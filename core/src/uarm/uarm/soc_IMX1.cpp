@@ -1,5 +1,7 @@
 #include "soc_IMX1.h"
 
+#include "syscall_dispatch.h"
+
 #include <memory>
 
 #include "GunzipContext.h"
@@ -291,6 +293,7 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     }
     // Guest calls need the ROM PACE; without it they stay unavailable.
     paceDiscoverZodiac(&soc->paceSites, zodiacRomBase, soc->rom.data(), soc->rom.size());
+    soc->syscallDispatch = initSyscallDispatch(soc.get());
     soc->pcm.machine = soc->machine;
     imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
@@ -836,8 +839,27 @@ bool SocIMX1::RunToPaceSyscall(uint16_t trap, uint64_t maxCycles, uint64_t cycle
 bool SocIMX1::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     if (!guestCall || halted || !cyclesPerSecond) return false;
     const uint64_t ticks = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
-    if (!imx1MachineSetPcStop(machine, zodiacInjectedReturn)) return false;
-    const bool returned = RunToStop(ticks);
+    const uint64_t start = imx1MachineGetStatus(machine).time.ticks;
+    bool returned = false;
+    for (;;) {
+        // A hook may make injected calls of its own, which set the stops for themselves.
+        const uint32_t stops[] = {zodiacInjectedReturn, paceSites.trap0Site};
+        if (!imx1MachineSetPcStops(machine, stops, trap0Hook ? 2 : 1)) break;
+        const uint64_t before = imx1MachineGetStatus(machine).time.ticks;
+        if (before - start >= ticks) break;
+        if (!RunToStop(ticks - (before - start))) {
+            // A wait for an interrupt ends the run early; go on while guest time moves.
+            if (halted || imx1MachineGetStatus(machine).time.ticks == before) break;
+            continue;
+        }
+        uint32_t registers[16];
+        if (!GuestRegisters(registers)) break;
+        if (registers[15] == zodiacInjectedReturn) {
+            returned = true;
+            break;
+        }
+        if (!trap0Hook()) imx1MachineLeavePcStop(machine);
+    }
     // The caller puts the registers back on the syscall site, where the machine stops again.
     if (!halted) imx1MachineSetPcStop(machine, paceSites.syscallSite);
     return returned;
@@ -904,4 +926,42 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % ticksPerSecond);
     return uint64_t(std::min<__uint128_t>(credit / ticksPerSecond, UINT64_MAX));
+}
+
+// Facts of the 1.1 ROM: the DAL's doze routine, which the idle loop calls in SVC mode with IRQs off, in Thumb, and
+// EvtWakeup's Boot table glue (entry 0x2e8, as on the T|X and Zire 72) and its Thumb code, which sets the event
+// manager's wake flag and wakes the UI task.
+namespace {
+constexpr uint32_t zodiacDoze = 0x20094534, zodiacEvtWakeupGlue = 0x200706c0, zodiacEvtWakeup = 0x2005d754;
+constexpr uint16_t zodiacDozeCode[] = {0xb570, 0x4c30, 0x2501, 0x4648, 0x6800, 0x6800, 0x4e15, 0x1836};
+constexpr uint32_t zodiacEvtWakeupGlueCode[] = {0xe59fc004, 0xe08cc00f, 0xe12fff1c, 0xfffed089};
+constexpr uint16_t zodiacEvtWakeupCode[] = {0xb580, 0x4649, 0x6809, 0x6849, 0x483f, 0x1840, 0x6bc1, 0x2001,
+                                            0x7008, 0xf017, 0xfd1b, 0xbc80, 0xbc08, 0x4718};
+
+bool romHas(const std::vector<uint8_t>& rom, uint32_t address, const void* code, size_t size) {
+    return address >= zodiacRomBase && address - zodiacRomBase + size <= rom.size() &&
+           !std::memcmp(rom.data() + (address - zodiacRomBase), code, size);
+}
+}  // namespace
+
+// Runs to the idle loop's next doze and calls EvtWakeup there in its place, as an interrupt routine would, so a
+// UI task waiting with no timeout gets a nilEvent. EvtWakeup returns to the doze's caller. At most half a second
+// of guest time; false with nothing changed if the ROM differs or the guest doesn't idle.
+bool SocIMX1::WakeIdle() {
+    if (halted || guestCall || !romHas(rom, zodiacDoze, zodiacDozeCode, sizeof(zodiacDozeCode)) ||
+        !romHas(rom, zodiacEvtWakeupGlue, zodiacEvtWakeupGlueCode, sizeof(zodiacEvtWakeupGlueCode)) ||
+        !romHas(rom, zodiacEvtWakeup, zodiacEvtWakeupCode, sizeof(zodiacEvtWakeupCode)) ||
+        !imx1MachineSetPcStop(machine, zodiacDoze))
+        return false;
+    const bool stopped = RunToStop(ticksPerSecond / 2);
+    imx1MachineClearPcStop(machine);
+    uint32_t registers[16], cpsr, boot = 0, hook = 0;
+    // Thumb, SVC mode, IRQs off, with the system r9: its Boot table holds the glue, unless a patch replaced it,
+    // which is skipped like the T|X's wake does.
+    if (!stopped || !GuestRegisters(registers, &cpsr) || registers[15] != (zodiacDoze | 1) ||
+        (cpsr & 0xbf) != 0xb3 || !ReadGuest(registers[9] - 8, &boot, 4) || !ReadGuest(boot + 0x2e8, &hook, 4))
+        return false;
+    if (hook != zodiacEvtWakeupGlue)
+        std::cerr << "zodiac: EvtWakeup is patched, calling its ROM routine" << std::endl;
+    return SetGuestRegister(15, zodiacEvtWakeup | 1);
 }

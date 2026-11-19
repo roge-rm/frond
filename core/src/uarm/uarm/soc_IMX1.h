@@ -2,6 +2,7 @@
 #define FROND_SOC_IMX1_H
 
 #include <atomic>
+#include <functional>
 #include <array>
 #include <memory>
 #include <string>
@@ -59,7 +60,14 @@ class SocIMX1 : public SoC {
     // call is pending the machine runs step by step; with none, Exact and Fast run as before.
     bool RunToPaceSyscall(uint16_t trap, uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     // Runs the call set up in the registers (pc the entry, lr zodiacInjectedReturn) until it returns there.
+    // With a TRAP #0 hook set it also stops on the ROM PACE's TRAP #0 frame and calls the hook there.
     bool ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    // Called with the machine on PaceSites().trap0Site (r0 the 68k state) during an injected call. True once it
+    // has run the trap and moved pc past the bl (SkipTrap0Callout); false lets the ROM run it. nullptr for none.
+    void SetTrap0Hook(std::function<bool()> hook) { trap0Hook = std::move(hook); }
+    bool SkipTrap0Callout() { return SetGuestRegister(15, paceSites.trap0Site + 4); }
+    // Wakes the UI task of an idle 68k app, as a nilEvent would: see WakeIdle in soc_IMX1.cpp.
+    bool WakeIdle();
     const ZodiacPaceSites& PaceSites() const { return paceSites; }
     bool GuestCallPending() const { return guestCall; }
     bool GuestRegisters(uint32_t (&registers)[16], uint32_t* cpsr = nullptr) const {
@@ -82,8 +90,9 @@ class SocIMX1 : public SoC {
     Buffer GetSavestate() override { return {.size = saved.size(), .data = saved.data()}; }
     void DumpMMU() override {}
     void JamKey(enum KeyId key, uint32_t durationMsec) override;
-    bool PrepareM68kSupport() override { return false; }
-    bool GuestServicesSupported() const override { return false; }
+    // Guest calls go through the ROM PACE, found at create.
+    bool PrepareM68kSupport() override { return paceSites.syscallSite && paceSites.trap0Site; }
+    bool GuestServicesSupported() const override { return paceSites.syscallSite && paceSites.trap0Site; }
     bool HardResetSupported() const override { return true; }
     uint64_t GetTime() override;
     uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
@@ -204,6 +213,7 @@ class SocIMX1 : public SoC {
     void EndGuestCall();
     ZodiacPaceSites paceSites{};
     bool guestCall{false};
+    std::function<bool()> trap0Hook;
     // Puts the battery, headphone, cradle and cradle button settings on the machine's inputs.
     bool ApplyBattery();
     bool ApplyHeadphones();

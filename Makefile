@@ -1046,13 +1046,13 @@ test-zodiac-battery: out/frond
 
 .PHONY: test-zodiac-guest-calls
 # Hard reset and guest calls on the real ROM from a bring-up state with a 68k app open (ZODIAC_ROM, ZODIAC_STATE),
-# Exact and Fast.
+# Exact and Fast: install FrondBench, list it and export it back.
 # Skipped without them.
 ZODIAC_STATE ?=
 test-zodiac-guest-calls: out/frond
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-guest-calls-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
-		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common -Icore/src/common/zip \
 		tests/zodiac-guest-calls.cpp @build/zodiac-guest-calls-core.rsp core/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-guest-calls
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ./build/test-zodiac-guest-calls hard-reset-yes

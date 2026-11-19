@@ -14,7 +14,9 @@
 #include <string>
 #include <vector>
 
+#include "GuestDatabaseOps.h"
 #include "soc_IMX1.h"
+#include "zip.h"
 #include "zodiac_panel.h"
 
 namespace {
@@ -151,13 +153,73 @@ uint32_t call(SocIMX1& soc, const Site& site, uint16_t trap) {
     return d0;
 }
 
-// A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself; a left trigger press
-// wakes it.
-bool runToEvtGetEvent(SocIMX1& soc) {
-    soc.KeyDown(keyIdTriggerLeft);
-    const bool reached = soc.RunToPaceSyscall(trapEvtGetEvent, 20 * hz, hz);
-    soc.KeyUp(keyIdTriggerLeft);
-    return reached;
+// A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself; the preparation wakes
+// it through EvtWakeup in the idle loop (SocIMX1::WakeIdle), with no key or pen.
+bool runToEvtGetEvent(SocIMX1& soc) { return syscallDispatchPrepare(soc.GetSyscallDispatch(), SYSCALL_PREPARE_WAKE); }
+
+
+// The one database in a backup ZIP, or empty.
+std::vector<uint8_t> unzipOne(const std::vector<uint8_t>& archive) {
+    std::vector<uint8_t> out;
+    zip_t* zip = zip_stream_open(reinterpret_cast<const char*>(archive.data()), archive.size(), 0, 'r');
+    if (!zip) return out;
+    if (zip_entries_total(zip) == 1 && zip_entry_openbyindex(zip, 0) == 0) {
+        void* data = nullptr;
+        size_t size = 0;
+        if (zip_entry_read(zip, &data, &size) >= 0 && data) out.assign((uint8_t*)data, (uint8_t*)data + size);
+        std::free(data);
+        zip_entry_close(zip);
+    }
+    zip_stream_close(zip);
+    return out;
+}
+
+bool listed(SocIMX1& soc, const char* name) {
+    DbMetadataList list;
+    assert(GuestDatabaseOps::List(soc, list, true));
+    for (const auto& db : list)
+        if (!std::strcmp(db.name, name)) return true;
+    return false;
+}
+
+// Install, list and export through the desktop socket's and CLI's own path (GuestDatabaseOps), from a 68k app
+// that waits with no timeout: FrondBench goes in, shows in the list and comes back out byte for byte.
+void databases(SocIMX1& soc, const char* prcPath) {
+    auto prc = readFile(prcPath);
+    assert(prc.size() > 78);
+    assert(!listed(soc, "FrondBench"));
+    const int installed = GuestDatabaseOps::Install(soc, prc.size(), prc.data());
+    std::printf("install %d\n", installed);
+    assert(installed == DB_INSTALL_RESULT_OK);
+    runFor(soc, 1000);
+    assert(!soc.Halted());
+    assert(listed(soc, "FrondBench"));
+    std::vector<uint8_t> archive;
+    assert(GuestDatabaseOps::Export(soc, "FrondBench", archive));
+    auto exported = unzipOne(archive);
+    // The ROM's ExgDBWrite leaves stale bytes after the name's NUL in the 32-byte name field.
+    if (exported.size() >= 32)
+        for (size_t i = std::strlen(reinterpret_cast<const char*>(exported.data())) + 1; i < 32; ++i)
+            exported[i] = prc[i];
+    std::printf("export %zu bytes of %zu\n", exported.size(), prc.size());
+    if (exported != prc) {
+        size_t at = 0;
+        while (at < exported.size() && at < prc.size() && exported[at] == prc[at]) ++at;
+        std::printf("first difference at %zu\n", at);
+        FILE* f = std::fopen("build/z12/FrondBench-export.prc", "wb");
+        if (f) { std::fwrite(exported.data(), 1, exported.size(), f); std::fclose(f); }
+    }
+    assert(exported == prc);
+    runFor(soc, 1000);
+    assert(!soc.Halted());
+    // The Tapwave launcher is native ARM and makes no 68k calls, so there's no PACE site to call from: the
+    // preparation (with its wake) gives up and the guest goes on.
+    press(soc, keyIdHome);
+    runFor(soc, 3000);
+    DbMetadataList list;
+    assert(!GuestDatabaseOps::List(soc, list, true));
+    runFor(soc, 1000);
+    assert(!soc.Halted() && !soc.GuestCallPending());
 }
 
 void calls(SocIMX1& soc) {
@@ -211,6 +273,7 @@ int main(int argc, char** argv) {
         // opens Preferences, which is a 68k app.
         hardReset(*soc, false);
         calls(*soc);
+        databases(*soc, std::getenv("FROND_BENCH_PRC") ? std::getenv("FROND_BENCH_PRC") : "tools/frondbench/FrondBench.prc");
         std::printf("zodiac guest calls %s: PASS\n", soc->FastEngine() ? "Fast" : "Exact");
         return 0;
     }

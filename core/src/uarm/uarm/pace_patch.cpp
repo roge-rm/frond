@@ -363,11 +363,32 @@ bool paceDiscoverZodiac(ZodiacPaceSites* sites, uint32_t romBase, const void* ro
     const uint32_t instruction = readLe32(data, entry + call);
     const int64_t target = int64_t(entry + call) + 8 + (int32_t((instruction & 0xffffff) << 8) >> 6);
     if (target < 0 || uint64_t(target) + 4 > size) return false;
+    // The TRAP #0 frame, also where the TG50's is: the 68k pc saved past the TRAP, then a bl to the ROM's
+    // trap callout; after it the frame reloads the pc and sr from the state and goes on.
+    static constexpr uint32_t trap0Frame[] = {
+        0xe59d0000,0xe24aa002,0xe580a044,0xe5804048,0xe5808000,0xe59d9018,0xe59d0000,0,
+        0xe59d0000,0xe590a044,0xe5904048,0xe2805004,0xe2806024,0xe0da70b2
+    };
+    constexpr size_t trap0Start = 0x5ac4, trap0Call = 0x5ae0;
+    if (size - entry < trap0Start + sizeof(trap0Frame)) return false;
+    for (size_t i = 0; i < sizeof(trap0Frame) / sizeof(trap0Frame[0]); ++i) {
+        const uint32_t word = readLe32(data, entry + trap0Start + 4 * i);
+        if (trap0Start + 4 * i == trap0Call ? (word >> 24) != 0xeb : word != trap0Frame[i]) return false;
+    }
     sites->entry = romBase + uint32_t(entry);
     sites->syscallSite = romBase + uint32_t(entry + call);
     sites->syscallReturn = sites->syscallSite + 4;
     sites->calloutSyscall = romBase + uint32_t(target);
-    return true;
+    sites->trap0Site = romBase + uint32_t(entry + trap0Call);
+    // The first RTS opcode at an even ROM address: a stub returns through it, so the ROM PACE's own RTS
+    // sees a native caller's return address.
+    for (size_t offset = 0; offset + 2 <= size; offset += 2)
+        if (data[offset] == 0x4e && data[offset + 1] == 0x75) {
+            sites->rts68k = romBase + uint32_t(offset);
+            return true;
+        }
+    *sites = {};
+    return false;
 }
 
 #ifndef __EMSCRIPTEN__

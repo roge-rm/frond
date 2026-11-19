@@ -28,6 +28,14 @@ enum paceStatus {
 void paceInit(struct ArmMem* mem, struct ArmMmu* mmu);
 void paceInit(struct ArmMem* mem, struct ArmMpu* mpu);
 
+// Another machine's memory for the host-side 68k helpers below (paceGet*, paceSet*, pacePush*,
+// paceReadTrapWord, paceLoad68kState and paceSave68kState): access copies size bytes at a guest
+// address and returns false when it can't. nullptr goes back to the memory set by paceInit. The
+// 68k interpreter itself never uses it. The Zodiac's ROM PACE runs its 68k code itself, and its
+// guest calls use these helpers on the 68k state the ROM keeps in guest memory.
+using PaceExternalAccess = bool (*)(void* context, uint32_t address, void* data, uint32_t size, bool write);
+void paceSetExternalMemory(PaceExternalAccess access, void* context);
+
 void paceSetStatePtr(uint32_t addr);
 void paceResetFsr();
 uint8_t paceGetFsr();

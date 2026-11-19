@@ -26,10 +26,7 @@ inline EjectWatch& ejectWatch() {
 
 inline void noteEjected(SoC& soc) { ejectWatch() = {true, soc.GetTime()}; }
 
-inline bool guestAsleep(SoC& soc) {
-    auto* pxa = dynamic_cast<SocPXA*>(&soc);
-    return pxa && pxa->PowerSleeping();
-}
+inline bool guestAsleep(SoC& soc) { return soc.PowerSleeping(); }
 
 // Runs the guest if an eject is still unseen. Guest cycles are counted at 100 MHz, like the
 // injected calls.
