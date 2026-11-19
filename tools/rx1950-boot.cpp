@@ -3,8 +3,10 @@
 //   rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N]
 //               [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]... [--walk MVA]... [--watch PA]...
 //               [--seconds S] [--tap T,X,Y[,MS]]... [--key T,NAME[,MS]]... [--shot T]... [--interactive]
-//               [--engine exact|fast] [--digest] [--pin-low PIN]... [--serial-cable]
+//               [--engine exact|fast] [--digest] [--pin-low PIN]... [--serial-cable] [--battery SPEC]
 //
+// --battery sets the battery as the machine setting does (BatteryPower.h: max, level N or host N, then
+// charging or battery; Maximum on battery by default), fed to the ADC and charger pins (rx1950_power.h).
 // --pin-low holds an input pin such as F6 low from reset; every other input is high. --serial-cable boots
 // with the serial cable attached (rx1950_board.h), which eboot needs to print on UART0.
 // --engine picks the interpreter (exact) or the Fast engine (fast, the default), which run the same
@@ -53,6 +55,7 @@
 #include "arm920_state.h"
 #include "ZodiacRom.h"
 #include "rx1950_board.h"
+#include "rx1950_power.h"
 #include "rx1950_nand_image.h"
 #include "s3c2442_machine.h"
 
@@ -109,6 +112,7 @@ int main(int argc, char** argv) {
     double seconds = 0;
     bool interactive = false;
     bool fastEngine = true, digest = false, serialCable = false;
+    BatteryPower battery;  // Maximum on battery, the machine setting's default
     std::vector<std::pair<unsigned, unsigned>> lowPins;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -131,6 +135,12 @@ int main(int argc, char** argv) {
         else if (a == "--interactive") interactive = true;
         else if (a == "--digest") digest = true;
         else if (a == "--serial-cable") serialCable = true;
+        else if (a == "--battery") {
+            if (!BatteryPower::Parse(next(), battery)) {
+                std::fprintf(stderr, "--battery is max, level N or host N (0-100), then charging or battery\n");
+                return 2;
+            }
+        }
         else if (a == "--pin-low") {
             const std::string pin = next();
             static const char ports[] = "ABCDEFGHJ";
@@ -193,12 +203,13 @@ int main(int argc, char** argv) {
     S3c2442Options options;
     options.rtcStart = rx1950RtcStart;
     if (!serialCable) options.pinLevels[rx1950CablePort] &= ~(1u << rx1950CableBit);
+    rx1950BatteryPins(battery, options);
     for (const auto& [port, bit] : lowPins) options.pinLevels[port] &= ~(1u << bit);
     auto machine = S3c2442Machine::create(options, error);
     if (!machine) { std::fprintf(stderr, "machine: %s\n", error.c_str()); return 1; }
     if (fastEngine && !machine->setFastEngine(true)) { std::fprintf(stderr, "machine: no Fast engine in this build\n"); return 1; }
     machine->loadRam(ebootPhysical, bl.data() + nbfHeader, ebootBytes);
-    for (const auto& in : rx1950AdcInputs) machine->adc.channel[in.channel] = in.value;
+    rx1950ApplyBattery(*machine, battery);
     // ASSUMPTION "rx1950 IPL clocks": the block 0 loader sets the PLL before eboot, which never does.
     // 296.35 MHz from the 16.9344 MHz crystal (MDIV 97, PDIV 1, SDIV 2), FCLK:HCLK:PCLK 1:3:6.
     machine->clock.write(0x04, 0x61012);
@@ -368,7 +379,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -492,6 +503,20 @@ int main(int argc, char** argv) {
                             std::get<1>(top[i].second), std::get<3>(top[i].second));
         } else if (c == "adc" && std::sscanf(line, "%*s %u %u", &x, &y) == 2 && x < 8 && y < 1024) {
             machine->adc.channel[x] = uint16_t(y);
+        } else if (c == "battery-state") {
+            std::printf("battery %s\n", rx1950BatteryState(battery).c_str());
+        } else if (c == "battery") {
+            BatteryPower parsed;
+            const char* spec = line + std::strspn(line, " \t") + 7;
+            std::string text(spec);
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+            if (!BatteryPower::Parse(text, parsed)) {
+                std::printf("error: battery is max, level N or host N (0-100), then charging or battery\n");
+                continue;
+            }
+            battery = parsed;
+            rx1950ApplyBattery(*machine, battery);
+            std::printf("battery %s\n", rx1950BatteryState(battery).c_str());
         } else if (c == "intclog" && std::sscanf(line, "%*s %u", &x) == 1) {
             for (size_t i = intcEvents.size() > x ? intcEvents.size() - x : 0; i < intcEvents.size(); ++i) {
                 const IntcEvent& e = intcEvents[i];

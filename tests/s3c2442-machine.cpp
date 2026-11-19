@@ -9,6 +9,7 @@
 
 #include "CPU.h"
 #include "rx1950_board.h"
+#include "rx1950_power.h"
 #include "s3c2442_machine.h"
 
 namespace {
@@ -157,6 +158,60 @@ int main() {
             }
             assert(fast->leanRetired() + fast->jitRetired() > fast->retired() / 2);
         }
+    }
+    // The battery setting on the rx1950's inputs: every level reads back through battdrvr's own sums within 1%
+    // (exact at 0, 50 and 100) and stays above its 3300 mV power off; Maximum is 4120 mV.
+    for (unsigned p = 0; p <= 100; ++p) {
+        const unsigned mv = rx1950CountMilliVolts(rx1950BatteryAin0(p));
+        const unsigned got = rx1950GuestPercent(mv);
+        if (got + 1 < p || got > p + 1) std::fprintf(stderr, "battery %u%%: %u mV reads %u%%\n", p, mv, got);
+        assert(got + 1 >= p && got <= p + 1 && mv > 3300);
+        if (p == 0 || p == 50 || p == 100) assert(got == p);
+    }
+    {
+        BatteryPower full;
+        assert(rx1950CountMilliVolts(rx1950PowerInputs(full).adc[0]) >= 4120);
+    }
+    // Each level and charging state on a running machine: AIN0-3, GPF2 (low with AC) and GPF3 (high when the
+    // charge is done or off the charger), and EINT2 on both edges as the OAL sets it, raised by plugging in
+    // and pulling out.
+    {
+        BatteryPower start;
+        assert(BatteryPower::Parse("level 30", start));
+        S3c2442Options options;
+        rx1950BatteryPins(start, options);
+        auto m = make({loop}, options);
+        rx1950ApplyBattery(*m, start);
+        assert(m->gpio.write(0x50, 2u << 4, m->intc) == S3cAccess::ok);           // GPF2 as EINT2
+        assert(m->gpio.write(0x88, 6u << 8, m->intc) == S3cAccess::ok);           // EINT2 both edges
+        m->intc.srcpnd = 0;
+        struct Case { const char* spec; bool ac, done; bool edge; };
+        const Case cases[] = {
+            {"level 30", false, true, false},  {"level 30 charging", true, false, true},
+            {"level 5 charging", true, false, false}, {"max charging", true, true, false},
+            {"level 100 battery", false, true, true},  {"host 0", false, true, false},
+            {"host 70 charging", true, false, true},   {"max", false, true, true},
+        };
+        for (const auto& c : cases) {
+            BatteryPower b;
+            assert(BatteryPower::Parse(c.spec, b));
+            rx1950ApplyBattery(*m, b);
+            uint32_t gpf = 0, adcdat = 0;
+            assert(m->gpio.read(0x54, gpf) == S3cAccess::ok);
+            assert(bool(gpf & 4) == !c.ac && bool(gpf & 8) == c.done);
+            assert(bool(m->intc.srcpnd & (1u << s3cIrq::eint2)) == c.edge);
+            m->intc.srcpnd = 0;
+            assert(rx1950GuestPercent(rx1950CountMilliVolts(m->adc.channel[0])) + 1 >= b.Percent());
+            assert(m->adc.channel[1] == 0 && m->adc.channel[2] == 451 && m->adc.channel[3] == rx1950PackIdCount);
+            // AIN0 through a normal conversion, as battdrvr reads it: ADCCON prescaler 49, channel 0, start.
+            m->adc.write(0, 0x4c40 | 1, m->intc);
+            m->run(100000);
+            assert(m->adc.read(0x0c, adcdat) == S3cAccess::ok && (adcdat & 0x3ff) == m->adc.channel[0]);
+            assert(rx1950BatteryState(b) == b.Describe() && rx1950BatteryState(b).find("no-charging") == std::string::npos);
+        }
+        // Pack ID 0 (500-700 mV, no 1.3191 divider) and the thermistor at 25 C.
+        const unsigned packMv = rx1950PackIdCount * 3300 / 1023;
+        assert(packMv >= 500 && packMv <= 700);
     }
     std::printf("s3c2442 machine: ok\n");
 }

@@ -35,13 +35,6 @@ inline const Rx1950Key* rx1950Key(const char* name) {
 constexpr uint16_t rx1950TouchRawX(unsigned x) { return uint16_t(64 + x * 896 / 240); }
 constexpr uint16_t rx1950TouchRawY(unsigned y) { return uint16_t(64 + y * 896 / 320); }
 
-// The battery ADC inputs until R4 feeds the power state: battdrvr reads AIN0 as the battery voltage
-// (AIN0 * 3.3 / 1023 * 1.3191 V; under 3.3 V it powers the device off), AIN2 as the pack thermistor
-// (100 kOhm at 25 C against 127 kOhm to 3.3 V) and AIN3 as the pack ID (1650-1850 mV is one of its four
-// packs). ASSUMPTION "rx1950 battery inputs": a 3.9 V battery at 25 C; AIN1 and the rest stay mid-scale.
-struct Rx1950AdcInput { uint8_t channel; uint16_t value; };
-constexpr Rx1950AdcInput rx1950AdcInputs[] = {{0, 917}, {2, 451}};
-
 // The RTC at boot: Sunday January 1 2006, 12:00. The OAL reads BCDYEAR as a binary count of years from 1950
 // (wYear = BCDYEAR + 1950, nk 0x8004abb0) and BCDDAY as day of week + 1 (Sunday 1); the other fields are BCD.
 constexpr uint8_t rx1950RtcYear(unsigned year) { return uint8_t(year - 1950); }
