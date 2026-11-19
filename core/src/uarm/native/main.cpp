@@ -1000,8 +1000,9 @@ bool gFastEngineMissing = false;
         auto* const zodiac = dynamic_cast<SocIMX1*>(soc);
         auto* const rx1950Soc = dynamic_cast<SocS3C2442*>(soc);
         const Imx1MachineCheapStatus zodiacStart = zodiac ? zodiac->Status() : Imx1MachineCheapStatus{};
-        // The Zodiac's speed figures over 5 s windows, made here on the SDL thread.
-        std::unique_ptr<ZodiacSpeed> zodiacSpeed = zodiac ? std::make_unique<ZodiacSpeed>(5000000) : nullptr;
+        // The Zodiac's and the rx1950's speed figures over 5 s windows, made here on the SDL thread.
+        std::unique_ptr<ZodiacSpeed> zodiacSpeed = zodiac ? std::make_unique<ZodiacSpeed>(5000000)
+            : rx1950Soc ? std::make_unique<ZodiacSpeed>(5000000, "rx1950 speed") : nullptr;
         uint64_t replayStartedAt = options.emulatedTime ? soc->GetTime() / 1000 : startedAt;
         commands::Context commandContext{
             .soc = soc, .mainLoop = mainLoop, .audioDriver = audioDriver, .rotation = rotation,
@@ -1009,6 +1010,7 @@ bool gFastEngineMissing = false;
             .screenWidth = displayConfiguration.width,
             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
         commandContext.replayClockLast = replayStartedAt;
+        if (rx1950Soc) commandContext.speedLimitHz = soc->FollowHz();
         commandContext.sessionFolder = sessionFolder;
         commandContext.sessionPath = sessionPath;
 
@@ -1434,11 +1436,25 @@ bool gFastEngineMissing = false;
                     }
 #endif
                 }
-                // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.
+                // The Zodiac's and the rx1950's speed line goes to the log on Android, and its figures to
+                // speed-state. The rx1950 reports the clock its guest got (its own clock times guest time
+                // against real time) against the clock it runs at, as MainLoop's figures don't fit its Run.
                 if (zodiacSpeed && zodiacSpeed->Due(now)) {
-                    const auto status = zodiac->Status();
-                    if (zodiacSpeed->Sample(now, status.retired, status.time.ticks)) {
+                    bool sampled = false;
+                    if (zodiac) {
+                        const auto status = zodiac->Status();
+                        sampled = zodiacSpeed->Sample(now, status.retired, status.time.ticks);
+                    } else {
+                        auto& machine = rx1950Soc->Machine();
+                        sampled = zodiacSpeed->Sample(now, machine.retired(),
+                                                      uint64_t(__uint128_t(machine.nanoseconds()) * 32768 / 1000000000));
+                    }
+                    if (sampled) {
                         commandContext.speedIps = zodiacSpeed->Ips();
+                        if (rx1950Soc) {
+                            commandContext.speedLimitHz = soc->FollowHz();
+                            commandContext.speedIps = uint64_t(double(commandContext.speedLimitHz) * zodiacSpeed->RealTime());
+                        }
                         commandContext.speedDetail = zodiacSpeed->Line();
 #ifdef __ANDROID__
                         cout << zodiacSpeed->Line() << endl;
