@@ -2554,8 +2554,10 @@ bool imx1MachineRegisters(const Imx1Machine* machine, uint32_t (&registers)[16],
 }
 bool imx1MachineSetRegister(Imx1Machine* machine, unsigned reg, uint32_t value) {
     auto* p = machine->probe;
-    if (p->bounds || p->stopped || p->terminal || reg > ARM_REG_NUM_CPSR || p->blPrefix || p->interruptedPrefixCount)
-        return false;
+    // Not between the halves of a Thumb BL here. Another task preempted between its halves
+    // (interruptedPrefixes) is fine: its entry is matched on its own pc, CPSR, lr and sp when a context
+    // return resumes it, which setting this task's registers doesn't touch.
+    if (p->bounds || p->stopped || p->terminal || reg > ARM_REG_NUM_CPSR || p->blPrefix) return false;
     // The CPSR keeps its mode and state bits; only the flags and interrupt masks change.
     if (reg == ARM_REG_NUM_CPSR) {
         const uint32_t now = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
@@ -2568,22 +2570,33 @@ bool imx1MachineAccessMemory(Imx1Machine* machine, uint32_t address, void* data,
     auto* p = machine->probe;
     if (p->bounds || p->stopped || p->terminal) return false;
     if (!size) return true;
-    // Only mapped SDRAM and SRAM pages, so a call never reaches a register. The probe maps the whole bus through
-    // one callback, so the CPU's own RAM range checks don't apply.
+    // Only mapped SDRAM and SRAM pages, and ROM for reads, so a call never reaches a register. The probe maps
+    // the whole bus through one callback, so the CPU's own RAM range checks don't apply. Every page is checked
+    // before anything is copied.
     if (uint64_t(address) + size > 0x100000000ull) return false;
-    for (uint64_t va = address; va < uint64_t(address) + size; va = (va | 0x3ff) + 1) {
-        const auto t = mmuTranslateInspect(cpuGetMMU(p->cpu), uint32_t(va), write);
-        if (!MMU_TRANSLATE_RESULT_OK(t)) return false;
-        const uint32_t pa = MMU_TRANSLATE_RESULT_PA(t);
-        const uint32_t last = pa + uint32_t(std::min<uint64_t>(0x3ff - (va & 0x3ff), uint64_t(address) + size - 1 - va));
-        if (!Imx1Bootstrap::isRamAddress(pa) || !Imx1Bootstrap::isRamAddress(last)) return false;
-    }
-    auto* bytes = static_cast<uint8_t*>(data);
-    for (uint32_t i = 0; i < size;) {
-        const uint32_t at = address + i;
-        const uint_fast8_t width = !(at & 3) && size - i >= 4 ? 4 : !(at & 1) && size - i >= 2 ? 2 : 1;
-        if (!cpuMemOpExternal(p->cpu, bytes + i, at, width, write)) return false;
-        i += width;
+    const uint64_t end = uint64_t(address) + size;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (uint64_t va = address; va < end; va = (va | 0x3ff) + 1) {
+            const auto t = mmuTranslateInspect(cpuGetMMU(p->cpu), uint32_t(va), write);
+            if (!MMU_TRANSLATE_RESULT_OK(t)) return false;
+            const uint32_t pa = MMU_TRANSLATE_RESULT_PA(t);
+            const uint32_t length = uint32_t(std::min<uint64_t>(0x400 - (va & 0x3ff), end - va));
+            const uint8_t* rom = write ? nullptr : p->resolve(pa, length);
+            if (!rom && (!Imx1Bootstrap::isRamAddress(pa) || !Imx1Bootstrap::isRamAddress(pa + length - 1))) return false;
+            if (!pass) continue;
+            auto* bytes = static_cast<uint8_t*>(data) + (va - address);
+            // ROM reads take no time and have no side effect (leanPage), so they come straight from the image.
+            if (rom) {
+                std::memcpy(bytes, rom, length);
+                continue;
+            }
+            for (uint32_t i = 0; i < length;) {
+                const uint32_t at = uint32_t(va) + i;
+                const uint_fast8_t width = !(at & 3) && length - i >= 4 ? 4 : !(at & 1) && length - i >= 2 ? 2 : 1;
+                if (!cpuMemOpExternal(p->cpu, bytes + i, at, width, write)) return false;
+                i += width;
+            }
+        }
     }
     return true;
 }
