@@ -156,7 +156,11 @@ class RuntimeCards {
         bool inserted[2]{};
         std::shared_ptr<Card> stick;
         bool stickInserted{};
+        // Saved cards left out under card swap: manifest slot id (0, 1 the stick, 2) and key.
+        std::vector<std::pair<unsigned, std::string>> dropped;
     };
+    // A slot's card file in a machine folder, by manifest slot id.
+    static const char* MachineName(unsigned id) { return id == 0 ? "sd.frondsd" : id == 2 ? "sd2.frondsd" : "ms.frondms"; }
     Pair Snapshot() const {
         Pair p;
         for(unsigned n=0;n<2;++n) { p.card[n]=cards[n]; p.inserted[n]=cards[n] && gExternalStorage.IsMounted(slot(n)); }
@@ -245,7 +249,11 @@ class RuntimeCards {
         if(!seen) return "empty portable manifest";
         linked=out.str(); return "";
     }
-    std::string Stage(const std::string& text, Pair& next) {
+    // `folder`: the session's machine folder. A saved card no longer at its path is found there under
+    // its slot's name when it is the same file (device, inode and change time), as a move into a
+    // machine folder leaves it. With `swap`, a saved card that isn't at its path or there, or was
+    // changed, leaves its slot empty instead of refusing the load (next.dropped).
+    std::string Stage(const std::string& text, Pair& next, const std::string& folder = "", bool swap = false) {
         if(text.empty()) return "";
         if(text.size()>8192 || text.find('\0')!=std::string::npos) return "invalid card manifest";
         std::istringstream in(text); std::string line;
@@ -261,6 +269,20 @@ class RuntimeCards {
                 (id==1 ? (protocol!="sd" || !StickSlot() || !ValidStickBytes(deviceType,size)) : !ValidGeometry(deviceType,id,protocol,size)) ||
                 serial!=std::stoul(key.substr(0,8),nullptr,16)) return "invalid card descriptor";
             path=std::filesystem::path(path).lexically_normal().string();
+            auto same=[&](const std::string& p) {
+                struct stat st{};
+                return !lstat(p.c_str(),&st) && S_ISREG(st.st_mode) && uint64_t(st.st_dev)==dev && uint64_t(st.st_ino)==ino &&
+                       uint64_t(st.st_mtim.tv_sec)*1000000000ull+st.st_mtim.tv_nsec==mtime;
+            };
+            if(!same(path) && !folder.empty()) {
+                const auto moved=(std::filesystem::path(folder)/MachineName(id)).lexically_normal().string();
+                if(same(moved)) path=moved;
+            }
+            if(swap && !same(path)) {
+                for(const auto& d:next.dropped) if(d.first==id) return "duplicate card slot, identity or serial";
+                next.dropped.emplace_back(id,key);
+                continue;
+            }
             const bool ms=id==1;
             unsigned n=id==2;
             std::shared_ptr<Card>& held=ms?next.stick:next.card[n];
