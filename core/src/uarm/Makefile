@@ -262,7 +262,7 @@ CXXFLAGS_NATIVE_EXTRA += -DFROND_DYNARMIC
 $(BUILDDIR_NATIVE)/uarm/jit_dynarmic.o: STD_CXX = -std=c++20
 # Only Dynarmic's headers: the core's include folders hide system ones (uarm/syscall.h).
 $(BUILDDIR_NATIVE)/uarm/jit_dynarmic.o: INCLUDE = -I$(FROND_DYNARMIC_SRC)/src \
-	-I$(FROND_DYNARMIC_SRC)/externals/mcl/include -I$(FROND_DYNARMIC_SRC)/externals/fmt/include
+	-I$(FROND_DYNARMIC_SRC)/externals/mcl/include -I$(FROND_DYNARMIC_SRC)/externals/fmt/include $(BOOST_INCLUDE)
 endif
 
 # CPU.o and icache.o change with FROND_DYNARMIC, so switching it rebuilds them.
