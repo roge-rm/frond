@@ -201,6 +201,8 @@ class SoC {
     bool SdRemount();
     void SdEject();
     bool SdInserted() { return cardInserted; }
+    // The card's write protect tab as the slot reads it, for devices that have the switch (the rx1950).
+    virtual void SetSdWriteProtect(bool) {}
     // A second SD slot, the Zodiac's only, with its card in sdCardStore(1). Sd2Insert puts that card
     // in and is false when it can't go in.
     virtual bool HasSecondSdSlot() const { return false; }

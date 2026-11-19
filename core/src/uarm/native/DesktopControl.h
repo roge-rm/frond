@@ -854,6 +854,7 @@ class DesktopControl {
             }
             if (!result.ok) return {false, result.code, result.message};
             frondNative::slotCards().sdProtected = false;
+            ctx.soc->SetSdWriteProtect(false);
             ctx.soc->SdInsert();
             return {true, "inserted", "SD card inserted."};
         }
@@ -874,6 +875,7 @@ class DesktopControl {
                 return {false, "argument", "Use the card's 64-digit identity, then protected or writable."};
             const auto result = frondNative::putInSd(ctx.sessionFolder, ctx.soc->GetDeviceType(), identity, protect);
             if (!result.ok) return {false, result.code, result.message};
+            ctx.soc->SetSdWriteProtect(protect);
             ctx.soc->SdInsert();
             return {true, "inserted", "SD card inserted."};
         }

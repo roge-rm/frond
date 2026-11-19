@@ -997,7 +997,7 @@ static void vzProfiles() {
 }
 
 // HP iPAQ rx1950: the S3C2442 board, told by its bootloader's size, CEOS.nbf made into the 64 MB NAND, 32 MB of
-// SDRAM, 240x320, sound with a microphone and the other peripherals greyed out for now.
+// SDRAM, 240x320, sound with a microphone, an SD slot and the other peripherals greyed out for now.
 static void rx1950() {
     const auto* p = deviceProfileNamed5("hp-ipaq-rx1950");
     assert(p && p->deviceType == deviceTypeRx1950 && int(deviceTypeRx1950) == 25 && deviceProfile5(25) == p);
@@ -1009,7 +1009,10 @@ static void rx1950() {
     assert(p->requiresExplicitNand && p->minRam == 32u << 20 && p->maxRam == p->minRam && p->cpuHz == 296352000);
     assert(p->defaultDisplay == DisplayMode::mode_240x320 && p->displayModes == (1u << 4));
     assert(p->frontend.width == 240 && p->frontend.height == 320 && !p->frontend.silkscreenHeight &&
-           p->frontend.stripHeight == 89 && !p->frontend.sdSlot && p->frontend.available);
+           p->frontend.stripHeight == 89 && p->frontend.sdSlot && p->frontend.available);
+    // SD cards from 32 MB to 2 GB (no SDHC in WM5).
+    assert(p->sdMin == 32u << 20 && p->sdMax == 2048ull << 20 && deviceProfileSdSizeValid5(p->deviceType, 1024ull << 20) &&
+           !deviceProfileSdSizeValid5(p->deviceType, 4096ull << 20));
     const auto& c = p->capabilities;
     assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared && !c.bluetooth && c.sound &&
            c.microphone && !c.builtInWifi && !c.usbWifi);

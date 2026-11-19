@@ -844,6 +844,7 @@ bool gFastEngineMissing = false;
         // stick's detect line drops here, after the restore, so a guest asleep at the save wakes
         // on it as on a hot eject.
         bool sdInsertPending = false, msInsertPending = false;
+        soc->SetSdWriteProtect(frondNative::slotCards().sdProtected);
         if (msSwapped) {
             msCtrlrSwapEject(memoryStick);
             msInsertPending = msCtrlrPresent(memoryStick);
@@ -865,6 +866,8 @@ bool gFastEngineMissing = false;
         } else if (auto* zodiac = dynamic_cast<SocIMX1*>(soc); zodiac && zodiac->CardSwappedOnLoad()) {
             // The Zodiac found another card than the saved one: in later, as a new card, so the guest
             // sees the slot empty first.
+            sdInsertPending = sdCardInitialized();
+        } else if (auto* rx = dynamic_cast<SocS3C2442*>(soc); rx && rx->CardSwappedOnLoad()) {
             sdInsertPending = sdCardInitialized();
         } else if (soc->SdInserted()) {
             if (!soc->SdRemount()) {

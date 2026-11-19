@@ -13,6 +13,7 @@
 #include "pace_patch.h"
 #include "patch_dispatch.h"
 #include "system_state.h"
+#include "vSD.h"
 
 namespace {
     constexpr uint32_t sdramBase = 0x30000000, bank6Size = 0x08000000;
@@ -123,6 +124,11 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
                 value = 0;
                 std::memcpy(&value, ramBuffer + at, size);
             }
+            return true;
+        }
+        if ((pa & ~3u) == 0x5a000040) {
+            if (write) sdi.fifoWrite(size, value);
+            else value = sdi.fifoRead(size);
             return true;
         }
         if ((pa & ~3u) != 0x55000010 || size == 1) return false;
@@ -349,7 +355,10 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             name = "GPIO";
             if (write) result = size == 4 ? gpio.write(offset, value, intc) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return gpio.read(o, v); });
-            if (write && result == S3cAccess::ok) codecPins();
+            if (write && result == S3cAccess::ok) {
+                codecPins();
+                sdPowerPins();
+            }
             break;
         case 0x52000000:
             name = "USB device";
@@ -367,7 +376,10 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
                 result = size == 4 ? dma.write(offset, value) : S3cAccess::unsupported;
                 if (result == S3cAccess::unsupported && size == 4) detail = "software-triggered DMA isn't modelled yet";
             } else readWord([&](uint32_t o, uint32_t& v) { return dma.read(o, v); });
-            if (result == S3cAccess::ok && write) pumpAudioDma();
+            if (result == S3cAccess::ok && write) {
+                pumpAudioDma();
+                sdiService();
+            }
             break;
         case 0x54000000:
             name = "IIC";
@@ -383,8 +395,11 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             break;
         case 0x5a000000:
             name = "SD interface";
-            if (write) result = size == 4 ? sdi.write(offset, value) : S3cAccess::unsupported;
-            else readWord([&](uint32_t o, uint32_t& v) { return sdi.read(o, v); });
+            // SDIDAT takes bytes, halfwords and words; the other registers words.
+            if (word == 0x40) result = write ? sdi.write(offset, value, size) : sdi.read(offset, size, value);
+            else if (write) result = sdi.write(offset, value, size);
+            else readWord([&](uint32_t o, uint32_t& v) { return sdi.read(o, 4, v); });
+            if (result == S3cAccess::ok) sdiService();
             break;
         case 0x57000000:
             name = "RTC";
@@ -529,6 +544,68 @@ void S3c2442Machine::codecPins() {
     const bool high = (gpio.con[S3cGpio::d] & 3) == 1 && (gpio.dat[S3cGpio::d] & 1);
     if (high && !codecResetHigh) codec.reset();
     codecResetHigh = high;
+}
+
+namespace {
+    // The uARM card behind the SDI.
+    struct VsdCard : S3cSdCard {
+        VSD* vsd;
+        const S3c2442Machine& machine;
+        VsdCard(VSD* v, const S3c2442Machine& m) : vsd(v), machine(m) {}
+        unsigned command(uint8_t index, uint32_t argument, uint8_t reply[17], bool& busy) override {
+            if (!machine.sdPowered()) return 0;
+            switch (vsdCommand(vsd, index, argument, reply)) {
+                case SdReplyNone: return 0;
+                case SdReply48bitsAndBusy: busy = true; return 48;
+                case SdReply48bits: return 48;
+                case SdReply136bits: return 136;
+            }
+            return 0;
+        }
+        bool readBlock(uint8_t* data, uint32_t size) override {
+            return machine.sdPowered() && vsdDataXferBlockFromCard(vsd, data, size) == SdDataOk;
+        }
+        bool writeBlock(const uint8_t* data, uint32_t size) override {
+            return machine.sdPowered() && vsdDataXferBlockToCard(vsd, data, size) == SdDataOk;
+        }
+    };
+}
+
+void S3c2442Machine::setSdCard(VSD* card) {
+    if (card == sdVsd) return;
+    // A card attached after a state load keeps the transfer the state restored.
+    if (sdVsd) sdi.cardRemoved();
+    sdVsd = card;
+    sdAdapter = card ? std::make_unique<VsdCard>(card, *this) : nullptr;
+    sdi.card = sdAdapter.get();
+    sdPowerWas = sdPowered();
+    sdiService();
+    updateLines();
+}
+
+bool S3c2442Machine::sdPowered() const {
+    const bool output = ((gpio.con[S3cGpio::j] >> 2) & 3) == 1;
+    return !output || (gpio.dat[S3cGpio::j] & 2);
+}
+
+void S3c2442Machine::sdPowerPins() {
+    const bool on = sdPowered();
+    if (sdPowerWas && !on && sdVsd) {
+        vsdPowerOff(sdVsd);
+        sdi.cardRemoved();
+    }
+    sdPowerWas = on;
+}
+
+void S3c2442Machine::sdiService() {
+    const int ch = dma.channelFor(S3cDmaRequest::sdi);
+    if (ch >= 0) {
+        const unsigned unit = dma.transferBytes(unsigned(ch));
+        // Each request moves one unit (or a burst); the guard stops at the channel's whole count.
+        for (uint32_t guard = 0; guard < 0x100000 && dma.on(unsigned(ch)) && sdi.dmaWants(unit); ++guard)
+            dma.service(unsigned(ch), intc);
+    }
+    intc.level(s3cIrq::sdi, sdi.irq());
 }
 
 // GPA1 drives the speaker amplifier (wavedev.dll sets it with no headphones in and clears it with them).
@@ -703,6 +780,9 @@ void S3c2442Machine::resetBlocks() {
     pwm.reset();
     watchdog.reset();
     sdi.reset();
+    // ASSUMPTION "SD card reset with the SoC": the card starts idle after a reset or a wake.
+    if (sdVsd) vsdPowerOff(sdVsd);
+    intc.level(s3cIrq::sdi, false);
     usbDevice.reset();
     uint16_t inputs[8];
     std::memcpy(inputs, adc.channel, sizeof inputs);
@@ -984,6 +1064,14 @@ namespace {
     // Sound (DMA current registers, IIS FIFOs, the codec), its own section so states saved before it load:
     // they start with the FIFOs empty, no DMA run and the codec reset.
     constexpr uint32_t secAudio = stateFourcc("AUDI"), audioStateVersion = 1;
+    // The SD card (in or not, its id and uARM card state, its supply) and the SDI's transfer, its own section so
+    // states saved before it load with the slot empty and no transfer.
+    constexpr uint32_t secCard = stateFourcc("SDCD"), cardStateVersion = 1;
+    template <class A> void cardState(A& a, bool& in, std::vector<uint8_t>& id, std::vector<uint8_t>& card, bool& powered,
+                                      S3cSdi& sdi) {
+        a.DoBool(in).DoVector(id, 64).DoVector(card, 1u << 20).DoBool(powered);
+        sdi.runState(a);
+    }
     constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
 }
 
@@ -1074,6 +1162,14 @@ bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
         file.end();
     }
     {
+        auto a = file.begin(secCard, cardStateVersion);
+        bool in = sdVsd;
+        std::vector<uint8_t> id(sdCardId.begin(), sdCardId.end()), card;
+        if (in) vsdMachineSave(sdVsd, card);
+        cardState(a, in, id, card, sdPowerWas, sdi);
+        file.end();
+    }
+    {
         auto a = file.begin(secMachine, stateVersion);
         uint64_t counts[] = {retiredCount, cycleCount, idleCount, elapsedNs, pclkRest, hclkRest, rtcRest, nsRest,
                              irqHeldUntil, sleeps, wakes, vfpProbes, breakpoints, wifiAccesses};
@@ -1152,6 +1248,19 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         blocks.iis.clearRun();
     }
 
+    SavedCard savedCard;
+    bool savedSdPower = true;
+    savedCard.section = file.find(secCard);
+    if (savedCard.section) {
+        if (!open(secCard, cardStateVersion, a)) { why = "the saved SD card is from another version"; return false; }
+        std::vector<uint8_t> id;
+        cardState(a, savedCard.in, id, savedCard.card, savedSdPower, blocks.sdi);
+        if (!done(a, "SD card")) return false;
+        savedCard.id.assign(id.begin(), id.end());
+    } else {
+        blocks.sdi.clearRun();
+    }
+
     if (!open(secMachine, stateVersion, a)) { why = "no saved machine counts"; return false; }
     uint64_t counts[14] = {};
     bool flags[5] = {};
@@ -1173,6 +1282,8 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
     watchdog = blocks.watchdog;
     rtc = blocks.rtc;
     sdi = blocks.sdi;
+    loadedCard = std::move(savedCard);
+    sdPowerWas = savedSdPower;
     usbDevice = blocks.usbDevice;
     adc = blocks.adc;
     dma = blocks.dma;

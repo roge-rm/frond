@@ -128,6 +128,7 @@ namespace {
             cout << (loaded.code == "read" ? "failed to read " + args[0] : loaded.message) << endl;
             return;
         }
+        ctx->soc->SetSdWriteProtect(frondNative::slotCards().sdProtected);
         ctx->soc->SdInsert();
     }
 
@@ -174,7 +175,7 @@ namespace {
             result = frondSdCandidate::fail("unsupported", "This device has no SD slot.");
         } else {
             result = frondNative::putInSd(ctx->sessionFolder, device, identity, protect);
-            if (result.ok) ctx->soc->SdInsert();
+            if (result.ok) ctx->soc->SetSdWriteProtect(protect), ctx->soc->SdInsert();
         }
         if (!result.ok) cout << result.message << endl;
     }
