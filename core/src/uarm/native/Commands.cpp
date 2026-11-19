@@ -110,6 +110,7 @@ namespace {
 
         ctx->soc->SdEject();
         sdCardReset();
+        frondNative::slotCards().sdProtected = false;
         frondSdCandidate::releaseUnused();
     }
 
