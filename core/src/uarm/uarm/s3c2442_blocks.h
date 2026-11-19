@@ -140,6 +140,9 @@ class S3cWatchdog {
     // PCLK ticks until the count runs out with the reset on, or with the interrupt on when interrupts is
     // set. UINT64_MAX when it can't run out (stopped, or WTCNT and WTDAT both 0).
     uint64_t ticksToEvent(bool interrupts = true) const;
+    // WTCNT after pclkTicks more with no reload on the way, or false when it would run out first or isn't
+    // counting.
+    bool countAfter(uint64_t pclkTicks, uint32_t& count) const;
     // Set when the count ran out with the reset output on; the machine stops on it.
     bool resetRequested = false;
 

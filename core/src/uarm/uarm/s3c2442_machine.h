@@ -89,6 +89,11 @@ class S3c2442Machine {
     uint64_t jitRetired() const { return jitRetiredCount; }
     uint64_t leanRetired() const { return leanRetiredCount; }
     uint64_t stepRetired() const { return stepRetiredCount; }
+    // Fast: the WTCNT delay loops passed at once (skipDelay) and the instructions they would have run. delaySkip
+    // turns it off for measuring (FROND_DELAY_SKIP=0 at create does too).
+    uint64_t delaySkips() const { return delaySkipCount; }
+    uint64_t delaySkipRetired() const { return delaySkipRetiredCount; }
+    bool delaySkip = true;
     // VFP instructions and Windows CE breakpoints the guest ran, which take the undefined instruction
     // exception without a stop.
     uint64_t vfpProbeCount() const { return vfpProbes; }
@@ -292,6 +297,7 @@ class S3c2442Machine {
     void catchUp();
     uint32_t step(uint64_t n);
     void runFast(uint64_t n);
+    uint64_t skipDelay(uint64_t left);
     static uint8_t* leanPage(void* context, uint32_t pa, bool write, bool* counted);
     static bool leanRead(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t left, bool single,
                          uint32_t* value, uint32_t* cost);
@@ -366,6 +372,7 @@ class S3c2442Machine {
     bool sfrAccessed = false;  // since the Fast span started
     bool fastOn = false;
     uint64_t jitRetiredCount = 0, leanRetiredCount = 0, stepRetiredCount = 0;
+    uint64_t delaySkipCount = 0, delaySkipRetiredCount = 0;
     std::vector<uint32_t> history;
     size_t historyNext = 0;
 };

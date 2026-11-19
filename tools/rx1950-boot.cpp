@@ -389,7 +389,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "power" (sleep, backlight and LEDs), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S [X]", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "power" (sleep, backlight and LEDs), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -414,14 +414,16 @@ int main(int argc, char** argv) {
             if (cpuInspectRead(machine->cpu(), va, &v, 4)) std::printf("peek %08x: %08x\n", va, v);
             else std::printf("peek %08x: not mapped\n", va);
         } else if (c == "profile" && std::sscanf(line, "%*s %lf", &sec) == 1) {
-            // Samples the pc every 20000 instructions for sec guest seconds: the top 4 KB pages, with the PID.
+            // Samples the pc every 20000 instructions for sec guest seconds: the top 4 KB pages, with the PID, or
+            // the top runs of x bytes with "profile S X".
             std::map<uint64_t, unsigned> pages;
+            const uint32_t grain = std::sscanf(line, "%*s %*f %u", &x) == 1 && x ? x : 4096;
             const uint64_t until = now + uint64_t(sec * 1e9);
             unsigned samples = 0;
             while (machine->nanoseconds() < until && left) {
                 stop = machine->run(20000);
                 left -= std::min<uint64_t>(left, 20000);
-                ++pages[uint64_t(cpuGetPid(machine->cpu())) << 32 | (machine->pc() & ~0xfffu)];
+                ++pages[uint64_t(cpuGetPid(machine->cpu())) << 32 | (machine->pc() - machine->pc() % grain)];
                 ++samples;
                 if (stop != S3c2442Stop::budget) { going = false; break; }
             }
@@ -615,8 +617,10 @@ int main(int argc, char** argv) {
         {
             uint64_t restarts = 0;
             const unsigned tags = cpuArm920JitPidTags(machine->cpu(), &restarts);
-            std::printf("; translated %" PRIu64 ", lean %" PRIu64 ", interpreter %" PRIu64 "; PID tags %u, %" PRIu64 " restarts",
-                        machine->jitRetired(), machine->leanRetired(), machine->stepRetired(), tags, restarts);
+            std::printf("; translated %" PRIu64 ", lean %" PRIu64 ", interpreter %" PRIu64 ", delay skips %" PRIu64 " (%" PRIu64
+                        "); PID tags %u, %" PRIu64 " restarts",
+                        machine->jitRetired(), machine->leanRetired(), machine->stepRetired(), machine->delaySkips(),
+                        machine->delaySkipRetired(), tags, restarts);
         }
         std::printf("\n");
     }
