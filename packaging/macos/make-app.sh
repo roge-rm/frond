@@ -42,8 +42,7 @@ for d in "$(brew --prefix)"/opt/*/lib; do LIBPATHS="$LIBPATHS -libpath=$d"; done
 # shellcheck disable=SC2086
 macdeployqt "$APP" -always-overwrite -no-codesign $LIBPATHS
 # The cores' Homebrew libraries (SDL2, libslirp and what they pull in) go into Frameworks.
-python3 packaging/macos/prune-broken.py "$APP"
-python3 packaging/macos/bundle-libs.py "$APP" "$APP/Contents/MacOS/frond" "$APP/Contents/MacOS/frond-68k"
+python3 packaging/macos/bundle-libs.py "$APP" "$(brew --prefix)" "$APP/Contents/MacOS/frond" "$APP/Contents/MacOS/frond-68k"
 codesign --force --deep --sign - "$APP"
 DMG="out/Frond-$VERSION-$ARCH.dmg"
 rm -f "$DMG"
