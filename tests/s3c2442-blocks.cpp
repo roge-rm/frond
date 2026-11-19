@@ -329,6 +329,20 @@ static void gpioTests() {
     intc.write(0x00, 1u << 5); intc.write(0x10, 1u << 5);
     assert(!(get(gpio, 0xa8) & (1u << 16)) && !(intc.pending() & (1u << 5)));
     gpio.write(0xa4, 0xfffff0, intc);
+    // EINT21 on GPG13 left as an input (GPGCON 0x02a8aaaa), low level: nothing latches. Set to EINT it does.
+    gpio.write(0x60, 0x02a8aaaa, intc);
+    gpio.write(0x90, 0, intc);
+    gpio.write(0xa4, 0xfffff0 & ~(1u << 21), intc);
+    gpio.write(0xa8, 0xfffff0, intc);
+    gpio.setInputs(S3cGpio::g, 1u << 13, 1u << 13, intc);
+    gpio.setInputs(S3cGpio::g, 1u << 13, 0, intc);
+    assert(!(get(gpio, 0xa8) & (1u << 21)));
+    gpio.write(0x60, 0x02a8aaaa | 2u << 26, intc);
+    assert(get(gpio, 0xa8) & (1u << 21));
+    gpio.write(0xa8, 1u << 21, intc);
+    intc.write(0x00, 1u << 5); intc.write(0x10, 1u << 5);
+    gpio.write(0x60, 0, intc);
+    gpio.write(0xa4, 0xfffff0, intc);
     // EINT5 on GPF5 left as an input, both edges, as the rx1950 OAL sets up SD card detect: the card going in
     // (low) and out (high) each latch EINTPEND and reach SRCPND bit 4 (EINT4-7). As an output it makes none.
     intc.write(0x08, ~(1u << 4));
