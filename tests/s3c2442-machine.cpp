@@ -614,19 +614,45 @@ static void delaySkipTests() {
     // add r7, r7, #1; ldr r5, [r6, #8]; mov r0, #0x40
     // wavedev's: ldr r3, [r6, #8]; sub r3, r5, r3; mov r3, r3, lsl #16; cmp r0, r3, lsr #16; bhs back
     // add r8, r8, #1; b to the first ldr
-    std::vector<uint32_t> program{0xe3a02453, 0xe1a06002, 0xe5924008, 0xe24440c8, 0xe5923008, 0xe1530004, 0x2afffffc,
+    const std::vector<uint32_t> base{0xe3a02453, 0xe1a06002, 0xe5924008, 0xe24440c8, 0xe5923008, 0xe1530004, 0x2afffffc,
                                   0xe2877001, 0xe5965008, 0xe3a00040, 0xe5963008, 0xe0453003, 0xe1a03803, 0xe1500823,
                                   0x2afffffa, 0xe2888001, 0xeafffff0};
+    // Watchdog setups: WTCON, WTDAT and WTCNT start, whether its interrupt is unmasked (the CPU still has IRQs
+    // masked), and the wavedev loop's variant: wrap has r0 all ones and r5 0x100 up, so the loop stays until the
+    // 16-bit start - WTCNT wraps.
+    struct Setup {
+        uint32_t wtcon, wtcnt;
+        bool irq, wrap;
+    };
+    const Setup setups[] = {
+        {0x0220, 0xffff, false, false},  // no interrupt or reset
+        {0x0224, 0x1000, true, false},   // interrupt: it limits each span
+        {0x0221, 0x3000, false, false},  // reset: the run stops at the first run out
+        {0x0225, 0x0900, true, false},   // both
+        {0x0220, 0xffff, false, true},
+        {0x0224, 0xffff, true, true},
+    };
+    for (const Setup& setup : setups)
     for (const bool known : {true, false}) {
+        std::vector<uint32_t> program = base;
+        if (setup.wrap) {
+            program[9] = 0xe3e00000;  // mvn r0, #0
+            program.insert(program.begin() + 10, 0xe2855c01);  // add r5, r5, #0x100
+            program.back() = 0xeaffffef;  // b to the first ldr
+        }
         if (!known) {
             program[5] = 0xe0539004;   // subs r9, r3, r4
-            program[13] = 0xe0509823;  // subs r9, r0, r3, lsr #16
+            program[program.size() - 4] = 0xe0509823;  // subs r9, r0, r3, lsr #16
         }
         auto exact = make(program), fast = make(program);
         if (!fast->setFastEngine(true)) return;
         for (auto* m : {exact.get(), fast.get()}) {
-            m->watchdog.wtdat = m->watchdog.wtcnt = 0xffff;
-            m->watchdog.wtcon = 0x0220;  // prescaler 2, divide by 16, counting, no interrupt or reset
+            m->watchdog.wtdat = m->watchdog.wtcnt = setup.wtcnt;
+            m->watchdog.wtcon = setup.wtcon;  // prescaler 2, divide by 16, counting
+            if (setup.irq) {
+                m->intc.intmsk &= ~(1u << s3cIrq::wdtAc97);
+                m->intc.intsubmsk &= ~(1u << s3cSubIrq::wdt);
+            }
         }
         for (const uint64_t slice : {1u, 7u, 1000u, 33333u, 250000u, 1000000u, 5000000u, 20000000u}) {
             exact->run(slice);
@@ -641,10 +667,13 @@ static void delaySkipTests() {
             assert(exact->retired() == fast->retired() && exact->nanoseconds() == fast->nanoseconds());
             assert(exact->watchdog.wtcnt == fast->watchdog.wtcnt && exact->watchdog.phase == fast->watchdog.phase);
         }
-        // Both loops went round many times, through WTCNT reloads too.
-        assert(cpuGetRegExternal(fast->cpu(), 7) > 50 && cpuGetRegExternal(fast->cpu(), 8) > 50);
-        if (known) assert(fast->delaySkips() > 100 && fast->delaySkipRetired() > fast->retired() / 2);
-        else assert(fast->delaySkips() == 0);
+        if (!known) assert(fast->delaySkips() == 0);
+        else if (setup.wrap) assert(fast->delaySkips() > 2);
+        else if (setup.wtcon == 0x0220) {
+            // Both loops went round many times, through WTCNT reloads too.
+            assert(cpuGetRegExternal(fast->cpu(), 7) > 50 && cpuGetRegExternal(fast->cpu(), 8) > 50);
+            assert(fast->delaySkips() > 100 && fast->delaySkipRetired() > fast->retired() / 2);
+        } else assert(fast->delaySkips() > 0);
     }
 }
 

@@ -1184,7 +1184,7 @@ uint64_t S3c2442Machine::skipDelay(uint64_t left) {
         {{0xe5963008, 0xe0453003, 0xe1a03803, 0xe1500823, 0x2afffffa}, 5, 6},
     };
     uint32_t* r = cpuGetRegisters(cpuCore);
-    if (!delaySkip || cpuIsThumb(cpuCore)) return 0;
+    if (!delaySkip || cpuIsThumb(cpuCore) || !cpuArm920JitCanRun(cpuCore)) return 0;
     const uint32_t head = r[15];
     uint32_t word, pa;
     if (!cpuArm920PeekWord(cpuCore, head, &word, &pa)) return 0;

@@ -549,7 +549,7 @@ On the 68k Palms, serial HotSync is tested with pilot-link on a 68k Palm (instal
 
 The HP iPAQ rx1950 runs Windows Mobile 5. Its Wi-Fi joins Frond's access point in the Virtual Wi-Fi network mode, and infrared beams files to another rx1950 or a Palm. It has no Bluetooth, same as the real one. The installed program list isn't done yet.
 
-Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or the Machine menu (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
+Microphone (Zire 72, TG50 and rx1950) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or the Machine menu (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 
 ## Troubleshooting
 
