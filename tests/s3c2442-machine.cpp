@@ -185,6 +185,19 @@ static void sdTests() {
     assert(vsdDataXferBlockFromCard(card, sector, 512) != SdDataOk);
     p->setSdCard(nullptr);
     free(card);
+
+    // GPJ1 dropped mid-read: DatTout reaches INT_SDI through SDIIMSK straight away.
+    card = readyCard();
+    const std::vector<std::pair<uint32_t, uint32_t>> dropMidRead = {
+        {0x5a00003c, 1u << 8}, {0x5a000028, 512}, {0x5a00002c, 0xa2000 | 1}, {0x5a000008, 512}, {0x5a00000c, 0x351},
+        {0x560000d4, 0}, {0x560000d0, 1u << 2}};
+    auto q = make(stores(dropMidRead, {loop}));
+    q->setSdCard(card);
+    assert(q->run(10000) == S3c2442Stop::budget && !q->sdPowered() && q->sdi.blocksRead == 1);
+    assert(q->sdi.read(0x34, 4, v) == S3cAccess::ok && (v & 0x21) == 0x20);
+    assert(q->intc.srcpnd & (1u << s3cIrq::sdi));
+    q->setSdCard(nullptr);
+    free(card);
 }
 
 // Sound: IIS playback through DMA, its interrupt and timing in both engines, the board's gain, recording from

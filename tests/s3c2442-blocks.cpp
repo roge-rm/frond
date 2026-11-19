@@ -334,6 +334,15 @@ static void gpioTests() {
     gpio.write(0x50, 0x802a | 1u << 10, intc);
     gpio.setInputs(S3cGpio::f, 1u << 5, 0, intc);
     assert(!(get(gpio, 0xa8) & (1u << 5)));
+    // EINT3 on low level with GPF3 left an input (charge done, low while charging, as the rx1950 OAL leaves
+    // it): nothing reaches SRCPND, so it can't wake the chip. Set to EINT it does.
+    intc.write(0x00, 0xf); intc.write(0x10, 0xf);
+    gpio.write(0x50, 0x802a, intc);
+    gpio.write(0x88, 0, intc);
+    gpio.setInputs(S3cGpio::f, 1u << 3, 0, intc);
+    assert(!(intc.srcpnd & (1u << 3)));
+    gpio.write(0x50, 0x802a | 2u << 6, intc);
+    assert(intc.srcpnd & (1u << 3));
 }
 
 static void uartTests() {
@@ -903,6 +912,31 @@ static void sdiTests() {
     sdi.write(0x2c, (0x8ae000 | 2) & ~0x8000u, 4);
     assert(!(get(sdi, 0x34) & 1) && card.readCount == 2);
     sdi.write(0x34, 0x10, 4);
+    // The next DMA read of the same size with no 0 written between: only DMAEn turns back on, which starts it.
+    ram.clear();
+    dma.write(0x10, 0xa2e00000 | 4);
+    dma.write(0x20, 2);
+    sdi.write(0x2c, 0x8ae000 | 2, 4);
+    assert(!sdi.dmaWants(4) && !(get(sdi, 0x34) & 1));
+    sdi.write(0x0c, 0x352, 4);
+    for (unsigned guard = 0; guard < 16 && dma.on(0) && sdi.dmaWants(4); ++guard) dma.service(0, intc);
+    assert(ram.size() == 4 && ram[0] == 0x23222120 && card.readCount == 4 && (get(sdi, 0x34) & 0x11) == 0x10);
+    sdi.write(0x2c, (0x8ae000 | 2) & ~0x8000u, 4);
+    sdi.write(0x34, 0x10, 4);
+    // Polled reads repeated with the same SDIDCON value: each write with no transfer running starts one, a
+    // repeat mid-transfer doesn't restart it.
+    sdi.write(0x2c, 0xa2000 | 1, 4);
+    for (unsigned n = 0; n < 2; ++n) {
+        if (n) sdi.write(0x2c, 0xa2000 | 1, 4);
+        sdi.write(0x0c, 0x351, 4);  // CMD17
+        assert((get(sdi, 0x34) & 1) && card.readCount == 5 + n);
+        assert(get(sdi, 0x40) == uint32_t(0x03020100 + 0x10101010 * (4 + n)));
+        sdi.write(0x2c, 0xa2000 | 1, 4);
+        assert((get(sdi, 0x34) & 1) && card.readCount == 5 + n);
+        assert(get(sdi, 0x40) == uint32_t(0x07060504 + 0x10101010 * (4 + n)));
+        assert((get(sdi, 0x34) & 0x11) == 0x10);
+        sdi.write(0x34, 0x10, 4);
+    }
     // And a DMA write, SDRAM to SDIDAT (0x92f000), one 8-byte block.
     ram.clear();
     card.written.clear();

@@ -593,6 +593,7 @@ void S3c2442Machine::sdPowerPins() {
     if (sdPowerWas && !on && sdVsd) {
         vsdPowerOff(sdVsd);
         sdi.cardRemoved();
+        sdiService();
     }
     sdPowerWas = on;
 }

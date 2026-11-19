@@ -13,7 +13,7 @@ namespace {
     // SDICSTA
     constexpr uint32_t cstaRspFin = 1u << 9, cstaTimeout = 1u << 10, cstaSent = 1u << 11, cstaCrc = 1u << 12;
     // SDIDCON
-    constexpr uint32_t dconBusyAfterCmd = 1u << 18, dconRxAfterCmd = 1u << 19, dconTxAfterRsp = 1u << 20;
+    constexpr uint32_t dconDmaEn = 1u << 15, dconBusyAfterCmd = 1u << 18, dconRxAfterCmd = 1u << 19, dconTxAfterRsp = 1u << 20;
     // A change in these (re)starts a transfer: BACMD, RACMD, TARSP, DTST, DatMode and BlkNum.
     constexpr uint32_t dconStartBits = 0x1c7fff;
     // SDIDSTA
@@ -79,7 +79,7 @@ bool S3cSdi::irq() const {
 }
 
 bool S3cSdi::dmaWants(unsigned bytes) const {
-    return active && (regs[sdidcon] & (1u << 15)) && bytes && available() >= bytes;
+    return active && (regs[sdidcon] & dconDmaEn) && bytes && available() >= bytes;
 }
 
 void S3cSdi::finish() {
@@ -248,9 +248,13 @@ S3cAccess S3cSdi::write(uint32_t offset, uint32_t value, unsigned size) {
         case sdidcon: {
             const uint32_t old = regs[r];
             regs[r] = value;
-            // ASSUMPTION "SDI restart on change": a write that leaves the start bits as they were (the driver
-            // clearing DMAEn after a transfer) doesn't start another transfer.
-            if (!((old ^ value) & dconStartBits)) break;
+            // ASSUMPTION "SDI start on write": a write starts a transfer when it changes the start bits, turns
+            // DMAEn on, or writes the same value again with no transfer running (the next transfer of the same
+            // size). A write that only turns DMAEn off (the driver's read-modify-write after a DMA transfer) or
+            // repeats the value mid-transfer doesn't.
+            const bool idle = !active && !armed;
+            const bool dmaOn = !(old & dconDmaEn) && (value & dconDmaEn);
+            if (!((old ^ value) & dconStartBits) && !dmaOn && !(idle && old == value)) break;
             active = armed = loaded = false;
             regs[sdidsta] &= ~(dstaRxOn | dstaTxOn);
             const uint32_t mode = (value >> 12) & 3;
