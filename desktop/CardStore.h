@@ -460,22 +460,17 @@ inline ToolResult runCardTool(const QString& tool, const QStringList& args, cons
 // Card file from a machine folder into the drawer. The slot gets swap first, so a crash at any
 // point loads with --card-swap; a cut-off move is fixed by reconcile rule 4. Library lock and
 // machine lock held.
+inline QString settleGenerations(const QString& library, const QString& dir, int n);
 inline QString toDrawer(const QString& library, const QString& dir, const QString& id, int n = 0) {
     const auto file = cardFileIn(dir, n);
     Card card;
     if (file.isEmpty() || !readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't move the card.");
     if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
-    // A card frond-68k left saved changes beside goes in with them written into its file.
-    if (linkedSession(frondSessions::sessionFrondIn(dir)) && hasGenerations(dir, file)) {
-        auto key = card.key;
-        LinkedRow row;
-        if (!validKey(key) && linkedRowFor(frondSessions::sessionFrondIn(dir), n, &row)) key = row.key;
-        if (!validKey(key)) return QStringLiteral("The card's saved changes can't be read.");
-        if (const auto r = runCardTool(cardTool(), {QStringLiteral("settle-linked"), dir + '/' + file, key}); !r.ok) return r.message;
-    }
     auto slot = readSlot(dir, n);
     slot.present = true; slot.swap = true; slot.card = id;
     if (!writeSlot(dir, slot, n)) return QStringLiteral("Couldn't move the card.");
+    // A card frond-68k left saved changes beside goes in with them written into its file.
+    if (const auto why = settleGenerations(library, dir, n); !why.isEmpty()) return why;
     if (!moveFile(dir + '/' + file, entryDir(library, id) + '/' + fileOfKind(card.kind)))
         return QStringLiteral("Couldn't move the card into Cards. Cards and sessions have to be on the same disk.");
     slot.card.clear();
@@ -504,6 +499,34 @@ inline QString toMachine(const QString& library, const QString& id, const QStrin
     card.machine = QFileInfo(dir).fileName();
     writeCard(entryDir(library, id), card);
     return {};
+}
+
+// Writes the saved changes frond-68k left beside slot n's card file (.gen-<file>-*) into the file,
+// with the key from the slot's library card or the save's row, so a copy or a move takes them.
+// The slot gets swap first: the next start loads the changed card empty and attaches it again.
+// Only frond-68k machines: a frond-68k save, or no save yet and a card with a frond-68k key (the
+// ARM core keeps its own generations, which its save settles). Machine lock held. Empty on
+// success or when there are none.
+inline QString settleGenerations(const QString& library, const QString& dir, int n) {
+    const auto file = cardFileIn(dir, n);
+    if (file.isEmpty() || !hasGenerations(dir, file)) return {};
+    const auto frond = frondSessions::sessionFrondIn(dir);
+    const bool linked = linkedSession(frond);
+    if (!linked && QFileInfo(frond).isFile()) return {};
+    auto slot = readSlot(dir, n);
+    Card card;
+    QString key;
+    if (!slot.card.isEmpty() && readCard(entryDir(library, slot.card), &card)) key = card.key;
+    LinkedRow row;
+    if (!validKey(key) && linked && linkedRowFor(frond, n, &row)) key = row.key;
+    if (!validKey(key)) return linked ? QStringLiteral("The card's saved changes can't be read.") : QString();
+    if (!slot.swap) {
+        slot.present = true;
+        slot.swap = true;
+        if (!writeSlot(dir, slot, n)) return QStringLiteral("Couldn't write the card's saved changes.");
+    }
+    const auto r = runCardTool(cardTool(), {QStringLiteral("settle-linked"), dir + '/' + file, key});
+    return r.ok ? QString() : r.message;
 }
 
 // Hidden copy folders in the library: cards/.new-<id>, locked by cards/.new-<id>.lock while a copy
@@ -549,6 +572,8 @@ inline QString settledCopy(const QString& dir, const QString& file, const QStrin
     const QString failed = QStringLiteral("Couldn't copy the card.");
     auto source = dir + '/' + file;
     QString journal;
+    // frond-68k's saved changes beside the file: settleGenerations first.
+    if (linkedSession(frondSessions::sessionFrondIn(dir)) && hasGenerations(dir, file)) return QStringLiteral("unsettled");
     if (hasJournals(dir, file) || !settled(dir, file, false)) {
         const auto settle = frondSessions::sdSettleOf(dir, frondSessions::sessionFrondIn(dir), false, file == "sd2.frondsd");
         if (settle.sibling == file && !settle.full.isEmpty()) source = settle.full;
@@ -674,6 +699,8 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
     // skipped may hold it.
     for (const auto& e : known) {
         if (e.inDrawer || claimed.contains(e.card.id) || skippedClaims.contains(e.card.id)) continue;
+        // Saved changes of a card whose move in was cut off: the next start-up finishes it.
+        if (hasGenerations(e.dir, fileOfKind(e.card.kind))) continue;
         // The hint names a saved machine we couldn't lock: it may hold the card.
         const auto hinted = sessions + '/' + e.card.machine;
         if (!e.card.machine.isEmpty() && QFileInfo(frondSessions::sessionFrondIn(hinted)).isFile() &&
@@ -741,6 +768,15 @@ inline void startUp(const QString& sessions, const QString& oldRoot = {}) {
     removeStaleNew(library);
     reconcile(sessions);
     if (!oldRoot.isEmpty()) moveUnlinkedIn(sessions, oldRoot);
+}
+
+// A frond-68k save outside the sessions folder: --card-swap when a card it links is gone (moved
+// into Cards at start-up), so it loads with that slot empty instead of refusing. Under swap its
+// other cards load empty too, as they aren't in its folder.
+inline QStringList outsideArguments(const QString& frond) {
+    for (const auto& row : linkedRows(frond))
+        if (!QFileInfo::exists(row.path)) return {QStringLiteral("--card-swap")};
+    return {};
 }
 
 // Card flags for the core, from the slot files and card.json. A swap in slot 2 needs --card-swap
@@ -939,6 +975,7 @@ inline QString keepSlotCardOf(const QString& sessions, const QString& dir, int n
         if (file.isEmpty()) return {};
         if (slot.card.isEmpty()) return QStringLiteral("Couldn't move the card into Cards.");
         if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
+        if (const auto why = settleGenerations(library, dir, n); !why.isEmpty()) return why;
         if (settled(dir, file, slot.swap)) return toDrawer(library, dir, slot.card, n);
     }
     // Copied outside the lock, then renamed in under it.
@@ -1406,6 +1443,10 @@ inline QString cardSource(const QString& sessions, const QString& id, QString* p
                 hold->reset();
                 return why;
             }
+            if (const auto why = settleGenerations(library, r.holderDir, r.holderSlot); !why.isEmpty()) {
+                hold->reset();
+                return why;
+            }
             const auto slot = readSlot(r.holderDir, r.holderSlot);
             if (settled(r.holderDir, held, slot.swap)) {
                 *path = r.holderDir + '/' + held;
@@ -1641,16 +1682,15 @@ class FreeWatcher {
 // opens, each card its save links there moves into its folder with its saved changes (the card
 // tool's move-linked, which never replaces a file and refuses unsettled writes) and gets a library
 // entry. Whatever fails leaves the card where it was, still linked by its old path. Each card
-// gets one line in the machine folder's card-moves.log. Machine lock held. Returns the cards moved.
+// gets one line in the machine folder's card-moves.log. A linked card that is gone and not in the
+// machine folder (another save that linked it moved it first) leaves its slot swapped, so the
+// machine loads with the slot empty. Machine lock held. Returns the cards moved.
 inline QString movesLog(const QString& dir) { return dir + QStringLiteral("/card-moves.log"); }
 inline int moveLinkedIn(const QString& sessions, const QString& dir, const QString& oldRoot, const QString& tool = {}) {
     const auto frond = frondSessions::sessionFrondIn(dir);
     const auto rows = linkedRows(frond);
+    if (rows.isEmpty()) return 0;
     const auto root = QDir::cleanPath(QFileInfo(oldRoot).absoluteFilePath());
-    QList<LinkedRow> old;
-    for (const auto& row : rows)
-        if (QDir::cleanPath(QFileInfo(row.path).absolutePath()) == root) old << row;
-    if (old.isEmpty()) return 0;
     const auto library = libraryFor(sessions);
     QDir().mkpath(library);
     LibraryLock lock(library);
@@ -1660,20 +1700,36 @@ inline int moveLinkedIn(const QString& sessions, const QString& dir, const QStri
         if (f.open(QIODevice::Append | QIODevice::Text)) f.write((now() + ' ' + line + '\n').toUtf8());
     };
     int moved = 0;
-    for (const auto& row : old) {
+    for (const auto& row : rows) {
         const QString file = row.stick ? QStringLiteral("ms.frondms") : row.n ? QStringLiteral("sd2.frondsd") : QStringLiteral("sd.frondsd");
         const auto target = dir + '/' + file;
         const auto meta = QFileInfo(row.path).absolutePath() + '/' + QFileInfo(row.path).completeBaseName() + QStringLiteral(".json");
         const bool there = QFileInfo::exists(row.path);
+        const bool old = QDir::cleanPath(QFileInfo(row.path).absolutePath()) == root;
         // A move cut off after the card tool: the card is in the folder, its entry not made yet.
-        const bool resumed = !there && QFileInfo::exists(target) && readSlot(dir, row.n).card.isEmpty() && QFileInfo::exists(meta);
-        if (!there && !resumed) continue;
+        const bool resumed = old && !there && QFileInfo::exists(target) && readSlot(dir, row.n).card.isEmpty() && QFileInfo::exists(meta);
+        if (!there && !resumed && cardFileIn(dir, row.n).isEmpty()) {
+            auto slot = readSlot(dir, row.n);
+            if (!slot.swap) {
+                slot.present = true;
+                slot.swap = true;
+                writeSlot(dir, slot, row.n);
+                QString where;
+                for (const auto& e : entries(library))
+                    if (e.card.key == row.key) where = e.card.name;
+                log(where.isEmpty() ? QStringLiteral("%1 isn't at %2, its slot loads empty").arg(row.key, row.path)
+                                    : QStringLiteral("%1 isn't at %2, it is in Cards as %3, its slot loads empty").arg(row.key, row.path, where));
+            }
+            continue;
+        }
+        if (!old || (!there && !resumed)) continue;
         if (there && !cardFileIn(dir, row.n).isEmpty()) {
             log(QStringLiteral("left %1 in %2: the slot already has a card file").arg(row.key, root));
             continue;
         }
         // A Files change on a stick that a crash cut off is finished first, as attaching it did.
         if (there && row.stick) frondCardFile::settle(row.path);
+        const auto before = there ? QFileInfo(row.path).lastModified() : QDateTime();
         const auto r = runCardTool(cardTool(tool), {QStringLiteral("move-linked"), row.path, target});
         if (!r.ok) {
             log(QStringLiteral("left %1 in %2: %3").arg(row.key, root, r.message));
@@ -1700,6 +1756,8 @@ inline int moveLinkedIn(const QString& sessions, const QString& dir, const QStri
         slot.present = true;
         slot.card = card.id;
         slot.name = card.name;
+        // Copied from another disk: a new file the save doesn't know, so it loads as a swap.
+        if (there && QFileInfo(target).lastModified() != before) slot.swap = true;
         if (!QDir().mkpath(entryDir(library, card.id)) || !writeCard(entryDir(library, card.id), card) || !writeSlot(dir, slot, row.n)) {
             // The card stays in the folder, where the save finds it; reconcile gives it an entry.
             QDir(entryDir(library, card.id)).removeRecursively();
@@ -1716,9 +1774,11 @@ inline int moveLinkedIn(const QString& sessions, const QString& dir, const QStri
 
 // Cards in `oldRoot` that no save in the sessions folder links go into the drawer, unlinked, so
 // they don't go unseen now that the Dana cards dialog is gone. Every save is read first, so a
-// machine still to move its cards in keeps them. The entry is made before the card tool's
-// move-linked moves the card with its saved changes; a move that fails or is cut off leaves the
-// card where it was (reconcile drops an entry with no card). Each card gets one line in the
+// machine still to move its cards in keeps them. Saved changes beside a card are written into it
+// first (settle-linked), then the entry is made and the card tool's move-linked moves the card in.
+// A move that fails or is cut off before anything moved leaves the card where it was (the entry
+// goes, or reconcile drops it); an entry that already holds the card or some of its saved changes
+// is kept, and the next start-up finishes the move into it. Each card gets one line in the
 // library's card-moves.log. Returns the cards moved.
 inline int moveUnlinkedIn(const QString& sessions, const QString& oldRoot, const QString& tool) {
     QStringList files;
@@ -1749,6 +1809,28 @@ inline int moveUnlinkedIn(const QString& sessions, const QString& oldRoot, const
         if (QFile f(meta); f.open(QIODevice::ReadOnly)) about = QJsonDocument::fromJson(f.readAll()).object();
         // A Files change on a stick that a crash cut off is finished first, as attaching it did.
         if (stick) frondCardFile::settle(from);
+        // A move cut off part way: its entry, with no card file yet, takes the rest.
+        QString resume;
+        for (const auto& e : entries(library))
+            if (!e.inDrawer && e.card.key == key && e.card.machine.isEmpty() && e.card.kind == (stick ? "ms" : "sd")) resume = e.dir;
+        if (!resume.isEmpty()) {
+            const auto r = runCardTool(cardTool(tool), {QStringLiteral("move-linked"), from, resume + '/' + (stick ? fileOfKind("ms") : fileOfKind("sd"))});
+            if (!r.ok) {
+                log(QStringLiteral("left %1 in %2: %3").arg(key, root, r.message));
+                continue;
+            }
+            QFile::remove(meta);
+            log(QStringLiteral("moved %1 to the drawer, finishing an earlier move").arg(key));
+            ++moved;
+            continue;
+        }
+        // Its saved changes are written into it first, so only the card file moves.
+        if (hasGenerations(root, name)) {
+            if (const auto r = runCardTool(cardTool(tool), {QStringLiteral("settle-linked"), from, key}); !r.ok) {
+                log(QStringLiteral("left %1 in %2: %3").arg(key, root, r.message));
+                continue;
+            }
+        }
         Card card;
         card.id = newId();
         card.kind = stick ? QStringLiteral("ms") : QStringLiteral("sd");
@@ -1770,7 +1852,12 @@ inline int moveUnlinkedIn(const QString& sessions, const QString& oldRoot, const
             continue;
         }
         const auto r = runCardTool(cardTool(tool), {QStringLiteral("move-linked"), from, entry + '/' + fileOfKind(card.kind)});
-        if (!r.ok) {
+        if (!r.ok && !QFileInfo(entry + '/' + fileOfKind(card.kind)).isFile()) {
+            // Never removed while it holds some of the card's saved changes.
+            if (hasGenerations(entry, fileOfKind(card.kind))) {
+                log(QStringLiteral("left %1 part way to the drawer: %2").arg(key, r.message));
+                continue;
+            }
             QDir(entry).removeRecursively();
             log(QStringLiteral("left %1 in %2: %3").arg(key, root, r.message));
             continue;

@@ -1188,6 +1188,11 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     qint64 total = 0;
     const bool copyCard = choice == CardChoice::copy;
     if (info.saved) {
+        // frond-68k's saved changes beside a card go into its file first, so the copy has them.
+        if (copyCard)
+            for (int n = 0; n < frondCards::slotCount; ++n)
+                if (copies[n].holds)
+                    if (const auto error = frondCards::settleGenerations(library, fromDir, n); !error.isEmpty()) return fail(error);
         settle = sdSettleOf(fromDir, info.path);
         if (!copyCard) settle = {};
         nandSettle = sdSettleOf(fromDir, info.path, true);
@@ -1284,7 +1289,13 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         auto original = c.slot;
         original.present = true;
         original.link = c.linkTo;
-        if (!frondCards::writeSlot(fromDir, original, n)) { dropEntries(); return fail(failed); }
+        if (!frondCards::writeSlot(fromDir, original, n)) {
+            // The slots already rewritten get their own links back.
+            for (int k = 0; k < n; ++k)
+                if (copies[k].slot.link != copies[k].linkTo) frondCards::writeSlot(fromDir, copies[k].slot, k);
+            dropEntries();
+            return fail(failed);
+        }
     }
     const auto target = machineDir(folder, name);
     hold.unlock();

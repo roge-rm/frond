@@ -2625,6 +2625,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
             (n ? linked2Watcher : linkedWatcher) = std::make_unique<frondCards::FreeWatcher>(frondCards::libraryFor(sessionFolder()), slot.link,
                                                                                          [this](bool) { refresh(); });
         }
+    } else if (frondFirmware::linkedCards(startDevice)) {
+        arguments << frondCards::outsideArguments(arguments.value(0));
     }
     // If Frond goes without stopping the Palm, the core saves the working session itself.
     arguments << "--save-on-disconnect" << QFileInfo(target).absoluteFilePath();
