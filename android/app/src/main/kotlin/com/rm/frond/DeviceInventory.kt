@@ -1412,7 +1412,6 @@ internal val deviceInventory = listOf(
         pendingUsb = "",
         colourLcd = false,
         os = "palm-os",
-        experimental = true,
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
