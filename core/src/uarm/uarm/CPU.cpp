@@ -402,6 +402,9 @@ struct ArmCpu {
     // and the run's budget, which such a store can shrink.
     Arm920LeanWrite leanWrite;
     uint32_t leanInstr, leanBudget;
+    // Fast blocks: virtual pages whose stores went to leanWrite (not plain, not cacheable or bufferable), keyed as
+    // the host TLB is (cpuJitLeanDeviceWrite). pa is the page's physical address with bit 0 set when in use.
+    struct { uint64_t key; uint32_t pa; } leanDeviceWrite[16];
     // Fast blocks: the pc of the last access-pc instruction generated code ran (cpuArm920SetJitAccessPcs), taken by
     // the lean read callback for the access it makes, then cleared.
     uint32_t jitAccessPc;
@@ -1450,6 +1453,16 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
             if (cpu->leanWrite(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, value, ran, left, &cost)) {
                 cpu->leanBudget -= cost;
                 ++cpu->leanBus;
+#ifdef FROND_DYNARMIC
+                // The next stores to this page from generated code skip the translation (cpuJitLeanDeviceWrite),
+                // while the MMU TLB entry it came from holds.
+                if (cpu->leanJit &&
+                    (mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision)) {
+                    auto &e = cpu->leanDeviceWrite[(va >> 12) & 15];
+                    e.key = hostTlbKey(cpu->mem->hostTlb.gen, va, privileged);
+                    e.pa = (MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu) | 1;
+                }
+#endif
                 return true;
             }
         }
@@ -5931,6 +5944,7 @@ bool cpuArm920AlignmentFaults(const ArmCpu *cpu) {
 
 void cpuArm920SetLean(ArmCpu *cpu, Arm920LeanPage page, Arm920LeanGuard guard, void *context) {
     if (cpu->model != ArmCpuModel::arm920t) return;
+    for (auto &e : cpu->leanDeviceWrite) e = {};
     cpu->leanPage = page;
     cpu->leanGuard = guard;
     cpu->leanContext = context;
@@ -6118,6 +6132,26 @@ bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t
         case 8: return cpuPrvJitMemOp<8, false>(cpu, buf, va, fsr);
     }
     return false;
+}
+
+// An ARM920T Fast blocks store to a page an earlier store sent to leanWrite: the same call, without the translation
+// and the page lookups. 1 if leanWrite took it, -1 if it refused (an exit, as cpuJitWrite's refusal with fsr 0), 0 for
+// cpuJitWrite. A refusal drops the page, so the next store looks it up again.
+int cpuJitLeanDeviceWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value) {
+    if (!cpu->leanRun || !cpu->leanJit || cpu->nativeCallDepth || size > 4 || (va & (size - 1))) return 0;
+    auto &e = cpu->leanDeviceWrite[(va >> 12) & 15];
+    if (!(e.pa & 1) || e.key != hostTlbKey(cpu->mem->hostTlb.gen, va, cpu->privileged)) return 0;
+    const uint32_t ran = cpuPrvJitRanUncharged(cpu);
+    const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
+    uint32_t cost = 0;
+    if (cpu->leanWrite(cpu->leanContext, (e.pa & ~0xfffu) | (va & 0xfffu), size, value, ran, left, &cost)) {
+        cpu->leanBudget -= cost;
+        ++cpu->leanBus;
+        return 1;
+    }
+    e = {};
+    cpu->leanExit = true;
+    return -1;
 }
 
 bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_fast8_t *fsr) {

@@ -833,6 +833,15 @@ struct Env final : public A32::UserCallbacks {
     void Write(A32::VAddr va, T v) {
         stats.writes++;
         stats.NoteCallback(va, true);
+        if constexpr (sizeof(T) <= 4) {
+            if (arm920) {
+                if (const int device = cpuJitLeanDeviceWrite(cpu, va, sizeof(T), uint32_t(v))) {
+                    if (device < 0) AccessFailed(va, sizeof(T), true, 0);
+                    else AfterIo();
+                    return;
+                }
+            }
+        }
         bool ok;
         if (const int io = cpuJitIoWrite(cpu, va, sizeof(T), &v, &ok, gen)) {
             if (!ok) {
