@@ -548,7 +548,7 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
 
 // Same file: device and inode.
 inline bool sameInode(const std::filesystem::path& a, const std::filesystem::path& b) {
-    #ifdef _WIN32
+#ifdef _WIN32
     (void)a; (void)b;  // no inode numbers here
     return false;
 #else
