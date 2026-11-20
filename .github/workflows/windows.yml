@@ -73,7 +73,7 @@ jobs:
       - name: Start the built programs
         run: |
           set -o pipefail
-          cd out/Frond
+          cd out/package/Frond
           ./frond-68k.exe --version
           # The ARM core has no version flag; it must start and print its usage, not fail to load.
           set +e
