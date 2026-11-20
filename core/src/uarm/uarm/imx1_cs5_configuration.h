@@ -117,6 +117,13 @@ class Imx1Cs5Configuration {
         const uint64_t steps = idleQuietSteps(period.numerator, period.denominator);
         return steps == UINT64_MAX ? UINT64_MAX : steps - 1;
     }
+    // quietCpuCycles gives 0 because a model changes state in the next cycle, not because the count can't be worked
+    // out (the controller's delay, a period the time fraction can't take, a busy level the clocks haven't taken).
+    bool changeDue(Imx1PllRatio period) const {
+        if (controller.delayRunning()) return false;
+        return !clocks.programmed() ||
+               (timeFraction.supports(uint64_t(period.denominator) * 64) && clocks.gpuBusyValue() == !engine.emptyRing());
+    }
     // Graphics ticks the next cycles CPU cycles and then busClocks bus clocks give, charged as advanceCpuCycles
     // and advanceBusCycles (in pieces of at most one transaction) charge them, with nothing changed.
     bool ticksAfter(uint64_t cycles, Imx1PllRatio cpu, uint64_t busClocks, Imx1PllRatio bus, uint64_t& ticks) const {

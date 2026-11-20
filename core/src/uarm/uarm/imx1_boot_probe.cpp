@@ -484,13 +484,17 @@ struct Probe {
         // cycle goes in the same charge, as nothing else changes in it.
         const auto period = peripherals.cpuReferencePeriod(mode);
         if (!quietCycles && !deferredHclk && cs5Configuration.quietCpuCycles(period) == deferredCycles &&
-            quietCpuCycles(mode, false) > deferredCycles)
+            (deferredCycles || cs5Configuration.changeDue(period)) && quietCpuCycles(mode, false) > deferredCycles)
             ++deferredCycles;
         if (!chargeDeferred()) { clockBoundary(); return -1; }
+        // A batch the charge completed leaves its busy level for the next advance, which takes it first: it is taken
+        // now, as jitChargedWrite takes a new batch's, so the span can run on.
+        cs5Configuration.takeBusyLevel();
         if (clockBoundary()) return -1;
         updateInterrupts();
         uint64_t span = quietCpuCycles(mode);
-        if (span < leanMinimumSpan && !cs5Configuration.quietCpuCycles(period) && quietCpuCycles(mode, false)) {
+        if (span < leanMinimumSpan && !cs5Configuration.quietCpuCycles(period) && cs5Configuration.changeDue(period) &&
+            quietCpuCycles(mode, false)) {
             // The graphics change is due in the next cycle and nothing else is: it passes as the step would charge it.
             const auto status = advanceGraphicsCpu(1, period);
             if (status != Imx1BootstrapAccess::ok) {
