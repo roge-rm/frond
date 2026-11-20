@@ -294,12 +294,23 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
     SDL_RenderPresent(renderer);
 }
 
-// The panels beside the screen, painted into a window-sized texture only when a key, the stick or the LED
+// The panels beside the screen, painted into a viewport-sized texture only when a key, the stick or the LED
 // changes, and copied over the window on every other draw. Straight on the window if the texture can't be made.
 void SdlRenderer::DrawSidebar(const DeviceControlProfile& controls, int screenWidth, int screenHeight,
                               DeviceKeyMask buttons, DeviceStick stick, bool changed) {
+    // The texture covers the viewport in output pixels (the whole window when there is no fit viewport).
     int w = 0, h = 0;
-    if (SDL_GetRendererOutputSize(renderer, &w, &h) != 0 || w <= 0 || h <= 0) w = h = 0;
+    {
+        float vsx, vsy;
+        SDL_RenderGetScale(renderer, &vsx, &vsy);
+        SDL_RenderSetScale(renderer, 1, 1);
+        SDL_Rect viewport{};
+        SDL_RenderGetViewport(renderer, &viewport);
+        SDL_RenderSetScale(renderer, vsx, vsy);
+        w = viewport.w;
+        h = viewport.h;
+        if (w <= 0 || h <= 0) w = h = 0;
+    }
     if (sidebarTexture && (w != sidebarWidth || h != sidebarHeight)) {
         SDL_DestroyTexture(sidebarTexture);
         sidebarTexture = nullptr;
@@ -333,7 +344,8 @@ void SdlRenderer::DrawSidebar(const DeviceControlProfile& controls, int screenWi
     float sx, sy;
     SDL_RenderGetScale(renderer, &sx, &sy);
     SDL_RenderSetScale(renderer, 1, 1);
-    SDL_RenderCopy(renderer, sidebarTexture, nullptr, nullptr);
+    const SDL_Rect dest{0, 0, sidebarWidth, sidebarHeight};
+    SDL_RenderCopy(renderer, sidebarTexture, nullptr, &dest);
     SDL_RenderSetScale(renderer, sx, sy);
 }
 
