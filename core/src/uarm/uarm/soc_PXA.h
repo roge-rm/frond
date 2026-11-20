@@ -71,6 +71,7 @@ class SocPXA : public SocGeneric<SocPXA> {
 
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     uint64_t CoreHz() const override;
+    std::optional<bool> SdRemovalHandled() override;
     uint32_t *GetPendingFrame(uint32_t &firstDirtyLine, uint32_t &lastDirtyLine) override;
     void ResetPendingFrame() override;
     DeviceType5 GetDeviceType() override;
