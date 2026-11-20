@@ -1,8 +1,8 @@
 # Frond
 
-Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games. There are builds for Windows and macOS too, untested.
+Frond is a PDA emulator for Linux and Android, for running apps and games and writing your own. There are builds for Windows and macOS too, untested.
 
-Frond runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, with sound, memory cards, infrared, Bluetooth, HotSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
+It runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, and the HP iPAQ rx1950 on Windows Mobile 5, with sound, memory cards, infrared, Bluetooth, HotSync, ActiveSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
@@ -91,7 +91,7 @@ Dan
 | **Windows Mobile, ARM** | | | | | | | | |
 | HP iPAQ rx1950 | Windows Mobile 5 | 240×320 colour | SD | yes | yes | | virtual Wi-Fi | ActiveSync, USB and serial |
 
-The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3, Zire 72 and Zodiac also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k Palms have the cradle's HotSync button, and their USB HotSync isn't done yet.
+The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3, Zire 72 and Zodiac also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k devices have the cradle's HotSync button, and their USB HotSync isn't done yet.
 
 Printing over infrared works on every device with infrared. The T|X, E2, Zire 72 and TG50 have an infrared keyboard, a mobile phone over infrared and a mobile phone over Bluetooth, and the 68k Palms have the phone over infrared (on Palm OS 3.5 and 4.1). Every 68k Palm except the m100 and m105 has the dial-up modem and HotSync by modem, tested on the IIIx. The Dana and Dana Wireless print to a USB printer. Mobile phone over Bluetooth and HotSync by modem are Linux only for now. The E2 and the Zire don't have their networking yet. The Zire 72 and TG50 have a microphone, and the Zire 72 has its camera.
 
@@ -99,7 +99,7 @@ The Tungsten E3 is the modified E2 ROM with a 320×480 screen. Its ROM has no Bl
 
 The T|X plays videos in Media. On a slower computer use the Fast engine for it.
 
-The 68k Palms run in their own runner, `frond-68k`, from the Palm IIIx to the m520, the Dana and the CLIÉ T415. They have a backlight, serial with the HotSync button, infrared and, on the grey ones, the screen contrast. The m125, m500, c500, m505, m515, m130 and m520 have an SD or MMC slot. Networking is PPP over the serial port or the dial-up modem. See [68k Palm serial and PPP](doc/using-frond.md#68k-palm-serial-and-ppp). Android has them too, and the debugger works with prc-tools' gdb. See [68k Palms](doc/developer-reference.md#68k-palms-frond-68k).
+The 68k devices run in their own runner, `frond-68k`, from the Palm IIIx to the m520, the Dana and the CLIÉ T415. They have a backlight, serial with the HotSync button, infrared and, on the grey ones, the screen contrast. The m125, m500, c500, m505, m515, m130 and m520 have an SD or MMC slot. Networking is PPP over the serial port or the dial-up modem. See [68k Palm serial and PPP](doc/using-frond.md#68k-palm-serial-and-ppp). Android has them too, and the debugger works with prc-tools' gdb. See [68k Palms](doc/developer-reference.md#68k-palms-frond-68k).
 
 The infrared keyboard and beaming share the port. Take the keyboard off before you turn beaming on. On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
 
@@ -113,9 +113,9 @@ The HP iPAQ rx1950 runs Windows Mobile 5, with sound and the microphone, an SD c
 
 <img src="doc/images/android-home.png" width="200" alt="The Frond home screen with a list of machines">
 
-Each Palm you run is a session on the home screen. You can rename one, duplicate it, export it, import one or delete it. There's no autosave, so a crash loses anything since the last save. On Linux, closing the window saves. Save and Stop goes back to the list. Save a copy… keeps a separate snapshot. A session has your firmware and your data in it, so keep it to yourself.
+Each device you run is a session on the home screen. You can rename one, duplicate it, export it, import one or delete it. There's no autosave, so a crash loses anything since the last save. On Linux, closing the window saves. Save and Stop goes back to the list. Save a copy… keeps a separate snapshot. A session has your firmware and your data in it, so keep it to yourself.
 
-Hard reset erases the Palm. Save first saves it before you do. The T|X, E2 and the 68k Palms ask first (press up to erase). The Zire erases straight away.
+Hard reset erases the device. Save first saves it before you do. The T|X, E2 and the 68k devices ask first (press up to erase). The Zire erases straight away, and the rx1950 starts again at Windows Mobile's first screen.
 
 ## Screen
 
@@ -123,7 +123,7 @@ Hard reset erases the Palm. Save first saves it before you do. The T|X, E2 and t
 
 On Linux the scale goes from 1× to 2× in steps of 0.25, and it starts at the largest that fits. On Android the screen fits the phone, in whole steps or filling it, and it can follow the phone or stay portrait or landscape. Pixels stay sharp. Smooth pixels softens them.
 
-While a machine runs, the bar along the top has Applications, Storage, Sound, Power and a menu with the rest. On Linux, Applications, Storage, Display and Connections open as a panel beside the Palm. On Android they open as a sheet. Hide bar leaves a small handle at the top.
+While a machine runs, the bar along the top has Applications, Storage, Sound, Power and a menu with the rest. On Linux, Applications, Storage, Display and Connections open as a panel beside the device. On Android they open as a sheet. Hide bar leaves a small handle at the top.
 
 ## Settings
 
@@ -131,28 +131,28 @@ While a machine runs, the bar along the top has Applications, Storage, Sound, Po
 
 Each machine has its own display, sound, speed and connection settings. Set them when you add it, or with Edit settings while it's stopped. On Android most of them are in the Display sheet while it runs too.
 
-- Speed is Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k Palms stop at 4×). Original runs the machine at its real speed, the others run it that many times faster, and Uncapped lets your computer or phone run it as fast as it can.
+- Speed is Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k devices stop at 4×). Original runs the machine at its real speed, the others run it that many times faster, and Uncapped lets your computer or phone run it as fast as it can.
 - Engine is Exact or Fast. Fast is the JIT, and the 68k machines only have Exact.
 
 See [Settings](doc/using-frond.md#settings).
 
 ## Buttons
 
-The buttons under the screen and the silkscreen can be clicked or tapped. On a keyboard the arrow keys are the five-way, Enter selects and F1 to F4 are the app buttons. Help → Hardware Keyboard Controls lists the rest. On Android a game controller presses the Palm's buttons. You can change which one does what in Settings.
+The buttons under the screen and the silkscreen can be clicked or tapped. On a keyboard the arrow keys are the five-way, Enter selects and F1 to F4 are the app buttons. Help → Hardware Keyboard Controls lists the rest. On Android a game controller presses the device's buttons. You can change which one does what in Settings.
 
 The TG50 has its keyboard, jog wheel, Home, Back and Hold. Hold locks the controls and turns the screen off. Audio keeps playing.
 
-You can also type with an emulated Palm infrared keyboard, once Palm's keyboard driver is installed.
+The T|X, E2, E3, Zire 72 and TG50 can also type with an emulated Palm infrared keyboard, once Palm's keyboard driver is installed.
 
 ## Apps and cards
 
 <img src="doc/images/android-internal-files.png" width="200" alt="The T|X's internal databases listed in Files on Android">
 
-Install PRC and PDB files with Install…, from the Applications panel on Linux or the sheet on Android. On the rx1950 Install… copies a file onto the SD card instead. Each app's row has Launch, Export and Delete.
+On Palm OS, install PRC and PDB files with Install…, from the Applications panel on Linux or the sheet on Android. Each app's row has Launch, Export and Delete. On the rx1950 Install… copies a file onto the SD card, where File Explorer installs a CAB.
 
-FrondBench, a small speed test, installs from the Help menu on the desktop or the Applications sheet on Android, or saves as a PRC for a real Palm; see [FrondBench](doc/using-frond.md#frondbench).
+FrondBench, a small Palm OS speed test, installs from the Help menu on the desktop or the Applications sheet on Android, or saves as a PRC for a real Palm; see [FrondBench](doc/using-frond.md#frondbench).
 
-Cards live in a Cards drawer, and a card sits in one machine at a time. Frond makes and imports SD images up to 2 GB, 1 GB on the E2 and E3. Files copies between your computer or phone and the card. Close any files on the Palm before you eject. Files also opens the Palm's own databases, under Internal.
+Cards live in a Cards drawer, and a card sits in one machine at a time. Frond makes and imports SD images up to 2 GB, 1 GB on the E2 and E3. Files copies between your computer or phone and the card. Close any files on the device before you eject. On Palm OS, Files also opens the device's own databases, under Internal.
 
 The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it. Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).
 
@@ -255,7 +255,7 @@ These builds are made as is and I haven't tried them. Get them from [Releases](h
 The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. The IIIe has no ROM of its own and runs the IIIx's OS 3.1 ROM (1,212,416 bytes). The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes). The m100 and m105 take the OS 3.5.1 ROM (2 MiB), and Frond offers the m100 when it sees one, so choose the m105 yourself. The m125 takes its OS 4.0.1 ROM (3 MiB), the m130 its OS 4.0 ROM (4 MiB), the m500 its OS 4.1 ROM (2,424,832 bytes) and the c500 the WorkPad ROM (2,621,440 bytes) or the m500's, so choose the c500 yourself. The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's. Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana. For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 
 
-Frond works out the device from the NOR and never changes your files. On Linux use File → Firmware… or Add device, on Android import them when you add a device. Go through Palm OS setup the first time, and if taps land in the wrong spot, calibrate the screen in Prefs.
+Frond works out the device from the NOR and never changes your files. On Linux use File → Firmware… or Add device, on Android import them when you add a device. Go through the device's own setup the first time. If taps land in the wrong spot, calibrate the screen in Prefs on Palm OS, or Settings, System, Screen on Windows Mobile.
 
 ## Building
 
@@ -270,7 +270,7 @@ make -j4
 ./out/frond-desktop
 ```
 
-`make deb` builds a Debian package in `out/` instead, which also needs `dpkg-dev` and `binutils`. Neither the packages nor the APK have firmware or Palm apps in them.
+`make deb` builds a Debian package in `out/` instead, which also needs `dpkg-dev` and `binutils`. Neither the packages nor the APK have firmware or apps in them.
 
 The Android app is in `android/` and builds with Gradle (`./gradlew assembleDebug`).
 
@@ -294,7 +294,7 @@ Frond is free software under the GNU General Public License, version 3 or later.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) (its execution core, PACE support and SDL frontend) and Dmitry Grinberg's [uARM](https://github.com/uARM-Palm/uARM) TX board model. Thanks to their authors.
 
-Palm firmware and apps have their own licences and you need to supply them yourself.
+The firmware and apps for these devices have their own licences and you need to supply them yourself.
 
 ## Special Thanks
 
