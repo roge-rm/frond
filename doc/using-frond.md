@@ -1,16 +1,16 @@
 # Using Frond
 
-How to run Palm machines in Frond on Linux and Android. The two apps have the same features, so this covers both and says where they differ. The 68k Palms (see the Devices table in the [README](../README.md)) have their own notes under Settings, Buttons and Connections. Install and firmware sizes are in the [README](../README.md). For command line options, console commands and the control socket see [developer-reference.md](developer-reference.md), for tests [testing.md](testing.md) and for speed and audio diagnostics [performance.md](performance.md).
+How to run machines in Frond on Linux and Android. The two apps have the same features, so this covers both and says where they differ. The 68k Palms (see the Devices table in the [README](../README.md)) have their own notes under Settings, Buttons and Connections. Install and firmware sizes are in the [README](../README.md). For command line options, console commands and the control socket see [developer-reference.md](developer-reference.md), for tests [testing.md](testing.md) and for speed and audio diagnostics [performance.md](performance.md).
 
 ## Firmware and machines
 
 Each Palm you run is a machine on the Devices list (Home on Android). Frond works out the device from the NOR image and never changes your files.
 
 - **Firmware…** (File menu on Linux, the menu on Android) imports a NOR image and, where the device has one, a NAND image. **Add device** does the same and then starts a new machine. Device can detect the model from the NOR image, or you can choose it. The 68k Palms take one ROM file each (see Firmware in the [README](../README.md)), shown as ROM image, and no NAND. The Zodiac also takes Tapwave's Zodiac 1.1 update, the zip or the PRC in it, as its NOR image. Frond makes the ROM from it and stops if it isn't that update. The HP iPAQ rx1950 takes `CEBL.nbf` from HP's Windows Mobile 5 ROM 1.01.00 ENG as its NOR image and `CEOS.nbf` from the same ROM as its NAND image. A NOR image that belongs to another device than the one chosen is refused. The images are copied into `~/.local/share/frond/firmware/<device>/` on Linux, so you can move the originals.
-- The first start runs Palm OS setup. If taps land in the wrong place, calibrate the screen in Prefs. The rx1950 starts with Windows Mobile's screen alignment, then its setup.
+- The first start runs the device's own setup. On Palm OS, if taps land in the wrong place, calibrate the screen in Prefs. The rx1950 starts with Windows Mobile's screen alignment, then its setup.
 - **Edit settings…** changes a machine's display and sound settings while it's stopped. Cancel keeps the old ones. Two machines of the same model can have different settings.
 - **Rename…**, **Duplicate**, **Export…** and **Delete** are in the row's menu (right-click or the … button on Linux). **Import session…** in the File menu (Import session in the Android menu) brings an exported machine back. A row shows the device, when it was saved and its size. "Saved by an older Frond" rows can only be deleted.
-- **Hard reset** erases everything on the Palm. **Save first** in its prompt saves the machine before erasing. The T|X, E2, E3, TG50, the 68k Palms and Dana then ask whether to erase all data, press up to erase. The Zire 72 erases at once and starts at calibration. The rx1950 erases its storage (your files, programs and settings) and starts at Windows Mobile's first screen.
+- **Hard reset** erases everything on the device. **Save first** in its prompt saves the machine before erasing. The T|X, E2, E3, TG50, the 68k Palms and Dana then ask whether to erase all data, press up to erase. The Zire 72 erases at once and starts at calibration. The rx1950 erases its storage (your files, programs and settings) and starts at Windows Mobile's first screen.
 - **Reset…** (a soft reset) is in the Machine menu on Linux and the ⋮ menu on Android.
 
 On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with the session (`<name>.frond`), its settings (`<name>.frond.settings.json`), a lock file, the card files (`sd.frondsd`, `ms.frondms` or `ms.frondmsp`) and, on a device with NAND, its internal NAND (`nand.frondnand`). A machine that was never saved has a `<name>.frond.new` marker instead of the session. Export writes the same folder with the NAND packed as `nand.frondnand.gz`, so keep the settings with it when you move it. A T|X exports at about 43 MB though its folder is about 160 MB, and an E2 at about 9 MB against 40 MB. Android exports the folder as a zip, and both apps import either. Android keeps the same folders in the app's storage. A machine is locked while it's open, so two windows can't overwrite it.
@@ -34,22 +34,22 @@ On Linux the window shows the running machine's controls instead of the list, an
 
 ### Android bar, menu and sheets
 
-On Android the controls sit in a bar along the top of the running machine. Taps outside it go to the Palm, and the machine keeps running while a menu or sheet is open.
+On Android the controls sit in a bar along the top of the running machine. Taps outside it go to the device, and the machine keeps running while a menu or sheet is open.
 
 - The bar has back (saves and leaves), the machine's name and engine, then Applications, Storage, Sound, Power and the ⋮ menu. Storage shows the card's state (in, out, ejected or none) on devices with a slot. Power only appears where the device has a power key. The keyboard button shows when the infrared keyboard is attached.
 - ⋮ lists Hold (TG50), Infrared keyboard, Microphone and Network with their state, then Display…, Connections… and Screenshot, then Hide bar, Save a copy… and Emulator log, then Reset and Hard reset…. On the 68k Palms and Dana rows the device doesn't have are left out, on the others they're greyed out. Screenshot saves a PNG of the Palm to Pictures/Frond.
-- Applications, Storage, Display and Connections open as a sheet over the bottom of the screen, or at the side in landscape, so the Palm stays in view. Tap outside it or press back to close it. Files… opens full screen.
+- Applications, Storage, Display and Connections open as a sheet over the bottom of the screen, or at the side in landscape, so the screen stays in view. Tap outside it or press back to close it. Files… opens full screen.
 - Display has the display settings, Rotate and Audio. Connections has infrared, Bluetooth, serial, USB HotSync, the Dana's USB port and Wi-Fi, the debugger and HotSync.
 - Hide bar leaves a small handle at the top edge. Tap it or swipe down on it to bring the bar back. Whether the bar shows is remembered for each machine. In landscape the bar is shorter.
-- Top bar (in Edit settings and the Display sheet) is Auto-hide or Own space. Auto-hide puts the bar over the Palm and hides it after a few seconds without a touch. Own space moves the Palm down to leave room for it, in portrait and landscape. With little room left, the bar goes over the Palm instead.
+- Top bar (in Edit settings and the Display sheet) is Auto-hide or Own space. Auto-hide puts the bar over the screen and hides it after a few seconds without a touch. Own space moves the screen down to leave room for it, in portrait and landscape. With little room left, the bar goes over the Palm instead.
 
 ### Linux bar and panels
 
-On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android plus Full screen, Save and Save and Stop (Hard reset… is red). The Palm is inside Frond's window under the bar (on X11, and on Wayland through XWayland). Applications, Storage, Display and Connections open as a panel at the right of the Palm and the window grows to the right, so the Palm keeps its size. Hide bar leaves a thin strip with a tab at the top, and the choice is remembered for each machine. The Machine menu shows each row's keys. Display has Size, Smooth pixels, Show keyboard and Jog controls (TG50) and Speed (68k Palms and Dana), which change while the Palm runs. A click on the Palm gives it the keys and a click in a panel takes them back, wherever the pointer is when you type; switching to another window and back keeps the choice. If the Palm's window can't be embedded, it stays in its own window, with the bar and the panels in Frond's window. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
+On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android plus Full screen, Save and Save and Stop (Hard reset… is red). The device is inside Frond's window under the bar (on X11, and on Wayland through XWayland). Applications, Storage, Display and Connections open as a panel at the right of the Palm and the window grows to the right, so the Palm keeps its size. Hide bar leaves a thin strip with a tab at the top, and the choice is remembered for each machine. The Machine menu shows each row's keys. Display has Size, Smooth pixels, Show keyboard and Jog controls (TG50) and Speed (68k Palms and Dana), which change while the device runs. A click on the device gives it the keys and a click in a panel takes them back, wherever the pointer is when you type; switching to another window and back keeps the choice. If the device's window can't be embedded, it stays in its own window, with the bar and the panels in Frond's window. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
 
-F11 or the Full screen row in the Machine menu fills the screen. The bar hides after 3 seconds and comes back when the pointer touches the top edge. Panels open over the Palm instead of widening the window.
+F11 or the Full screen row in the Machine menu fills the screen. The bar hides after 3 seconds and comes back when the pointer touches the top edge. Panels open over the device instead of widening the window.
 
-Shortcuts work in the Palm window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save a copy, Ctrl+W Save and Stop, Ctrl+I Install, Ctrl+M Sound, Ctrl+B Hide bar, Ctrl+L Emulator log, Ctrl+R Reset, F12 Screenshot, Ctrl+Q Quit. With the infrared keyboard attached, and on a Dana while it has the keys, the Ctrl keys go to the Palm and only F11 and F12 still come back to Frond.
+Shortcuts work in the device window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save a copy, Ctrl+W Save and Stop, Ctrl+I Install, Ctrl+M Sound, Ctrl+B Hide bar, Ctrl+L Emulator log, Ctrl+R Reset, F12 Screenshot, Ctrl+Q Quit. With the infrared keyboard attached, and on a Dana while it has the keys, the Ctrl keys go to the device and only F11 and F12 still come back to Frond.
 
 - Applications lists the installed apps, each with Launch, Export and Delete. Double-click launches. Dropping PRC and PDB files on the window installs them.
 - Storage has the card controls below. Display also has Contrast (the grey 68k Palms and Dana), Sound, Microphone and Rotate (not on the 68k Palms and Dana). Connections has infrared beaming, Bluetooth, serial, USB HotSync, the Dana's USB port and Wi-Fi, HotSync and Pair with another Frond…, which opens Connections.
@@ -59,7 +59,7 @@ Shortcuts work in the Palm window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save
 Under Applications (the Linux panel or the Android sheet):
 
 - **Install…** takes PRC and PDB files (several on Linux and Android), once Palm OS has started. As after a HotSync, an app installed while the launcher shows appears in it at once, and the app in front stays.
-- **Launch** and **Export** on an app's row start it or write its database as a ZIP. **Delete** asks first, then removes the app and the databases with its creator. The Palm refuses the app that is open or one in ROM, and leaves its data.
+- **Launch** and **Export** on an app's row start it or write its database as a ZIP. **Delete** asks first, then removes the app and the databases with its creator. Palm OS refuses the app that is open or one in ROM, and leaves its data.
 - **Other…** takes any database name, to launch or export it. Use it for an open system database, like `Shim Logs`, that stops the full export.
 - **Export all…** writes a ZIP of everything in RAM, other apps and your data included.
 
@@ -69,7 +69,7 @@ On the rx1950 **Install…** copies files onto the SD card's top folder, so it n
 
 ### FrondBench
 
-FrondBench times four tests on a Palm and shows the numbers, so Frond's speed can be checked against real devices. On the desktop, Help > FrondBench has **Install on This Device**, which puts it on the running device like any other app, and **Save FrondBench.prc…**, which writes the file for a real Palm. On Android, Install on This Device and Save FrondBench.prc… are at the bottom of the Applications sheet while a machine runs, and Save is also in About. The results go to a Memo (Memos on the T|X, T5, LifeDrive and Treo), so a HotSync brings them to your computer.
+FrondBench times four tests on a Palm OS device and shows the numbers, so Frond's speed can be checked against real devices. On the desktop, Help > FrondBench has **Install on This Device**, which puts it on the running device like any other app, and **Save FrondBench.prc…**, which writes the file for a real Palm. On Android, Install on This Device and Save FrondBench.prc… are at the bottom of the Applications sheet while a machine runs, and Save is also in About. The results go to a Memo (Memos on the T|X, T5, LifeDrive and Treo), so a HotSync brings them to your computer.
 
 On a real device:
 
@@ -89,12 +89,12 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Size (Android) | Fit, Whole steps or Fill. |
 | Top bar (Android) | Auto-hide or Own space. See above. |
 | Smooth pixels | Softens the LCD. Pixels are sharp by default. |
-| Show speed | Not on the 68k Palms and Dana. Shows the clock in MHz the emulated Palm is running at (the Zodiac shows million instructions a second), in a small box at the bottom right of the Palm, updated every second. Where the Palm can't be embedded in the window (Wayland, Windows, macOS) it follows the engine under the machine name instead, like "Fast · 312 MHz". Off by default. It is in the Display panel too and is saved with the machine. |
+| Show speed | Not on the 68k Palms and Dana. Shows the clock in MHz the emulated device is running at (the Zodiac shows million instructions a second), in a small box at the bottom right of the screen, updated every second. Where the device can't be embedded in the window (Wayland, Windows, macOS) it follows the engine under the machine name instead, like "Fast · 312 MHz". Off by default. It is in the Display panel too and is saved with the machine. |
 | Show keyboard, Jog controls, Jog in landscape | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard; with the game controller in, Left of keyboard puts them left of the controller. Jog in landscape is where they go once the game controller's grips are either side of the screen: Hidden, Left of controller, Under screen or Over screen. Under and over turn them on their side, with jog up on the left. |
 | Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
 | Contrast | The grey 68k Palms and Dana only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
-| Battery | Maximum (the default, with Charging off), Set level (a 0 to 100 slider) or Host battery, which follows this computer's level and charging, read about once a minute (a computer with no battery reads 100% on external power). Charging says whether the Palm sits on its charger, for Maximum and Set level. Low levels bring up the Palm's own warnings and auto-off. It applies at once, is in the Display panel too, and is saved with the machine, not the session. Greyed in the Display panel on devices that don't have it yet, and Charging is greyed there where the charger isn't modelled (the saved choice is kept). |
+| Battery | Maximum (the default, with Charging off), Set level (a 0 to 100 slider) or Host battery, which follows this computer's level and charging, read about once a minute (a computer with no battery reads 100% on external power). Charging says whether the device sits on its charger, for Maximum and Set level. Low levels bring up the device's own warnings and auto-off. It applies at once, is in the Display panel too, and is saved with the machine, not the session. Greyed in the Display panel on devices that don't have it yet, and Charging is greyed there where the charger isn't modelled (the saved choice is kept). |
 | Speed | Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k Palms stop at 4×); the multiples run that many times faster than Original. On the 68k Palms and Dana, Original runs at the real clock (16.58 MHz on the IIIx, IIIe, IIIxe, V, m100 and m105, 20.25 MHz on the Vx and IIIc, 33.16 MHz on the m125, m130, m500, c500, m505, m515 and m520) and Uncapped lets the host run it as fast as it can (timers stay real time); it's in the Display panel or sheet too and applies at once. On the other devices Original follows the clock the Palm OS sets (312 MHz turbo on the T|X and Zire 72, about 199 MHz on the E2, E3 and TG50, lower when the OS slows the chip down) and Uncapped passes `--mips 3000`; both apply at the next start. |
 | Engine | Exact or Fast. See [performance.md](performance.md). The 68k Palms and Dana only have Exact, so it never shows there. |
 
@@ -133,14 +133,14 @@ The 68k Palms have the four app buttons, the scroll rocker and power under the s
 
 **Hold** (TG50) latches the device's Hold switch, which turns off the screen and controls, and audio keeps playing. It's saved with the machine.
 
-On Android a game controller presses the Palm's buttons. The d-pad and left stick are the five-way, A is select, L1, X, Y and R1 are the four app buttons and Select is Menu. To change them go to Settings → Controller → Set controls, tap a Palm button, then press the controller key. Reset to defaults puts them back.
+On Android a game controller presses the device's buttons. The d-pad and left stick are the five-way, A is select, L1, X, Y and R1 are the four app buttons and Select is Menu. To change them go to Settings → Controller → Set controls, tap a device button, then press the controller key. Reset to defaults puts them back.
 
 ### Dana screen and keyboard
 
 Dana keeps its wide screen in both phone orientations. Screen zoom and the
 onscreen keyboard have separate sizes. Choose Fit to see the whole screen, or
 a larger zoom for reading. Select Pan to drag the view; select Touch to use the
-Palm's pen. On desktop, the middle mouse button pans and the wheel zooms while
+device's pen. On desktop, the middle mouse button pans and the wheel zooms while
 panning. The machine keeps your zoom and position when the window changes size.
 
 The keyboard choices are Automatic, Compact, Full Dana and Hidden. Automatic
@@ -184,7 +184,7 @@ Panning is manual.
 
 The T|X, E2, E3, Zire 72 and rx1950 take an SD card, the TG50 a Memory Stick. The rx1950 takes cards from 32 MB to 2 GB. Format a new one as FAT16 on your computer first. The m125, m130, m500, c500, m505, m515 and m520 take one SD or MMC card, handled like the Zodiac and Dana cards in [Two-slot cards](#zodiac-and-68k-palm-cards). A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
 
-While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card slot, where the device has one, and Internal, the Palm's own databases. Each has Files…, the same file manager, see [Files](#files).
+While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card slot, where the device has one, and Internal, the device's own databases on Palm OS. Each has Files…, the same file manager, see [Files](#files).
 
 | | T\|X | E2 / E3 | Zire 72 | TG50 |
 |---|---|---|---|---|
@@ -246,7 +246,7 @@ Open Cards from the main menu on Linux, or from the home menu on Android. SD car
 - **Link to machines** lets several machines share one card. Only one of them holds it at a time: the others show "Games is in Palm TX". Take it out of one machine and another can take it with Insert.
 - **Take out** puts a card back in the drawer.
 
-In a machine, the SD card or Memory Stick row shows the card's name or No card. Tap it to pick a card from the drawer, greyed when it is in another machine or too big for the device, or make a new one there. Changing the card ejects the old one first (close files on the Palm first, as Frond can't flush them), and the old card goes back to the drawer. A picked card is inserted at once.
+In a machine, the SD card or Memory Stick row shows the card's name or No card. Tap it to pick a card from the drawer, greyed when it is in another machine or too big for the device, or make a new one there. Changing the card ejects the old one first (close files on the device first, as Frond can't flush them), and the old card goes back to the drawer. A picked card is inserted at once.
 
 Duplicating a machine with a card asks what to do with it: Link (the copy shares the card), Copy (a copy of the card) or No card. A machine's Export packs its card, and importing it makes a new card in the drawer.
 
@@ -257,11 +257,11 @@ Card controls in the Storage panel (Linux) or the Storage sheet (Android) (only 
 - **Write protected** (Memory Stick) is set while ejected, and goes with the card.
 - **Files** opens the card's files, see [Files](#files).
 
-Don't eject or sleep the Palm while an app is writing quickly, as the SD driver can get stuck until you reset. FAT32 cards imported from `mkfs.fat` can be read but not written by the T|X.
+Don't eject or sleep the device while an app is writing quickly, as the SD driver can get stuck until you reset. FAT32 cards imported from `mkfs.fat` can be read but not written by the T|X.
 
 ### Files
 
-SD cards and Memory Sticks: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the card of a running machine use Files in the Storage panel or sheet: it ejects the card (close files on the Palm first), and closing Files puts it back in, ejected again if it was out before.
+SD cards and Memory Sticks: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the card of a running machine use Files in the Storage panel or sheet: it ejects the card (close files on the device first), and closing Files puts it back in, ejected again if it was out before.
 
 - Open a folder by double-clicking it (tap on Android), go back with Up or the path bar, and jump to `/PALM/Launcher` or `/DCIM`. The top line shows the free space and the card's size.
 - Sort by name, size or date. Select several with Ctrl or Shift, or Select all.
@@ -276,7 +276,7 @@ On the T415, Files is beside Memory Stick… in the Storage panel and on the Mem
 
 A classic Memory Stick opens in Files only when its last write is finished; if not, put it in the TG50 once. A blank stick, new or put in a TG50 but never formatted, is formatted the way the TG50 does it the first time Files opens it.
 
-Internal lists the databases in the Palm's RAM by file name, with their type and creator, while the machine runs. Add files installs PRC and PDB files (on Linux a dropped folder installs the files in it), Export… writes the selected databases to a folder as PRC and PDB files, and Delete removes them. There are no folders, so Add folder, Cut, Copy, Paste, Rename and New folder aren't there. As in Applications, the Palm refuses a database that is open or in ROM.
+Internal lists the databases in the device's RAM by file name, with their type and creator, while the machine runs. Add files installs PRC and PDB files (on Linux a dropped folder installs the files in it), Export… writes the selected databases to a folder as PRC and PDB files, and Delete removes them. There are no folders, so Add folder, Cut, Copy, Paste, Rename and New folder aren't there. As in Applications, the Palm refuses a database that is open or in ROM.
 
 ## Connections
 
@@ -452,7 +452,7 @@ Modem and phone by device:
 
 ### USB HotSync
 
-Plugs the Palm's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
+Plugs the device's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
 
 ### ActiveSync
 
@@ -490,9 +490,9 @@ On Linux you can still put each machine on Wait for a peer with a different port
 python3 tools/link-irda.py 5030 5031
 ```
 
-`link-irda.py` reconnects when a Palm wakes.
+`link-irda.py` reconnects when a device wakes.
 
-Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keyboard. Install Palm's keyboard driver (version 1.13, not included), reset if it asks, open Keyboard on the Palm and turn it ON. Then type in the Palm window. Left Alt is Fn and right Alt is AltGr, and the layout follows physical US keys, so pick the matching one in the driver. F1 to F4 and Escape keep their button and power uses. The attachment is saved with the machine.
+Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keyboard. Install Palm's keyboard driver (version 1.13, not included), reset if it asks, open Keyboard in Palm OS and turn it ON. Then type in the device window. Left Alt is Fn and right Alt is AltGr, and the layout follows physical US keys, so pick the matching one in the driver. F1 to F4 and Escape keep their button and power uses. The attachment is saved with the machine.
 
 ### Bluetooth
 
@@ -548,7 +548,7 @@ Microphone (Zire 72, TG50 and rx1950) is off each time it starts. Turn it on und
 - Gaps in sound on a PipeWire desktop: check that PipeWire's real-time threads get priority. `systemctl status rtkit-daemon` and `ps -eLo pid,tid,cls,rtprio,comm | grep -E 'pipewire|data-loop|frond'` show it.
 - If `journalctl --user -u pipewire -u xdg-desktop-portal` reports `Could not get pidns`, tell PipeWire to use RTKit directly. Put `module.rt.args = { rtportal.enabled = false }` in `~/.config/pipewire/pipewire.conf.d/90-direct-rtkit.conf`, `~/.config/pipewire/pipewire-pulse.conf.d/90-direct-rtkit.conf` and `~/.config/pipewire/client.conf.d/90-direct-rtkit.conf`, then run `systemctl --user restart pipewire pipewire-pulse wireplumber`, which briefly interrupts audio in other apps. Remove the files and restart to undo it.
 - Low-latency audio drops back to normal on starvation until the next reset. Use normal audio for projects that need a bigger queue.
-- A full disk or a machine folder that can't be written: on a device with NAND the machine keeps running, Palm OS sees its writes to internal storage fail (an install says out of memory) and the Emulator log says "NAND: a write to the machine's NAND file failed". Free some space, then reset the Palm.
-- A card that stops responding after an eject or sleep during writes: reset the Palm. The card image is intact.
+- A full disk or a machine folder that can't be written: on a device with NAND the machine keeps running, the OS sees its writes to internal storage fail (an install says out of memory) and the Emulator log says "NAND: a write to the machine's NAND file failed". Free some space, then reset the Palm.
+- A card that stops responding after an eject or sleep during writes: reset the device. The card image is intact.
 - "This session is open in another Frond": close the other window, or it's still running.
 - Diagnostics and logs for bug reports: Emulator log, and [performance.md](performance.md) for speed and audio traces.
