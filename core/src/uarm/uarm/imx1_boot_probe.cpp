@@ -686,6 +686,7 @@ struct Probe {
                                bool single, uint32_t* value, uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         *cost = 0;
+        if (inJit && (pa & ~1u) == 0x15000000) return single && size == 1 && p.jitYmfAccess(pa, false, *value, ran);
         if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
             return single && p.leanGraphicsRead(pa, size, ran, left, *value, *cost);
         if (size != 4) return false;
@@ -845,6 +846,7 @@ struct Probe {
                           uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
+        if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran);
         // The graphics ring pointer writes of the ROM's two batch producers (Origo submits about 90000 a second).
         // Both are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
         if (pa == 0x16010220 && inJit) {
@@ -947,6 +949,33 @@ struct Probe {
         // A batch start leaves its busy level for the next advance, which would end the quiet span at once; it
         // takes it now, so the run goes on to the batch's completion.
         cs5Configuration.takeBusyLevel();
+        updateInterrupts();
+        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
+        if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
+            jitHalt = true;
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+        }
+        return true;
+    }
+    // A YMF768 byte access from generated code (the sound driver's index and data writes and its status reads): the
+    // cycles before the run and the run's finished blocks (ran) are charged first, then access takes it as the step
+    // does. The block it is in is charged at the run's end, so the access lands up to one block early. The interrupt
+    // lines follow at once, and the run stops at its next block if the new quiet span ends before its budget.
+    __attribute__((noinline)) bool jitYmfAccess(uint32_t pa, bool write, uint32_t& value, uint32_t ran) {
+        if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver || options.cs4Observer ||
+            !options.cs4Port0InputKnown || !peripherals.ymf768Enabled())
+            return false;
+        deferredHclk += leanCs5.waitClocks;
+        result.cs5WaitClocks += leanCs5.waitClocks;
+        work += leanCs5.waitClocks;
+        leanCs5 = {};
+        deferredCycles += ran;
+        cpuArm920JitCharge(cpu, ran, 0);
+        if (!chargeDeferred()) return false;
+        uint8_t datum = uint8_t(value);
+        if (!access(this, pa, 1, write, &datum)) return false;
+        if (!write) value = datum;
         updateInterrupts();
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
         cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
