@@ -755,6 +755,8 @@ class Imx1GraphicsCommands {
     // checked, so none can fail; false, with nothing done, for the rest.
     static bool fastFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
                          const Fill& fill) {
+        if (directFills && transformed(fill) && !fill.keyed && !fill.a4 && !fill.invert && !fill.doubled && !fill.painted &&
+            fill.pixels.empty()) return fastTransform(configuration, eim, memory, fill);
         if (!directFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || smoothFill(fill) ||
             patternFill(fill) || maskFill(fill) || ropFill(fill) ||
             ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
@@ -780,6 +782,37 @@ class Imx1GraphicsCommands {
         const bool kinds[6] = {!copy && !fill.pixels.empty(), copy, fill.keyed, copy && fill.doubled, fill.invert, fill.a4};
         fillKind<>(kinds, fill, destination, from, offset, writes, first, end);
         memory.noteWrites(bank, first, end, writes);
+        ++directFillCount;
+        return true;
+    }
+    // The rotate and mirror blit straight on the bank storage: each pixel read from its source and then written,
+    // in the accessGpu loop's order, so a source that overlaps the destination gives the same result. Only with
+    // even bases and steps, so every access is aligned and inside the ranges the batch checked.
+    static bool fastTransform(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
+                              const Fill& fill) {
+        if (!fill.width || !fill.height || ((fill.base | fill.pitch | fill.sourceBase | fill.colour | fill.sourcePitch) & 1))
+            return false;
+        const uint64_t length = uint64_t(fill.height - 1) * fill.pitch + fill.width * 2;
+        unsigned bank = 0, sourceBank = 0;
+        uint32_t offset = 0, sourceOffset = 0;
+        uint8_t* destination = memory.gpuSpan(configuration, eim, fill.base, length, bank, offset);
+        if (!destination) return false;
+        const uint32_t start = sourceStart(fill);
+        const uint8_t* from = memory.gpuSpan(configuration, eim, start, sourceBytes(fill), sourceBank, sourceOffset);
+        if (!from) return false;
+        // Byte offsets from start: column x of row y reads at origin + y * row + x * column.
+        const int64_t column = signedStep(fill.colour), row = signedStep(fill.sourcePitch);
+        const int64_t origin = int64_t(uint32_t(fill.sourceBase - start));
+        for (uint32_t y = 0; y < fill.height; ++y) {
+            uint8_t* to = destination + uint64_t(y) * fill.pitch;
+            int64_t at = origin + int64_t(y) * row;
+            for (uint32_t x = 0; x < fill.width; ++x, to += 2, at += column) {
+                const uint8_t low = from[at], high = from[at + 1];
+                to[0] = low;
+                to[1] = high;
+            }
+        }
+        memory.noteWrites(bank, offset, uint32_t(offset + length), uint64_t(fill.width) * fill.height);
         ++directFillCount;
         return true;
     }

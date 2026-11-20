@@ -326,8 +326,8 @@ static void checkCommands(bool packedMono) {
 }
 
 // completeFill straight on the bank storage against the accessGpu loop, for every kind of fill: inline pixels,
-// plain and keyed copies (doubled or not, painted or not), invert and A4, with sources and rows that overlap the
-// destination. Bytes, dirty ranges and generations must match.
+// plain and keyed copies (doubled or not, painted or not), invert, A4 and the rotate and mirror blit, with sources
+// and rows that overlap the destination. Bytes, dirty ranges and generations must match.
 static void checkFillKinds() {
     using A = Imx1BootstrapAccess;
     using C = Imx1GraphicsCommands;
@@ -345,7 +345,9 @@ static void checkFillKinds() {
     const uint32_t region = 0x100000, regionBytes = 0x4000;
     const uint16_t palette[4] = {0x0000, 0xffff, 0xf800, 0x07e0};
     unsigned fills = 0, kinds = 0;
-    for (unsigned kind = 0; kind < 128; ++kind) {
+    // Kind 128 is the rotate and mirror blit, with signed column and row steps.
+    for (unsigned kind = 0; kind < 129; ++kind) {
+        const bool turn = kind == 128;
         const bool pixels = kind & 1, copy = kind & 2, keyed = copy && (kind & 4), doubled = copy && (kind & 8);
         const bool invert = kind & 16, a4 = kind & 32, painted = keyed && (kind & 64);
         if ((!copy && (kind & (4 | 8 | 64))) || (a4 && doubled) || (pixels && copy)) continue;
@@ -382,6 +384,15 @@ static void checkFillKinds() {
                 f.sourceX = doubled ? next(5) : 0; f.sourceY = doubled ? next(5) : 0;
                 // Every third fill reads from just around the destination.
                 f.sourceBase = round % 3 ? region + next(0x1000) * 2 : f.base - 64 + next(64) * 2;
+            }
+            if (turn) {
+                f.plain = f.keyEqual = true;
+                const int32_t column = (1 + int32_t(next(32))) * 2, row = (1 + int32_t(next(64))) * 2;
+                f.colour = uint32_t(next(2) ? -column : column);
+                f.sourcePitch = uint32_t(next(2) ? -row : row);
+                // Every third fill reads from around the destination.
+                if (round % 3 == 0) f.base = region + 0x1800 - 64 + next(64) * 2;
+                f.sourceBase = region + 0x1800 + next(0x400) * 2;
             }
             if (pixels || a4Pixels)
                 for (uint32_t i = 0; i < f.width * f.height; ++i)
