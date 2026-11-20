@@ -436,6 +436,9 @@ void gpioDelivery() {
     }
     std::puts("PASS: generated GPIO unmask, next-instruction IRQ/FIQ entry, ISR read and mask/W1C acknowledgement");
 }
+// The Timer 2 compare that elapses after a Thumb BL prefix, before its second half, counted from the
+// enable through MSR, LDR, B and BX at the ARM920T cost table's cycles.
+constexpr uint32_t blPrefixCompare = 12;
 void thumbPrefix() {
     for (bool fiq : {false, true}) for (bool changedReturn : {false, true})
     for (bool ldmReturn : {false, true}) {
@@ -443,7 +446,7 @@ void thumbPrefix() {
         load(words, 0, 0x00223000);
         if (fiq) store(words, 0, 0x18, 1u << 26);
         store(words, 0, 8, 58);
-        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        load(words, 0, 0x00203000); store(words, 0, 8, blPrefixCompare); store(words, 0, 0, 0x13);
         words.push_back(0xe321f013);
         const uint32_t thumbPc = words.size() * 4 + 16;
         load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
@@ -477,7 +480,7 @@ void suspendedThumbPrefix() {
         load(words, 0, 0x00223000);
         if (fiq) store(words, 0, 0x18, 1u << 26);
         store(words, 0, 8, 58);
-        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        load(words, 0, 0x00203000); store(words, 0, 8, blPrefixCompare); store(words, 0, 0, 0x13);
         words.push_back(0xe321f013);
         const uint32_t thumbPc = words.size() * 4 + 16;
         load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
@@ -528,7 +531,7 @@ void sharedThumbPrefix() {
         load(words, 0, 0x00223000);
         if (fiq) store(words, 0, 0x18, 1u << 26);
         store(words, 0, 8, 58);
-        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        load(words, 0, 0x00203000); store(words, 0, 8, blPrefixCompare); store(words, 0, 0, 0x13);
         words.push_back(0xe321f01f);
         const uint32_t thumbPc = words.size() * 4 + 16;
         load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
@@ -537,7 +540,7 @@ void sharedThumbPrefix() {
         words.push_back(0x47702655);
         words.resize(0x300 / 4, 0xe1a00000);
         load(words, 13, 0x00300200);
-        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        load(words, 0, 0x00203000); store(words, 0, 8, blPrefixCompare); store(words, 0, 0, 0x13);
         words.push_back(0xe321f01f);
         load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
         words.resize(0x380 / 4, 0xe1a00000);
