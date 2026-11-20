@@ -221,6 +221,8 @@ class Imx1GraphicsMemory {
         transfer(bank, offset, size, write, value);
         return true;
     }
+    // A word write at a bank offset that accessReady would take, for a caller that checked the offset with contains().
+    void writeWord(unsigned bank, uint32_t offset, uint32_t value) { transfer(bank, offset, 4, true, value); }
     // The residency pointer, left out of the saved layout's size.
     static constexpr size_t unsavedBytes = sizeof(Imx1GraphicsResidency*);
     // The host GPU's copy, or none. Not saved; a load gives a new memory and the GPU marks every page again.
@@ -270,7 +272,8 @@ class Imx1GraphicsMemory {
             if (!wrap.known || !engine.ringBytes() || offset < wrap.first ||
                 uint64_t(offset) + size > uint64_t(wrap.last) + 1) return A::sequence;
             // The configured CPU wrap view aliases the enabled ring's storage.
-            gpuAddress = engine.ringAddress() + (offset - wrap.first) % engine.ringBytes();
+            // The ring's size is a power of two.
+            gpuAddress = engine.ringAddress() + ((offset - wrap.first) & (engine.ringBytes() - 1));
             return A::ok;
         }
         return cpuToGpu(address, gpuAddress) ? A::ok : A::unmapped;

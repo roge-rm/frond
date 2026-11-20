@@ -66,6 +66,11 @@ struct LeanCs5 {
     bool memoryChecked, memoryUsable;
     uint32_t clocks, cost;
     uint64_t waitClocks, waitCost;
+    // Writes to the ring wrap view, the producers' batch words: worked out at the first one the slow path takes.
+    // A word at pa in [ringLow, ringLow + ringSpan) goes to bank storage at ringOffset + ((pa - ringWrap) & ringMask).
+    bool ringChecked, ringUsable;
+    unsigned ringBank;
+    uint32_t ringLow, ringSpan, ringWrap, ringMask, ringOffset;
 };
 LeanCs5 leanCs5{};
 // Fast blocks: set while cpuArm920RunJit runs, with its budget; jitHalt when a board write asked it to stop at its
@@ -801,6 +806,18 @@ struct Probe {
                    p.cs5Configuration.virtualProfile() && !p.options.cs5ConfigurationObserver &&
                    p.jitChargedWrite(pa, 4, value, ran, pc);
         }
+        // A ring word the first write of the run checked the view for: the same checks pass, so it goes straight to
+        // the bank storage.
+        if (leanCs5.ringUsable && pa - leanCs5.ringLow < leanCs5.ringSpan && size == 4 && !(pa & 3)) {
+            if (p.failed || quietCycles <= ran || left < leanCs5.cost) return false;
+            p.graphicsMemory->writeWord(leanCs5.ringBank, leanCs5.ringOffset + ((pa - leanCs5.ringWrap) & leanCs5.ringMask),
+                                        value);
+            leanCs5.waitClocks += leanCs5.clocks;
+            leanCs5.waitCost += leanCs5.cost;
+            ++leanCs5Writes;
+            *cost = leanCs5.cost;
+            return true;
+        }
         if (!p.graphicsMemory || !p.cs5Configuration.virtualProfile() || !Imx1GraphicsMemory::owns(pa) ||
             p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)
             return false;
@@ -810,11 +827,43 @@ struct Probe {
         if (p.peripherals.eimState().cs5Transfer(pa, size, true, user) != Imx1EimAccess::ok || !p.leanMemoryReady() ||
             !p.graphicsMemory->accessReady(p.cs5Configuration, pa, size, true, datum))
             return false;
+        if (!leanCs5.ringChecked && size == 4 && pa >= 0x16080000 && pa < 0x160c0000) p.leanRingCheck();
         leanCs5.waitClocks += leanCs5.clocks;
         leanCs5.waitCost += leanCs5.cost;
         ++leanCs5Writes;
         *cost = leanCs5.cost;
         return true;
+    }
+    // The ring wrap view for leanWrite, after a ring word passed its checks: usable where every word of the view
+    // passes them the same way, as no state they read changes until leanCs5 is cleared. The view's words all map into
+    // the ring, which has to lie whole in one bank's mapped addresses, with no host GPU. The EIM check doesn't depend
+    // on the address, so both modes passing it covers a mode change in the run.
+    __attribute__((noinline)) void leanRingCheck() {
+        leanCs5.ringChecked = true;
+        const auto wrap = cs5Configuration.memoryWindows().wrap();
+        const auto& engine = cs5Configuration.engineState();
+        const uint32_t bytes = engine.ringBytes(), ring = engine.ringAddress();
+        const uint64_t ringEnd = uint64_t(ring) + bytes;
+        const auto& eim = peripherals.eimState();
+        unsigned bank = 0;
+        uint32_t offset = 0;
+        if (!wrap.known || !bytes || (bytes & (bytes - 1)) || (ring & 3) || graphicsMemory->gpuResidency() ||
+            !((ring >= 0x100000 && ringEnd <= 0x160000) || (ring >= 0x800000 && ringEnd <= 0x1000000)) ||
+            !graphicsMemory->contains(cs5Configuration, eim, ring, bytes, &bank, &offset) ||
+            eim.cs5Transfer(0x16080000, 4, true, false) != Imx1EimAccess::ok ||
+            eim.cs5Transfer(0x16080000, 4, true, true) != Imx1EimAccess::ok)
+            return;
+        // Words whose four bytes lie in both the wrap range and the view's addresses.
+        const uint64_t low = std::max<uint64_t>(0x16080000, 0x16000000ull + wrap.first);
+        const uint64_t end = std::min<uint64_t>(0x160c0000, 0x16000000ull + wrap.last + 1);
+        if (end < low + 4) return;
+        leanCs5.ringUsable = true;
+        leanCs5.ringBank = bank;
+        leanCs5.ringLow = uint32_t(low);
+        leanCs5.ringSpan = uint32_t(end - 4 - low + 1);
+        leanCs5.ringWrap = 0x16000000u + wrap.first;
+        leanCs5.ringMask = bytes - 1;
+        leanCs5.ringOffset = offset;
     }
     // Writes Fast blocks take in generated code: GPIO IMR and ISR, AITC NIMASK, INTENNUM and INTDISNUM, timer status,
     // the watchdog service register and DMA DISR (which only clears status, so the PCM DMA pages stay as they are).
