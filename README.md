@@ -295,3 +295,11 @@ Frond is free software under the GNU General Public License, version 3 or later.
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) (its execution core, PACE support and SDL frontend) and Dmitry Grinberg's [uARM](https://github.com/uARM-Palm/uARM) TX board model. Thanks to their authors.
 
 Palm firmware and apps have their own licences and you need to supply them yourself.
+
+## Special Thanks
+
+Frond started as a solo project but grew almost right away and has turned into a small community project. 
+
+Thank you to [palmtoplover777](https://github.com/dyharlan) especially as they have been a constant source of ideas, inspiration, hints, clues, and bug reports that have kept the project progressing. The Zodiac emulator would not have happened without their essential contributions.
+
+Thank you as well to [Gadgetoid](https://github.com/Gadgetoid) for their help with YMF768 fidelity work.
