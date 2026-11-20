@@ -77,6 +77,9 @@ for root, _, names in os.walk(os.path.join(app, "Contents")):
 sdl3 = find_brew("libSDL3.0.dylib")
 if sdl3:
     queue.append(copy_in(sdl3))
+    link = os.path.join(frameworks, "libSDL3.dylib")  # the name sdl2-compat looks for next to libSDL2
+    if not os.path.lexists(link):
+        os.symlink(os.path.basename(sdl3), link)
 queue = [os.path.abspath(p) if not os.path.isabs(p) else p for p in queue]
 while queue:
     fix(queue.pop())
