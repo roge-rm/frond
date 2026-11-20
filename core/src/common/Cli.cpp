@@ -4,8 +4,10 @@
 
 // clang-format off
 #include <cstdio>
+#ifndef FROND_NO_READLINE
 #include <readline/readline.h>
 #include <readline/history.h>
+#endif
 // clang-format on
 
 #include <atomic>
@@ -205,6 +207,7 @@ namespace {
         return ParseLine(line, quote);
     }
 
+#ifndef FROND_NO_READLINE
     extern "C" int CharIsQuoted(char* line, int index) {
         enum class mode { blank, word, escape };
 
@@ -313,6 +316,8 @@ namespace {
         return 1;
     }
 
+#endif  // FROND_NO_READLINE
+
     void Dispatch(const cli::Command* _command, vector<string>& _arguments) {
         unique_lock<mutex> lock(dispatchMutex);
         if (stop) return;
@@ -375,6 +380,7 @@ namespace {
     void ThreadMain() {
         char* breakCharacters = strdup(" \t");
 
+#ifndef FROND_NO_READLINE
         rl_event_hook = ReadlineEventHook;
         rl_completion_entry_function = RlCompletionFunction;
         rl_char_is_quoted_p = CharIsQuoted;
@@ -382,6 +388,7 @@ namespace {
 
         rl_completer_word_break_characters = breakCharacters;
         rl_completer_quote_characters = "\"\\";
+#endif
 
         while (!stop) {
             char* lineBuffer;
@@ -390,12 +397,21 @@ namespace {
                 lineBuffer = strdup(script.begin()->c_str());
                 script.pop_front();
             } else {
+#ifndef FROND_NO_READLINE
                 lineBuffer = readline("> ");
+#else
+                // No readline: a plain line from stdin.
+                std::cout << "> " << std::flush;
+                std::string line;
+                lineBuffer = std::getline(std::cin, line) ? strdup(line.c_str()) : nullptr;
+#endif
             }
 
             if (!lineBuffer) lineBuffer = strdup("quit");
 
+#ifndef FROND_NO_READLINE
             add_history(lineBuffer);
+#endif
 
             vector<string> words = ParseLine(lineBuffer);
 

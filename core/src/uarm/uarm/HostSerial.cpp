@@ -1,15 +1,20 @@
 #ifndef __EMSCRIPTEN__
+#include "PosixCompat.h"
 #include "HostSerial.h"
 
-#include <arpa/inet.h>
 #include <fcntl.h>
+#include <unistd.h>
+#ifndef _WIN32
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#ifdef __linux__
 #include <sys/eventfd.h>
+#endif
 #include <sys/socket.h>
 #include <termios.h>
-#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -20,7 +25,9 @@
 #include <mutex>
 #include <thread>
 
+#ifndef _WIN32
 #include "UnixListener.h"
+#endif
 #ifndef FROND_BYTE_LINK_ONLY
 #include "pxa_UART.h"
 #endif
@@ -42,7 +49,8 @@ struct Shared {
     bool receiveEnabled{false}; // mutex-protected, for scoped links only
     uint64_t receiveTag{0}, receiveGeneration{0};
     std::atomic<uint64_t> peerGeneration{0};
-    int wake{-1};
+    int wake{-1};       // read end (the eventfd on Linux)
+    int wakeWrite{-1};  // pipe write end; -1 where wake is an eventfd
 
     // Caller holds mutex. Bytes the worker copied out before this are not erased later.
     void ClearTx() {
@@ -55,7 +63,7 @@ struct Shared {
     }
     void Wake() {
         const uint64_t one = 1;
-        (void)!write(wake, &one, sizeof(one));
+        (void)!write(wakeWrite >= 0 ? wakeWrite : wake, &one, sizeof(one));
     }
     void Disconnect() {
         std::lock_guard lock(mutex);
@@ -70,6 +78,11 @@ void closeFd(int& fd) {
     fd = -1;
 }
 
+#ifdef _WIN32
+// The host serial endpoints (PTY, TCP, Unix socket) aren't ported to Windows.
+void ptyWorker(std::shared_ptr<Shared>, int) {}
+void tcpWorker(std::shared_ptr<Shared>, int) {}
+#else
 bool nonblocking(int fd) {
     const int flags = fcntl(fd, F_GETFL);
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 &&
@@ -147,7 +160,7 @@ void ptyWorker(std::shared_ptr<Shared> s, int master) {
         if (poll(fds, hung ? 1 : 2, hung ? 50 : -1) < 0 && errno != EINTR) break;
         if (fds[0].revents & POLLIN) {
             uint64_t value;
-            (void)!read(s->wake, &value, sizeof(value));
+            while (read(s->wake, &value, sizeof(value)) == ssize_t(sizeof(value))) {}
         }
         if (hung) {
             pollfd probe{master, POLLIN, 0};
@@ -178,7 +191,7 @@ void tcpWorker(std::shared_ptr<Shared> s, int listener) {
         if (poll(fds, client >= 0 ? 3 : 2, -1) < 0 && errno != EINTR) break;
         if (fds[0].revents & POLLIN) {
             uint64_t value;
-            (void)!read(s->wake, &value, sizeof(value));
+            while (read(s->wake, &value, sizeof(value)) == ssize_t(sizeof(value))) {}
         }
         if (fds[1].revents & POLLIN) {
             const int accepted = accept(listener, nullptr, nullptr);
@@ -203,6 +216,7 @@ void tcpWorker(std::shared_ptr<Shared> s, int listener) {
     }
     closeFd(client);
 }
+#endif
 }  // namespace
 
 #ifndef FROND_BYTE_LINK_ONLY
@@ -298,8 +312,10 @@ struct HostSerial::Impl {
         if (!shared) return;
         shared->stop=true;shared->Wake();
         if(worker.joinable())worker.join();
-        closeFd(fd);closeFd(shared->wake);shared.reset();
+        closeFd(fd);closeFd(shared->wake);closeFd(shared->wakeWrite);shared.reset();
+#ifndef _WIN32
         if(config.kind==Kind::unixSocket)frondUnix::Remove(config.path,socketInode);
+#endif
         socketInode=0;window=false;lastInputs=-1;endpoint.clear();
     }
     static void Replaced(void* context) {
@@ -394,12 +410,23 @@ HostSerial::~HostSerial() { Stop(); }
 #endif
 
 namespace {
+#ifdef _WIN32
+bool openEndpoint(const HostSerial::Config&, Shared&, int&, std::string&, uint16_t&, ino_t&, std::string& error) {
+    error = "Host serial isn't available on Windows yet.";
+    return false;
+}
+#else
 // Opens a PTY master, a 127.0.0.1 listener or a Unix socket listener and the worker's eventfd.
 bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std::string& endpoint,
                   uint16_t& port, ino_t& inode, std::string& error) {
+#ifdef __linux__
     shared.wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    shared.wakeWrite = -1;
     if (shared.wake < 0) {
-        error = std::string("eventfd: ") + strerror(errno);
+#else
+    if (!frondPosix::WakePipe(shared.wake, shared.wakeWrite)) {
+#endif
+        error = std::string("wake: ") + strerror(errno);
         return false;
     }
     fd = -1;
@@ -408,7 +435,7 @@ bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std
     if (config.kind == HostSerial::Kind::unixSocket) {
         fd = frondUnix::Listen(config.path, error, inode);
         if (fd < 0) {
-            closeFd(shared.wake);
+            closeFd(shared.wake);closeFd(shared.wakeWrite);
             return false;
         }
         endpoint = config.path;
@@ -419,7 +446,7 @@ bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std
         if (!name || !nonblocking(fd) || tcgetattr(fd, &raw) != 0) {
             error = std::string("Could not open a PTY: ") + strerror(errno);
             closeFd(fd);
-            closeFd(shared.wake);
+            closeFd(shared.wake);closeFd(shared.wakeWrite);
             return false;
         }
         cfmakeraw(&raw);
@@ -427,7 +454,7 @@ bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std
         endpoint = name;
         shared.connected = true;
     } else {
-        fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        fd = frondPosix::Socket(AF_INET, SOCK_STREAM | frondPosix::kNonblock | frondPosix::kCloexec, 0);
         const int on = 1;
         sockaddr_in address{};
         address.sin_family = AF_INET;
@@ -439,7 +466,7 @@ bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std
             getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
             error = "Could not listen on 127.0.0.1:" + std::to_string(config.port) + ": " + strerror(errno);
             closeFd(fd);
-            closeFd(shared.wake);
+            closeFd(shared.wake);closeFd(shared.wakeWrite);
             return false;
         }
         port = ntohs(address.sin_port);
@@ -447,6 +474,7 @@ bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std
     }
     return true;
 }
+#endif
 }  // namespace
 
 #ifndef FROND_BYTE_LINK_ONLY
@@ -627,8 +655,11 @@ void HostByteLink::Close() {
     if (impl->worker.joinable()) impl->worker.join();
     closeFd(impl->fd);
     close(impl->shared->wake);
+    if (impl->shared->wakeWrite >= 0) close(impl->shared->wakeWrite);
     impl->shared.reset();
+#ifndef _WIN32
     if (impl->config.kind == HostSerial::Kind::unixSocket) frondUnix::Remove(impl->config.path, impl->socketInode);
+#endif
     impl->socketInode = 0;
     impl->config = {};
     impl->endpoint.clear();

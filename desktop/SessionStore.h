@@ -22,7 +22,11 @@
 #include <zlib.h>
 #include <cerrno>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "winshim/sys/file.h"
+#else
 #include <sys/file.h>
+#endif
 #include <optional>
 #include <unistd.h>
 #include "FirmwareInput.h"

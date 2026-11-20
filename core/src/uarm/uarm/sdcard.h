@@ -11,6 +11,9 @@
 
 #include <string>
 #include <utility>
+#ifdef _WIN32
+#include "PosixCompat.h"
+#endif
 
 #define SD_SECTOR_SIZE 512
 #define SD_CARD_ID_MAX_LEN 32
@@ -47,6 +50,20 @@ class SdCardStore {
     void trustChunks(const std::vector<uint64_t>& chunks);
     bool adoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadOffset);
     bool adoptSavedFromRam(const char* path, uint64_t payloadBytes, uint64_t payloadOffset);
+#ifdef _WIN32
+    // The same with a std::filesystem path's wchar_t c_str().
+    bool initializeFromFile(const wchar_t* path, uint64_t payloadBytes, uint64_t payloadOffset, const char* id) {
+        return initializeFromFile(frondPosix::Narrow(path).c_str(), payloadBytes, payloadOffset, id);
+    }
+    bool backedBy(const wchar_t* path) const { return backedBy(frondPosix::Narrow(path).c_str()); }
+    bool runsOn(const wchar_t* path) const { return runsOn(frondPosix::Narrow(path).c_str()); }
+    bool adoptSaved(const wchar_t* path, uint64_t payloadBytes, uint64_t payloadOffset) {
+        return adoptSaved(frondPosix::Narrow(path).c_str(), payloadBytes, payloadOffset);
+    }
+    bool adoptSavedFromRam(const wchar_t* path, uint64_t payloadBytes, uint64_t payloadOffset) {
+        return adoptSavedFromRam(frondPosix::Narrow(path).c_str(), payloadBytes, payloadOffset);
+    }
+#endif
     void reset();
     bool readBytes(uint64_t offset, uint64_t length, void* data);
     bool writeBytes(uint64_t offset, uint64_t length, const void* data);
@@ -103,6 +120,12 @@ void sdCardInitialize(size_t sectors, const char* id);
 void sdCardInitializeWithData(size_t sectors, void* buf, const char* id);
 bool sdCardInitializeFromFile(const char* path, uint64_t payloadBytes, uint64_t payloadOffset,
                               const char* id);
+#ifdef _WIN32
+inline bool sdCardInitializeFromFile(const wchar_t* path, uint64_t payloadBytes, uint64_t payloadOffset,
+                                     const char* id) {
+    return sdCardInitializeFromFile(frondPosix::Narrow(path).c_str(), payloadBytes, payloadOffset, id);
+}
+#endif
 
 void sdCardRekey(const char* id);
 bool sdCardCommit();

@@ -711,11 +711,16 @@ inline volatile std::sig_atomic_t& signalled() {
 // "ok KIND BYTES" or "error CODE MESSAGE". Exit 0 on success, 1 on failure, 2 on bad use.
 // SIGINT and SIGTERM cancel and remove the partial output.
 inline int cliMain(const std::vector<std::string>& args) {
+#ifdef _WIN32
+    signal(SIGINT, [](int) { signalled() = 1; });
+    signal(SIGTERM, [](int) { signalled() = 1; });
+#else
     struct sigaction action{};
     action.sa_handler = [](int) { signalled() = 1; };
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, nullptr);
     sigaction(SIGTERM, &action, nullptr);
+#endif
     int lastPercent = -1;
     const auto result = run(args, [&](uint64_t done, uint64_t total) {
         if (signalled()) return false;

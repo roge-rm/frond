@@ -8,6 +8,9 @@
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <sys/file.h>
+#endif
 #include <vector>
 
 // File helpers for the storage library: whole reads and writes at an offset, folder fsync, temps.
@@ -40,11 +43,16 @@ inline bool readAllAt(int fd, void* data, size_t n, uint64_t offset) {
 }
 
 inline bool syncDir(const std::filesystem::path& dir) {
+#ifdef _WIN32
+    (void)dir;
+    return true;  // a folder can't be opened to flush; renames are written through
+#else
     const int fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd < 0) return false;
     const int rc = fsync(fd);
     ::close(fd);
     return rc == 0;
+#endif
 }
 
 inline std::filesystem::path folderOf(const std::filesystem::path& file) {
@@ -72,17 +80,25 @@ inline void removePath(const std::filesystem::path& p) {
 }
 
 inline int64_t sizeOf(int fd) {
+#ifdef _WIN32
+    return int64_t(_filelengthi64(fd));
+#else
     struct stat st {};
     return fstat(fd, &st) == 0 ? int64_t(st.st_size) : -1;
+#endif
 }
 
 // An open file description lock on the whole file, as the apps hold on a card open in Files.
 // It conflicts with any other descriptor's, in this process or another.
 inline bool tryLock(int fd) {
+#ifdef _WIN32
+    return flock(fd, LOCK_EX | LOCK_NB) == 0;
+#else
     struct flock l {};
     l.l_type = F_WRLCK;
     l.l_whence = SEEK_SET;
     return fcntl(fd, F_OFD_SETLK, &l) == 0;
+#endif
 }
 
 // Closes on scope exit.

@@ -47,7 +47,7 @@ class DrawGate {
 // What the render thread draws next. Draws the guest thread published since the last
 // take are merged: the newest pixels, LCD state and buttons, and every row any of them
 // changed.
-struct DrawState {
+struct RenderDrawState {
     const uint32_t* pixels{nullptr};  // whole LCD frame, or null when no new frame came
     uint32_t firstDirtyLine{0}, lastDirtyLine{0};
     bool lcdEnabled{true};
@@ -203,7 +203,7 @@ class RenderLink {
 
     // SDL thread: the merged draw since the last take, if any. The pixels stay valid
     // until the next take.
-    bool TakeDraw(DrawState& out) {
+    bool TakeDraw(RenderDrawState& out) {
         std::lock_guard<std::mutex> lock(mutex);
         if (!pendingDraw) return false;
         out = pending;
@@ -393,7 +393,7 @@ class RenderLink {
     int back{0}, middle{1}, front{2};
     bool hasFront{false};
     Lines staleLines[3];
-    DrawState pending;
+    RenderDrawState pending;
     bool pendingDraw{false}, pendingFrame{false};
 
     std::vector<Input> inputs;

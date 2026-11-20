@@ -7,7 +7,6 @@
 #include "zip/miniz.h"
 
 namespace frondCardFiles {
-using frondCardFile::Cancelled;
 using Error = frondCardFile::Error;
 
 namespace {

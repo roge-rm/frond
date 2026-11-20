@@ -246,14 +246,14 @@ SOURCE_CXX_FROND = \
 
 ifdef FROND_68K
 SOURCE_CXX_NATIVE = $(SOURCE_CXX_FROND)
-BINARY_NATIVE = frond-68k
+BINARY_NATIVE = frond-68k$(EXE_SUFFIX)
 BUILDDIR_NATIVE = .build-frond
 DEPDIR_NATIVE = .deps-frond
 # frond/ first, for its keys.h in front of the shared art.
 INCLUDE := -Ifrond $(INCLUDE) -Inative
 # ENABLE_DEBUGGER: breakpoints and watchpoints for the GDB stub; idle checks while none is connected.
 CFLAGS_NATIVE = -O2 -g -DENABLE_DEBUGGER $(shell sdl2-config --cflags)
-LDFLAGS_NATIVE = $(shell sdl2-config --libs) -lSDL2_image -lpthread $(shell pkg-config --libs slirp)
+LDFLAGS_NATIVE = $(shell sdl2-config --libs) -lSDL2_image -lpthread $(shell pkg-config --libs slirp) $(PLATFORM_LIBS)
 # The snap-on modem's slirp side (common/net), ahead of libcommon.a.
 OBJECTS_EXTRA_NATIVE = ../common/libcommon-net.a ../common/libcommon.a
 endif

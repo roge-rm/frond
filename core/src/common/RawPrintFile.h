@@ -7,6 +7,9 @@
 #endif
 #include <cerrno>
 #include <string>
+#ifdef _WIN32
+#include <random>
+#endif
 
 // POSIX native output. Each finish needs a caller-chosen unique absolute destination.
 class RawPrintFile {
@@ -19,6 +22,7 @@ class RawPrintFile {
         return static_cast<RawPrintFile*>(context)->publish(bytes,size);
     }
  private:
+#ifndef _WIN32
 #ifdef O_PATH
     static constexpr int WalkFlags=O_PATH;
 #else
@@ -38,6 +42,40 @@ class RawPrintFile {
     }
     struct Guard { int& fd; ~Guard() { closeFd(fd); } };
     struct Staging { int& dir; const std::string& name; ~Staging() { if(dir>=0) unlinkat(dir,name.c_str(),0); } };
+#endif
+#ifdef _WIN32
+    // A private staging file in the same folder, renamed into place; rename won't replace a file.
+    RawPrintJob::Publication publish(const uint8_t* bytes,size_t size) {
+        using P=RawPrintJob::Publication;
+        error="Invalid absolute output path.";
+        if(size>16*1024*1024 || (size && !bytes)) {error="Raw output limit exceeded.";return P::rejected;}
+        if(path.size()<3 || path.size()>4096 || path.find('\0')!=std::string::npos) return P::rejected;
+        const auto slash=path.find_last_of("/\\");
+        if(slash==std::string::npos || slash+1>=path.size()) return P::rejected;
+        unsigned char random[16];
+        std::random_device entropy;
+        for(auto& c:random) c=static_cast<unsigned char>(entropy());
+        std::string temporary=".frond-print-";
+        for(auto c:random) {temporary+="0123456789abcdef"[c>>4];temporary+="0123456789abcdef"[c&15];}
+        const std::string stagingPath=path.substr(0,slash+1)+temporary;
+        int fd=open(stagingPath.c_str(),O_WRONLY|O_CREAT|O_EXCL,0600);
+        if(fd<0) {error="Cannot create private output.";return P::rejected;}
+        bool ok=fault!=Fault::write;
+        for(size_t offset=0;ok && offset<size;) {
+            auto n=write(fd,bytes+offset,unsigned(size-offset));
+            if(n<=0) {ok=false;break;} offset+=n;
+        }
+        if(fsync(fd)!=0 || fault==Fault::flush) ok=false;
+        if(close(fd)!=0 || fault==Fault::close) ok=false;
+        if(!ok) {error="Output write, flush or close failed.";unlink(stagingPath.c_str());return P::rejected;}
+        if(fault==Fault::publish || rename(stagingPath.c_str(),path.c_str())!=0) {
+            error="Output publication refused; choose a new destination.";
+            if(unlink(stagingPath.c_str())!=0) {error+=" Private staging file remains at "+stagingPath+". Do not retry automatically.";return P::uncertain;}
+            return P::rejected;
+        }
+        error.clear();return P::published;
+    }
+#else
     RawPrintJob::Publication publish(const uint8_t* bytes,size_t size) {
         using P=RawPrintJob::Publication;
         error="Invalid absolute output path.";
@@ -109,4 +147,5 @@ class RawPrintFile {
         if(!durable || !closed) error+=" Private staging file "+stagingPath+" was removed; the removal may not be durable.";
         return P::rejected;
     }
+#endif
 };

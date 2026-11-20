@@ -1,5 +1,7 @@
+#include "PosixCompat.h"
 #include "HostLink.h"
 
+#ifndef _WIN32
 #include "UnixListener.h"
 
 #include <arpa/inet.h>
@@ -9,6 +11,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <termios.h>
+#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -16,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifndef _WIN32
 namespace {
 
 bool nonblocking(int fd) {
@@ -29,6 +33,7 @@ void closeFd(int& fd) {
 }
 
 }  // namespace
+#endif
 
 bool HostLink68k::Parse(const std::string& text, Kind& kind, uint16_t& port, std::string* path) {
     port = 0;
@@ -54,6 +59,25 @@ bool HostLink68k::Parse(const std::string& text, Kind& kind, uint16_t& port, std
     return true;
 }
 
+#ifdef _WIN32
+// The PTY, TCP and Unix socket endpoints aren't ported to Windows.
+bool HostLink68k::Open(Kind newKind, uint16_t, std::string& error, const std::string&) {
+    Close();
+    if (newKind == Kind::off) return true;
+    error = "Host serial isn't available on Windows yet.";
+    return false;
+}
+void HostLink68k::SetAsleep(bool) {}
+void HostLink68k::Close() {
+    path.clear();
+    kind = Kind::off;
+    endpoint.clear();
+    DropReceived();
+    tx.clear();
+    hung = false;
+    asleep = false;
+}
+#else
 bool HostLink68k::Open(Kind newKind, uint16_t newPort, std::string& error, const std::string& newPath) {
     Close();
     if (newKind == Kind::off) return true;
@@ -77,7 +101,7 @@ bool HostLink68k::Open(Kind newKind, uint16_t newPort, std::string& error, const
         // A new PTY has no slave open yet; the first open isn't reported, so count it as there.
         hung = false;
     } else {
-        fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        fd = frondPosix::Socket(AF_INET, SOCK_STREAM | frondPosix::kNonblock | frondPosix::kCloexec, 0);
         const int on = 1;
         sockaddr_in address{};
         address.sin_family = AF_INET;
@@ -128,6 +152,8 @@ void HostLink68k::Close() {
     asleep = false;
 }
 
+#endif
+
 bool HostLink68k::Connected() const {
     return kind == Kind::pty ? !hung : kind == Kind::off ? false : client >= 0;
 }
@@ -142,6 +168,11 @@ std::string HostLink68k::Mode() const {
 }
 
 // What the peer sent before it went is still the guest's, like its last acknowledgement.
+#ifdef _WIN32
+void HostLink68k::Disconnect() {}
+bool HostLink68k::Pump(int) { return false; }
+void HostLink68k::Poll() {}
+#else
 void HostLink68k::Disconnect() {
     tx.clear();
     if (kind != Kind::pty) closeFd(client);
@@ -210,6 +241,8 @@ void HostLink68k::Poll() {
         tcflush(fd, TCIFLUSH);
     }
 }
+
+#endif
 
 size_t HostLink68k::Take(uint8_t* out, size_t max) {
     const size_t count = std::min(max, rx.size());

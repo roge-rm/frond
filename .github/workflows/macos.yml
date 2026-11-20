@@ -1,0 +1,95 @@
+# The macOS builds, one on each kind of Mac: Apple silicon (arm64) and Intel (x86_64).
+# They build the cores and the desktop, make Frond.app and a dmg, and start the built app.
+name: macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/desktop-ports]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: brew install sdl2 sdl2_image libslirp boost ninja cmake pkg-config readline make qt librsvg
+
+      - name: Build the cores
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix readline)/lib/pkgconfig:$PKG_CONFIG_PATH"
+          set -o pipefail
+          gmake -k -j"$(sysctl -n hw.ncpu)" BUILD_JOBS="$(sysctl -n hw.ncpu)" out/frond out/frond-68k 2>&1 | tee build.log
+
+      - name: Build the desktop
+        run: |
+          set -o pipefail
+          cmake -S desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFROND_PREPARED_SOURCE="$PWD/core" -DCMAKE_PREFIX_PATH="$(brew --prefix)" 2>&1 | tee -a build.log
+          cmake --build build/desktop --target frond-desktop -- -k 0 2>&1 | tee -a build.log
+
+      - name: Make the app and the dmg
+        run: |
+          set -o pipefail
+          export PATH="$(brew --prefix qt)/bin:$PATH"
+          sh packaging/macos/make-app.sh 2>&1 | tee -a build.log
+
+      - name: Start the built app
+        timeout-minutes: 5
+        run: |
+          APP=out/Frond.app/Contents/MacOS
+          # Each program runs for up to 8 seconds and is stopped if still running; a library that fails
+          # to load exits at once with 126 or more.
+          run_a_while() {
+            echo "--- $*"
+            "$@" > run.out 2>&1 < /dev/null &
+            pid=$!
+            for i in 1 2 3 4 5 6 7 8; do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              sample "$pid" 1 -file sample.txt > /dev/null 2>&1 || true
+              head -80 sample.txt 2>/dev/null || true
+              kill "$pid" || true; sleep 1; kill -9 "$pid" 2>/dev/null || true
+              cat run.out; echo "still running after 8 s"; return "${STILL_RUNNING_RESULT:-0}"
+            fi
+            wait "$pid"; code=$?
+            cat run.out; echo "exited with $code"
+            [ "$code" -lt 126 ]
+          }
+          export QT_QPA_PLATFORM=offscreen
+          failed=0
+          STILL_RUNNING_RESULT=1 run_a_while "$APP/frond-68k" --version || failed=1
+          run_a_while "$APP/frond" || failed=1
+          STILL_RUNNING_RESULT=1 run_a_while "$APP/Frond" --version || failed=1
+          run_a_while "$APP/Frond" || failed=1
+          exit $failed
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frond-macos-${{ matrix.arch }}
+          path: out/Frond-*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: build-log-macos-${{ matrix.arch }}
+          path: build.log
+          if-no-files-found: ignore
