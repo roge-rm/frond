@@ -236,7 +236,7 @@ class DesktopControl {
     // the .frond compressed and written on saveJob while the guest runs. True when the reply waits
     // for that write; false with `result` set when the save failed before it.
     bool startSave(commands::Context& ctx, const std::string& path, const std::string& id, Reply& result) {
-        if (path.empty() || path.front() != '/') {
+        if (!frondPosix::IsAbsolutePath(path)) {
             result = {false, "argument", "An absolute file path is required."};
             return false;
         }
@@ -454,7 +454,7 @@ class DesktopControl {
         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
-        if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+        if (fileCommand && !frondPosix::IsAbsolutePath(path)) return {false, "argument", "An absolute file path is required."};
         if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
         if (command == "install" && ctx.soc->InstallsToCard()) {
             const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path);
@@ -713,7 +713,7 @@ class DesktopControl {
                 }
                 GuestFiles::Path(cardPath, command == "ms-files");
                 if (command == "ms-rename") GuestFiles::Name(other);
-                if ((command == "ms-get" || command == "ms-put") && (other.empty() || other.front() != '/'))
+                if ((command == "ms-get" || command == "ms-put") && !frondPosix::IsAbsolutePath(other))
                     return {false, "argument", "An absolute host file path is required."};
                 std::vector<uint8_t> contents;
                 if (command == "ms-put") {

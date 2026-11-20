@@ -2241,7 +2241,7 @@ class Runner {
                 // before a save.
                 if (window) PollWindow();
                 if (request.command == "save") {
-                    if (request.argument.empty() || request.argument.front() != '/')
+                    if (!frondPosix::IsAbsolutePath(request.argument))
                         desktop->Reply(request.id, false, "argument", "An absolute file path is required.");
                     else if (!StartSave(request.argument, request.id))
                         desktop->Reply(request.id, false, "save", "Could not save device state.");
@@ -2401,7 +2401,7 @@ class Runner {
         if (command == "export-portable" || command == "copy-session" || command == "duplicate-session") {
             if (!runtimeCards.Slots())
                 return {false, "unsupported", "This command is for independent cards."};
-            if (argument.empty() || argument.front() != '/' || argument.find_first_of("\r\n") != string::npos || argument.find('\0') != string::npos)
+            if (!frondPosix::IsAbsolutePath(argument) || argument.find_first_of("\r\n") != string::npos || argument.find('\0') != string::npos)
                 return {false, "argument", "An absolute new folder path is required."};
             const auto result = savePortable(argument, *profile, metadata);
             if (result == PortablePublication::durable)
@@ -2447,7 +2447,7 @@ class Runner {
         bool fileCommand = false, takesArgument = card;
         for (const char* name : fileCommands) fileCommand = fileCommand || command == name;
         for (const char* name : argumentCommands) takesArgument = takesArgument || command == name;
-        if (fileCommand && (argument.empty() || argument.front() != '/'))
+        if (fileCommand && !frondPosix::IsAbsolutePath(argument))
             return {false, "argument", "An absolute file path is required."};
         if (!fileCommand && !takesArgument && !argument.empty())
             return {false, "argument", "This command takes no argument."};
@@ -3713,7 +3713,7 @@ bool parseOptions(int argc, char** argv, Options& options) {
             options.desktopSocket = v;
         } else if (arg == "--save-on-disconnect") {
             const char* v = value();
-            if (!v || v[0] != '/') return false;
+            if (!v || !frondPosix::IsAbsolutePath(v)) return false;
             options.saveOnDisconnect = v;
         } else if (arg == "--usb") {
             // A device without a USB cradle takes it and ignores it, as the desktop passes it to all.
