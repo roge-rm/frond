@@ -29,8 +29,7 @@ TEST_KILL_GRACE ?= 10
 export TEST_KILL_GRACE
 test: SHELL = $(CURDIR)/tests/timed-shell.sh
 test-%: SHELL = $(CURDIR)/tests/timed-shell.sh
-test: export TEST_TIMEOUT
-test-%: export TEST_TIMEOUT
+export TEST_TIMEOUT
 test: export TEST_NAME = $@
 test-%: export TEST_NAME = $@
 # make recheck-list shows which checks need running (changed paths, failed, never passed),
