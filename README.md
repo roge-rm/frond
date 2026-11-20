@@ -4,8 +4,6 @@ Frond is a Palm OS emulator for Linux and Android, for running and writing Palm 
 
 Frond runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, with sound, memory cards, infrared, Bluetooth, HotSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
 
-Tapwave Zodiac support is a work in progress and will keep improving.
-
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
 How it differs is by focussing on a couple of goals that are important to me - simulating peripherals to emulate the experience of actually using these devices and emulating them fast enough that they can be enjoyed on less than stellar hardware. These goals are achieved by simulating each offered connection and peripheral (work in progress) and finding ways to increase the speed of emulation - like the [dynarmic](https://github.com/lioncash/dynarmic) based JIT compiler that was added in 0.11.0.
@@ -67,7 +65,7 @@ Dan
 | Tungsten E3 | 5.4 | 320×480 colour | SD | yes | yes | | | USB, serial |
 | Zire 72 | 5.2 | 320×320 colour | SD | yes | yes | yes | | USB |
 | Sony CLIÉ TG50 | 5.0 | 320×320 colour | Memory Stick | yes | yes | yes | | USB, serial |
-| Tapwave Zodiac | 5.2 | 480×320 colour | SD | yes | | | | |
+| Tapwave Zodiac | 5.2 | 480×320 colour | two SD | yes | yes | yes | | USB, serial |
 | **Palm OS 3 and 4, 68k** | | | | | | | | |
 | Palm IIIx | 3.1, 3.5 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIe | 3.1 | 160×160 grey | | piezo | yes | | PPP | serial |
@@ -89,7 +87,7 @@ Dan
 | **Windows Mobile, ARM** | | | | | | | | |
 | HP iPAQ rx1950 | Windows Mobile 5 | 240×320 colour | SD | yes | yes | | virtual Wi-Fi | ActiveSync, USB and serial |
 
-The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3 and Zire 72 also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k Palms have the cradle's HotSync button, and their USB HotSync isn't done yet.
+The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3, Zire 72 and Zodiac also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k Palms have the cradle's HotSync button, and their USB HotSync isn't done yet.
 
 Printing over infrared works on every device with infrared. The T|X, E2, Zire 72 and TG50 have an infrared keyboard, a mobile phone over infrared and a mobile phone over Bluetooth, and the 68k Palms have the phone over infrared (on Palm OS 3.5 and 4.1). Every 68k Palm except the m100 and m105 has the dial-up modem and HotSync by modem, tested on the IIIx. The Dana and Dana Wireless print to a USB printer. Mobile phone over Bluetooth and HotSync by modem are Linux only for now. The E2 and the Zire don't have their networking yet. The Zire 72 and TG50 have a microphone, and the Zire 72 has its camera.
 
@@ -103,7 +101,7 @@ The infrared keyboard and beaming share the port. Take the keyboard off before y
 
 The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
 
-The Tapwave Zodiac plays sound and takes an SD card. Its other peripherals aren't done.
+The Tapwave Zodiac plays sound and takes two SD cards. It has infrared beaming, Bluetooth (tested with sending files and InkStorm multiplayer) and HotSync over USB or the serial cradle. Dial-up and HotSync over Bluetooth aren't done yet.
 
 The HP iPAQ rx1950 runs Windows Mobile 5, with sound and the microphone, an SD card, infrared beaming and Wi-Fi through Virtual Wi-Fi. It syncs with SynCE's ActiveSync tools over USB or the serial cable on Linux. Install copies a file onto the SD card, where File Explorer installs a CAB. Hard reset erases its storage and starts at Windows Mobile's first screen. The installed program list isn't done yet. See [ActiveSync](doc/using-frond.md#activesync).
 
