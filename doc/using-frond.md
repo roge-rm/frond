@@ -205,7 +205,7 @@ Add device has a Card 1 and a Card 2 choice for the Zodiac and the Dana: No card
 
 The write-protect switch is only on the TG50's Memory Stick. On the Dana, the VZ Palms and the T415 set protection in Cards before the card goes in.
 
-Duplicate asks about the cards as for one card: Link, Copy or No card, for all of the machine's cards together. A machine's Export packs its cards, and importing makes a new card in the drawer for each. A session saved before this update that has `sd2.frondsd` in it moves into Card 2 when it opens, and cards the older Dana, VZ and T415 saves kept in `dana-cards` move into the drawer.
+Duplicate asks about the cards as for one card: Link, Copy or No card, for all of the machine's cards together. A machine's Export packs its cards, and importing makes a new card in the drawer for each, except on the Dana, the VZ Palms and the T415, where a machine saved with cards can't be exported or imported yet. Export each card on its own, or on the desktop use Export portable folder. A session saved before this update that has `sd2.frondsd` in it moves into Card 2 when it opens, and cards the older Dana, VZ and T415 saves kept in `dana-cards` move into the drawer.
 
 On the Dana, the VZ Palms and the T415, Files… takes the card out, saves, and puts it back when you close it. Export portable folder… (desktop, while the machine runs) writes the machine with its cards as one folder. Keep it together: moving it to another filesystem or copying its files one by one isn't supported. Android has no portable folder. Save a Copy there asks you to take the cards out first, and a session saved by an older version with independent cards can't be duplicated, exported or imported. Export each card on its own instead.
 
