@@ -2458,6 +2458,9 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     }
                     // A UART status poll's load ends the run; the next try starts with skipUartPoll.
                     if (ran && p->atUartPoll()) continue;
+                    // A run that left an instruction with the span used up (a ring word or a register read refused
+                    // at its end): the span ends through spanBoundary and the next run starts on it.
+                    if (ran && quietCycles < leanMinimumSpan) continue;
                     // The instruction the JIT left goes to the lean path, then the JIT again. Code not compiled
                     // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
                     leanCount = stop == arm920JitCold || instructions < 4 ? 32 : 1;
