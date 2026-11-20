@@ -64,18 +64,22 @@ jobs:
               sleep 1
             done
             if kill -0 "$pid" 2>/dev/null; then
-              kill "$pid"; sleep 1; kill -9 "$pid" 2>/dev/null
-              cat run.out; echo "still running after 8 s"; return 0
+              sample "$pid" 1 -file sample.txt > /dev/null 2>&1 || true
+              head -80 sample.txt 2>/dev/null || true
+              kill "$pid" || true; sleep 1; kill -9 "$pid" 2>/dev/null || true
+              cat run.out; echo "still running after 8 s"; return "${STILL_RUNNING_RESULT:-0}"
             fi
             wait "$pid"; code=$?
             cat run.out; echo "exited with $code"
             [ "$code" -lt 126 ]
           }
           export QT_QPA_PLATFORM=offscreen
-          run_a_while "$APP/frond-68k" --version
-          run_a_while "$APP/frond"
-          run_a_while "$APP/Frond" --version
-          run_a_while "$APP/Frond"
+          failed=0
+          STILL_RUNNING_RESULT=1 run_a_while "$APP/frond-68k" --version || failed=1
+          run_a_while "$APP/frond" || failed=1
+          STILL_RUNNING_RESULT=1 run_a_while "$APP/Frond" --version || failed=1
+          run_a_while "$APP/Frond" || failed=1
+          exit $failed
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
