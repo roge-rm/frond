@@ -144,7 +144,7 @@
           "guest_ns": 124000000000,
           "cycles": 12400000000,
           "instructions": 2289671000,
-          "jit_instructions": 2277305193,
+          "jit_instructions": 2277305820,
           "lcd_frames": 633,
           "changed_frames": 198,
           "pcm_frames": 5243228,
@@ -169,7 +169,7 @@
           "guest_ns": 112000000000,
           "cycles": 11200000000,
           "instructions": 2279822431,
-          "jit_instructions": 2271434902,
+          "jit_instructions": 2271435254,
           "lcd_frames": 926,
           "changed_frames": 786,
           "pcm_frames": 4714029,
@@ -193,8 +193,8 @@
         "fast": {
           "guest_ns": 135000000000,
           "cycles": 13500000000,
-          "instructions": 4363164213,
-          "jit_instructions": 4343427759,
+          "instructions": 4363164223,
+          "jit_instructions": 4344738873,
           "lcd_frames": 1766,
           "changed_frames": 149,
           "pcm_frames": 5728328,
@@ -218,13 +218,13 @@
         "fast": {
           "guest_ns": 170000000000,
           "cycles": 17000000000,
-          "instructions": 5165961548,
-          "jit_instructions": 3341615113,
+          "instructions": 5165961729,
+          "jit_instructions": 3341920532,
           "lcd_frames": 4152,
           "changed_frames": 914,
           "pcm_frames": 7271829,
           "frame_sequence_hash": "b4c0c195f27bc683",
-          "pcm_hash": "50842c4b8c3ec0a7",
+          "pcm_hash": "3eb68d4eb953699f",
           "input": "3ee3771c3485f9d7"
         }
       }
@@ -243,12 +243,12 @@
         "fast": {
           "guest_ns": 160000000000,
           "cycles": 16000000000,
-          "instructions": 5778503117,
-          "jit_instructions": 5098310532,
+          "instructions": 5778503362,
+          "jit_instructions": 5098440053,
           "lcd_frames": 2770,
           "changed_frames": 1680,
           "pcm_frames": 6830829,
-          "frame_sequence_hash": "2732ab283982846b",
+          "frame_sequence_hash": "ae7de2ae4ccb88a0",
           "pcm_hash": "cc512b3d7cd1f524",
           "input": "3fd73abe78f92c90"
         }
@@ -269,7 +269,7 @@
           "guest_ns": 136000000000,
           "cycles": 13600000000,
           "instructions": 2758628966,
-          "jit_instructions": 2743351375,
+          "jit_instructions": 2743353752,
           "lcd_frames": 1039,
           "changed_frames": 803,
           "pcm_frames": 5772429,
