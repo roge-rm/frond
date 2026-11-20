@@ -1,6 +1,6 @@
 # Frond
 
-Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games.
+Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games. There are builds for Windows and macOS too, untested.
 
 Frond runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, with sound, memory cards, infrared, Bluetooth, HotSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
 
@@ -33,6 +33,10 @@ Dan
   <tr>
     <td align="center" colspan="2"><img src="doc/images/android-dana.png" height="180" alt="An AlphaWord document on the AlphaSmart Dana, in landscape" /><br>AlphaSmart Dana, on Android</td>
     <td align="center" colspan="2"><img src="doc/images/desktop-dana-wireless.png" height="180" alt="An AlphaWord document on the Dana Wireless, on Linux" /><br>Dana Wireless, on Linux</td>
+  </tr>
+  <tr>
+    <td align="center" colspan="3"><img src="doc/images/desktop-zodiac.png" height="260" alt="The Tapwave Zodiac home screen on Linux" /><br>Tapwave Zodiac, on Linux</td>
+    <td align="center"><img src="doc/images/desktop-rx1950.png" height="260" alt="The iPAQ rx1950's Windows Mobile 5 Start screen on Linux" /><br>iPAQ rx1950, on Linux</td>
   </tr>
 </table>
 
@@ -228,6 +232,10 @@ Or get the `.deb` for your machine, amd64 or arm64, from [Releases](https://gith
 On other distributions get the AppImage for x86_64 or aarch64 from [Releases](https://github.com/roge-rm/frond/releases), make it executable and run it. It needs a fairly recent distribution, Debian 12 or Ubuntu 22.10 or newer.
 
 It needs FUSE, which most desktops have. If it won't start, install `fuse3`, or run it with `--appimage-extract-and-run`.
+
+### Windows and macOS
+
+These builds are made as is and I haven't tried them. Get them from [Releases](https://github.com/roge-rm/frond/releases): the installer (`Frond-*-setup.exe`) or the zip for 64-bit Windows, and the dmg for an Apple silicon or Intel Mac. They aren't signed, so Windows asks before running the installer, and on a Mac you right-click Frond and pick Open the first time. Host serial ports, the NetLib redirect, Bluetooth between machines on one computer, 68k HostLink and the debugger aren't in these builds yet.
 
 ## Firmware
 
