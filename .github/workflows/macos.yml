@@ -49,6 +49,18 @@ jobs:
           export PATH="$(brew --prefix qt)/bin:$PATH"
           sh packaging/macos/make-app.sh 2>&1 | tee -a build.log
 
+      - name: Fast engine check
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          # No firmware in CI, so this is the Dynarmic JIT running guest code on this Mac: the cycle
+          # budget test, then random ARM and Thumb blocks on the JIT and the interpreter, compared.
+          # Apple silicon runs the JIT through MAP_JIT with the compile thread's W^X switching.
+          gmake FROND_FAST=1 test-jit-overshoot 2>&1 | tee -a build.log
+          gmake FROND_FAST=1 build/test-jit-differential 2>&1 | tee -a build.log
+          ./build/test-jit-differential --seeds 1:3001 --duration 600 2> build/jit-differential.err | tail -15
+          grep -v ' failed (pc=' build/jit-differential.err | tail -5 || true
+
       - name: Start the built app
         timeout-minutes: 5
         run: |
