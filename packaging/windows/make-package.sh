@@ -11,7 +11,7 @@ cp out/frond.exe out/frond-68k.exe "$DIR/"
 cp LICENSE README.md "$DIR/" 2>/dev/null || true
 [ -d licences ] && cp -R licences "$DIR/licences"
 # Qt's DLLs and plugins.
-windeployqt6 --no-translations --no-system-d3d-compiler "$DIR/frond-desktop.exe"
+windeployqt6 --no-translations "$DIR/frond-desktop.exe"
 # The libraries the cores and the desktop pull in from UCRT64 (SDL2, libslirp, zlib, the C++ runtime...).
 python3 packaging/windows/bundle-dlls.py "$DIR" "$DIR/frond-desktop.exe" "$DIR/frond.exe" "$DIR/frond-68k.exe"
 ZIP="out/Frond-$VERSION-windows-x64.zip"
@@ -31,6 +31,7 @@ for c in "$(command -v iscc 2>/dev/null || true)" "/c/Program Files (x86)/Inno S
     if [ -n "$c" ] && [ -x "$c" ]; then ISCC=$c; break; fi
 done
 if [ -n "$ISCC" ]; then
+    export MSYS2_ARG_CONV_EXCL="*"  # keep /D... as they are
     "$ISCC" "/DAppVersion=$VERSION" "/DSourceDir=$(cygpath -w "$PWD/$DIR")" "/DOutputDir=$(cygpath -w "$PWD/out")" \
         "$(cygpath -w "$PWD/packaging/windows/frond.iss")"
     echo "out/Frond-$VERSION-setup.exe"

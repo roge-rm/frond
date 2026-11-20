@@ -59,6 +59,11 @@ jobs:
             -DFROND_PREPARED_SOURCE="$PWD/core" 2>&1 | tee -a build.log
           cmake --build build/desktop --target frond-desktop -- -k 0 2>&1 | tee -a build.log
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
       - name: Make the zip and the installer
         run: |
           set -o pipefail
@@ -74,10 +79,10 @@ jobs:
           ./frond.exe > core.out 2>&1 < /dev/null
           code=$?
           cat core.out
-          # A loader failure (missing DLL) gives a code like 0xC0000135, which is above 126 here.
-          if [ "$code" -ge 126 ]; then echo "core exited with $code"; exit 1; fi
+          # A missing DLL gives no output, so the usage text has to be there.
+          if ! grep -qi usage core.out; then echo "no usage from the core (exit $code)"; exit 1; fi
           # A short run of the desktop: it must stay up for a few seconds.
-          QT_QPA_PLATFORM=offscreen ./frond-desktop.exe &
+          ./frond-desktop.exe &
           pid=$!
           sleep 5
           kill -0 "$pid" || { echo "desktop exited early"; exit 1; }
