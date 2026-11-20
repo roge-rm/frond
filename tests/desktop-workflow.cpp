@@ -2556,8 +2556,107 @@ for line in s.makefile('rb'):
             for (int i = 0; i < box->count(); ++i) texts << box->itemText(i);
             QCOMPARE(texts, QStringList({"No card", "Games · 64 MB", "Notes · MMC · 32 MB"}));
         }
+        // Card 2 doesn't offer the card picked for card 1, and lets go of it when card 1 takes it.
+        QCOMPARE(dialog.chosenCards(), QStringList({QString(), games}));
+        one->setCurrentIndex(one->findData(games));
+        texts.clear();
+        for (int i = 0; i < two->count(); ++i) texts << two->itemText(i);
+        QCOMPARE(texts, QStringList({"No card", "Notes · MMC · 32 MB"}));
+        QCOMPARE(dialog.chosenCards(), QStringList({games, QString()}));
+        two->setCurrentIndex(two->findData(notes));
+        one->setCurrentIndex(0);
+        QCOMPARE(two->count(), 3);
+        QCOMPARE(dialog.chosenCards(), QStringList({QString(), notes}));
         device->setCurrentIndex(device->findData(QString("palm-tx")));
         QVERIFY(!one->isVisible() && !two->isVisible() && dialog.chosenCards().isEmpty());
+    }
+    // Add device on a Dana: the cards picked go in by path once its start replies are in, after the
+    // USB port's.
+    void addDeviceDanaCards() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        const auto firmwareRoot = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+        QString games, notes;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Games", "sd", 64, {}, &games).isEmpty());
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Notes", "mmc", 32, {}, &notes).isEmpty());
+        QTemporaryDir files;
+        // A synthetic Dana ROM: the small card, then the big one at 0x8000.
+        const auto* dana = deviceProfileNamed5("alphasmart-dana");
+        QVERIFY(dana);
+        auto card = [](QByteArray& rom, int at, quint32 company, quint32 hal, quint32 reset, quint32 bytes) {
+            auto be = [&](int where, quint32 value, int n) { for (int i = 0; i < n; ++i) rom[at + where + i] = char(value >> (8 * (n - 1 - i))); };
+            be(0, 0x3000, 4); be(4, reset, 4); be(8, 0xfeedbeef, 4); be(0x0c, 5, 2); be(0x0e, 0x40, 2);
+            rom.replace(at + 0x10, 9, QByteArray("PalmCard\0", 9)); rom.replace(at + 0x30, 10, QByteArray("Synthetic\0", 10));
+            be(0x6c, bytes, 4); be(0x7e, company, 4); be(0x82, hal, 4);
+        };
+        QByteArray rom(6 << 20, '\0');
+        card(rom, 0, dana->companyId, dana->halId, 0x100002a2, 0x6000);
+        card(rom, 0x8000, dana->companyId, dana->halId, 0x1000c80a, 0x5c8000);
+        const auto romPath = files.filePath("dana.rom");
+        { QFile f(romPath); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(rom); }
+        QFile core(files.filePath("dana-core"));
+        QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+here=pathlib.Path(__file__)
+trace=here.with_name('commands')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+slots={'sd':None,'sd2':None}
+for line in s.makefile('rb'):
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
+    ok,message='ok','done'
+    slot,_,op=cmd.partition('-')
+    if cmd=='device-state': message='alphasmart-dana'
+    elif cmd=='network-state': message='disabled'
+    elif cmd in ('usb-port','usb-port-state'): message='off'
+    elif slot in slots:
+        card=slots[slot]
+        if op=='state': message='none' if not card else card['state']+' '+card['key']+' writable'+(' mmc' if card['mmc'] else '')
+        elif op=='attach':
+            words=arg.rsplit(' ',3); slots[slot]={'state':'inserted','key':words[1],'mmc':words[3]=='mmc'}; message='inserted'
+    elif cmd in ('hold-state','rotate'): ok,message='error','unsupported'
+    s.sendall(i+b'\t'+ok.encode()+b'\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='quit': break
+)PY");
+        core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        auto read = [&] { QFile f(files.filePath("commands")); return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString(); };
+        {
+            MainWindow window(core.fileName(), core.fileName());
+            window.show();
+            QStringList errors;
+            QTimer poll; poll.setInterval(50);
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { errors << box->text(); box->accept(); return; }
+                auto* firmware = window.findChild<FirmwareDialog*>();
+                if (!firmware || !firmware->isVisible()) return;
+                auto* devices = firmware->findChild<QComboBox*>("device");
+                devices->setCurrentIndex(devices->findData("alphasmart-dana"));
+                firmware->findChild<QLineEdit*>("nor")->setText(romPath);
+                auto* one = firmware->findChild<QComboBox*>("card1Choice");
+                auto* two = firmware->findChild<QComboBox*>("card2Choice");
+                one->setCurrentIndex(one->findData(games));
+                two->setCurrentIndex(two->findData(notes));
+                firmware->findChild<QPushButton*>("import")->click();
+            });
+            poll.start();
+            window.findChild<QPushButton*>("addDevice")->click();
+            auto* pick = window.findChild<QPushButton*>("cardPick");
+            auto* pick2 = window.findChild<QPushButton*>("card2Pick");
+            QTRY_COMPARE_WITH_TIMEOUT(pick2->text(), QString("Notes"), 10000);
+            QCOMPARE(pick->text(), QString("Games"));
+            poll.stop();
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            const auto commands = read();
+            QVERIFY2(commands.contains("sd-attach\t") && commands.contains("sd2-attach\t"), qPrintable(commands));
+            QVERIFY(commands.indexOf("usb-port\t") < commands.indexOf("sd-attach\t"));
+            QVERIFY(commands.indexOf("sd-attach\t") < commands.indexOf("sd2-attach\t"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        }
+        QDir(firmwareRoot).removeRecursively();
+        QSettings().clear();
     }
     // The library with a second slot: an old Zodiac folder's sd2.frondsd moves in as its own card,
     // each slot is listed and linked on its own, take out and put back by slot, and Delete keeps

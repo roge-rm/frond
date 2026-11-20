@@ -118,9 +118,11 @@ void FirmwareDialog::offerCards(const QString& folder) {
     }
     connect(device, &QComboBox::currentIndexChanged, this, &FirmwareDialog::fillCards);
     connect(nor, &QLineEdit::textChanged, this, &FirmwareDialog::fillCards);
+    connect(cards[0], &QComboBox::currentIndexChanged, this, &FirmwareDialog::fillCards);
     fillCards();
 }
-// No card, then the drawer cards slot n takes, by name; shown only for a two-slot machine.
+// No card, then the drawer cards slot n takes, by name; shown only for a two-slot machine. Card 2
+// leaves out the card picked for card 1.
 void FirmwareDialog::fillCards() {
     if (!cards[0]) return;
     auto selected = frondFirmware::deviceFromId(device->currentData().toString());
@@ -132,11 +134,14 @@ void FirmwareDialog::fillCards() {
             if (e.inDrawer) drawer << e;
     std::sort(drawer.begin(), drawer.end(), [](const auto& a, const auto& b) { return a.card.name.localeAwareCompare(b.card.name) < 0; });
     for (int n = 0; n < 2; ++n) {
+        const QSignalBlocker blocked(cards[n]);
         const auto keep = cards[n]->currentData().toString();
+        const auto first = n ? cards[0]->currentData().toString() : QString();
         cards[n]->clear();
         cards[n]->addItem(tr("No card"), QString());
         for (const auto& e : drawer)
-            if (frondCards::deviceTakes(selected, frondCards::takeKind(e.card), frondCards::sizeOf(e.card.kind, e.card.bytes), nullptr, n))
+            if ((first.isEmpty() || e.card.id != first) &&
+                frondCards::deviceTakes(selected, frondCards::takeKind(e.card), frondCards::sizeOf(e.card.kind, e.card.bytes), nullptr, n))
                 cards[n]->addItem(e.card.name + QStringLiteral(" · ") + frondCards::cardSizeText(e.card), e.card.id);
         cards[n]->setCurrentIndex(std::max(0, cards[n]->findData(keep)));
         form->setRowVisible(cards[n], two);

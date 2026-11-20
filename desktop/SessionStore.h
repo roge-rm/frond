@@ -1137,7 +1137,8 @@ enum class CardChoice { link, copy, none };
 // deleted if it fails, is cancelled or the disk is too full.
 inline QString duplicate(const QString& folder, const Info& info, QString* newName = nullptr, const CopyProgress& progress = {},
                          CardChoice choice = CardChoice::copy) {
-    if (frondDanaSession::inspect(info.path).wrapped)
+    const auto dana = frondDanaSession::inspect(info.path);
+    if (dana.independent)
         return QStringLiteral("This session has independent cards. Open it and export a portable folder.");
     if (info.old) return QStringLiteral("This session was saved by an older Frond.");
     QLockFile lock(info.path + ".lock");
@@ -1260,10 +1261,13 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         auto& copySlot = copySlots[n];
         copySlot.present = true;
         // A copied card gets its own serial, so the copy loads it as a swap: two cards with one
-        // serial and the same change counter would look unchanged in each other's machines.
-        copySlot.swap = c.slot.swap || had;
+        // serial and the same change counter would look unchanged in each other's machines. A
+        // frond-68k save links its cards by path into the first machine's folder, so each slot it
+        // lists loads empty in the copy and the copy's own card goes in by path after start.
+        const bool listed = dana.wrapped && frondCards::linkedRowFor(info.path, n);
+        copySlot.swap = c.slot.swap || had || listed;
         if (choice == CardChoice::link) copySlot.link = c.linkTo;
-        if (info.saved && (c.slot.present || had) && !frondCards::writeSlot(dest, copySlot, n)) return fail(failed);
+        if (info.saved && (c.slot.present || had || listed) && !frondCards::writeSlot(dest, copySlot, n)) return fail(failed);
     }
     frondCards::LibraryLock libraryLock(library);
     if (!libraryLock.ok) return fail(frondCards::busyMessage());

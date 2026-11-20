@@ -16,6 +16,17 @@ internal object DanaSession {
         }
     } catch (_: IOException) { false }
 
+    // A portable folder's save, or a linked one with a card outside its machine folder's own card
+    // files (sd.frondsd, sd2.frondsd, ms.frondms), as dana-cards/ cards were before Cards. Copies
+    // refuse these.
+    fun independent(file: File): Boolean {
+        if (!wrapped(file)) return false
+        val header = inspect(file) ?: return true
+        if (header.portable) return true
+        val rows = Cards.linkedRows(file)
+        return rows.isEmpty() || rows.any { File(it.path).name != if (it.stick) "ms.frondms" else if (it.n == 1) "sd2.frondsd" else "sd.frondsd" }
+    }
+
     fun inspect(file: File): Header? = try {
         RandomAccessFile(file, "r").use { input ->
             if (input.length() !in 64..(512L shl 20)) return null

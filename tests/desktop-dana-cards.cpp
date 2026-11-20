@@ -99,7 +99,7 @@ class DanaCardsTest : public QObject {
         for (bool portable : {false,true}) {
             write(path,manifest(portable),portable);
             const auto inspection=frondDanaSession::inspect(path);
-            QVERIFY(inspection.valid); QCOMPARE(inspection.portable,portable); QCOMPARE(inspection.version,8u);
+            QVERIFY(inspection.valid && inspection.independent); QCOMPARE(inspection.portable,portable); QCOMPARE(inspection.version,8u);
             QVERIFY(frondSessions::openable(frondSessions::readHeader(path)));
             QVERIFY(!frondSessions::importFile(dir.path()+"/sessions",path).isEmpty());
             frondSessions::Info info; info.path=path; info.saved=true;
@@ -187,6 +187,68 @@ class DanaCardsTest : public QObject {
         QVERIFY(!frondCards::linkedRows(dir+"/Dana.frond")[0].inserted);
         QCOMPARE(frondCards::startAttachArgument(sessions,dir,0),frondCards::attachArgument(sessions,dir,0)+" ejected");
         QCOMPARE(frondCards::startAttachArgument(sessions,dir,1),frondCards::attachArgument(sessions,dir,1));
+    }
+    // A Dana whose save links the cards in its own folder duplicates with Link, Copy or No card. Each
+    // slot the save lists loads empty in the copy (swap), and a copied card goes in by path with its
+    // key, still ejected when the save had it ejected.
+    void duplicateDrawerCards() {
+        QTemporaryDir root; const auto sessions=root.filePath("sessions"), dir=sessions+"/Dana";
+        QVERIFY(QDir().mkpath(dir));
+        auto rows=manifest();
+        rows.replace("\"/cards/a.frondsd\"",frondCards::quotePath(dir+"/sd.frondsd").toUtf8());
+        rows.replace("\"/cards/b.frondsd\"",frondCards::quotePath(dir+"/sd2.frondsd").toUtf8());
+        write(dir+"/Dana.frond",rows);
+        const auto inspection=frondDanaSession::inspect(dir+"/Dana.frond");
+        QVERIFY(inspection.valid && !inspection.independent);
+        const QByteArray keys[2]={key,second};
+        QString ids[2];
+        for (int n=0;n<2;++n) {
+            ids[n]=n?"c2":"c1";
+            QVERIFY(QDir().mkpath(root.filePath("cards/"+ids[n])));
+            frondCards::Card card{ids[n],n?"Two":"One","sd",frondCards::now(),"Dana",32ll<<20,frondCards::newIdentity(),false};
+            card.key=QString(keys[n]);
+            QVERIFY(frondCards::writeCard(root.filePath("cards/"+ids[n]),card));
+            QFile file(dir+(n?"/sd2.frondsd":"/sd.frondsd")); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(QByteArray(64,char('a'+n))); file.close();
+            QVERIFY(frondCards::writeSlot(dir,{true,ids[n],{},card.name,false},n));
+        }
+        frondSessions::Info info; info.name="Dana"; info.path=dir+"/Dana.frond"; info.device="alphasmart-dana"; info.saved=true;
+        // Copy: new cards with the same keys, the files copied, card 1 back in ejected.
+        QString name;
+        QCOMPARE(frondSessions::duplicate(sessions,info,&name,{},frondSessions::CardChoice::copy),QString());
+        QCOMPARE(name,QString("Dana 2"));
+        const auto copy=sessions+"/Dana 2";
+        for (int n=0;n<2;++n) {
+            const auto slot=frondCards::readSlot(copy,n);
+            QVERIFY(slot.swap && !slot.card.isEmpty() && slot.card!=ids[n]);
+            frondCards::Card card; QVERIFY(frondCards::readCard(root.filePath("cards/"+slot.card),&card));
+            QCOMPARE(card.key,QString(keys[n]));
+            QVERIFY(QFileInfo(copy+(n?"/sd2.frondsd":"/sd.frondsd")).isFile());
+        }
+        QCOMPARE(frondCards::launchArguments(sessions,copy,true),QStringList{"--card-swap"});
+        QVERIFY(frondCards::startAttachArgument(sessions,copy,0).endsWith(" ejected"));
+        QVERIFY(frondCards::startAttachArgument(sessions,copy,0).startsWith(frondCards::quotePath(QFileInfo(copy+"/sd.frondsd").absoluteFilePath())));
+        QVERIFY(!frondCards::startAttachArgument(sessions,copy,1).endsWith(" ejected"));
+        // The first machine keeps its own cards.
+        QCOMPARE(frondCards::readSlot(dir,0).card,ids[0]); QCOMPARE(frondCards::readSlot(dir,1).card,ids[1]);
+        // No card: both slots empty and swapped.
+        QCOMPARE(frondSessions::duplicate(sessions,info,&name,{},frondSessions::CardChoice::none),QString());
+        for (int n=0;n<2;++n) {
+            const auto slot=frondCards::readSlot(sessions+'/'+name,n);
+            QVERIFY(slot.swap && slot.card.isEmpty() && slot.link.isEmpty());
+            QVERIFY(frondCards::cardFileIn(sessions+'/'+name,n).isEmpty());
+        }
+        // Link: the copy links the same cards and holds none.
+        QCOMPARE(frondSessions::duplicate(sessions,info,&name,{},frondSessions::CardChoice::link),QString());
+        for (int n=0;n<2;++n) {
+            const auto slot=frondCards::readSlot(sessions+'/'+name,n);
+            QVERIFY(slot.swap && slot.card.isEmpty()); QCOMPARE(slot.link,ids[n]);
+            QVERIFY(frondCards::cardFileIn(sessions+'/'+name,n).isEmpty());
+        }
+        // A save that links a card outside its folder still refuses.
+        auto outside=rows; outside.replace(frondCards::quotePath(dir+"/sd2.frondsd").toUtf8(),"\"/cards/b.frondsd\"");
+        write(dir+"/Dana.frond",outside);
+        QVERIFY(frondDanaSession::inspect(dir+"/Dana.frond").independent);
+        QVERIFY(frondSessions::duplicate(sessions,info).contains("independent cards"));
     }
     // dana-cards/ cards linked from a save move into the machine folder with their saved changes,
     // once, and never over a file; a card with an unfinished write stays where it is.

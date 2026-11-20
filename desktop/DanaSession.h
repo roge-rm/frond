@@ -5,7 +5,10 @@
 #include "device_profile5.h"
 
 namespace frondDanaSession {
-struct Header { bool wrapped{}, valid{}, portable{}; qint64 offset{}; quint32 version{}; QString device; };
+// `independent`: a portable folder's save, or one that links a card outside its machine folder's
+// own card files (sd.frondsd, sd2.frondsd, ms.frondms), as cards in dana-cards/ were before Cards.
+// Duplicate, Export and Import refuse those.
+struct Header { bool wrapped{}, valid{}, portable{}, independent{}; qint64 offset{}; quint32 version{}; QString device; };
 inline quint32 u32(const QByteArray& bytes, int at) {
     quint32 result=0;
     for (int i=0;i<4;++i) result |= quint32(uchar(bytes[at+i])) << (8*i);
@@ -28,6 +31,7 @@ inline Header inspect(const QString& path) {
     const auto magic=file.read(13);
     if (magic!="FRONDLINKSD1\n" && magic!="FRONDPORTSD1\n") return out;
     out.wrapped=true; out.portable=magic=="FRONDPORTSD1\n";
+    out.independent=true;
     if (file.size()<64 || file.size()>(512ll<<20)) return out;
     const auto descriptor=file.read(12);
     if (descriptor.size()!=12) return out;
@@ -39,6 +43,7 @@ inline Header inspect(const QString& path) {
     if (lines.last().isEmpty()) lines.removeLast();
     if (lines.size()<2 || lines.size()>3 || lines[0]!=(out.portable?"frond-portable-sd 3":"frond-linked-sd 3")) return out;
     QSet<QString> seenSlots, keys, serials;
+    bool outside=false;
     const QRegularExpression word(QStringLiteral("\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s]+"));
     for (int i=1;i<lines.size();++i) {
         QStringList fields;
@@ -52,6 +57,13 @@ inline Header inspect(const QString& path) {
         seenSlots.insert(id); keys.insert(key); serials.insert(key.left(8));
         if (out.portable) { if (fields[2]!=(id=="0"?"sd0.frondsd":"sd2.frondsd")) return out; }
         else if (!fields[2].startsWith("\"/") || !fields[2].endsWith('"')) return out;
+        if (!out.portable) {
+            QString path;
+            const auto quoted=fields[2].mid(1,fields[2].size()-2);
+            for (int c=0;c<quoted.size();++c) { if (quoted[c]=='\\' && c+1<quoted.size()) ++c; path+=quoted[c]; }
+            const auto own=id=="0"?"sd.frondsd":id=="2"?"sd2.frondsd":"ms.frondms";
+            if (path.section('/',-1)!=QLatin1String(own)) outside=true;
+        }
         bool ok=false;
         const auto serial=fields[4].toULongLong(&ok);
         if (!ok || serial!=key.left(8).toULongLong(nullptr,16) ||
@@ -76,6 +88,7 @@ inline Header inspect(const QString& path) {
         !linkedCards(machine.mid(8,32).split('\0').first())) return out;
     out.device=QString::fromLatin1(machine.mid(8,32).split('\0').first());
     out.version=u32(machine,4); out.valid=true;
+    out.independent=out.portable || outside;
     return out;
 }
 }
