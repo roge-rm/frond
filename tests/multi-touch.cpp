@@ -125,8 +125,9 @@ static void arm(DeviceType5 type, DeviceArt art, int w, int h) {
         assert((guest.keys() == Keys{{from,true},{app,true}}));
         finger(SDL_FINGERUP, 9, a.first, a.second);
         assert((guest.keys() == Keys{{app,false}}));
+        // The new direction goes down before the old one comes up.
         finger(SDL_FINGERMOTION, 8, t.first, t.second);
-        assert((guest.keys() == Keys{{from,false},{to,true}}));
+        assert((guest.keys() == Keys{{to,true},{from,false}}));
         // Rolling onto the screen lets go without a pen stroke.
         finger(SDL_FINGERMOTION, 8, 100, 100);
         assert((guest.keys() == Keys{{to,false}}) && guest.pens().empty());
