@@ -424,26 +424,41 @@ struct Probe {
         const uint32_t cycles = uint32_t(deferredCycles);
         const uint32_t hclk = uint32_t(deferredHclk);
         deferredCycles = deferredHclk = 0;
-        auto status = advanceGraphicsCpu(cycles, peripherals.cpuReferencePeriod(quietMode));
-        if (status == Imx1BootstrapAccess::ok) {
-            if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-            peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
-            status = peripherals.clockStatus();
-        }
-        // The wait clocks as cs5Wait charges them, in pieces of at most one transaction.
-        if (status == Imx1BootstrapAccess::ok && hclk) {
+        const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
+        Imx1BootstrapAccess status;
+        if (!hclk) {
+            status = advanceGraphicsCpu(cycles, cpuPeriod);
+            if (status == Imx1BootstrapAccess::ok) {
+                if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
+                peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
+                status = peripherals.clockStatus();
+            }
+        } else {
+            // Wait clocks come only from Fast's lean path and JIT, inside a quiet span, where nothing in the graphics
+            // chip changes: it takes the cycles and then the wait clocks (as cs5Wait charges them, in pieces of at
+            // most one transaction) in one advance, and then the board takes both.
             const auto bus = peripherals.busReferencePeriod();
-            const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
-            peripherals.advanceHclkCycles(hclk);
-            status = advanceGraphics([&](Imx1Cs5Configuration& c) {
-                for (uint32_t left = hclk; left;) {
-                    const uint32_t chunk = std::min(left, Imx1Cs5Bus::timeoutClocks);
-                    c.advanceBusCycles(chunk, bus, cpuPeriod);
-                    left -= chunk;
-                }
-            });
-            if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-            if (status == Imx1BootstrapAccess::ok) status = peripherals.clockStatus();
+            if (!peripherals.referenceChargeSupported(uint64_t(cycles) * cpuPeriod.numerator, cpuPeriod.denominator) ||
+                !cs5Configuration.referencePeriodSupported(cpuPeriod))
+                status = Imx1BootstrapAccess::sideEffect;
+            else
+                status = advanceGraphics([&](Imx1Cs5Configuration& c) {
+                    c.advanceCpuCycles(cycles, cpuPeriod);
+                    for (uint32_t left = hclk; left;) {
+                        const uint32_t chunk = std::min(left, Imx1Cs5Bus::timeoutClocks);
+                        c.advanceBusCycles(chunk, bus, cpuPeriod);
+                        left -= chunk;
+                    }
+                });
+            if (status == Imx1BootstrapAccess::ok) {
+                if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
+                peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
+                status = peripherals.clockStatus();
+            }
+            if (status == Imx1BootstrapAccess::ok) {
+                peripherals.advanceHclkCycles(hclk);
+                status = peripherals.clockStatus();
+            }
         }
         if (status == Imx1BootstrapAccess::ok) return true;
         if (graphicsWireStatus == Imx1BootstrapAccess::ok) graphicsWireStatus = status;
