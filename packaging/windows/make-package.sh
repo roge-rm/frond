@@ -7,7 +7,9 @@ DIR=out/Frond
 rm -rf "$DIR"
 mkdir -p "$DIR"
 cp build/desktop/frond-desktop.exe "$DIR/frond-desktop.exe"
-cp out/frond.exe out/frond-68k.exe "$DIR/"
+ls -l out core/src/uarm/cp-uarm.exe core/src/cloudpilot/frond-68k.exe || true
+cp core/src/uarm/cp-uarm.exe "$DIR/frond.exe"
+cp core/src/cloudpilot/frond-68k.exe "$DIR/frond-68k.exe"
 cp LICENSE README.md "$DIR/" 2>/dev/null || true
 [ -d licences ] && cp -R licences "$DIR/licences"
 # Qt's DLLs and plugins.
