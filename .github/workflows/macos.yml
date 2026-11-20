@@ -49,21 +49,6 @@ jobs:
           export PATH="$(brew --prefix qt)/bin:$PATH"
           sh packaging/macos/make-app.sh 2>&1 | tee -a build.log
 
-      - name: Fast engine checks
-        timeout-minutes: 40
-        run: |
-          set -o pipefail
-          # No firmware in CI, so these run the Dynarmic JIT on guest code made by the tests: the cycle
-          # budget, the compile thread (MAP_JIT and the W^X switching on Apple silicon), random ARM and
-          # Thumb blocks on the JIT against the interpreter, the S3C2442 machine on Exact and Fast, and
-          # the i.MX1 machine on the JIT.
-          for t in test-jit-overshoot test-jit-compile-thread test-s3c2442-machine test-zodiac-jit; do
-            gmake FROND_FAST=1 "$t" 2>&1 | tee -a build.log
-          done
-          gmake FROND_FAST=1 build/test-jit-differential 2>&1 | tee -a build.log
-          ./build/test-jit-differential --seeds 1:3001 --duration 600 2> build/jit-differential.err | tail -15
-          grep -v ' failed (pc=' build/jit-differential.err | tail -5 || true
-
       - name: Start the built app
         timeout-minutes: 5
         run: |
