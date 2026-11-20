@@ -746,8 +746,9 @@ bool gFastEngineMissing = false;
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
         } else if (board == DeviceBoard5::s3c2442Rx1950) {
-            if (options.gdbPort || options.experimentalFastAudio || options.lowLatencyQueue) {
-                cerr << "--gdb and the low-latency audio options are not available on the rx1950" << endl;
+            // Low-latency audio is --low-latency-queue only: the --fast-audio preview is for Palm OS firmware.
+            if (options.gdbPort || options.experimentalFastAudio) {
+                cerr << "--gdb and --fast-audio are not available on the rx1950" << endl;
                 return false;
             }
             // Its machine sets the engine itself, below.

@@ -26,6 +26,17 @@ class Rx1950FirmwareTest {
         assertTrue(PalmButton.CENTRE in PalmButton.on(rx1950))
     }
 
+    // Low-latency audio is the shorter queue only: no qualified firmware, so never the preview.
+    @Test fun lowLatencyIsQueueOnly() {
+        assertTrue(rx1950.lowLatencyAudio)
+        assertFalse(rx1950.fastAudio)
+        assertFalse(Firmware.fastAudioQualified(rx1950, null, sized(rx1950.norSize)))
+        val arguments = MachineSettings(fastAudio = true).audioArguments(rx1950.lowLatencyAudio, 512) {
+            Firmware.fastAudioQualified(rx1950, null, sized(rx1950.norSize))
+        }
+        assertEquals(listOf("--low-latency-queue", "--audio-period", "512"), arguments)
+    }
+
     @Test fun detectedByTheBootloaderSize() {
         assertEquals(rx1950, Firmware.detect(sized(Firmware.RX1950_CEBL.bytes)))
     }

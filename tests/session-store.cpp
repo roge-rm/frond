@@ -872,6 +872,11 @@ class SessionStoreTest : public QObject {
         QVERIFY(!frondAudio::qualified(e3, {}, {}));
         QCOMPARE(frondAudio::lowLatencyOption(e3, {}, {}), QString("--low-latency-queue"));
         QVERIFY(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-iiix"), {}, {}).isEmpty());
+        // The rx1950 has no preview, only the queue limits.
+        const auto rx1950 = frondFirmware::deviceFromId("hp-ipaq-rx1950");
+        QVERIFY(frondAudio::lowLatencyAvailable(rx1950));
+        QVERIFY(!frondAudio::qualified(rx1950, {}, {}));
+        QCOMPARE(frondAudio::lowLatencyOption(rx1950, {}, {}), QString("--low-latency-queue"));
         QVERIFY(frondAudio::lowLatencyOption(frondFirmware::Device::automatic, {}, {}).isEmpty());
     }
     void variantNorDigest() {
