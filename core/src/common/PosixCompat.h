@@ -91,6 +91,15 @@ inline bool IsAbsolutePath(std::string_view path) {
 #endif
 }
 
+// Whether a path is absolute on either Linux or Windows, for saved paths a session may have been
+// written with on the other host. A card at such a path is dropped later if it isn't there.
+inline bool IsAbsolutePathAnyHost(std::string_view path) {
+    const auto separator = [](char c) { return c == '/' || c == '\\'; };
+    if (!path.empty() && separator(path[0])) return true;
+    return path.size() >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+           path[1] == ':' && separator(path[2]);
+}
+
 // Reserves length bytes of the file like posix_fallocate: 0, ENOSPC when full, or another error
 // number where the file system can't (the caller then writes the bytes).
 inline int Preallocate(int fd, uint64_t length) {

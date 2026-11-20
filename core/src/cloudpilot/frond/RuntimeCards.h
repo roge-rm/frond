@@ -265,7 +265,7 @@ class RuntimeCards {
             std::istringstream row(line); unsigned id,protect,insert; uint64_t size,serial,dev,ino,mtime,history;
             std::string kind,path,key,extra,protocol="sd";
             if(!(row>>id>>kind>>std::quoted(path)>>key>>serial>>size>>protect>>insert>>dev>>ino>>mtime) || (v2 && !(row>>protocol>>history)) || (protocol!="sd" && protocol!="mmc") || row>>extra ||
-                (id!=0 && id!=1 && id!=2) || kind!=(id==1?"ms":"sd") || !frondPosix::IsAbsolutePath(path) || path.size()>4096 ||
+                (id!=0 && id!=1 && id!=2) || kind!=(id==1?"ms":"sd") || !frondPosix::IsAbsolutePathAnyHost(path) || path.size()>4096 ||
                 path.find_first_of("\r\n")!=std::string::npos || key.size()!=32 ||
                 key.find_first_not_of("0123456789abcdef")!=std::string::npos || protect>1 || insert>1 ||
                 (id==1 ? (protocol!="sd" || !StickSlot() || !ValidStickBytes(deviceType,size)) : !ValidGeometry(deviceType,id,protocol,size)) ||
