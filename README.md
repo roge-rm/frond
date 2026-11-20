@@ -127,11 +127,11 @@ While a machine runs, the bar along the top has Applications, Storage, Sound, Po
 
 ## Settings
 
-<img src="doc/images/desktop-edit-settings.png" width="200" alt="Edit settings with the Speed list open, Original or Uncapped">
+<img src="doc/images/desktop-edit-settings.png" width="200" alt="Edit settings with the Speed list open">
 
 Each machine has its own display, sound, speed and connection settings. Set them when you add it, or with Edit settings while it's stopped. On Android most of them are in the Display sheet while it runs too.
 
-- Speed is Original or Uncapped. Original runs the machine at its real speed, and Uncapped lets your computer or phone run it as fast as it can.
+- Speed is Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k Palms stop at 4×). Original runs the machine at its real speed, the others run it that many times faster, and Uncapped lets your computer or phone run it as fast as it can.
 - Engine is Exact or Fast. Fast is the JIT, and the 68k machines only have Exact.
 
 See [Settings](doc/using-frond.md#settings).
