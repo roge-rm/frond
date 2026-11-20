@@ -26,7 +26,11 @@ READLINE_LIBS =
 endif
 
 # Libraries every core binary needs beyond SDL2 and slirp.
-PLATFORM_LIBS = $(if $(filter windows,$(HOST_OS)),-lws2_32 -liphlpapi -lbcrypt -Wl,--wrap=rename)
+PLATFORM_LIBS =
+ifeq ($(HOST_OS),windows)
+# rename wraps to a version that replaces an existing file (winshim/stdio.h).
+PLATFORM_LIBS = -lws2_32 -liphlpapi -lbcrypt -Wl,--wrap=rename
+endif
 
 # Boost headers for Dynarmic's interface (jit_dynarmic.cpp). On the default path on Linux and in
 # MSYS2; Homebrew's prefix is not on clang's.

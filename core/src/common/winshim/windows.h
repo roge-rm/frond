@@ -9,3 +9,10 @@
 #define _WIN32_WINNT 0x0A00
 #endif
 #include_next <windows.h>
+// Names the core and the desktop use as variables.
+#ifdef far
+#undef far
+#endif
+#ifdef near
+#undef near
+#endif
