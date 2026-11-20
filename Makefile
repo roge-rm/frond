@@ -2487,7 +2487,7 @@ test-zodiac-cs5-configuration: build/zodiac-boot-probe
 .PHONY: test-zodiac-virtual-graphics
 test-zodiac-virtual-graphics: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-virtual-graphics.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-virtual-graphics.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-virtual-graphics
 	./build/test-zodiac-virtual-graphics
 	python3 tests/zodiac-virtual-graphics.py
@@ -2495,7 +2495,7 @@ test-zodiac-virtual-graphics: build/zodiac-boot-probe
 .PHONY: test-zodiac-graphics-gpio
 test-zodiac-graphics-gpio: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-gpio.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-gpio.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-gpio
 	./build/test-zodiac-graphics-gpio
 	python3 tests/zodiac-graphics-slot-gpio.py
@@ -2503,28 +2503,28 @@ test-zodiac-graphics-gpio: build/zodiac-boot-probe
 .PHONY: test-zodiac-graphics-memory
 test-zodiac-graphics-memory: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-memory.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-memory.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-memory
 	./build/test-zodiac-graphics-memory
 
 .PHONY: test-zodiac-graphics-controller
 test-zodiac-graphics-controller: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-controller.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-controller.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-controller
 	./build/test-zodiac-graphics-controller
 
 .PHONY: test-zodiac-graphics-engine
 test-zodiac-graphics-engine: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-engine.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-engine.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-engine
 	./build/test-zodiac-graphics-engine
 
 .PHONY: test-zodiac-graphics-commands
 test-zodiac-graphics-commands: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-commands.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-commands.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-commands
 	./build/test-zodiac-graphics-commands
 
@@ -2532,14 +2532,14 @@ test-zodiac-graphics-commands: build/zodiac-boot-probe
 # The host GPU path against the CPU model; skipped (77) on a host with no usable GPU.
 test-zodiac-graphics-gpu: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pthread \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-gpu.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-gpu.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-gpu
 	./build/test-zodiac-graphics-gpu; status=$$?; [ $$status = 0 ] || [ $$status = 77 ]
 
 .PHONY: test-zodiac-graphics-a4
 test-zodiac-graphics-a4: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-a4.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-a4.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-a4
 	./build/test-zodiac-graphics-a4
 	python3 tests/zodiac-graphics-a4.py
@@ -2559,7 +2559,7 @@ test-zodiac-graphics-plain-copy: build/zodiac-boot-probe
 .PHONY: test-zodiac-graphics-display
 test-zodiac-graphics-display: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-display.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-display.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-display
 	./build/test-zodiac-graphics-display
 
@@ -2567,7 +2567,7 @@ test-zodiac-graphics-display: build/zodiac-boot-probe
 .PHONY: test-zodiac-video
 test-zodiac-video: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-video.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-video.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-video
 	./build/test-zodiac-video
 
@@ -2579,7 +2579,7 @@ test-zodiac-graphics-clocks: build/zodiac-boot-probe
 # CS5 asynchronous external acknowledge and guest-clock transaction checks.
 .PHONY: test-zodiac-cs5-bus
 test-zodiac-cs5-bus: build/zodiac-boot-probe
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/zodiac-cs5-bus.cpp \
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/common tests/zodiac-cs5-bus.cpp \
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp \
 		core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp -o build/test-zodiac-cs5-bus
