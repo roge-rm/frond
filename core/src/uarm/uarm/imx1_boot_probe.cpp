@@ -453,11 +453,7 @@ struct Probe {
                 });
             if (status == Imx1BootstrapAccess::ok) {
                 if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-                peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
-                status = peripherals.clockStatus();
-            }
-            if (status == Imx1BootstrapAccess::ok) {
-                peripherals.advanceHclkCycles(hclk);
+                peripherals.advanceCpuThenHclk(cycles, quietMode, options.assumeMpllSettled, hclk);
                 status = peripherals.clockStatus();
             }
         }
