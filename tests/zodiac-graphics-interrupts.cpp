@@ -30,10 +30,15 @@ int main() {
     assert(state.interruptOutput() == Imx1GpioLine::clear);
     state.observeDisplay(true, true);
     assert(state.interruptOutput() == Imx1GpioLine::asserted);
-    for (auto mask : {0x50u, 0x02000000u, 0x02000051u}) {
+    for (auto mask : {0x02000000u, 0x02000051u}) {
         access(state, false, true, mask, A::externalInput);
         assert(access(state, false, false) == 1 && access(state, true, false) == 1);
     }
+    // The USB driver's group (0x50) is taken at this store, as the wake set-up writes it.
+    access(state, false, true, 0x51);
+    assert(access(state, false, false) == 0x51);
+    access(state, false, true, 1);
+    assert(access(state, false, false) == 1 && access(state, true, false) == 1);
     access(state, false, true, 2, A::reservedBits);
     access(state, true, true, 2, A::reservedBits);
     state.reset();

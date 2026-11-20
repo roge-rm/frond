@@ -33,8 +33,7 @@ TEST_KILL_GRACE ?= 10
 export TEST_KILL_GRACE
 test: SHELL = $(CURDIR)/tests/timed-shell.sh
 test-%: SHELL = $(CURDIR)/tests/timed-shell.sh
-test: export TEST_TIMEOUT
-test-%: export TEST_TIMEOUT
+export TEST_TIMEOUT
 test: export TEST_NAME = $@
 test-%: export TEST_NAME = $@
 # make recheck-list shows which checks need running (changed paths, failed, never passed),
@@ -50,6 +49,8 @@ out/% build/% core/% vendor/%: SHELL = /bin/sh
 test-desktop: export TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
 test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: export TEST_TIMEOUT = 1800
+# Card store checks bound by the disk: 230 to 300 s alone on a busy hard drive.
+test-ms-logical-equivalence test-card-backing: export TEST_TIMEOUT = 900
 # Two Zodiacs in Exact for the InkStorm chat.
 test-zodiac-bluetooth: export TEST_TIMEOUT = 2400
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
@@ -610,7 +611,7 @@ test-keyboard: out/frond
 
 .PHONY: test-host-network
 test-host-network: prepare
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm \
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common \
 		tests/host-network.cpp core/src/uarm/uarm/HostNetwork.cpp -pthread -o build/test-host-network
 	./build/test-host-network
 
@@ -747,11 +748,11 @@ core/src/common/libcommon.a:
 
 .PHONY: test-network-reliability
 test-network-reliability: prepare
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm \
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common \
 		tests/network-reliability.cpp core/src/uarm/uarm/HostNetwork.cpp \
 		-pthread -o build/test-network-reliability
 	./build/test-network-reliability
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm \
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common \
 		tests/network-dns.cpp core/src/uarm/uarm/HostNetwork.cpp \
 		-Wl,--wrap=getaddrinfo -Wl,--wrap=freeaddrinfo -pthread -o build/test-network-dns
 	./build/test-network-dns
@@ -1457,7 +1458,7 @@ test-bluetooth: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/bluetooth-bootstrap.cpp core/src/common/libcommon.a -lz -o build/test-bluetooth-bootstrap
 	./build/test-bluetooth-bootstrap
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm \
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common \
 		tests/bluetooth-backend.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-bluetooth-backend
 	./build/test-bluetooth-backend
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
@@ -1849,7 +1850,7 @@ test: test-csr-bcsp
 test-csr-bcsp: out/frond
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Icore/src/uarm/uarm tests/bcsp-transport.cpp core/src/uarm/uarm/BcspTransport.cpp -o build/test-csr-bcsp-transport
 	./build/test-csr-bcsp-transport
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Icore/src/uarm/uarm tests/csr-backpressure.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-backpressure
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Icore/src/uarm/uarm -Icore/src/common tests/csr-backpressure.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-backpressure
 	./build/test-csr-backpressure
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-bcsp-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-bcsp-board.cpp @build/csr-bcsp-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-csr-bcsp-board
@@ -1858,7 +1859,7 @@ test-csr-bcsp: out/frond
 
 .PHONY: test-csr-bcsp-lifetime
 test-csr-bcsp-lifetime: prepare
-	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Icore/src/uarm/uarm tests/csr-bcsp-lifetime.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-bcsp-lifetime
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Icore/src/uarm/uarm -Icore/src/common tests/csr-bcsp-lifetime.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-bcsp-lifetime
 	./build/test-csr-bcsp-lifetime
 
 .PHONY: test-csr-peer-services
@@ -1866,7 +1867,7 @@ test: test-csr-peer-services
 test-csr-peer-services: out/frond
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Icore/src/uarm/uarm tests/csr-peer-services.cpp core/src/uarm/uarm/BcspTransport.cpp -o build/test-csr-peer-services
 	./build/test-csr-peer-services
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
 	./build/test-csr-peer-radio-state
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-peer-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @build/csr-peer-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
@@ -1890,11 +1891,11 @@ test: test-csr-controller-lifecycle
 test-csr-controller-lifecycle: out/frond
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/csr-controller-reset.cpp -o build/test-csr-controller-reset
 	./build/test-csr-controller-reset
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/csr-controller-lifecycle.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-controller-lifecycle
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/common tests/csr-controller-lifecycle.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-controller-lifecycle
 	./build/test-csr-controller-lifecycle
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/csr-peer-services.cpp core/src/uarm/uarm/BcspTransport.cpp -o build/test-csr-peer-services
 	./build/test-csr-peer-services
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
 	./build/test-csr-peer-radio-state
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-controller-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @build/csr-controller-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
@@ -2490,7 +2491,7 @@ test-zodiac-cs5-configuration: build/zodiac-boot-probe
 .PHONY: test-zodiac-virtual-graphics
 test-zodiac-virtual-graphics: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-virtual-graphics.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-virtual-graphics.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-virtual-graphics
 	./build/test-zodiac-virtual-graphics
 	python3 tests/zodiac-virtual-graphics.py
@@ -2498,7 +2499,7 @@ test-zodiac-virtual-graphics: build/zodiac-boot-probe
 .PHONY: test-zodiac-graphics-gpio
 test-zodiac-graphics-gpio: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-gpio.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-gpio.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-gpio
 	./build/test-zodiac-graphics-gpio
 	python3 tests/zodiac-graphics-slot-gpio.py
@@ -2506,28 +2507,28 @@ test-zodiac-graphics-gpio: build/zodiac-boot-probe
 .PHONY: test-zodiac-graphics-memory
 test-zodiac-graphics-memory: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-memory.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-memory.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-memory
 	./build/test-zodiac-graphics-memory
 
 .PHONY: test-zodiac-graphics-controller
 test-zodiac-graphics-controller: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-controller.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-controller.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-controller
 	./build/test-zodiac-graphics-controller
 
 .PHONY: test-zodiac-graphics-engine
 test-zodiac-graphics-engine: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-engine.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-engine.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-engine
 	./build/test-zodiac-graphics-engine
 
 .PHONY: test-zodiac-graphics-commands
 test-zodiac-graphics-commands: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-commands.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-commands.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-commands
 	./build/test-zodiac-graphics-commands
 
@@ -2535,14 +2536,14 @@ test-zodiac-graphics-commands: build/zodiac-boot-probe
 # The host GPU path against the CPU model; skipped (77) on a host with no usable GPU.
 test-zodiac-graphics-gpu: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pthread \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-gpu.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-gpu.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-gpu
 	./build/test-zodiac-graphics-gpu; status=$$?; [ $$status = 0 ] || [ $$status = 77 ]
 
 .PHONY: test-zodiac-graphics-a4
 test-zodiac-graphics-a4: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-a4.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-a4.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-a4
 	./build/test-zodiac-graphics-a4
 	python3 tests/zodiac-graphics-a4.py
@@ -2562,7 +2563,7 @@ test-zodiac-graphics-plain-copy: build/zodiac-boot-probe
 .PHONY: test-zodiac-graphics-display
 test-zodiac-graphics-display: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-graphics-display.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-display.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-display
 	./build/test-zodiac-graphics-display
 
@@ -2570,7 +2571,7 @@ test-zodiac-graphics-display: build/zodiac-boot-probe
 .PHONY: test-zodiac-video
 test-zodiac-video: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-video.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-video.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-video
 	./build/test-zodiac-video
 
@@ -2582,7 +2583,7 @@ test-zodiac-graphics-clocks: build/zodiac-boot-probe
 # CS5 asynchronous external acknowledge and guest-clock transaction checks.
 .PHONY: test-zodiac-cs5-bus
 test-zodiac-cs5-bus: build/zodiac-boot-probe
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/zodiac-cs5-bus.cpp \
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/common tests/zodiac-cs5-bus.cpp \
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp \
 		core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp -o build/test-zodiac-cs5-bus

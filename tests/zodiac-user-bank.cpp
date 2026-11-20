@@ -141,8 +141,8 @@ void faults(Machine& exact, Machine& fast) {
             m->reset(mode); cpuSetReg(m->cpu, base, data);
             m->word(code, instruction(load, am, base, list));
             for (unsigned n = 0; n < 15; ++n) m->word(start + n * 4, 0x34560000 + n);
-            // The shared interpreter visits decreasing address modes from high to low.
-            m->fault = start + ((am & 1) ? fail : 14 - fail) * 4;
+            // Every address mode goes from the lowest address up, as the ARM920T does.
+            m->fault = start + fail * 4;
             m->step();
             assert(m->psr() == 0xa00000d7 && m->spsr() == (0xa00000c0 | mode));
             assert(m->reg(15) == 0x10 && m->reg(14) == code + 8 && m->accesses.size() == fail);

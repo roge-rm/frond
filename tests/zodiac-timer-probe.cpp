@@ -5,9 +5,10 @@
 #include <vector>
 
 #include "imx1_boot_probe.h"
+#include "xscale_cost.h"
 
 namespace {
-struct Trace { std::vector<Imx1ProbeAccess> bus; };
+struct Trace { std::vector<Imx1ProbeAccess> bus; std::vector<Imx1ProbeTrace> instructions; };
 void access(void* context, const Imx1ProbeAccess& entry) {
     static_cast<Trace*>(context)->bus.push_back(entry);
 }
@@ -16,7 +17,8 @@ void load(std::vector<uint32_t>& words, unsigned reg, uint32_t value) {
     words.push_back(0xea000000);
     words.push_back(value);
 }
-Imx1ProbeResult run(const std::vector<uint32_t>& words, Trace& trace, bool fast = false, bool assumeSettled = false, bool assumeSystem = false, uint32_t steps = 30000) {
+Imx1ProbeResult run(const std::vector<uint32_t>& words, Trace& trace, bool fast = false, bool assumeSettled = false, bool assumeSystem = false, uint32_t steps = 30000,
+                    bool instructions = false) {
     Imx1ProbeOptions options{};
     options.bootstrapPeripherals = true;
     options.rtcInitialTimeKnown = true;
@@ -25,7 +27,10 @@ Imx1ProbeResult run(const std::vector<uint32_t>& words, Trace& trace, bool fast 
     options.busObserver = access;
     options.busContext = &trace;
     return imx1BootProbe(reinterpret_cast<const uint8_t*>(words.data()), words.size() * 4,
-                          Imx1ProbeEntry::physicalFlash, steps, nullptr, nullptr, fast, &options);
+                          Imx1ProbeEntry::physicalFlash, steps,
+                          instructions ? [](void* p, const Imx1ProbeTrace& t) { static_cast<Trace*>(p)->instructions.push_back(t); }
+                                       : Imx1ProbeObserver(nullptr),
+                          &trace, fast, &options);
 }
 }  // namespace
 
@@ -38,14 +43,18 @@ int main() {
     words.push_back(0xe5902010); words.push_back(0xe3520004); words.push_back(0x3afffffc);
     words.push_back(0xe7f000f0);
     Trace exact;
-    const auto a = run(words, exact);
+    const auto a = run(words, exact, false, false, false, 30000, true);
     assert(a.stop == Imx1ProbeStop::unsupportedInstruction && a.trace.instruction == 0xe7f000f0);
     uint32_t enabledAt = 0, reads = 0;
     for (const auto& entry : exact.bus) {
         assert(entry.status == Imx1BootstrapAccess::ok);
         if (entry.write && entry.address == 0x00202000) enabledAt = entry.step;
         if (!entry.write && entry.address == 0x00202010) {
-            assert(entry.value == (entry.step - enabledAt) / 32);
+            // A count every 32 CPU cycles: the ARM920T cost of the instructions run since the enable.
+            uint64_t cycles = 0;
+            for (const auto& t : exact.instructions)
+                if (t.step >= enabledAt && t.step < entry.step) cycles += cost::armCost(t.instruction, cost::Core::arm920t);
+            assert(entry.value == cycles / 32);
             ++reads;
         }
     }

@@ -377,6 +377,9 @@ struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t g
 void tg50ucGpioSetInState(struct TG50uc *uc, unsigned port, unsigned pin, bool hi)
 {
 	if (port >= 4 || pin >= 16) return;
+	// An unchanged pin leaves the port as it is: a recalc would still move prevState, and the battery
+	// setting is put back after every load.
+	if (!(uc->port[port].inputs & (1u << pin)) == !hi) return;
 	if (hi)
 		uc->port[port].inputs |= 1 << pin;
 	else
