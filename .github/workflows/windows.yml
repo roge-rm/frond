@@ -4,11 +4,17 @@ name: Windows
 
 on:
   workflow_dispatch:
+    inputs:
+      build_run:
+        description: "Run id whose built programs (exes-windows) to package, skipping the build"
+        required: false
+        default: ""
   push:
     branches: [ci/desktop-ports-windows]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -46,19 +52,37 @@ jobs:
             qt6-imageformats:p
 
       - name: Build the cores
+        if: inputs.build_run == ''
         run: |
           set -o pipefail
           make -j4 BUILD_JOBS=4 out/frond out/frond-68k 2>&1 | tee build.log
           ls -l out
 
       - name: Build the desktop
-        if: always()
+        if: always() && inputs.build_run == ''
         continue-on-error: true
         run: |
           set -o pipefail
           cmake -S desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DFROND_PREPARED_SOURCE="$PWD/core" 2>&1 | tee -a build.log
           cmake --build build/desktop --target frond-desktop -- -k 0 2>&1 | tee -a build.log
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.build_run == ''
+        with:
+          name: exes-windows
+          path: |
+            out/frond.exe
+            out/frond-68k.exe
+            build/desktop/frond-desktop.exe
+          if-no-files-found: warn
+
+      - uses: actions/download-artifact@v4
+        if: inputs.build_run != ''
+        with:
+          name: exes-windows
+          run-id: ${{ inputs.build_run }}
+          github-token: ${{ github.token }}
 
       - name: Install Inno Setup
         shell: pwsh
@@ -92,7 +116,7 @@ jobs:
       # While the Windows port is unfinished: compile every core source on its own, so the log lists
       # all the errors and not only the first library to fail.
       - name: Compile errors across the cores
-        if: always()
+        if: always() && inputs.build_run == ''
         continue-on-error: true
         run: |
           make -k -j4 -C core/src/common bin 2>&1 | tee -a build.log || true

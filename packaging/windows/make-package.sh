@@ -2,6 +2,9 @@
 # Builds out/Frond-VERSION-windows-x64.zip and, with Inno Setup, out/Frond-VERSION-setup.exe, in MSYS2 UCRT64.
 # Run from the repository root after out/frond.exe, out/frond-68k.exe and build/desktop/frond-desktop.exe exist.
 set -eu
+for f in out/frond.exe out/frond-68k.exe build/desktop/frond-desktop.exe; do
+    [ -f "$f" ] || { echo "make-package: $f is missing, build it first"; exit 1; }
+done
 
 VERSION=$(head -n 1 VERSION)
 DIR=out/package/Frond  # not out/Frond: MSYS would match out/frond.exe
