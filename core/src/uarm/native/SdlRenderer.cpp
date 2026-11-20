@@ -114,6 +114,7 @@ SdlRenderer::~SdlRenderer() {
     SDL_DestroyTexture(intermediateTexture);
     SDL_DestroyTexture(silkscreenTexture);
     SDL_DestroyTexture(controlsTexture);
+    SDL_DestroyTexture(sidebarTexture);
     SDL_DestroyRenderer(renderer);
 }
 
@@ -261,7 +262,7 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
     if(controls.count) {
         // Controls all beside the screen leave nothing to draw under it.
         if(!deviceControlsUnits(controls,controlView)) {
-            drawDeviceSidebar(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView,stick);
+            DrawSidebar(controls,screenWidth,screenHeight,buttons,stick,controlsChanged);
             SDL_RenderPresent(renderer);
             return;
         }
@@ -288,9 +289,64 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
         } else drawDeviceControls(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView,stick);
         // A jog panel beside the screen or the buttons is drawn straight on the window, after the strip
         // so the strip's texture can't cover the part beside the buttons.
-        if(controls.sideTabWidth>0) drawDeviceSidebar(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView,stick);
+        if(controls.sideTabWidth>0) DrawSidebar(controls,screenWidth,screenHeight,buttons,stick,controlsChanged);
     }
     SDL_RenderPresent(renderer);
+}
+
+// The panels beside the screen, painted into a viewport-sized texture only when a key, the stick or the LED
+// changes, and copied over the window on every other draw. Straight on the window if the texture can't be made.
+void SdlRenderer::DrawSidebar(const DeviceControlProfile& controls, int screenWidth, int screenHeight,
+                              DeviceKeyMask buttons, DeviceStick stick, bool changed) {
+    // The texture covers the viewport in output pixels (the whole window when there is no fit viewport).
+    int w = 0, h = 0;
+    {
+        float vsx, vsy;
+        SDL_RenderGetScale(renderer, &vsx, &vsy);
+        SDL_RenderSetScale(renderer, 1, 1);
+        SDL_Rect viewport{};
+        SDL_RenderGetViewport(renderer, &viewport);
+        SDL_RenderSetScale(renderer, vsx, vsy);
+        w = viewport.w;
+        h = viewport.h;
+        if (w <= 0 || h <= 0) w = h = 0;
+    }
+    if (sidebarTexture && (w != sidebarWidth || h != sidebarHeight)) {
+        SDL_DestroyTexture(sidebarTexture);
+        sidebarTexture = nullptr;
+    }
+    if (!sidebarTexture && w && h) {
+        sidebarTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET, w, h);
+        if (sidebarTexture) SDL_SetTextureBlendMode(sidebarTexture, SDL_BLENDMODE_BLEND);
+        sidebarWidth = w;
+        sidebarHeight = h;
+        sidebarPainted = false;
+    }
+    if (!sidebarTexture) {
+        drawDeviceSidebar(renderer, controls, screenWidth, screenHeight, scale, buttons, controlView, stick);
+        return;
+    }
+    if (!sidebarPainted || changed) {
+        float sx, sy;
+        SDL_RenderGetScale(renderer, &sx, &sy);
+        if (SDL_SetRenderTarget(renderer, sidebarTexture) != 0) {
+            drawDeviceSidebar(renderer, controls, screenWidth, screenHeight, scale, buttons, controlView, stick);
+            return;
+        }
+        SDL_RenderSetScale(renderer, sx, sy);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+        SDL_RenderClear(renderer);
+        drawDeviceSidebar(renderer, controls, screenWidth, screenHeight, scale, buttons, controlView, stick);
+        SDL_SetRenderTarget(renderer, nullptr);
+        SDL_RenderSetScale(renderer, sx, sy);
+        sidebarPainted = true;
+    }
+    float sx, sy;
+    SDL_RenderGetScale(renderer, &sx, &sy);
+    SDL_RenderSetScale(renderer, 1, 1);
+    const SDL_Rect dest{0, 0, sidebarWidth, sidebarHeight};
+    SDL_RenderCopy(renderer, sidebarTexture, nullptr, &dest);
+    SDL_RenderSetScale(renderer, sx, sy);
 }
 
 // Clear the visible panel on every draw, including power transitions.
