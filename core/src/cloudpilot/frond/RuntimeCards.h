@@ -382,23 +382,26 @@ class RuntimeCards {
             if (stick) return "error: take out the current stick first";
             std::istringstream words(argument);
             std::string path, key, policy, extra;
-            if (!(words >> std::quoted(path) >> key >> policy) || (words >> extra) || path.empty() || path[0] != '/' ||
+            // A trailing "ejected" attaches the stick without inserting it, as a save left it.
+            const bool read=bool(words >> std::quoted(path) >> key >> policy);
+            const bool ejected=read && (words >> extra) && extra=="ejected";
+            if (!read || (!ejected && !extra.empty()) || (words >> extra) || path.empty() || path[0] != '/' ||
                 path.size()>4096 || path.find_first_of("\r\n")!=std::string::npos ||
                 key.size() != 32 || key.find_first_not_of("0123456789abcdef") != std::string::npos ||
                 (policy != "protected" && policy != "writable"))
-                return "error: use absolute-path 32-lowercase-hex-identity writable|protected";
+                return "error: use absolute-path 32-lowercase-hex-identity writable|protected [ejected]";
             for (auto& other : cards) if (other && (other->key == key || other->serial == uint32_t(std::stoul(key.substr(0,8),nullptr,16))))
                 return "error: duplicate identity or serial";
             std::string error;
             auto next=OpenStick(path,key,policy,error);
             if (!next) return error;
             if (!gExternalStorage.AddImage(key, next->image)) return "error: duplicate image key";
-            if (!gExternalStorage.Mount(key, msSlot)) {
+            if (!ejected && !gExternalStorage.Mount(key, msSlot)) {
                 gExternalStorage.RemoveImage(key);
                 return "error: cannot mount stick";
             }
             stick = std::move(next);
-            return "inserted";
+            return ejected ? "ejected" : "inserted";
         }
         if (!stick) return "error: empty slot";
         if (op == "export") {
@@ -465,23 +468,31 @@ class RuntimeCards {
         if (op == "attach" || (op == "insert" && !argument.empty())) {
             if (card) return "error: take out the current card first";
             std::istringstream words(argument);
-            std::string path, key, policy, extra, protocol="sd";
-            if (!(words >> std::quoted(path) >> key >> policy) || ((words >> protocol) && (words >> extra)) || (protocol!="sd" && protocol!="mmc") || path.empty() || path[0] != '/' || path.size()>4096 || path.find_first_of("\r\n")!=std::string::npos ||
+            std::string path, key, policy, word, protocol="sd";
+            // After the policy: the protocol, then "ejected" to attach the card without inserting it,
+            // as a save left it. Both are optional.
+            std::vector<std::string> rest;
+            const bool read=bool(words >> std::quoted(path) >> key >> policy);
+            while (read && rest.size()<3 && words >> word) rest.push_back(word);
+            const bool ejected=!rest.empty() && rest.back()=="ejected";
+            if (ejected) rest.pop_back();
+            if (rest.size()==1) protocol=rest[0];
+            if (!read || rest.size()>1 || (protocol!="sd" && protocol!="mmc") || path.empty() || path[0] != '/' || path.size()>4096 || path.find_first_of("\r\n")!=std::string::npos ||
                 key.size() != 32 || key.find_first_not_of("0123456789abcdef") != std::string::npos ||
                 (policy != "protected" && policy != "writable"))
-                return "error: use absolute-path 32-lowercase-hex-identity writable|protected [sd|mmc]";
+                return "error: use absolute-path 32-lowercase-hex-identity writable|protected [sd|mmc] [ejected]";
             for (auto& other : cards) if (other && (other->key == key || other->serial == uint32_t(std::stoul(key.substr(0,8),nullptr,16))))
                 return "error: duplicate identity or serial";
             std::string error;
             auto next=Open(n,path,key,policy,error,protocol);
             if (!next) return error;
             if (!gExternalStorage.AddImage(key, next->image)) return "error: duplicate image key";
-            if (!gExternalStorage.Mount(key, slot(n))) {
+            if (!ejected && !gExternalStorage.Mount(key, slot(n))) {
                 gExternalStorage.RemoveImage(key);
                 return "error: cannot mount card";
             }
             card = std::move(next);
-            return "inserted";
+            return ejected ? "ejected" : "inserted";
         }
         if (!card) return "error: empty slot";
         if (op == "export") {

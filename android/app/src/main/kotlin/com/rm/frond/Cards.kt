@@ -199,7 +199,8 @@ object Cards {
     }
 
     // `n` is the library slot: 0 for card 1 or the stick, 1 for card 2.
-    class LinkedRow(val n: Int, val stick: Boolean, val path: String, val key: String, val writeProtected: Boolean, val protocol: String)
+    class LinkedRow(val n: Int, val stick: Boolean, val path: String, val key: String, val writeProtected: Boolean, val protocol: String,
+                    val inserted: Boolean = true)
 
     fun linkedRows(frond: File?): List<LinkedRow> = try {
         if (frond == null || !frond.isFile) emptyList() else RandomAccessFile(frond, "r").use { f ->
@@ -223,7 +224,8 @@ object Cards {
                     path.append(quoted[c])
                     c++
                 }
-                LinkedRow(if (f13[0] == "2") 1 else 0, stick, path.toString(), f13[3], f13[6] == "1", if (f13[11] == "mmc") "mmc" else "sd")
+                LinkedRow(if (f13[0] == "2") 1 else 0, stick, path.toString(), f13[3], f13[6] == "1", if (f13[11] == "mmc") "mmc" else "sd",
+                    f13[7] != "0")
             }
         }
     } catch (e: IOException) {
@@ -764,6 +766,15 @@ object Cards {
         var argument = quotePath(File(dir, file).absolutePath) + " " + key + if (card.writeProtected) " protected" else " writable"
         if (card.kind == "sd") argument += " " + card.type
         return argument
+    }
+
+    // attachArgument for the card frond-68k left out of slot n at start, with "ejected" when the
+    // save had that same card ejected, so it comes back as it was saved.
+    fun startAttachArgument(sessions: File, dir: File, n: Int): String? {
+        val argument = attachArgument(sessions, dir, n) ?: return null
+        val key = readSlot(dir, n).card?.let { readCard(entryDir(libraryFor(sessions), it)) }?.key
+        val row = linkedRowFor(sessionFile(dir), n)
+        return if (row != null && !row.inserted && row.key == key) "$argument ejected" else argument
     }
 
     // The flags for the core, and per slot the name of the machine holding a linked card when it's elsewhere.

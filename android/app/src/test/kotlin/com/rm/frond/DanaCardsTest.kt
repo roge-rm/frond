@@ -142,8 +142,8 @@ class DanaCardsTest {
         val crc = CRC32().also { it.update(header); it.update(table) }.value
         return header.copyOfRange(0, 24) + le(crc, 4) + header.copyOfRange(28, 64) + payload + table
     }
-    private fun row(id: Int, path: File, k: String, protocol: String = "sd", protect: Int = 0) =
-        "$id ${if (id == 1) "ms" else "sd"} ${Cards.quotePath(path.path)} $k ${k.take(8).toLong(16)} 33554432 $protect 1 1 2 3 $protocol 9\n"
+    private fun row(id: Int, path: File, k: String, protocol: String = "sd", protect: Int = 0, insert: Int = 1) =
+        "$id ${if (id == 1) "ms" else "sd"} ${Cards.quotePath(path.path)} $k ${k.take(8).toLong(16)} 33554432 $protect $insert 1 2 3 $protocol 9\n"
     private fun machine(name: String, device: String = "alphasmart-dana", rows: String? = null): File {
         val dir = File(sessions, name).apply { mkdirs() }
         File(dir, "$name.json").writeText(JSONObject().put("name", name).put("device", device).toString())
@@ -216,6 +216,24 @@ class DanaCardsTest {
         // frond-68k takes only --card-swap.
         Cards.writeSlot(dir, Cards.Slot(true, "one", swap = true))
         assertEquals(listOf("--card-swap"), Cards.launchArguments(sessions, dir, m68k = true))
+    }
+
+    @Test fun cardLeftOutAtStartComesBackAsSaved() {
+        // Slot 1's card was saved ejected, slot 2's inserted; both were left out at start (settled or copied).
+        val dir = machine("Dana", rows = row(0, File("/x/a.frondsd"), key, insert = 0) + row(2, File("/x/b.frondsd"), second))
+        for ((n, id) in listOf(0 to "one", 1 to "two")) {
+            File(library, id).mkdirs()
+            Cards.writeCard(File(library, id), Cards.Card(id, id, "sd", "", "Dana", 512, ByteArray(32), false, type = "sd",
+                key = if (n == 0) key else second))
+            File(dir, if (n == 0) "sd.frondsd" else "sd2.frondsd").writeBytes(sdCard())
+            Cards.writeSlot(dir, Cards.Slot(true, id, swap = true), n)
+        }
+        assertFalse(Cards.linkedRows(File(dir, "Dana.frond"))[0].inserted)
+        assertEquals(Cards.attachArgument(sessions, dir, 0) + " ejected", Cards.startAttachArgument(sessions, dir, 0))
+        assertEquals(Cards.attachArgument(sessions, dir, 1), Cards.startAttachArgument(sessions, dir, 1))
+        // A different card put in while the machine was off goes in inserted.
+        Cards.writeCard(File(library, "one"), Cards.readCard(File(library, "one"))!!.copy(key = "34567890000000000000000000000000"))
+        assertFalse(Cards.startAttachArgument(sessions, dir, 0)!!.endsWith(" ejected"))
     }
 
     @Test fun savedChangesAreSettledBeforeTheDrawer() {

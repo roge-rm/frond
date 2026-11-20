@@ -205,6 +205,21 @@ int main(int argc, char** argv) {
         assert(cards.Manifest().find(std::string("\"") + moved.string() + "\"") != std::string::npos);
         cards.Install(RuntimeCards::Pair{});
     }
+    // A card the save had ejected goes back ejected: attached, not inserted.
+    {
+        RuntimeCards cards;
+        cards.SetDevice(deviceTypeDana);
+        const std::string argument = "\"" + moved.string() + "\" " + key + " writable";
+        assert(cards.Command(0, "attach", argument + " sd ejected sd").rfind("error: use", 0) == 0);
+        assert(cards.Command(0, "attach", argument + " inserted").rfind("error: use", 0) == 0);
+        assert(cards.Command(0, "attach", argument + " sd ejected") == "ejected");
+        assert(cards.Command(0, "state", "") == "ejected " + key + " writable");
+        assert(!gExternalStorage.IsMounted(EmHAL::Slot::sdcard));
+        assert(cards.Command(0, "insert", "") == "inserted");
+        cards.Install(RuntimeCards::Pair{});
+        assert(cards.Command(0, "attach", argument + " ejected") == "ejected");
+        cards.Install(RuntimeCards::Pair{});
+    }
     std::filesystem::remove_all(root);
     puts("runtime-cards-swap ok");
     return 0;
