@@ -453,11 +453,7 @@ struct Probe {
                 });
             if (status == Imx1BootstrapAccess::ok) {
                 if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-                peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
-                status = peripherals.clockStatus();
-            }
-            if (status == Imx1BootstrapAccess::ok) {
-                peripherals.advanceHclkCycles(hclk);
+                peripherals.advanceCpuThenHclk(cycles, quietMode, options.assumeMpllSettled, hclk);
                 status = peripherals.clockStatus();
             }
         }
@@ -488,13 +484,17 @@ struct Probe {
         // cycle goes in the same charge, as nothing else changes in it.
         const auto period = peripherals.cpuReferencePeriod(mode);
         if (!quietCycles && !deferredHclk && cs5Configuration.quietCpuCycles(period) == deferredCycles &&
-            quietCpuCycles(mode, false) > deferredCycles)
+            (deferredCycles || cs5Configuration.changeDue(period)) && quietCpuCycles(mode, false) > deferredCycles)
             ++deferredCycles;
         if (!chargeDeferred()) { clockBoundary(); return -1; }
+        // A batch the charge completed leaves its busy level for the next advance, which takes it first: it is taken
+        // now, as jitChargedWrite takes a new batch's, so the span can run on.
+        cs5Configuration.takeBusyLevel();
         if (clockBoundary()) return -1;
         updateInterrupts();
         uint64_t span = quietCpuCycles(mode);
-        if (span < leanMinimumSpan && !cs5Configuration.quietCpuCycles(period) && quietCpuCycles(mode, false)) {
+        if (span < leanMinimumSpan && !cs5Configuration.quietCpuCycles(period) && cs5Configuration.changeDue(period) &&
+            quietCpuCycles(mode, false)) {
             // The graphics change is due in the next cycle and nothing else is: it passes as the step would charge it.
             const auto status = advanceGraphicsCpu(1, period);
             if (status != Imx1BootstrapAccess::ok) {
@@ -2458,6 +2458,9 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     }
                     // A UART status poll's load ends the run; the next try starts with skipUartPoll.
                     if (ran && p->atUartPoll()) continue;
+                    // A run that left an instruction with the span used up (a ring word or a register read refused
+                    // at its end): the span ends through spanBoundary and the next run starts on it.
+                    if (ran && quietCycles < leanMinimumSpan) continue;
                     // The instruction the JIT left goes to the lean path, then the JIT again. Code not compiled
                     // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
                     leanCount = stop == arm920JitCold || instructions < 4 ? 32 : 1;

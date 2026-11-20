@@ -53,6 +53,8 @@ class Imx1Cgm {
         mcuWakeDenominator = 1;
         mcuRestartComplete = true;
     }
+    // No System PLL write delay, MCU restart or System PLL restart counting: advanceSystemPllCycles changes nothing.
+    bool systemCountsIdle() const { return !systemWriteDelay && !mcuRestartCycles && !systemRestartUnits; }
     // Steps of numerator/denominator CLK32 periods until a clock state changes. 1 while a restart or write delay runs.
     uint64_t idleQuietSteps(uint64_t numerator, uint64_t denominator) const {
         if (systemWriteDelay || mcuRestartCycles || systemRestartUnits ||

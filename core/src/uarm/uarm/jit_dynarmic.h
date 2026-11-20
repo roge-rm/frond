@@ -112,6 +112,9 @@ bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_
 // else, which takes cpuJitRead or cpuJitWrite.
 int cpuJitIoRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, bool *ok, uint64_t gen);
 int cpuJitIoWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, bool *ok, uint64_t gen);
+// ARM920T Fast blocks: a store to a page an earlier one sent to the lean write callback. 1 taken, -1 refused (an exit
+// with no fault), 0 for cpuJitWrite. ranNow is jitRanNow's count.
+int cpuJitLeanDeviceWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value, uint32_t ranNow);
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word);
 // While on, cpuJitFetch reads only RAM and ROM; a fetch from anything else fails and is
 // noted for cpuJitRefused (turning it on clears that). For code compiled ahead, which the

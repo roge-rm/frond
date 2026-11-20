@@ -386,6 +386,10 @@ class Imx1Bootstrap {
     bool systemPllBusStallPending() const { return cgm.systemRestartRemaining() != 0; }
     // Charge with the post-instruction mode, preserving System PLL and PERCLK1 fractions.
     void advanceCpuCycles(uint32_t cycles, uint32_t mode, bool assumeSettled);
+    // advanceCpuCycles and then advanceHclkCycles(hclk), for Fast's charges inside a quiet span, with the peripherals
+    // on the system clock advanced once for both. Where a stop or a PLL count is under way it makes the two calls,
+    // the second only with clockStatus ok after the first.
+    void advanceCpuThenHclk(uint32_t cycles, uint32_t mode, bool assumeSettled, uint32_t hclk);
     Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value, uint32_t cpuClockMode = 0);
     // Instruction reads cannot issue SDRAM commands or consume peripheral state.
     bool instructionRead(uint32_t address, uint32_t size, uint32_t& value) const;

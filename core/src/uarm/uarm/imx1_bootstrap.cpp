@@ -43,6 +43,45 @@ void Imx1Bootstrap::advanceCpuCycles(uint32_t cycles, uint32_t mode, bool assume
     }
 }
 
+void Imx1Bootstrap::advanceCpuThenHclk(uint32_t cycles, uint32_t mode, bool assumeSettled, uint32_t hclk) {
+    if (!hclk || systemStop != stopRunning || !cgm.systemCountsIdle()) {
+        advanceCpuCycles(cycles, mode, assumeSettled);
+        if (hclk && clockStatus() == Imx1BootstrapAccess::ok) advanceHclkCycles(hclk);
+        return;
+    }
+    SourceChange change(*this);
+    assert(cpuClockModeSupported(mode, assumeSettled));
+    // The system clocks of both parts go to advanceSystemOutput in one call, which gives every peripheral on them the
+    // same state as two calls: each keeps its own phase, and with no PLL count running the write periods don't matter.
+    uint64_t systemClocks = 0;
+    if (mode != 3) {
+        const auto system = cgm.systemPllActiveRatio();
+        if (!advanceReference(uint64_t(cycles) * cgm.busDivider() * system.denominator, system.numerator)) return;
+        systemClocks = uint64_t(cycles) * cgm.busDivider();
+    } else {
+        const auto mcu = cpuMcuRatio();
+        uint64_t units = uint64_t(cycles) * mcu.denominator * cgm.mcuPrescaler();
+        if (!referenceChargeSupported(units, mcu.numerator)) { referenceOverflow = true; return; }
+        asynchronousUsed = true;
+        cgm.qualifyMcuOutput();
+        if (!advanceReference(units, mcu.numerator)) return;
+        const auto system = cgm.systemPllActiveRatio();
+        const uint64_t denominator = mcu.numerator * system.denominator;
+        while (units) {
+            const uint64_t chunk = std::min(units,
+                (std::numeric_limits<uint64_t>::max() - systemPllPhase) / system.numerator);
+            const uint64_t clocks = chunk * system.numerator + systemPllPhase;
+            cgm.advanceSystemWriteFraction(chunk * system.numerator, denominator);
+            systemClocks += clocks / denominator;
+            systemPllPhase = clocks % denominator;
+            units -= chunk;
+        }
+    }
+    const auto period = busReferencePeriod();
+    if (!advanceReference(uint64_t(hclk) * period.numerator, period.denominator)) return;
+    advanceSystemOutput(systemClocks + uint64_t(hclk) * cgm.busDivider());
+}
+
 // The same sums as advanceCpuCycles and advanceSystemOutput, down to the PERCLK1 cycles a timer gets.
 bool Imx1Bootstrap::timerCountAfter(uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode, uint32_t& value,
                                      uint64_t hclk, uint64_t* sameUntil) const {
