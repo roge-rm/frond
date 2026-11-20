@@ -274,7 +274,7 @@ class RuntimeCards {
             auto same=[&](const std::string& p) {
                 struct stat st{};
                 return !lstat(p.c_str(),&st) && S_ISREG(st.st_mode) && uint64_t(st.st_dev)==dev && uint64_t(st.st_ino)==ino &&
-                       uint64_t(st.st_mtim.tv_sec)*1000000000ull+st.st_mtim.tv_nsec==mtime;
+                       frondPosix::MtimeNs(st)==mtime;
             };
             if(!same(path) && !folder.empty()) {
                 const auto moved=(std::filesystem::path(folder)/MachineName(id)).lexically_normal().string();

@@ -23,7 +23,13 @@
 #include <fstream>
 #include <string>
 #include <sys/stat.h>
+#if defined(__linux__)
 #include <sys/syscall.h>
+#endif
+#include "PosixCompat.h"
+#ifndef EDQUOT
+#define EDQUOT ENOSPC  // no quota error here
+#endif
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
 #endif
@@ -432,13 +438,13 @@ inline std::string fileStamp(const std::filesystem::path& path) {
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0) return {};
     return std::to_string(uint64_t(st.st_dev)) + ' ' + std::to_string(uint64_t(st.st_ino)) + ' ' +
-           std::to_string(uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec));
+           std::to_string(frondPosix::MtimeNs(st));
 }
 // A file's change time in nanoseconds, 0 if it can't be read.
 inline uint64_t changedAt(const std::filesystem::path& path) {
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0) return 0;
-    return uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
+    return frondPosix::MtimeNs(st);
 }
 
 // A settle-linked cut off part way, finished or undone. The settled file is written to
@@ -542,8 +548,13 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
 
 // Same file: device and inode.
 inline bool sameInode(const std::filesystem::path& a, const std::filesystem::path& b) {
+#ifdef _WIN32
+    (void)a; (void)b;  // no inode numbers here
+    return false;
+#else
     struct stat x{}, y{};
     return ::lstat(a.c_str(), &x) == 0 && ::lstat(b.c_str(), &y) == 0 && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+#endif
 }
 // Whether renameat2 may be called. Android's app seccomp filter only allows it from Android 11 (API
 // 30); before that the call can kill the app (SIGSYS), so the fallbacks are used.
@@ -565,14 +576,16 @@ inline bool renameNoReplaceAllowed() {
 // between the link and the unlink leaves both names; the next call finishes it.
 inline bool moveNoReplace(const std::filesystem::path& from, const std::filesystem::path& to) {
     if (sameInode(from, to)) return ::unlink(from.c_str()) == 0;
-#if defined(SYS_renameat2)
+#if defined(__linux__) && defined(SYS_renameat2)
     if (renameNoReplaceAllowed()) {
         if (::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 1u /* RENAME_NOREPLACE */) == 0) return true;
         if (errno == EEXIST) return false;
     }
 #endif
+#ifndef _WIN32
     if (::link(from.c_str(), to.c_str()) == 0) return ::unlink(from.c_str()) == 0;
     if (errno == EEXIST) return false;
+#endif
     struct stat st{};
     if (::lstat(to.c_str(), &st) == 0 || errno != ENOENT) return false;
     return ::rename(from.c_str(), to.c_str()) == 0;
