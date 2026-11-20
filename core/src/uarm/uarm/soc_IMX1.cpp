@@ -941,9 +941,11 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     PollBluetooth();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
     const Imx1ReferenceTime until{before.time.ticks + wanted, 0, 1};
-    // Fast runs longer slices: each slice end charges the whole board.
+    // Fast runs longer slices: each slice end charges the whole board and ends a JIT run, with a few short
+    // runs before it to reach the slice's retired count. Fast's retired and work sizes are past what the guest
+    // does in sliceTicks (about 80000 instructions in a busy level), so the deadline ends most of its slices.
     const bool fast = imx1MachineFastEngine(machine);
-    const uint64_t sliceRetired = fast ? 8000 : 4000, sliceWork = fast ? 40000 : 20000;
+    const uint64_t sliceRetired = fast ? 200000 : 4000, sliceWork = fast ? 1000000 : 20000;
     Imx1MachineBounds bounds;
     const auto started = std::chrono::steady_clock::now();
     bool waiting = false;
