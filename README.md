@@ -188,7 +188,7 @@ Peer to Peer (ad hoc) Wi-Fi finds nobody, and the USB computer controls stay gre
 
 ## Low-latency audio
 
-Off by default. On the T|X, E2, E3 and Zire 72 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path if your computer or phone can't keep up. On the TG50, and on these with other firmware, it keeps a shorter queue while sound plays, about 35 ms less delay. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
+Off by default. On the T|X, E2, E3 and Zire 72 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path if your computer or phone can't keep up. On the TG50, and on these with other firmware, it keeps a shorter queue while sound plays, about 35 ms less delay. The rx1950 keeps a shorter queue too. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
 
 ## For developers
 

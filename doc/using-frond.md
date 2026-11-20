@@ -106,7 +106,7 @@ The button bars and silkscreens are drawn at the chosen size. The E3 uses the E2
 
 Off by default. On the T|X, E2, E3 and Zire 72 with their qualified firmware, it plays one open 44.1 kHz stereo stream with less delay, for music apps like SunVox, and goes back to normal audio when your computer or phone can't keep up, which can pause the sound for a moment. Anything else, like several streams or other formats, uses normal audio.
 
-On the TG50, and on a T|X, E2, E3 or Zire 72 with other firmware, it keeps a shorter audio queue while sound is playing. Set it before starting the machine. Diagnostics are in [performance.md](performance.md).
+On the TG50 and the rx1950, and on a T|X, E2, E3 or Zire 72 with other firmware, it keeps a shorter audio queue while sound is playing. Set it before starting the machine. Diagnostics are in [performance.md](performance.md).
 
 ## Buttons, keys and controllers
 
@@ -521,7 +521,7 @@ native localhost debug path. The app's USB computer controls stay disabled.
 | | T\|X | E2 | E3 | Zire 72 | TG50 | 68k Palms | rx1950 |
 |---|---|---|---|---|---|---|---|
 | Sound | yes | yes | yes | yes | yes, see below | yes, piezo | yes |
-| Low-latency audio | yes | yes | yes | yes | shorter queue | | |
+| Low-latency audio | yes | yes | yes | yes | shorter queue | | shorter queue |
 | Microphone | | | | yes | yes | | yes |
 | Network | yes | | | | | PPP over serial | Virtual Wi-Fi |
 | Serial port | yes | yes | yes | not offered | yes | yes | ActiveSync |
