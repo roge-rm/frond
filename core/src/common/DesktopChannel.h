@@ -8,15 +8,20 @@
 // (cancel-files, panel-visible) get no reply.
 // Not thread safe: only the emulation thread uses it.
 
+#include "PosixCompat.h"
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <stdexcept>
 #include <string>
 #include <sys/file.h>
+#include <unistd.h>
+#ifdef _WIN32
+#include "WinPipe.h"
+#else
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <unistd.h>
+#endif
 
 // Locks <session>.core for the rest of the run: the launcher leaves the session alone while it is
 // held, as when this core saves it after the launcher died. The kernel frees it when the core exits.
@@ -47,11 +52,14 @@ class DesktopChannel {
     enum class Cancel { none, cancelled, gone };
 
     explicit DesktopChannel(const std::string& path) {
+#ifdef _WIN32
+        if (!pipe.Open(path)) throw std::runtime_error("cannot connect to desktop launcher");
+#else
         sockaddr_un address{};
         address.sun_family = AF_UNIX;
         if (path.size() >= sizeof(address.sun_path)) throw std::runtime_error("desktop socket path too long");
         std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
-        fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        fd = frondPosix::Socket(AF_UNIX, SOCK_STREAM | frondPosix::kCloexec, 0);
         if (fd < 0) throw std::runtime_error("cannot create desktop socket");
         if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
             fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
@@ -59,9 +67,12 @@ class DesktopChannel {
             fd = -1;
             throw std::runtime_error("cannot connect to desktop launcher");
         }
+#endif
         Event("ready");
     }
+#ifndef _WIN32
     ~DesktopChannel() { if (fd >= 0) close(fd); }
+#endif
     DesktopChannel(const DesktopChannel&) = delete;
     DesktopChannel& operator=(const DesktopChannel&) = delete;
 
@@ -77,7 +88,7 @@ class DesktopChannel {
     // grow the output without limit.
     Poll Receive(Request& request) {
         char data[4096];
-        const auto n = recv(fd, data, sizeof(data), 0);
+        const auto n = Raw(data, sizeof(data));
         if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
             panelVisible = false;
             lost = true;
@@ -110,7 +121,7 @@ class DesktopChannel {
     // Sends what the socket takes now; false when the client has gone.
     bool Flush() {
         if (output.empty()) return true;
-        const auto sent = send(fd, output.data(), output.size(), MSG_NOSIGNAL);
+        const auto sent = Send(output.data(), output.size());
         if (sent > 0) output.erase(0, sent);
         const bool ok = sent >= 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
         if (!ok) lost = true;
@@ -135,7 +146,7 @@ class DesktopChannel {
     Cancel CheckCancel(const std::string& job) {
         char bytes[4096];
         while (true) {
-            const auto received = recv(fd, bytes, sizeof(bytes), MSG_DONTWAIT);
+            const auto received = Raw(bytes, sizeof(bytes));
             if (received == 0) {
                 lost = true;
                 return Cancel::gone;
@@ -183,7 +194,15 @@ class DesktopChannel {
     }
 
  private:
+#ifdef _WIN32
+    frondWinPipe::Client pipe;
+    long Raw(char* data, size_t size) { return pipe.Read(data, size); }
+    long Send(const char* data, size_t size) { return pipe.Write(data, size); }
+#else
     int fd{-1};
+    long Raw(char* data, size_t size) { return recv(fd, data, size, MSG_DONTWAIT); }
+    long Send(const char* data, size_t size) { return send(fd, data, size, MSG_NOSIGNAL); }
+#endif
     bool panelVisible{false}, lost{false};
     std::string input, output;
 };

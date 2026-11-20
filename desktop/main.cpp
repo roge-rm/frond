@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
     QString core = parser.value("core");
     if (core.isEmpty()) {
         const auto directory = QCoreApplication::applicationDirPath();
-        const QStringList candidates{directory + "/frond", directory + "/../lib/frond/frond-core"};
+        const QStringList candidates{directory + "/frond", directory + "/frond.exe", directory + "/../lib/frond/frond-core"};
         for (const auto& candidate : candidates) if (QFileInfo(candidate).isExecutable()) { core = candidate; break; }
     }
     if (!core.isEmpty()) core = QFileInfo(core).absoluteFilePath();

@@ -1,0 +1,37 @@
+# Host platform settings shared by the top-level Makefile and the core's makefiles.
+# HOST_OS is linux, macos or windows (MSYS2 and MinGW); HOST_ARCH is uname -m.
+
+HOST_UNAME := $(shell uname -s)
+HOST_ARCH ?= $(shell uname -m)
+ifneq ($(filter Darwin,$(HOST_UNAME)),)
+HOST_OS ?= macos
+else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(HOST_UNAME)),)
+HOST_OS ?= windows
+else
+HOST_OS ?= linux
+endif
+
+EXE_SUFFIX ?= $(if $(filter windows,$(HOST_OS)),.exe)
+
+# Readline for the command line. Linux links it as always, elsewhere it is used when pkg-config
+# finds it (Homebrew's is keg-only: PKG_CONFIG_PATH=$(brew --prefix readline)/lib/pkgconfig).
+# Without it the command line reads plain lines from stdin.
+FROND_READLINE ?= $(if $(filter linux,$(HOST_OS)),1,$(if $(shell pkg-config --exists readline 2>/dev/null && echo 1),1,0))
+ifeq ($(FROND_READLINE),1)
+READLINE_CFLAGS = $(if $(filter linux,$(HOST_OS)),,$(shell pkg-config --cflags readline))
+READLINE_LIBS = $(if $(filter linux,$(HOST_OS)),-lreadline,$(shell pkg-config --libs readline))
+else
+READLINE_CFLAGS = -DFROND_NO_READLINE
+READLINE_LIBS =
+endif
+
+# Libraries every core binary needs beyond SDL2 and slirp.
+PLATFORM_LIBS =
+ifeq ($(HOST_OS),windows)
+# rename wraps to a version that replaces an existing file (winshim/stdio.h).
+PLATFORM_LIBS = -lws2_32 -liphlpapi -lbcrypt -Wl,--wrap=rename
+endif
+
+# Boost headers for Dynarmic's interface (jit_dynarmic.cpp). On the default path on Linux and in
+# MSYS2; Homebrew's prefix is not on clang's.
+BOOST_INCLUDE = $(if $(filter macos,$(HOST_OS)),-I$(shell brew --prefix 2>/dev/null || echo /usr/local)/include)

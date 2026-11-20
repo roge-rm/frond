@@ -1,6 +1,7 @@
 #ifndef FROND_FILE_CARD_BACKING_H
 #define FROND_FILE_CARD_BACKING_H
 
+#include "PosixCompat.h"
 #include "CardBacking.h"
 #include "FrondSdImage.h"
 
@@ -229,7 +230,7 @@ class FileCardBacking : public CardBacking {
         if (!read || std::memcmp(buf, "FRONDRT\0", 8) != 0 || frondSdFile::get32(buf + 8) != 2 ||
             stat(durable.c_str(), &st) != 0)
             return false;
-        const uint64_t mtime = uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
+        const uint64_t mtime = frondPosix::MtimeNs(st);
         return frondSdFile::get64(buf + 28) == uint64_t(st.st_dev) &&
                frondSdFile::get64(buf + 36) == uint64_t(st.st_ino) && frondSdFile::get64(buf + 44) == mtime;
     }
@@ -566,11 +567,15 @@ class FileCardBacking : public CardBacking {
         }
 
         bool flushDir() {
+#ifdef _WIN32
+            return true;  // a folder can't be opened to flush here
+#else
             const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
             if (dfd < 0) return false;
             const int rc = fsync(dfd);
             ::close(dfd);
             return rc == 0;
+#endif
         }
 
         std::filesystem::path tempName(const std::string& rest) const {
@@ -648,7 +653,7 @@ class FileCardBacking : public CardBacking {
             if (fstat(durableFd, &st) != 0) return false;
             bindDev = uint64_t(st.st_dev);
             bindIno = uint64_t(st.st_ino);
-            bindMtime = uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
+            bindMtime = frondPosix::MtimeNs(st);
             if (!bindingKey(options.identity, bindKey)) return false;
             // Strict providers retain every invalid namespace. Legacy providers discard
             // roots belonging to a replaced base file or card identity.

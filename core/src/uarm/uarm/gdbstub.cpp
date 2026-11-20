@@ -1,5 +1,6 @@
 //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
 // Frond's native, single-CPU ARM/Thumb RSP foundation.
+#include "PosixCompat.h"
 #include "gdbstub.h"
 
 #ifdef GDB_STUB_ENABLED
@@ -537,7 +538,7 @@ stub* gdbStubInit(ArmCpu* cpu, int port) {
     if (!s) ERR("cannot allocate GDB stub\n");
     s->cpu = cpu;
     if (port < 0 || port > 65535) ERR("GDB port must be 1..65535\n");
-    s->listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    s->listener = frondPosix::Socket(AF_INET, SOCK_STREAM | frondPosix::kCloexec, 0);
     if (s->listener < 0) ERR("gdb socket failed: %s\n", strerror(errno));
     const int one = 1;
     setsockopt(s->listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));

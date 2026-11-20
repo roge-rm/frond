@@ -1,3 +1,10 @@
+include $(dir $(lastword $(MAKEFILE_LIST)))Makefile.host
+ifeq ($(HOST_OS),windows)
+# Stand-ins for the POSIX headers (common/winshim) come first on the include path.
+FROND_WINSHIM := $(shell cygpath -m $(abspath $(dir $(lastword $(MAKEFILE_LIST)))common/winshim))
+export CPATH := $(FROND_WINSHIM)$(if $(CPATH),;$(CPATH))
+endif
+
 # The variables below most likely have to be defined
 
 SOURCE_C_NATIVE ?= 
@@ -67,9 +74,9 @@ RANLIB_EMCC = emranlib
 
 EMCC_OPT ?= -O3 -flto
 
-CFLAGS_NATIVE ?= -O2  -g $(shell sdl2-config --cflags)
+CFLAGS_NATIVE ?= -O2  -g $(shell sdl2-config --cflags) $(READLINE_CFLAGS)
 CXXFLAGS_NATIVE ?= $(CFLAGS_NATIVE)
-LDFLAGS_NATIVE ?=  $(shell sdl2-config --libs) -lSDL2_image -lreadline -lcurl -lpthread -lresolv
+LDFLAGS_NATIVE ?=  $(shell sdl2-config --libs) -lSDL2_image $(READLINE_LIBS) -lpthread $(PLATFORM_LIBS)
 
 CFLAGS_EMCC ?= $(EMCC_OPT)
 CXXFLAGS_EMCC ?= $(CFLAGS_EMCC) -fno-rtti -fno-exceptions

@@ -1,6 +1,7 @@
 #ifndef FROND_SD_CANDIDATE_H
 #define FROND_SD_CANDIDATE_H
 
+#include "PosixCompat.h"
 #include "CardBacking.h"
 #include "FileCardBacking.h"
 #include "FrondSdImage.h"
@@ -20,7 +21,9 @@
 #include <string_view>
 #include <sys/file.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/statvfs.h>
+#endif
 #include <unistd.h>
 #include <vector>
 
@@ -143,9 +146,15 @@ inline std::string randomIdentity() {
 }
 
 inline bool hasSpace(const std::filesystem::path& folder, uint64_t bytes) {
+#ifdef _WIN32
+    std::error_code ec;
+    const uint64_t free = std::filesystem::space(folder, ec).available;
+    if (ec) return false;
+#else
     struct statvfs fs{};
     if (statvfs(folder.c_str(), &fs) != 0) return false;
     const uint64_t free = uint64_t(fs.f_bavail) * uint64_t(fs.f_frsize);
+#endif
     return free >= bytes + spareBytes;
 }
 
@@ -233,7 +242,11 @@ inline bool openCandidate(const std::filesystem::path& folder, Candidate& out) {
         if (fd < 0) return false;
         if (beforeLockHook()) beforeLockHook()(name);
         struct stat mine {}, named {};
+#ifdef _WIN32
+        if (fstat(fd, &mine) < 0) {
+#else
         if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 || fstat(fd, &mine) < 0) {
+#endif
             ::close(fd);
             unlink(name.c_str());
             return false;
@@ -269,7 +282,7 @@ inline Result create(const std::filesystem::path& folder, uint64_t payloadBytes,
         return fail(code, message);
     };
     const uint64_t total = frondSdFile::headerBytes + payloadBytes;
-    const int allocated = posix_fallocate(candidate.fd, 0, off_t(total));
+    const int allocated = frondPosix::Preallocate(candidate.fd, total);
     if (allocated == ENOSPC) return abandon("space", "There isn't enough free space for the card.");
     uint32_t crc = 0;
     uint64_t at = 0;

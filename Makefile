@@ -1,13 +1,17 @@
 .PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 BUILD_JOBS ?= 4
 # libcommon-net.a: the core's .o files include HostInfrared's phone (SlirpIp).
-CPU_TEST_LDLIBS ?= core/src/common/libcommon-net.a -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
+include core/src/Makefile.host
+
+CPU_TEST_LDLIBS ?= core/src/common/libcommon-net.a -lpthread $(shell pkg-config --libs slirp) $(PLATFORM_LIBS)
 
 # The Fast engine (Dynarmic JIT) is built in on x86-64 and arm64 hosts; FROND_FAST=0 leaves it out.
 # Its source is in vendor/dynarmic and it's built in build/dynarmic.
-HOST_ARCH := $(shell uname -m)
 FROND_FAST ?= $(if $(filter x86_64 aarch64 arm64,$(HOST_ARCH)),1,0)
 DYNARMIC_SRC ?= vendor/dynarmic
+# Boost headers for Dynarmic: found on the default paths on Linux and in MSYS2; Homebrew's prefix is
+# passed to cmake on macOS.
+DYNARMIC_CMAKE_ARGS ?= $(if $(filter macos,$(HOST_OS)),-DCMAKE_PREFIX_PATH=$(shell brew --prefix 2>/dev/null || echo /usr/local))
 JIT_LIBS = build/dynarmic/src/dynarmic/libdynarmic.a build/dynarmic/externals/mcl/src/libmcl.a \
 	build/dynarmic/externals/fmt/libfmt.a \
 	$(if $(filter x86_64,$(HOST_ARCH)),build/dynarmic/externals/zydis/libZydis.a \
@@ -192,8 +196,8 @@ FORCE:
 out/frond: core/src/common/libcommon.a core/src/common/libcommon-net.a $(CORE_JIT_DEPS)
 	$(MAKE) -C core/src/uarm bin $(CORE_JIT_FLAGS)
 	mkdir -p out
-	cp core/src/uarm/cp-uarm out/frond.new
-	mv -f out/frond.new out/frond
+	cp core/src/uarm/cp-uarm$(EXE_SUFFIX) out/frond$(EXE_SUFFIX).new
+	mv -f out/frond$(EXE_SUFFIX).new out/frond$(EXE_SUFFIX)
 
 # The core with the Zodiac developer start: FROND_ZODIAC_STATE=/path/to.state runs the ROM from a
 # bring-up state. For tests and bring-up, never packaged.
@@ -204,10 +208,10 @@ out/frond-zodiac-developer: out/frond
 
 # The 68k runner for DragonBall devices, from Cloudpilot's core in src/cloudpilot.
 out/frond-68k: core/src/common/libcommon.a core/src/common/libcommon-net.a
-	$(MAKE) -C core/src/cloudpilot FROND_68K=1 frond-68k
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 frond-68k$(EXE_SUFFIX)
 	mkdir -p out
-	cp core/src/cloudpilot/frond-68k out/frond-68k.new
-	mv -f out/frond-68k.new out/frond-68k
+	cp core/src/cloudpilot/frond-68k$(EXE_SUFFIX) out/frond-68k$(EXE_SUFFIX).new
+	mv -f out/frond-68k$(EXE_SUFFIX).new out/frond-68k$(EXE_SUFFIX)
 
 test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
 
@@ -1664,7 +1668,7 @@ build/dynarmic/.built: FORCE
 	grep -qx 'CMAKE_HOME_DIRECTORY:INTERNAL=$(abspath $(DYNARMIC_SRC))' build/dynarmic/CMakeCache.txt 2>/dev/null || rm -rf build/dynarmic
 	[ -f build/dynarmic/build.ninja ] || cmake -S $(DYNARMIC_SRC) -B build/dynarmic -G Ninja -DCMAKE_BUILD_TYPE=Release \
 		-DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
-		-DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF
+		-DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF $(DYNARMIC_CMAKE_ARGS)
 	ninja -C build/dynarmic -j$(BUILD_JOBS) dynarmic
 	[ -f $@ ] && [ ! build/dynarmic/src/dynarmic/libdynarmic.a -nt $@ ] || touch $@
 
@@ -1811,7 +1815,7 @@ z72-test-mic: out/frond
 		-Icore/src/common/zip -Icore/src/argparse -c $(Z72_MIC_DIR)/main.cpp -o $(Z72_MIC_DIR)/main.o
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/main.o' > $(Z72_MIC_DIR)/core.rsp
 	$(CXX) -o $(Z72_MIC_DIR)/frond-test-mic $(Z72_MIC_DIR)/main.o @$(Z72_MIC_DIR)/core.rsp core/src/common/libcommon.a \
-		$(shell pkg-config --libs sdl2 SDL2_image slirp) -lreadline $(CPU_TEST_LDLIBS)
+		$(shell pkg-config --libs sdl2 SDL2_image slirp) $(READLINE_LIBS) $(CPU_TEST_LDLIBS)
 
 # Zire 72 Camera on the real ROM records a 320 x 240 clip of the test pattern and the fake
 # microphone to an SD card, plays it in Media and records across a save and load
@@ -1865,7 +1869,7 @@ test-csr-peer-services: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
 	./build/test-csr-peer-radio-state
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-peer-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @build/csr-peer-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @build/csr-peer-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
 	./build/test-csr-peer-state
 
 .PHONY: bluetooth-opp-peer test-bluetooth-opp-peer test-bluetooth-dun
@@ -1893,9 +1897,9 @@ test-csr-controller-lifecycle: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
 	./build/test-csr-peer-radio-state
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-controller-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @build/csr-controller-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @build/csr-controller-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
 	./build/test-csr-peer-state
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-bcsp-board.cpp @build/csr-controller-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-bcsp-board
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-bcsp-board.cpp @build/csr-controller-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o build/test-csr-bcsp-board
 	./build/test-csr-bcsp-board --lifecycle
 	./build/test-csr-bcsp-board
 

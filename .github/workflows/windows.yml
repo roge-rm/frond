@@ -1,0 +1,139 @@
+# The Windows build in MSYS2 UCRT64 (gcc): the cores, the desktop, a zip and an installer, and a short
+# start of the built programs.
+name: Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: "Run id whose built programs (exes-windows) to package, skipping the build"
+        required: false
+        default: ""
+  push:
+    branches: [ci/desktop-ports-windows]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            git
+            python
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            ninja:p
+            pkgconf:p
+            SDL2:p
+            SDL2_image:p
+            libslirp:p
+            boost:p
+            zlib:p
+            qt6-base:p
+            qt6-tools:p
+            qt6-svg:p
+            qt6-imageformats:p
+
+      - name: Build the cores
+        if: inputs.build_run == ''
+        run: |
+          set -o pipefail
+          make -j4 BUILD_JOBS=4 out/frond out/frond-68k 2>&1 | tee build.log
+          ls -l out
+
+      - name: Build the desktop
+        if: always() && inputs.build_run == ''
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cmake -S desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFROND_PREPARED_SOURCE="$PWD/core" 2>&1 | tee -a build.log
+          cmake --build build/desktop --target frond-desktop -- -k 0 2>&1 | tee -a build.log
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.build_run == ''
+        with:
+          name: exes-windows
+          path: |
+            out/frond.exe
+            out/frond-68k.exe
+            build/desktop/frond-desktop.exe
+          if-no-files-found: warn
+
+      - uses: actions/download-artifact@v4
+        if: inputs.build_run != ''
+        with:
+          name: exes-windows
+          run-id: ${{ inputs.build_run }}
+          github-token: ${{ github.token }}
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Make the zip and the installer
+        run: |
+          set -o pipefail
+          sh packaging/windows/make-package.sh 2>&1 | tee -a build.log
+
+      - name: Start the built programs
+        run: |
+          set -o pipefail
+          cd out/package/Frond
+          ./frond-68k.exe --version
+          # The ARM core has no version flag; it must start and print its usage, not fail to load.
+          set +e
+          ./frond.exe > core.out 2>&1 < /dev/null
+          code=$?
+          cat core.out
+          # A missing DLL gives no output, so the usage text has to be there.
+          if ! grep -qi usage core.out; then echo "no usage from the core (exit $code)"; exit 1; fi
+          # A short run of the desktop: it must stay up for a few seconds.
+          ./frond-desktop.exe &
+          pid=$!
+          sleep 5
+          kill -0 "$pid" || { echo "desktop exited early"; exit 1; }
+          kill "$pid"
+
+      # While the Windows port is unfinished: compile every core source on its own, so the log lists
+      # all the errors and not only the first library to fail.
+      - name: Compile errors across the cores
+        if: always() && inputs.build_run == ''
+        continue-on-error: true
+        run: |
+          make -k -j4 -C core/src/common bin 2>&1 | tee -a build.log || true
+          make -k -j4 -C core/src/cloudpilot FROND_68K=1 frond-68k.exe 2>&1 | tee -a build.log || true
+          grep -E "error:|Error [0-9]" build.log | sort | uniq -c | sort -rn | head -150
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: build-log-windows
+          path: build.log
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frond-windows
+          path: |
+            out/Frond-*-windows-x64.zip
+            out/Frond-*-setup.exe
+          if-no-files-found: error

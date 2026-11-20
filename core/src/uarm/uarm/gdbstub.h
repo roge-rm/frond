@@ -6,7 +6,7 @@
 #include "CPU.h"
 
 // Native support is compiled in, but no socket is opened without --gdb.
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
 #define GDB_STUB_ENABLED 1
 #endif
 
