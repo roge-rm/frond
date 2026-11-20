@@ -94,10 +94,23 @@ class FirmwareInputTest : public QObject {
         QVERIFY(rx1950 != Device::automatic);
         QCOMPARE(frondFirmware::detectDevice(ceblPath), rx1950);
         QCOMPARE(frondFirmware::validateFiles(Device::automatic, ceblPath, {}),
-                 QStringLiteral("Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950."));
+                 QStringLiteral("Choose the OS image (CEOS.nbf) for the HP iPAQ rx1950."));
         QCOMPARE(frondFirmware::validateFiles(rx1950, ceblPath, ceosPath),
                  QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."));
         QVERIFY(!frondFirmware::firmwareFileMatches(ceosPath, rx1950Ceos5));
+        // The OS image: HP's by hash, any other .nbf that lays out, and the rest refused.
+        QCOMPARE(int(frondFirmware::rx1950OsImage(ceosPath)), int(frondFirmware::Rx1950Os::other));
+        QVERIFY(frondFirmware::importWarning(rx1950, ceosPath).contains("isn't HP's tested CEOS.nbf"));
+        QVERIFY(frondFirmware::importWarning(Device::tx, ceosPath).isEmpty());
+        QFile raw(dir.filePath("raw.nb0"));
+        QVERIFY(raw.open(QIODevice::WriteOnly) && raw.write(QByteArray(100000, '\x12')) > 0);
+        raw.close();
+        QCOMPARE(int(frondFirmware::rx1950OsImage(raw.fileName())), int(frondFirmware::Rx1950Os::unusable));
+        QCOMPARE(int(frondFirmware::rx1950OsImage(dir.filePath("missing"))), int(frondFirmware::Rx1950Os::unusable));
+        QFile bad(dir.filePath("bad.nbf"));
+        QVERIFY(bad.open(QIODevice::WriteOnly) && bad.write(QByteArray(0xa5a + 520, '\x12')) > 0);  // logical sector 0x12121212
+        bad.close();
+        QCOMPARE(int(frondFirmware::rx1950OsImage(bad.fileName())), int(frondFirmware::Rx1950Os::unusable));
         QVERIFY(!frondFirmware::firmwareFileMatches(dir.filePath("missing"), rx1950Cebl5));
         QVERIFY(!frondFirmware::palmOs(rx1950) && frondFirmware::palmOs(Device::tx) && frondFirmware::fastByDefault(rx1950));
         QVERIFY(frondFirmware::installsToCard(rx1950) && frondFirmware::ceHardReset(rx1950) && frondFirmware::usbNetwork(rx1950));

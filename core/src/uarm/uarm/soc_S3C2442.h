@@ -20,7 +20,7 @@
 // (CEBL.nbf) is the session's NOR; the 64 MB NAND, which the loader and OS run from, is a uARM NAND, so
 // sessions keep it as their NAND file. One per process, as the CPU is.
 
-// The firmware Frond runs (rx1950Cebl5 and rx1950Ceos5) by size and CRC-32, as the core has no SHA-256;
+// HP's firmware (rx1950Cebl5 and rx1950Ceos5) by size and CRC-32, as the core has no SHA-256. CEBL.nbf is required, CEOS.nbf only recognised;
 // the desktop checks the SHA-256 at import.
 bool rx1950IsCebl(const uint8_t* data, size_t size);
 bool rx1950IsCeos(const uint8_t* data, size_t size);

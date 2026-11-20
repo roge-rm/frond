@@ -36,6 +36,15 @@ bool rx1950NandImage(const uint8_t* eboot, size_t ebootSize, const uint8_t* nbf,
         return false;
     }
     const size_t sectors = (nbfSize - nbfHeader) / nbfSector;
+    // Each sector's logical sector number is erased (0xffffffff) or inside the NAND; a raw dump isn't.
+    for (size_t i = 0; i < sectors; ++i) {
+        const uint8_t* info = nbf + nbfHeader + i * nbfSector + S3cNand::pageData;
+        const uint32_t logical = info[0] | info[1] << 8 | info[2] << 16 | uint32_t(info[3]) << 24;
+        if (logical != 0xffffffffu && logical >= uint32_t(S3cNand::blocks - reservedBlocks) * S3cNand::pagesPerBlock) {
+            error = "not an NBF of 512 byte sectors with SectorInfo that fits the NAND";
+            return false;
+        }
+    }
     if (ebootSize > size_t(reservedBlocks - ebootBlock) * S3cNand::pagesPerBlock * S3cNand::pageData) {
         error = "eboot doesn't fit the reserved blocks";
         return false;

@@ -76,6 +76,13 @@ class DeviceDataTest(unittest.TestCase):
             match = re.search(name + r'\{\s*"[^"]+", (\d+), "([0-9a-f]{64})"', header)
             self.assertIsNotNone(match, name)
             self.assertIn(f'{match.group(1)}L, "{match.group(2)}"', firmware)
+        # The OS image layout Firmware.kt checks is the one rx1950NandImage lays out.
+        image = (ROOT / 'core/src/uarm/uarm/rx1950_nand_image.cpp').read_text()
+        self.assertIn('nbfHeader = 0xa5a, nbfSector = 512 + 8', image)
+        self.assertIn('reservedBlocks = 21', image)
+        self.assertIn('NBF_HEADER = 0xa5aL', firmware)
+        self.assertIn('NBF_SECTOR = 520L', firmware)
+        self.assertIn('NBF_MAX_SECTORS = (4096L - 21) * 32', firmware)
 
     def test_dana_independent_native_card_inventory(self):
         profiles = json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']

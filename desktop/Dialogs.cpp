@@ -58,7 +58,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         choose->setObjectName(key + "Choose");
         row->addWidget(edit, 1); row->addWidget(choose);
         connect(choose, &QPushButton::clicked, this, [this, edit, label] {
-            const auto file = QFileDialog::getOpenFileName(this, label, edit->text(), tr("Firmware images (*.bin *.rom *.zip *.prc);;All files (*)"));
+            const auto file = QFileDialog::getOpenFileName(this, label, edit->text(), tr("Firmware images (*.bin *.rom *.zip *.prc *.nbf);;All files (*)"));
             if (!file.isEmpty()) edit->setText(file);
         });
         auto* text = new QLabel(label, this);
@@ -67,7 +67,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         return edit;
     };
     nor = field(tr("NOR image"), "nor", &norLabel);
-    nand = field(tr("NAND image (optional for the E2)"), "nand");
+    nand = field(tr("NAND image (optional for the E2)"), "nand", &nandLabel);
     // The Zire 72 has no NAND, and a 68k device takes one ROM file.
     auto nandShown = [this] {
         const auto selected = frondFirmware::deviceFromId(device->currentData().toString());
@@ -75,6 +75,8 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         nand->setEnabled(!none);
         if (auto* choose = findChild<QPushButton*>("nandChoose")) choose->setEnabled(!none);
         norLabel->setText(frondFirmware::runs68k(selected) ? tr("ROM image") : tr("NOR image"));
+        const bool rx1950 = frondFirmware::profile(selected).board == DeviceBoard5::s3c2442Rx1950;
+        nandLabel->setText(rx1950 ? tr("OS image (CEOS.nbf)") : tr("NAND image (optional for the E2)"));
     };
     connect(device, &QComboBox::currentIndexChanged, this, nandShown);
     nandShown();
@@ -88,8 +90,11 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         if (chosen.size() == 2 && !chosen[0].isEmpty() && chosen[0] == chosen[1])
             return void(QMessageBox::critical(this, tr("Frond"), tr("Pick a different card for each slot.")));
         const auto error = importImages();
-        if (error.isEmpty()) accept();
-        else QMessageBox::critical(this, tr("Frond"), error);
+        if (error.isEmpty()) {
+            if (const auto warning = frondFirmware::importWarning(stored, nand->text()); !warning.isEmpty())
+                QMessageBox::warning(this, tr("Frond"), warning);
+            accept();
+        } else QMessageBox::critical(this, tr("Frond"), error);
     });
     auto* layout = new QVBoxLayout(this);
     layout->addLayout(form);

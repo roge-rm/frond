@@ -16,7 +16,7 @@ object Firmware {
     fun ready(context: Context, device: Device): Boolean {
         val nor = nor(context, device)
         val nand = nand(context, device)
-        if (device.rx1950) return nor.length() == RX1950_CEBL.bytes && nand.length() == RX1950_CEOS.bytes
+        if (device.rx1950) return nor.length() == RX1950_CEBL.bytes && rx1950SizeFits(nand.length())
         return nor.isFile && (nand.isFile || !device.nandRequired) && check(device, nor, nand.takeIf { it.isFile }) == null
     }
 
@@ -31,14 +31,66 @@ object Firmware {
 
     fun sha256(file: File): String? = digest(file, "SHA-256")
 
-    // The rx1950 runs HP's WM5 ROM 1.01.00 ENG only: CEBL.nbf as the NOR and CEOS.nbf as the NAND.
-    // CEOS.nbf picked as the NOR is caught by its size before the NAND is asked for. cebl is for tests, which
-    // have no firmware.
-    internal fun checkRx1950(nor: File, nand: File?, cebl: KnownFile = RX1950_CEBL): String? {
-        if (nor.length() == RX1950_CEOS.bytes) return RX1950_SWAPPED
-        if (nand == null) return "Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950."
+    // The NBF layout rx1950NandImage takes: a header, then 512-byte sectors each with 8 bytes of SectorInfo,
+    // at most as many as the NAND holds after its reserved blocks.
+    private const val NBF_HEADER = 0xa5aL
+    private const val NBF_SECTOR = 520L
+    private const val NBF_MAX_SECTORS = (4096L - 21) * 32
+    internal const val RX1950_NBF_MAX = NBF_HEADER + NBF_MAX_SECTORS * NBF_SECTOR
+    internal fun rx1950SizeFits(size: Long) =
+        size >= NBF_HEADER && (size - NBF_HEADER) % NBF_SECTOR == 0L && (size - NBF_HEADER) / NBF_SECTOR <= NBF_MAX_SECTORS
+
+    // Whether every sector's logical sector number is erased or inside the NAND, which a raw dump's isn't.
+    private fun rx1950SectorInfoFits(file: File): Boolean = try {
+        file.inputStream().buffered(1 shl 20).use { input ->
+            var ok = input.skip(NBF_HEADER) == NBF_HEADER
+            val sector = ByteArray(NBF_SECTOR.toInt())
+            var sectors = 0L
+            while (ok && sectors < NBF_MAX_SECTORS) {
+                var n = 0
+                while (n < sector.size) {
+                    val got = input.read(sector, n, sector.size - n)
+                    if (got < 0) break
+                    n += got
+                }
+                if (n == 0) break
+                val logical = (sector[512].toLong() and 0xff) or ((sector[513].toLong() and 0xff) shl 8) or
+                    ((sector[514].toLong() and 0xff) shl 16) or ((sector[515].toLong() and 0xff) shl 24)
+                ok = n == sector.size && (logical == 0xffffffffL || logical < NBF_MAX_SECTORS)
+                sectors++
+            }
+            ok
+        }
+    } catch (e: IOException) {
+        false
+    }
+
+    enum class Rx1950Os { UNUSABLE, HP, OTHER }
+
+    // The OS image: HP's CEOS.nbf by size and SHA-256, any other .nbf rx1950NandImage can lay out, or neither.
+    internal fun rx1950Os(file: File, hp: KnownFile = RX1950_CEOS): Rx1950Os = when {
+        !rx1950SizeFits(file.length()) -> Rx1950Os.UNUSABLE
+        matches(file, hp) -> Rx1950Os.HP
+        rx1950SectorInfoFits(file) -> Rx1950Os.OTHER
+        else -> Rx1950Os.UNUSABLE
+    }
+
+    const val RX1950_OS_MISSING = "Choose the OS image (CEOS.nbf) for the HP iPAQ rx1950."
+    const val RX1950_OS_UNUSABLE = "The OS image isn't a usable .nbf (512-byte sectors with SectorInfo). Choose CEOS.nbf or another OS .nbf."
+    const val RX1950_OS_WARNING = "This OS image isn't HP's tested CEOS.nbf, so it may not boot."
+
+    // The warning for the rx1950's stored OS image when it isn't HP's, or null. Hashes 67 MB, so off the main thread.
+    fun importWarning(context: Context, device: Device): String? =
+        if (device.rx1950 && rx1950Os(nand(context, device)) == Rx1950Os.OTHER) RX1950_OS_WARNING else null
+
+    // The rx1950 takes HP's WM5 ROM 1.01.00 ENG CEBL.nbf as the NOR and an OS .nbf as the NAND, HP's CEOS.nbf
+    // or another that lays out the same. An OS image picked as the NOR is caught before the NAND is asked for.
+    // cebl and hp are for tests, which have no firmware.
+    internal fun checkRx1950(nor: File, nand: File?, cebl: KnownFile = RX1950_CEBL, hp: KnownFile = RX1950_CEOS): String? {
+        if (nor.length() != cebl.bytes && rx1950Os(nor, hp) != Rx1950Os.UNUSABLE) return RX1950_SWAPPED
+        if (nand == null) return RX1950_OS_MISSING
         if (!matches(nor, cebl)) return "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."
-        if (!matches(nand, RX1950_CEOS)) return "The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG."
+        if (rx1950Os(nand, hp) == Rx1950Os.UNUSABLE) return RX1950_OS_UNUSABLE
         return null
     }
 
@@ -123,7 +175,7 @@ object Firmware {
     }
 
     const val NOT_DETECTED = "Frond can't tell which device this firmware is for. Choose the device."
-    const val RX1950_SWAPPED = "That's CEOS.nbf, the NAND image. Choose CEBL.nbf as the NOR image for the HP iPAQ rx1950."
+    const val RX1950_SWAPPED = "That's the OS image. Choose CEBL.nbf as the NOR image for the HP iPAQ rx1950."
 
     // A 68k ROM's big-endian card header, read like common/device_profile5.h's deviceProfileInspect68kRom5:
     // only the header, so frond-68k still checks the ROM properly when it starts.
@@ -238,9 +290,9 @@ object Firmware {
     fun picked(context: Context) = File(File(context.filesDir, "firmware"), "picked-nor.bin")
 
     // Bigger than any NOR the app takes; anything past it is refused while copying. With the rx1950 chosen the
-    // limit is CEOS.nbf's size, so CEOS.nbf picked as the NOR gets its own message from check().
+    // limit is the biggest OS .nbf, so one picked as the NOR gets its own message from check().
     private const val PICK_LIMIT = 32L shl 20
-    internal fun pickLimit(device: Device?) = if (device?.rx1950 == true) maxOf(PICK_LIMIT, RX1950_CEOS.bytes) else PICK_LIMIT
+    internal fun pickLimit(device: Device?) = if (device?.rx1950 == true) maxOf(PICK_LIMIT, RX1950_NBF_MAX) else PICK_LIMIT
     // The message for a picked file over pickLimit: the rx1950's NOR is CEBL.nbf, other devices can't be told.
     internal fun tooBig(device: Device?) =
         if (device?.rx1950 == true) "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG." else NOT_DETECTED
