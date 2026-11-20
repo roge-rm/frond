@@ -52,7 +52,7 @@ inline bool Ready(SoC& soc) {
 // that takes host calls, or awake for 3 s (a 68k app waiting with no timeout never shows Ready),
 // kWakeSeconds of guest time at most. The T|X ignores power presses for about 2.6 s after any wake,
 // a power-key one too, so a press right after the call can be lost. False when it's still asleep.
-// Cycles are counted at 100 MHz, like settleEject.
+// Cycles are counted at 100 MHz.
 inline bool Wake(SoC& soc) {
     if (!frondNative::guestAsleep(soc)) return true;
     if (!soc.PowerButtonSupported()) return false;
@@ -103,7 +103,7 @@ inline void noteStoreWrite(SoC& soc) {
 // Before a pin reset: runs the guest until it has had delay of awake time since the last install
 // or delete, or limit in all. Time since the change counts as awake even if the guest slept, as
 // it wrote the store on the way to sleep. A guest that is asleep, or falls asleep, has written it,
-// so the wait stops there. Cycles are counted at 100 MHz, like settleEject.
+// so the wait stops there. Cycles are counted at 100 MHz.
 inline void SettleBeforeReset(SoC& soc, uint64_t delay = 3000000000, uint64_t limit = 10000000000) {
     auto& write = storeWrite();
     if (!write.pending) return;

@@ -35,6 +35,8 @@ struct PxaMmc {
 
     struct VSD *vsd;
     bool wordFifo;  // PXA27x transfers 1/2/4 bytes per FIFO access; PXA25x uses the low byte.
+    // The guest stopped the clock since the card was taken out (pxaMmcClockStoppedSinceRemoval). Not saved.
+    bool stoppedSinceRemoval;
 
     // fifo
     uint32_t fifoBytes, fifoOfst;
@@ -348,6 +350,7 @@ static bool pxaMmcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
                 case 1:  // stop clock
                     //				fprintf(stderr, "MMC: clock off\n");
                     mmc->clockOn = false;
+                    if (!mmc->vsd) mmc->stoppedSinceRemoval = true;
                     mmc->stat &= ~0x100;
                     pxaMmcPrvRecalcIregAndFifo(mmc);
                     break;
@@ -556,8 +559,11 @@ struct PxaMmc *pxaMmcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDm
     return mmc;
 }
 
+bool pxaMmcClockStoppedSinceRemoval(struct PxaMmc *mmc) { return !mmc->vsd && mmc->stoppedSinceRemoval; }
+
 void pxaMmcInsert(struct PxaMmc *mmc, struct VSD *vsd) {
     sdLogReset(&mmc->noReplyLog);
+    mmc->stoppedSinceRemoval = false;
     if (!vsd) {
         // Removal ends the old card's transfer. Never drain its FIFO into a
         // later block request through a null card, or expose it after reinsert.

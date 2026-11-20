@@ -649,6 +649,11 @@ void SocPXA::OnSdInsert() {
 
 void SocPXA::OnSdRemount() { pxaMmcInsert(mmc, vSD); }
 
+std::optional<bool> SocPXA::SdRemovalHandled() {
+    if (GetDeviceType() == deviceTypeTG50) return std::nullopt;
+    return pxaMmcClockStoppedSinceRemoval(mmc);
+}
+
 void SocPXA::OnSdEject() {
     vsdReset(vSD, 0);
     pxaMmcInsert(mmc, nullptr);

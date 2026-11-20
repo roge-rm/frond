@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "AttentionState.h"
@@ -209,6 +210,9 @@ class SoC {
     bool SdRemount();
     void SdEject();
     bool SdInserted() { return cardInserted; }
+    // After an SD eject: whether the guest's card driver has handled the removal, on boards that can
+    // tell (the PXA SD devices: the guest stopped the MMC clock with the slot empty), else nullopt.
+    virtual std::optional<bool> SdRemovalHandled() { return std::nullopt; }
     // The card's write protect tab as the slot reads it, for devices that have the switch (the rx1950).
     virtual void SetSdWriteProtect(bool) {}
     // A second SD slot, the Zodiac's only, with its card in sdCardStore(1). Sd2Insert puts that card

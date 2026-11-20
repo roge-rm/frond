@@ -144,7 +144,8 @@ bool gFastEngineMissing = false;
     std::optional<frondMachine::Media> nandMedia;
     bool nandFromMalloc = false;
     // Guest time awake between the eject and the insert, so the card driver handles the removal
-    // first. A guest the eject doesn't wake gets the card after swapInsertLimit.
+    // first, and for an SD card until SoC::SdRemovalHandled says it has where the board can tell. A
+    // guest the eject doesn't wake, or that never handles it, gets the card after swapInsertLimit.
     constexpr uint64_t swapInsertDelay = 500000000, swapInsertLimit = 5000000000;  // ns
     constexpr size_t AUDIO_QUEUE_SIZE = 44100 / MAIN_LOOP_FPS * 10;
 
@@ -1370,7 +1371,8 @@ bool gFastEngineMissing = false;
                 if (sdInsertPending || msInsertPending) {
                     const uint64_t time = soc->GetTime();
                     if (!awakeAt && !(socPxa && socPxa->PowerSleeping())) awakeAt = time;
-                    if ((awakeAt && time - *awakeAt >= swapInsertDelay) || time - ejectedAt >= swapInsertLimit) {
+                    const bool handled = !sdInsertPending || soc->SdRemovalHandled().value_or(true);
+                    if ((awakeAt && time - *awakeAt >= swapInsertDelay && handled) || time - ejectedAt >= swapInsertLimit) {
                         bool inserted = false;
                         if (sdInsertPending) soc->SdInsert(), inserted = soc->SdInserted();
                         if (msInsertPending) inserted = msCtrlrInsert(memoryStick, true) || inserted;
