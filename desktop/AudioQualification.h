@@ -91,13 +91,15 @@ inline bool qualified(frondFirmware::Device device, const QString& session, cons
         if (int(variant.deviceType) == int(device) && md5 == variant.fastAudioNorMd5) return true;
     return false;
 }
-// ARM devices use the preview on qualified firmware, otherwise the queue limits only.
+// ARM devices use the preview on qualified firmware, otherwise the queue limits only. The rx1950 has
+// no qualified firmware, so it always gets the queue limits.
 inline bool lowLatencyAvailable(frondFirmware::Device device) {
     if (device == frondFirmware::Device::automatic) return false;
     // The Zodiac's sound has no low-latency path.
-    if (frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac) return false;
+    const auto board = frondFirmware::profile(device).board;
+    if (board == DeviceBoard5::imx1Zodiac) return false;
     const auto caps = frondFirmware::capabilities(device);
-    return caps.sound && deviceProfileRunnerEligible5(int(device));
+    return caps.sound && (deviceProfileRunnerEligible5(int(device)) || board == DeviceBoard5::s3c2442Rx1950);
 }
 inline QString lowLatencyOption(frondFirmware::Device device, const QString& session, const QString& nor) {
     if (!lowLatencyAvailable(device)) return {};
