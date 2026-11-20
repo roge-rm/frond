@@ -678,9 +678,9 @@ static void zodiac2() {
     assert(deviceProfileCardSlotCount5(*p) == 2 && !deviceProfileLinkedCards5(*p));
     assert(deviceProfileCardSizeValid5(p->deviceType, DeviceCardSlot5::sd2, DeviceCardFamily5::sdsc, 32ull << 20));
     const auto& c = p->capabilities;
-    // Serial (UART1), IrDA (UART2) and USB HotSync are on since Z10; Bluetooth waits for Z11.
+    // Serial (UART1), IrDA (UART2), USB HotSync and Bluetooth (the HCI shim) are on.
     assert(!c.network && !c.keyboard && c.serial && c.usb && !c.fastAudio && c.infrared &&
-           !c.bluetooth && c.sound && !c.microphone && !c.backgroundPanel);
+           c.bluetooth && c.sound && !c.microphone && !c.backgroundPanel);
     assert(p->norSize == 0x7d0000 && !p->nandSize && !p->requiresExplicitNand);
     assert(p->minRam == (128u << 20) && p->maxRam == p->minRam);
     assert(!deviceProfileSdSizeValid5(p->deviceType, 512));
