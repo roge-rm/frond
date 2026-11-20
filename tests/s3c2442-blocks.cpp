@@ -818,6 +818,10 @@ static void nandImageTests() {
     const uint32_t ecc = S3cNand::ecc512(page(21, 0));
     assert(page(21, 0)[520] == uint8_t(ecc) && page(21, 0)[522] == uint8_t(ecc >> 16));
     assert(page(21, 2)[0] == 0xff && page(21, 2)[512] == 0xff);
+    // A sector whose logical number is past the NAND, as in a raw dump, is refused.
+    const uint8_t bad[4] = {0x12, 0x12, 0x12, 0x12};
+    std::memcpy(&nbf[0xa5a + 520 + 512], bad, 4);
+    assert(!rx1950NandImage(eboot.data(), eboot.size(), nbf.data(), nbf.size(), flash, error));
 }
 
 // The blocks the OS's drivers set up before they're modelled in full: an empty SD slot, no USB cable,
