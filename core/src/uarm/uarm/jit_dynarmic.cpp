@@ -765,6 +765,11 @@ struct Env final : public A32::UserCallbacks {
     void AfterIo() {
         if (cpuJitSlowPath(cpu)) jit->HaltExecution(kSlowPath);
     }
+    // jitRanNow for this run, which is the one running.
+    uint32_t RanNow() const {
+        const int64_t ran = (int64_t(budget) - jit->TicksRemainingNow()) >> model.shift;
+        return ran <= 0 ? 0 : uint32_t(std::min<int64_t>(ran, UINT32_MAX));
+    }
 
     // Fast at Original (cpuJitMemoryCost): generated loads and stores check the CPU's data cache
     // hint (cpuJitCostHint) before the page table, and come to the callbacks unless the hint
@@ -835,7 +840,7 @@ struct Env final : public A32::UserCallbacks {
         stats.NoteCallback(va, true);
         if constexpr (sizeof(T) <= 4) {
             if (arm920) {
-                if (const int device = cpuJitLeanDeviceWrite(cpu, va, sizeof(T), uint32_t(v))) {
+                if (const int device = cpuJitLeanDeviceWrite(cpu, va, sizeof(T), uint32_t(v), RanNow())) {
                     if (device < 0) AccessFailed(va, sizeof(T), true, 0);
                     else AfterIo();
                     return;

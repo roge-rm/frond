@@ -6137,11 +6137,11 @@ bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t
 // An ARM920T Fast blocks store to a page an earlier store sent to leanWrite: the same call, without the translation
 // and the page lookups. 1 if leanWrite took it, -1 if it refused (an exit, as cpuJitWrite's refusal with fsr 0), 0 for
 // cpuJitWrite. A refusal drops the page, so the next store looks it up again.
-int cpuJitLeanDeviceWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value) {
+int cpuJitLeanDeviceWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value, uint32_t ranNow) {
     if (!cpu->leanRun || !cpu->leanJit || cpu->nativeCallDepth || size > 4 || (va & (size - 1))) return 0;
     auto &e = cpu->leanDeviceWrite[(va >> 12) & 15];
     if (!(e.pa & 1) || e.key != hostTlbKey(cpu->mem->hostTlb.gen, va, cpu->privileged)) return 0;
-    const uint32_t ran = cpuPrvJitRanUncharged(cpu);
+    const uint32_t ran = ranNow > cpu->jitCharged ? ranNow - cpu->jitCharged : 0;
     const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
     uint32_t cost = 0;
     if (cpu->leanWrite(cpu->leanContext, (e.pa & ~0xfffu) | (va & 0xfffu), size, value, ran, left, &cost)) {
