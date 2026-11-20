@@ -429,17 +429,25 @@ class Imx1GraphicsCommands {
                 }
                 fill.pixels.reserve(size_t(fill.width) * fill.height);
                 const uint32_t samplesPerWord = mono ? 32 : a4 ? 8 : 2;
+                // Samples run in rows of width; x and y follow the sample index, which stops at width * height.
+                const uint64_t samples = uint64_t(width) * height;
+                uint64_t index = 0;
+                uint32_t x = 0, y = 0;
                 for (uint64_t word = 0; word < payload; ++word) {
                     uint32_t pixels;
-                    if (!take(pixels)) return A::sequence;
-                    for (uint32_t sample = 0; sample < samplesPerWord; ++sample) {
-                        const uint64_t index = word * samplesPerWord + sample;
-                        if (index >= uint64_t(width) * height) break;
-                        const uint32_t y = index / width, x = index % width;
+                    // payload <= left, so a ring read straight from the bank can't run out.
+                    if (ring) {
+                        const uint8_t* at = ring + cursor * 4;
+                        pixels = uint32_t(at[0]) | uint32_t(at[1]) << 8 | uint32_t(at[2]) << 16 | uint32_t(at[3]) << 24;
+                        cursor = (cursor + 1) & (words - 1);
+                        --left;
+                    } else if (!take(pixels)) return A::sequence;
+                    for (uint32_t sample = 0; sample < samplesPerWord && index < samples; ++sample, ++index) {
                         if (y >= fill.sourceY && y - fill.sourceY < fill.height &&
                             x >= fill.sourceX && x - fill.sourceX < fill.width)
                             fill.pixels.push_back(mono ? virtualPackedMonoColour(virtualPackedMonoBit(pixels, sample)) :
                                 uint16_t((pixels >> (sample * (a4 ? 4 : 16))) & (a4 ? 15 : 0xffff)));
+                        if (++x == width) { x = 0; ++y; }
                     }
                 }
                 ticks += uint64_t(fill.width) * fill.height;
