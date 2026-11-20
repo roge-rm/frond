@@ -182,7 +182,7 @@ Panning is manual.
 
 ## Storage cards
 
-The T|X, E2, E3, Zire 72 and rx1950 take an SD card, the TG50 a Memory Stick. The rx1950 takes cards from 32 MB to 2 GB. Format a new one as FAT16 on your computer first. The m125, m130, m500, c500, m505, m515 and m520 take one SD or MMC card, handled like the Zodiac and Dana cards in [Two-slot cards](#two-slot-cards). A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
+The T|X, E2, E3, Zire 72 and rx1950 take an SD card, the TG50 a Memory Stick. The rx1950 takes cards from 32 MB to 2 GB. Format a new one as FAT16 on your computer first. The m125, m130, m500, c500, m505, m515 and m520 take one SD or MMC card, handled like the Zodiac and Dana cards in [Two-slot cards](#zodiac-and-68k-palm-cards). A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
 
 While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card slot, where the device has one, and Internal, the Palm's own databases. Each has Files…, the same file manager, see [Files](#files).
 
@@ -195,9 +195,9 @@ While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card s
 
 SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
 
-### Two-slot cards
+### Zodiac and 68k Palm cards
 
-The Zodiac and the Dana have two card slots, and the VZ Palms (m125, m130, m500, c500, m505, m515, m520) and the CLIÉ T415 have one. While the machine runs, Storage shows a Card 1 and a Card 2 row on the two-slot devices. Each row is the same as the one-slot card's: tap the name to pick a card from the drawer or make a new one, then Insert, Files…, Eject and Export image. The Zodiac takes SD cards. The Dana and the VZ Palms take SD or MMC cards, and New card offers MMC after SD. The T415 takes its Memory Stick the same way.
+The Zodiac and the Dana have two card slots, and the VZ Palms (m125, m130, m500, c500, m505, m515, m520) and the CLIÉ T415 have one. While the machine runs, Storage shows a Card 1 and a Card 2 row on the two-slot devices. Each row is the same as the one-slot card's: click or tap the name to pick a card from the drawer or make a new one, then Insert, Files…, Eject and Export image. The Zodiac takes SD cards. The Dana and the VZ Palms take SD or MMC cards, and New card offers MMC after SD. The T415 takes its Memory Stick the same way.
 
 Each slot links its own card, so a machine holds at most one card per slot, and a card sits in one slot of one machine at a time. The Cards screen lists a card in a two-slot machine as "In Zodiac · Card 2", and Link to machines lists each slot. Take a card out of one slot and it can go in the other slot or another machine.
 
