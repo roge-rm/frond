@@ -19,6 +19,16 @@ The 6 MiB E2 de-NVFS image is imported as Tungsten E2, with 32 MiB RAM by defaul
 
 The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by default. NAND is optional. Its saved device name stays `palm-e2-franken`. The 320×480 screen includes Palm OS's input area and status bar, with no extra silkscreen below it. Home and Menu use the status bar whether the input area is open or closed. Frond keeps sleep disabled for this ROM, so the E3 has no Power control. The ROM has no Bluetooth stack, and its network library needs one, so the E3 has no Bluetooth, mobile phone or dial-up; those rows are greyed out.
 
+Which ROM each 68k device and the Zodiac take:
+
+- The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. The IIIe has no ROM of its own and runs the IIIx's OS 3.1 ROM (1,212,416 bytes).
+- The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes).
+- The m100 and m105 take the OS 3.5.1 ROM (2 MiB). Frond offers the m100 when it sees one, so choose the m105 yourself.
+- The m125 takes its OS 4.0.1 ROM (3 MiB), the m130 its OS 4.0 ROM (4 MiB), the m500 its OS 4.1 ROM (2,424,832 bytes) and the c500 the WorkPad ROM (2,621,440 bytes) or the m500's, so choose the c500 yourself.
+- The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's.
+- Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana.
+- For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
+
 A session has your firmware, installed apps and personal data in it. Keep it to yourself.
 
 ## Running a machine
@@ -81,6 +91,8 @@ To report, open a Real device benchmark issue on GitHub and paste the Memo text.
 
 ## Settings
 
+<img src="images/desktop-edit-settings.png" width="200" alt="Edit settings with the Speed list open">
+
 Set these when you add a machine, or in Edit settings while it's stopped. On Android most are in the Display sheet while it runs too.
 
 | Setting | What it does |
@@ -106,7 +118,7 @@ The button bars and silkscreens are drawn at the chosen size. The E3 uses the E2
 
 Off by default. On the T|X, E2, E3 and Zire 72 with their qualified firmware, it plays one open 44.1 kHz stereo stream with less delay, for music apps like SunVox, and goes back to normal audio when your computer or phone can't keep up, which can pause the sound for a moment. Anything else, like several streams or other formats, uses normal audio.
 
-On the TG50 and the rx1950, and on a T|X, E2, E3 or Zire 72 with other firmware, it keeps a shorter audio queue while sound is playing. Set it before starting the machine. Diagnostics are in [performance.md](performance.md).
+On the TG50 and the rx1950, and on a T|X, E2, E3 or Zire 72 with other firmware, it keeps a shorter audio queue while sound is playing, about 35 ms less delay. Set it before starting the machine. Diagnostics are in [performance.md](performance.md).
 
 ## Buttons, keys and controllers
 
@@ -193,6 +205,8 @@ While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card s
 | Images it takes | up to 2 GB | up to 1 GB | up to 2 GB | `.frondms`, Pro as raw `.img` |
 | Import folder as card | yes | yes | yes | Pro only |
 
+On the TG50 Sony Launcher runs apps from the card's Card category.
+
 SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
 
 ### Zodiac and 68k Palm cards
@@ -210,6 +224,8 @@ Duplicate asks about the cards as for one card: Link, Copy or No card, for all o
 On the Dana, the VZ Palms and the T415, Files… takes the card out, saves, and puts it back when you close it. Export portable folder… (desktop, while the machine runs) writes the machine with its cards as one folder. Keep it together: moving it to another filesystem or copying its files one by one isn't supported. Android has no portable folder. Save a Copy there asks you to take the cards out first, and a session saved by an older version with independent cards can't be duplicated, exported or imported. Export each card on its own instead.
 
 ### Dana USB port
+
+<img src="images/desktop-dana-wifi.png" width="400" alt="The Dana's Network Log pinging the virtual router over its USB Wi-Fi adapter">
 
 The Dana has one external USB port, and USB port in Connections (desktop panel, Android sheet) picks what is plugged into it: Off, Printer or Wi-Fi adapter. The choice is kept for the machine and applied at every start. Changing it while the Dana runs unplugs one and plugs in the other. The Dana Wireless offers Off and Printer only, as its Wi-Fi is built in, see [Dana Wireless](#dana-wireless).
 
@@ -261,6 +277,8 @@ Don't eject or sleep the device while an app is writing quickly, as the SD drive
 
 ### Files
 
+<img src="images/android-internal-files.png" width="200" alt="The T|X's internal databases listed in Files on Android">
+
 SD cards and Memory Sticks: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the card of a running machine use Files in the Storage panel or sheet: it ejects the card (close files on the device first), and closing Files puts it back in, ejected again if it was out before.
 
 - Open a folder by double-clicking it (tap on Android), go back with Up or the path bar, and jump to `/PALM/Launcher` or `/DCIM`. The top line shows the free space and the card's size.
@@ -283,6 +301,8 @@ Internal lists the databases in the device's RAM by file name, with their type a
 Each device only gets the connections it really has. A control it doesn't have yet is greyed out, with "Not available on the <device> yet". The Zire 72 has no serial port, so that row isn't shown, and on the 68k Palm and Dana rows for hardware they don't have aren't shown.
 
 ### Connections between Fronds
+
+<img src="images/android-tx-connections.png" width="200" alt="T|X Connections on Android, infrared joined to a Tungsten E2 on a computer">
 
 A connection is a link between two Frond installs on the same network, paired once. A machine's Infrared, Serial or Bluetooth setting can name a connection, and then the two Palms talk to each other through it, for example beaming a memo from a Tungsten E2 on a phone to a T|X on your computer. One link carries all the channels between two installs, and it only runs while a machine wants it.
 
@@ -335,6 +355,8 @@ Without a connection, serial, USB HotSync and infrared beaming have an endpoint 
 
 The choice is saved with each machine. A status line shows the endpoint and whether a peer is connected. Changing the choice while the machine runs closes the old connection. Nothing from the host is saved in a session, and reset, true sleep and loading a session close the connection.
 
+On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server all go over the network, to another Frond or to the link tools below on a computer.
+
 Android has no PTYs. Its USB HotSync row has Off, Wait for a peer (all addresses, port 5034, and it shows the phone's address) and Connect to an address, to reach a link tool on a computer. Infrared, serial and Bluetooth on Android use connections only.
 
 The link tools stay for scripts and for USB HotSync from a phone:
@@ -347,7 +369,7 @@ A relay waits again after its peer goes, and Connect again retries.
 
 ### Network
 
-Network is the T|X only. The 68k Palms have no network setting, they connect over PPP on their serial port, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). Choose a mode before opening a network app:
+Network is the T|X only, and the E2 and Zire 72 don't have their networking yet. The 68k Palms have no network setting, they connect over PPP on their serial port, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). Choose a mode before opening a network app:
 
 - Virtual Wi-Fi (Frond): turn on Wi-Fi in Palm OS, scan and connect to the open **Frond** network. A virtual router gives it an address, DNS and IPv4 through the computer's or phone's connection, with no root, bridge or Wi-Fi adapter needed. The router is 10.0.2.2, so use that for a service on your computer. Blazer loads HTTP pages, but its old HTTPS is refused by most sites. For Network HotSync run `pilot-xfer -p net:127.0.0.1 -l` and enter 10.0.2.2 as the PC address in the Palm's HotSync setup.
 - Internet via host: forwards some 68k NetLib calls to host sockets. Blazer's Wi-Fi workflow doesn't work this way, use Virtual Wi-Fi.
@@ -406,7 +428,9 @@ Programs that use NetLib, like a web clipping app or a telnet client, then work 
 
 ### Dial-up modem
 
-The 68k Palms have a snap-on modem on their serial port, except the m100 and m105. Set Serial port to Modem in Edit settings (Linux, or in the Connections panel while it runs) or Edit settings (Android), then set up a connection in Palm OS the way you would for a real modem. Frond answers as a modem on a 33600 line and puts you on the internet through your computer's or phone's connection, with no root. Any number you dial connects. The line driver has to be on, so the modem only works while a program has the serial port open.
+<img src="images/desktop-iiix-modem-hotsync.png" width="300" alt="The Palm IIIx doing a Modem HotSync, online at 33600">
+
+The 68k Palms have a snap-on modem on their serial port, except the m100 and m105. It's tested on the IIIx. Set Serial port to Modem in Edit settings (Linux, or in the Connections panel while it runs) or Edit settings (Android), then set up a connection in Palm OS the way you would for a real modem. Frond answers as a modem on a 33600 line and puts you on the internet through your computer's or phone's connection, with no root. Any number you dial connects. The line driver has to be on, so the modem only works while a program has the serial port open.
 
 1. Palm OS 3.1: the Modem panel's defaults (Standard, 57,600 bps) work. In Prefs, Network set the service's phone number to anything, for example `5551234`.
 2. Palm OS 3.5 and 4.1: open Prefs, Network, pick a service and set its Connection to the built-in Palm Modem US/Canada (the Modem settings it comes with work). Set the phone number to anything.
@@ -478,6 +502,8 @@ Infrared beaming links two Frond machines through a connection, see Connections 
 
 ### Printing over infrared
 
+<img src="images/desktop-dana-print.png" width="400" alt="A PrintBoy test page received from the Dana over infrared">
+
 Every device with infrared can print to Frond as an IrDA printer. Pick Printer in the Infrared list (Linux: the Infrared beaming row, and Edit settings…; Android: Infrared beaming in Connections, and Edit settings). The choice is kept for the machine and applied at every start. Detach the infrared keyboard first, as they share the port.
 
 A print app that finds IrDA printers sees "Frond Printer". On the Dana, PrintBoy does: in its setup choose the IrDA port for your printer, then print as usual. Other IrDA print apps work the same way, and so do apps that print to the infrared serial port (IrCOMM).
@@ -512,11 +538,7 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 
 ## Availability and limits
 
-Dana has a desktop and Android frontend, with its built-in
-keyboard, sound, infrared beaming, two independent SD/MMC slots, a USB printer
-and a USB Wi-Fi adapter. The Dana Wireless has the same, with built-in Wi-Fi
-instead of the adapter. Its USB computer transport is available through the
-native localhost debug path. The app's USB computer controls stay disabled.
+What each device has, beyond the Devices table in the [README](../README.md#devices). The Zodiac and the Danas are under [Device notes](#device-notes).
 
 | | T\|X | E2 | E3 | Zire 72 | TG50 | 68k Palms | rx1950 |
 |---|---|---|---|---|---|---|---|
@@ -535,11 +557,21 @@ native localhost debug path. The app's USB computer controls stay disabled.
 | Hold | | | | | yes | | |
 | Card | SD | SD | SD | SD | Memory Stick, Pro | SD or MMC on the m125, m130, m500, c500, m505, m515, m520, else none | SD |
 
-The Zire 72's Camera shows a test pattern, a picture or the phone's back camera on Android, or a webcam on Linux desktop: pick it in the Camera row of the Display panel or sheet (Webcam is greyed when there is no /dev/video device you can open). It goes back to the test pattern on a save, sleep, or when the webcam goes away or the app is left, and the row says why. Video isn't tested with a picture or camera. Its microphone is the built-in one that Voice Memo uses, with no choice of input. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
+### Device notes
 
-On the 68k Palms, serial HotSync is tested with pilot-link on a 68k Palm (install, fetch, backup). They have no Fast engine and no Bluetooth or Wi-Fi, as on the real ones, and their USB HotSync isn't done yet. The m125, m130, m500, c500, m505, m515 and m520 have an SD or MMC slot, the others have no card. The IIIc, m130, m505, m515 and m520 have colour screens, the rest are grey. The grey ones show the backlight as a green panel.
+The T|X plays videos in Media. On a slower computer use the Fast engine for it. HotSync over its serial port isn't tested.
 
-The HP iPAQ rx1950 runs Windows Mobile 5. Its Wi-Fi joins Frond's access point in the Virtual Wi-Fi network mode, and infrared beams files to another rx1950 or a Palm. It has no Bluetooth, same as the real one. The installed program list isn't done yet.
+The Zire 72 has no serial port, same as the real one. Its Camera shows a test pattern, a picture or the phone's back camera on Android, or a webcam on Linux desktop: pick it in the Camera row of the Display panel or sheet (Webcam is greyed when there is no /dev/video device you can open). It goes back to the test pattern on a save, sleep, or when the webcam goes away or the app is left, and the row says why. Video isn't tested with a picture or camera. Its microphone is the built-in one that Voice Memo uses, with no choice of input.
+
+The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its early Palm OS 5 has no standard Palm SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on it.
+
+The Tapwave Zodiac plays sound and takes two SD cards, see [Zodiac and 68k Palm cards](#zodiac-and-68k-palm-cards). It has infrared beaming, Bluetooth (tested with sending files and InkStorm multiplayer) and HotSync over USB or the serial cradle, each to a PTY or TCP port. Dial-up and HotSync over Bluetooth aren't done yet.
+
+The 68k Palms, from the Palm IIIx to the m520, the Dana and the CLIÉ T415, run in their own runner, `frond-68k`, on Linux and Android. They have a backlight, serial with the cradle's HotSync button, infrared and, on the grey ones, the screen contrast. Serial HotSync is tested with pilot-link on a 68k Palm (install, fetch, backup). Networking is PPP over the serial port or the dial-up modem, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). They have no Fast engine and no Bluetooth or Wi-Fi, as on the real ones, and their USB HotSync isn't done yet. The m125, m130, m500, c500, m505, m515 and m520 have an SD or MMC slot, the others have no card. The IIIc, m130, m505, m515 and m520 have colour screens, the rest are grey. The grey ones show the backlight as a green panel. The debugger works with prc-tools' gdb, see [68k Palms](developer-reference.md#68k-palms-frond-68k).
+
+The AlphaSmart Dana has the wide screen, the built-in keyboard, sound, infrared beaming, two SD or MMC slots and a USB port for a printer or a USB Wi-Fi adapter, on Linux and Android. The Dana Wireless has the same, with Wi-Fi built in instead of the adapter. See [Dana screen and keyboard](#dana-screen-and-keyboard), [Dana USB port](#dana-usb-port) and [Dana Wireless](#dana-wireless). Its USB computer link is there through the native localhost debug path, and the app's USB computer controls stay greyed out. Peer to Peer (ad hoc) Wi-Fi finds nobody. On Android a Dana session with cards in it can't be copied or imported yet, but each card can still be exported.
+
+The HP iPAQ rx1950 runs Windows Mobile 5, with sound, the microphone and an SD card. Its Wi-Fi joins Frond's access point in the Virtual Wi-Fi network mode, and infrared beams files to another rx1950 or a Palm OS device. It syncs with SynCE's ActiveSync tools over USB or the serial cable on Linux, see [ActiveSync](#activesync). It has no Bluetooth, same as the real one. The installed program list isn't done yet.
 
 Microphone (Zire 72, TG50 and rx1950) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or the Machine menu (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 

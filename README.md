@@ -6,7 +6,7 @@ It runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the Alph
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
-How it differs is by focussing on a couple of goals that are important to me - simulating peripherals to emulate the experience of actually using these devices and emulating them fast enough that they can be enjoyed on less than stellar hardware. These goals are achieved by simulating each offered connection and peripheral (work in progress) and finding ways to increase the speed of emulation - like the [dynarmic](https://github.com/lioncash/dynarmic) based JIT compiler that was added in 0.11.0.
+How it differs is by focussing on a couple of goals that are important to me - simulating peripherals to emulate the experience of actually using these devices and emulating them fast enough that they can be enjoyed on less than stellar hardware. These goals are achieved by simulating each offered connection and peripheral and finding ways to increase the speed of emulation - like the [dynarmic](https://github.com/lioncash/dynarmic) based JIT compiler that was added in 0.11.0.
 
 You can run multiple devices on one computer (Linux only for now) - or multiple phones - and link them together over virtual infrared or Bluetooth, connect to the internet with a virtual modem or simulated WIFI connection, install an IR keyboard driver and work on your screenplay, etc. This project is fueled by nostalgia and I want to play with the things I remember, as I remember them, while also trying things I knew of back then but never saw in person.
 
@@ -41,23 +41,17 @@ Dan
 </table>
 
 - [Devices](#devices)
-- [Sessions](#sessions)
-- [Screen](#screen)
-- [Settings](#settings)
-- [Buttons](#buttons)
-- [Apps and cards](#apps-and-cards)
-- [Connections](#connections)
-- [Modem and phones](#modem-and-phones)
-- [Printing](#printing)
-- [The Dana](#the-dana)
-- [Low-latency audio](#low-latency-audio)
+- [Getting started](#getting-started)
+  - [Installing](#installing)
+  - [Firmware](#firmware)
+  - [Your first machine](#your-first-machine)
+- [What it does](#what-it-does)
 - [For developers](#for-developers)
+  - [Building](#building)
+  - [Testing](#testing)
 - [Documentation](#documentation)
-- [Installing](#installing)
-- [Firmware](#firmware)
-- [Building](#building)
-- [Testing](#testing)
 - [Licence](#licence)
+- [Special Thanks](#special-thanks)
 
 ## Devices
 
@@ -91,131 +85,23 @@ Dan
 | **Windows Mobile, ARM** | | | | | | | | |
 | HP iPAQ rx1950 | Windows Mobile 5 | 240×320 colour | SD | yes | yes | | virtual Wi-Fi | ActiveSync, USB and serial |
 
-The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3, Zire 72 and Zodiac also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k devices have the cradle's HotSync button, and their USB HotSync isn't done yet.
+- The ARM devices have two engines. Exact runs the device exactly and Fast is a JIT that runs quicker on a slow computer or phone. Pick one in each machine's [Settings](doc/using-frond.md#settings).
+- The 68k devices, from the Palm IIIx to the m520, the Danas and the CLIÉ T415, run in their own runner, `frond-68k`, with the Exact engine only. Their networking is PPP over serial or the dial-up modem, see [68k Palm serial and PPP](doc/using-frond.md#68k-palm-serial-and-ppp).
+- The iPAQ rx1950 runs Windows Mobile 5. It installs CABs from its SD card and syncs over [ActiveSync](doc/using-frond.md#activesync).
 
-Printing over infrared works on every device with infrared. The T|X, E2, Zire 72 and TG50 have an infrared keyboard, a mobile phone over infrared and a mobile phone over Bluetooth, and the 68k Palms have the phone over infrared (on Palm OS 3.5 and 4.1). Every 68k Palm except the m100 and m105 has the dial-up modem and HotSync by modem, tested on the IIIx. The Dana and Dana Wireless print to a USB printer. Mobile phone over Bluetooth and HotSync by modem are Linux only for now. The E2 and the Zire don't have their networking yet. The Zire 72 and TG50 have a microphone, and the Zire 72 has its camera.
+What each device has, and what isn't done yet, is in [Availability and limits](doc/using-frond.md#availability-and-limits) and its [Device notes](doc/using-frond.md#device-notes).
 
-The Tungsten E3 is the modified E2 ROM with a 320×480 screen. Its ROM has no Bluetooth stack, so it has no Bluetooth, mobile phone or dial-up.
+## Getting started
 
-The T|X plays videos in Media. On a slower computer use the Fast engine for it.
+### Installing
 
-The 68k devices run in their own runner, `frond-68k`, from the Palm IIIx to the m520, the Dana and the CLIÉ T415. They have a backlight, serial with the HotSync button, infrared and, on the grey ones, the screen contrast. The m125, m500, c500, m505, m515, m130 and m520 have an SD or MMC slot. Networking is PPP over the serial port or the dial-up modem. See [68k Palm serial and PPP](doc/using-frond.md#68k-palm-serial-and-ppp). Android has them too, and the debugger works with prc-tools' gdb. See [68k Palms](doc/developer-reference.md#68k-palms-frond-68k).
-
-The infrared keyboard and beaming share the port. Take the keyboard off before you turn beaming on. On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
-
-The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
-
-The Tapwave Zodiac plays sound and takes two SD cards. It has infrared beaming, Bluetooth (tested with sending files and InkStorm multiplayer) and HotSync over USB or the serial cradle. Dial-up and HotSync over Bluetooth aren't done yet.
-
-The HP iPAQ rx1950 runs Windows Mobile 5, with sound and the microphone, an SD card, infrared beaming and Wi-Fi through Virtual Wi-Fi. It syncs with SynCE's ActiveSync tools over USB or the serial cable on Linux. Install copies a file onto the SD card, where File Explorer installs a CAB. Hard reset erases its storage and starts at Windows Mobile's first screen. The installed program list isn't done yet. See [ActiveSync](doc/using-frond.md#activesync).
-
-## Sessions
-
-<img src="doc/images/android-home.png" width="200" alt="The Frond home screen with a list of machines">
-
-Each device you run is a session on the home screen. You can rename one, duplicate it, export it, import one or delete it. There's no autosave, so a crash loses anything since the last save. On Linux, closing the window saves. Save and Stop goes back to the list. Save a copy… keeps a separate snapshot. A session has your firmware and your data in it, so keep it to yourself.
-
-Hard reset erases the device. Save first saves it before you do. The T|X, E2 and the 68k devices ask first (press up to erase). The Zire erases straight away, and the rx1950 starts again at Windows Mobile's first screen.
-
-## Screen
-
-<img src="doc/images/desktop-tx.png" width="300" alt="The Palm T|X on Linux at 2x, with the running bar">
-
-On Linux the scale goes from 1× to 2× in steps of 0.25, and it starts at the largest that fits. On Android the screen fits the phone, in whole steps or filling it, and it can follow the phone or stay portrait or landscape. Pixels stay sharp. Smooth pixels softens them.
-
-While a machine runs, the bar along the top has Applications, Storage, Sound, Power and a menu with the rest. On Linux, Applications, Storage, Display and Connections open as a panel beside the device. On Android they open as a sheet. Hide bar leaves a small handle at the top.
-
-## Settings
-
-<img src="doc/images/desktop-edit-settings.png" width="200" alt="Edit settings with the Speed list open">
-
-Each machine has its own display, sound, speed and connection settings. Set them when you add it, or with Edit settings while it's stopped. On Android most of them are in the Display sheet while it runs too.
-
-- Speed is Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k devices stop at 4×). Original runs the machine at its real speed, the others run it that many times faster, and Uncapped lets your computer or phone run it as fast as it can.
-- Engine is Exact or Fast. Fast is the JIT, and the 68k machines only have Exact.
-
-See [Settings](doc/using-frond.md#settings).
-
-## Buttons
-
-The buttons under the screen and the silkscreen can be clicked or tapped. On a keyboard the arrow keys are the five-way, Enter selects and F1 to F4 are the app buttons. Help → Hardware Keyboard Controls lists the rest. On Android a game controller presses the device's buttons. You can change which one does what in Settings.
-
-The TG50 has its keyboard, jog wheel, Home, Back and Hold. Hold locks the controls and turns the screen off. Audio keeps playing.
-
-The T|X, E2, E3, Zire 72 and TG50 can also type with an emulated Palm infrared keyboard, once Palm's keyboard driver is installed.
-
-## Apps and cards
-
-<img src="doc/images/android-internal-files.png" width="200" alt="The T|X's internal databases listed in Files on Android">
-
-On Palm OS, install PRC and PDB files with Install…, from the Applications panel on Linux or the sheet on Android. Each app's row has Launch, Export and Delete. On the rx1950 Install… copies a file onto the SD card, where File Explorer installs a CAB.
-
-FrondBench, a small Palm OS speed test, installs from the Help menu on the desktop or the Applications sheet on Android, or saves as a PRC for a real Palm; see [FrondBench](doc/using-frond.md#frondbench).
-
-Cards live in a Cards drawer, and a card sits in one machine at a time. Frond makes and imports SD images up to 2 GB, 1 GB on the E2 and E3. Files copies between your computer or phone and the card. Close any files on the device before you eject. On Palm OS, Files also opens the device's own databases, under Internal.
-
-The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it. Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).
-
-## Connections
-
-<img src="doc/images/android-tx-connections.png" width="200" alt="T|X Connections on Android, infrared joined to a Tungsten E2 on a computer">
-
-Two Frond installs on the same network can be paired once. After that, a machine's Infrared, Serial or Bluetooth setting can name the other install. You can beam a memo from an E2 on a phone to a T|X on your computer. On Linux, This computer joins machines in different windows on the same computer. See [Connections between Fronds](doc/using-frond.md#connections-between-fronds).
-
-## Modem and phones
-
-<img src="doc/images/desktop-iiix-modem-hotsync.png" width="300" alt="The Palm IIIx doing a Modem HotSync, online at 33600">
-
-The Palm IIIx has a snap-on modem on its serial port. Frond answers as a modem on a 33600 line and puts you on the internet through your computer or phone. Any number you dial connects. On Linux the modem can also HotSync with pilot-link, by dialling 4687962 or over Network HotSync.
-
-The T|X, E2, Zire 72 and TG50 can dial out through a mobile phone over infrared, and on Linux over Bluetooth, with the same modem and the same internet. The IIIx can use the infrared phone too, on Palm OS 3.5 and 4.1. See [Dial-up modem](doc/using-frond.md#dial-up-modem).
-
-## Printing
-
-<img src="doc/images/desktop-dana-print.png" width="400" alt="A PrintBoy test page received from the Dana over infrared">
-
-Pick Printer in a machine's Infrared list. Print apps see "Frond Printer" over IrDA. The Dana and Dana Wireless can also print to a USB printer. When a print stops, "Print received" shows. Then choose Save as PDF (Linux), Print, Save raw file or Discard. Only the Generic printer profile comes out as pages. For a printer's own language (PCL, ESC/P) use Save raw file. See [Printing over infrared](doc/using-frond.md#printing-over-infrared).
-
-## The Dana
-
-<img src="doc/images/desktop-dana-wifi.png" width="400" alt="The Dana's Network Log pinging the virtual router over its USB Wi-Fi adapter">
-
-The AlphaSmart Dana has the wide screen, the built-in keyboard, sound, infrared and two SD or MMC slots. Zoom in, or pick Fit to see the whole screen. The onscreen keyboard can be compact, full or hidden.
-
-The USB port takes a printer or a USB 802.11b adapter. The Dana Wireless has the Wi-Fi built in. Make an 802.11b service in the Dana's Network preferences and connect to `Frond`, and the Dana gets on the internet through your computer or phone. See [Dana USB port](doc/using-frond.md#dana-usb-port).
-
-Peer to Peer (ad hoc) Wi-Fi finds nobody, and the USB computer controls stay greyed out. On Android a Dana session with cards in it can't be copied or imported yet. Each card can still be exported.
-
-## Low-latency audio
-
-Off by default. On the T|X, E2, E3 and Zire 72 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path if your computer or phone can't keep up. On the TG50, and on these with other firmware, it keeps a shorter queue while sound plays, about 35 ms less delay. The rx1950 keeps a shorter queue too. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
-
-## For developers
-
-- The [developer runner](doc/developer-reference.md#developer-runner) installs and launches apps, exports RAM databases and fetches logs from the command line.
-- The [debugger](doc/developer-reference.md#gdb-and-pace-monitor) works with GDB: ARM and Thumb stepping, breakpoints, PACE inspection and 68k stepping, no watchpoints yet. On Android turn on the gdb server in Settings.
-- [Compatibility tests](doc/testing.md#real-firmware-checks) check apps launch, take input, keep their data and restore.
-- [Input and audio timing](doc/performance.md#input-and-menu-latency) tools measure latency.
-
-## Documentation
-
-- [Using Frond](doc/using-frond.md) covers machines, settings, keys, cards and connections.
-- [Developer reference](doc/developer-reference.md) has the command line, console, control socket, replay files, GDB and environment variables.
-- [Testing](doc/testing.md) lists the test levels and what each one needs.
-- [Performance](doc/performance.md) covers the engines, benchmarks and latency tools.
-- [Adding a device](doc/adding-a-device.md) explains profiles, bring-up and button bar art.
-
----
-
-## Installing
-
-### Android
+#### Android
 
 Android 8 or newer. Add [my F-Droid repo](https://hunke.ws/fdroid/repo?fingerprint=80438B253C257BCCE05CDCB9E3AC9B6174C2250659962B14FCBE7F32FD42D53E), then search for Frond. F-Droid offers new versions as updates.
 
 Or get the APK from [Releases](https://github.com/roge-rm/frond/releases).
 
-### Linux
+#### Linux
 
 On Debian 13 (Trixie) and the 64-bit Raspberry Pi OS based on it, the easiest way is my apt repo, so it updates with the rest of the system. Add it once:
 
@@ -233,11 +119,11 @@ On other distributions get the AppImage for x86_64 or aarch64 from [Releases](ht
 
 It needs FUSE, which most desktops have. If it won't start, install `fuse3`, or run it with `--appimage-extract-and-run`.
 
-### Windows and macOS
+#### Windows and macOS
 
 These builds are made as is and I haven't tried them. Get them from [Releases](https://github.com/roge-rm/frond/releases): the installer (`Frond-*-setup.exe`) or the zip for 64-bit Windows, and the dmg for an Apple silicon or Intel Mac. They aren't signed, so Windows asks before running the installer, and on a Mac you right-click Frond and pick Open the first time. Host serial ports, the NetLib redirect, Bluetooth between machines on one computer, 68k HostLink and the debugger aren't in these builds yet.
 
-## Firmware
+### Firmware
 
 | Device | NOR | NAND |
 |---|---|---|
@@ -252,12 +138,36 @@ These builds are made as is and I haven't tried them. Get them from [Releases](h
 | AlphaSmart Dana and Dana Wireless | one ROM file, 6 MiB | none |
 | HP iPAQ rx1950 | `CEBL.nbf` from HP's WM5 ROM 1.01.00 ENG (264,794 bytes) | `CEOS.nbf` from the same ROM (67,095,130 bytes) |
 
-The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. The IIIe has no ROM of its own and runs the IIIx's OS 3.1 ROM (1,212,416 bytes). The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes). The m100 and m105 take the OS 3.5.1 ROM (2 MiB), and Frond offers the m100 when it sees one, so choose the m105 yourself. The m125 takes its OS 4.0.1 ROM (3 MiB), the m130 its OS 4.0 ROM (4 MiB), the m500 its OS 4.1 ROM (2,424,832 bytes) and the c500 the WorkPad ROM (2,621,440 bytes) or the m500's, so choose the c500 yourself. The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's. Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana. For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
+Frond works out the device from the NOR and never changes your files. Which ROM each 68k device and the Zodiac take is in [Firmware and machines](doc/using-frond.md#firmware-and-machines).
 
+### Your first machine
 
-Frond works out the device from the NOR and never changes your files. On Linux use File → Firmware… or Add device, on Android import them when you add a device. Go through the device's own setup the first time. If taps land in the wrong spot, calibrate the screen in Prefs on Palm OS, or Settings, System, Screen on Windows Mobile.
+On Linux use File → Firmware… or Add device, on Android import the firmware when you add a device. Add device starts a new machine with its own settings. Go through the device's own setup the first time. If taps land in the wrong spot, calibrate the screen in Prefs on Palm OS, or Settings, System, Screen on Windows Mobile.
 
-## Building
+## What it does
+
+- Sessions: each machine is a session you can rename, duplicate, export, import or delete. There's no autosave, so save often. See [Running a machine](doc/using-frond.md#running-a-machine).
+- Screen and buttons: the screen scales to fit and stays sharp. Use the device's buttons and silkscreen, your keyboard or a game controller. See [Buttons, keys and controllers](doc/using-frond.md#buttons-keys-and-controllers).
+- Settings: each machine has its own display, sound, battery, speed and engine. Speed goes from Original, the real device's speed, up to Uncapped. See [Settings](doc/using-frond.md#settings).
+- Apps and cards: install PRC and PDB files, or CABs on the rx1950. Cards live in a drawer, and Files copies to and from them. See [Apps](doc/using-frond.md#apps) and [Storage cards](doc/using-frond.md#storage-cards).
+- Connections: infrared, Bluetooth and serial link machines on one computer or on paired Fronds on your network. On Linux serial and USB also go to a PTY or TCP port. See [Connections](doc/using-frond.md#connections).
+- Modem and phones: the 68k Palms have a snap-on modem, and most ARM Palm OS devices dial through a mobile phone over infrared or Bluetooth, onto the internet. See [Dial-up modem](doc/using-frond.md#dial-up-modem).
+- Printing: every device with infrared prints to "Frond Printer", and the Danas to a USB printer, as a PDF or a raw file. See [Printing over infrared](doc/using-frond.md#printing-over-infrared).
+- Low-latency audio: less delay between a tap and the sound, for music apps like SunVox. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
+- HotSync and ActiveSync: Palm OS devices HotSync with pilot-link over serial, USB or the modem, and the rx1950 syncs with SynCE. See [USB HotSync](doc/using-frond.md#usb-hotsync) and [ActiveSync](doc/using-frond.md#activesync).
+
+## For developers
+
+- The [developer runner](doc/developer-reference.md#developer-runner) installs and launches apps, exports RAM databases and fetches logs from the command line.
+- The [debugger](doc/developer-reference.md#gdb-and-pace-monitor) works with GDB: ARM and Thumb stepping, breakpoints, PACE inspection and 68k stepping, no watchpoints yet. On Android turn on the gdb server in Settings.
+- [Compatibility tests](doc/testing.md#real-firmware-checks) check apps launch, take input, keep their data and restore.
+- [Input and audio timing](doc/performance.md#input-and-menu-latency) tools measure latency.
+- [Developer reference](doc/developer-reference.md) has the command line, console, control socket, replay files, GDB and environment variables.
+- [Testing](doc/testing.md) lists the test levels and what each one needs.
+- [Performance](doc/performance.md) covers the engines, benchmarks and latency tools.
+- [Adding a device](doc/adding-a-device.md) explains profiles, bring-up and button bar art.
+
+### Building
 
 On Debian 13 (Trixie):
 
@@ -276,7 +186,7 @@ The Android app is in `android/` and builds with Gradle (`./gradlew assembleDebu
 
 The core is in `core/` (based on CloudpilotEmu) and Dynarmic is in `vendor/dynarmic`. See [Testing](doc/testing.md).
 
-## Testing
+### Testing
 
 These need no firmware:
 
@@ -285,6 +195,10 @@ make test
 QT_QPA_PLATFORM=offscreen make test-desktop
 make test-build-tools
 ```
+
+## Documentation
+
+- [Using Frond](doc/using-frond.md) covers machines, settings, keys, cards and connections.
 
 ---
 
