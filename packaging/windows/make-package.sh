@@ -2,12 +2,13 @@
 # Builds out/Frond-VERSION-windows-x64.zip and, with Inno Setup, out/Frond-VERSION-setup.exe, in MSYS2 UCRT64.
 # Run from the repository root after out/frond.exe, out/frond-68k.exe and build/desktop/frond-desktop.exe exist.
 set -eu
+pwd; ls -l out || true
 VERSION=$(head -n 1 VERSION)
 DIR=out/Frond
 rm -rf "$DIR"
 mkdir -p "$DIR"
 cp build/desktop/frond-desktop.exe "$DIR/frond-desktop.exe"
-cp out/frond.exe out/frond-68k.exe "$DIR/"
+ls -l out; cp out/frond.exe out/frond-68k.exe "$DIR/"
 cp LICENSE README.md "$DIR/" 2>/dev/null || true
 [ -d licences ] && cp -R licences "$DIR/licences"
 # Qt's DLLs and plugins.
