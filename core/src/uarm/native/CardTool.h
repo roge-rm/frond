@@ -27,6 +27,9 @@
 #include <sys/syscall.h>
 #endif
 #include "PosixCompat.h"
+#ifndef EDQUOT
+#define EDQUOT ENOSPC  // no quota error here
+#endif
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
 #endif
