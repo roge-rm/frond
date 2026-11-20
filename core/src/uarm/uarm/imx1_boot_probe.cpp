@@ -377,10 +377,11 @@ struct Probe {
     Imx1BootstrapAccess graphicsWireStatus = Imx1BootstrapAccess::ok;
     // CPU cycles from now that can be charged later in one piece. Worked out only after the interrupt
     // lines and the clock boundary have been looked at in the state it starts from.
-    uint64_t quietCpuCycles(uint32_t mode) const {
+    // withGraphics false leaves the graphics models out, for spanBoundary.
+    uint64_t quietCpuCycles(uint32_t mode, bool withGraphics = true) const {
         if (options.idleStepped) return 0;
         const auto cpuPeriod = peripherals.cpuReferencePeriod(mode);
-        uint64_t cycles = cs5Configuration.quietCpuCycles(cpuPeriod);
+        uint64_t cycles = withGraphics ? cs5Configuration.quietCpuCycles(cpuPeriod) : UINT64_MAX;
         if (!cycles) return 0;
         // The board counts its quiet time in HCLK periods, the last of which is the one with the change.
         // One more is left out for the part of a System PLL clock an asynchronous charge can carry over.
@@ -423,30 +424,92 @@ struct Probe {
         const uint32_t cycles = uint32_t(deferredCycles);
         const uint32_t hclk = uint32_t(deferredHclk);
         deferredCycles = deferredHclk = 0;
-        auto status = advanceGraphicsCpu(cycles, peripherals.cpuReferencePeriod(quietMode));
-        if (status == Imx1BootstrapAccess::ok) {
-            if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-            peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
-            status = peripherals.clockStatus();
-        }
-        // The wait clocks as cs5Wait charges them, in pieces of at most one transaction.
-        if (status == Imx1BootstrapAccess::ok && hclk) {
+        const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
+        Imx1BootstrapAccess status;
+        if (!hclk) {
+            status = advanceGraphicsCpu(cycles, cpuPeriod);
+            if (status == Imx1BootstrapAccess::ok) {
+                if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
+                peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
+                status = peripherals.clockStatus();
+            }
+        } else {
+            // Wait clocks come only from Fast's lean path and JIT, inside a quiet span: it takes the cycles and then
+            // the wait clocks (as cs5Wait charges them, in pieces of at most one transaction) in one advance, and
+            // then the board takes both. The JIT can pass the span by up to a block, so a batch that completes in
+            // the cycles part has its completion work after the wait clocks.
             const auto bus = peripherals.busReferencePeriod();
-            const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
-            peripherals.advanceHclkCycles(hclk);
-            status = advanceGraphics([&](Imx1Cs5Configuration& c) {
-                for (uint32_t left = hclk; left;) {
-                    const uint32_t chunk = std::min(left, Imx1Cs5Bus::timeoutClocks);
-                    c.advanceBusCycles(chunk, bus, cpuPeriod);
-                    left -= chunk;
-                }
-            });
-            if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-            if (status == Imx1BootstrapAccess::ok) status = peripherals.clockStatus();
+            if (!peripherals.referenceChargeSupported(uint64_t(cycles) * cpuPeriod.numerator, cpuPeriod.denominator) ||
+                !cs5Configuration.referencePeriodSupported(cpuPeriod))
+                status = Imx1BootstrapAccess::sideEffect;
+            else
+                status = advanceGraphics([&](Imx1Cs5Configuration& c) {
+                    c.advanceCpuCycles(cycles, cpuPeriod);
+                    for (uint32_t left = hclk; left;) {
+                        const uint32_t chunk = std::min(left, Imx1Cs5Bus::timeoutClocks);
+                        c.advanceBusCycles(chunk, bus, cpuPeriod);
+                        left -= chunk;
+                    }
+                });
+            if (status == Imx1BootstrapAccess::ok) {
+                if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
+                peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
+                status = peripherals.clockStatus();
+            }
+            if (status == Imx1BootstrapAccess::ok) {
+                peripherals.advanceHclkCycles(hclk);
+                status = peripherals.clockStatus();
+            }
         }
         if (status == Imx1BootstrapAccess::ok) return true;
         if (graphicsWireStatus == Imx1BootstrapAccess::ok) graphicsWireStatus = status;
         return false;
+    }
+    // Fast: the end of a quiet span in the JIT loop, taken without a step. The step there would charge the span, look
+    // at the clock boundary and the interrupt lines and start a new span, which this does without an instruction.
+    // Where the span ended on a graphics change due in the next CPU cycle (a batch's completion, mostly), that one
+    // cycle passes with no instruction, as a one cycle stall, which the step's two instructions cost more than on the
+    // host. 1 when a new span can run, 0 for the step to go on (with every cycle charged), -1 when the slice ends.
+    // A span a step started after an access (linesPending) only needs the lines, as the step would look at them.
+    int spanBoundary() {
+        const uint32_t mode = cpuArm920ClockMode(cpu);
+        if (mode != quietMode || cpuArm920Waiting(cpu) || !peripherals.mcuEnabled() || peripherals.mcuWakePending() ||
+            peripherals.systemStopped() || graphicsWireStatus != Imx1BootstrapAccess::ok ||
+            peripherals.systemPllBusStallPending() || boundReached() ||
+            (codeHooks.count && codeHooks.at(cpuGetRegisters(cpu)[15] & ~1u)))
+            return 0;
+        if (linesPending) {
+            if (clockBoundary()) return -1;
+            updateInterrupts();
+            linesPending = false;
+            if (quietCycles >= leanMinimumSpan) return 1;
+        }
+        // The span ran out just before a graphics change, with no wait clocks to charge after the cycles: the stall
+        // cycle goes in the same charge, as nothing else changes in it.
+        const auto period = peripherals.cpuReferencePeriod(mode);
+        if (!quietCycles && !deferredHclk && cs5Configuration.quietCpuCycles(period) == deferredCycles &&
+            quietCpuCycles(mode, false) > deferredCycles)
+            ++deferredCycles;
+        if (!chargeDeferred()) { clockBoundary(); return -1; }
+        if (clockBoundary()) return -1;
+        updateInterrupts();
+        uint64_t span = quietCpuCycles(mode);
+        if (span < leanMinimumSpan && !cs5Configuration.quietCpuCycles(period) && quietCpuCycles(mode, false)) {
+            // The graphics change is due in the next cycle and nothing else is: it passes as the step would charge it.
+            const auto status = advanceGraphicsCpu(1, period);
+            if (status != Imx1BootstrapAccess::ok) {
+                result.stop = Imx1ProbeStop::unsupportedPeripheral;
+                result.peripheralStatus = status;
+                return -1;
+            }
+            if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
+            peripherals.advanceCpuCycles(1, mode, options.assumeMpllSettled);
+            if (clockBoundary()) return -1;
+            updateInterrupts();
+            span = quietCpuCycles(mode);
+        }
+        quietCycles = span;
+        return span >= leanMinimumSpan ? 1 : 0;
     }
     bool idleWakePossible() const {
         if (usbHostPending || peripherals.idleWakePossible()) return true;
@@ -639,6 +702,7 @@ struct Probe {
                                bool single, uint32_t* value, uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         *cost = 0;
+        if (inJit && (pa & ~1u) == 0x15000000) return single && size == 1 && p.jitYmfAccess(pa, false, *value, ran, pc);
         if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
             return single && p.leanGraphicsRead(pa, size, ran, left, *value, *cost);
         if (size != 4) return false;
@@ -798,6 +862,7 @@ struct Probe {
                           uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
+        if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran, cpuArm920TakeJitAccessPc(p.cpu));
         // The graphics ring pointer writes of the ROM's two batch producers (Origo submits about 90000 a second).
         // Both are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
         if (pa == 0x16010220 && inJit) {
@@ -900,6 +965,39 @@ struct Probe {
         // A batch start leaves its busy level for the next advance, which would end the quiet span at once; it
         // takes it now, so the run goes on to the batch's completion.
         cs5Configuration.takeBusyLevel();
+        updateInterrupts();
+        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
+        if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
+            jitHalt = true;
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+        }
+        return true;
+    }
+    // A YMF768 byte access from generated code (the sound driver's index and data writes and its status reads): the
+    // cycles before the run and the run's finished blocks (ran) are charged first, then access takes it as the step
+    // does. The block it is in is charged at the run's end, so the access lands up to one block early. The interrupt
+    // lines follow at once, and the run stops at its next block if the new quiet span ends before its budget.
+    __attribute__((noinline)) bool jitYmfAccess(uint32_t pa, bool write, uint32_t& value, uint32_t ran, uint32_t pc) {
+        if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver || options.cs4Observer ||
+            !options.cs4Port0InputKnown || !peripherals.ymf768Enabled())
+            return false;
+        deferredHclk += leanCs5.waitClocks;
+        result.cs5WaitClocks += leanCs5.waitClocks;
+        work += leanCs5.waitClocks;
+        leanCs5 = {};
+        deferredCycles += ran;
+        cpuArm920JitCharge(cpu, ran, 0);
+        if (!chargeDeferred()) return false;
+        uint8_t datum = uint8_t(value);
+        auto& t = result.trace;
+        const auto saved = t;
+        t.pc = pc;
+        t.cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const bool ok = access(this, pa, 1, write, &datum);
+        t = saved;
+        if (!ok) return false;
+        if (!write) value = datum;
         updateInterrupts();
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
         cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
@@ -2259,14 +2357,24 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
         // to see (MMIO, CP15, faults, a guard refusal), which the next step runs. The JIT may pass the span by
         // up to its block length (the charge then comes a little late); the slice, the bounds and the GPIO
         // event it never passes. The last instruction before the slice's retired or work limit is left to the
-        // step, so the slice always ends on a step and result.trace is the last instruction run.
+        // step, so the slice ends on a step. When spanBoundary ends a slice without one, result.trace is the last stepped
+        // instruction, not the last one the JIT ran.
         const uint32_t jitSlack = p->fastJit ? cpuArm920JitMaxUnchecked(p->cpu) : 0;
         for (uint32_t slice = 0; slice < retiredBudget;) {
             if (!runStep(p, idleHclkLimit)) break;
             ++slice;
+            bool ended = false;
             delayHalted = delayHaltOff = delayPassed = false;
             scanHalted = scanHaltOff = false;
             for (;;) {
+                // A span the JIT ran to its end, or one a step started with the interrupt lines still to look at,
+                // goes on at once where it can (spanBoundary).
+                if ((quietCycles < leanMinimumSpan || linesPending) && p->fastJit && !p->blPrefix &&
+                    slice + 1 < retiredBudget && !p->pcStop.armed) {
+                    const int next = p->spanBoundary();
+                    if (next < 0) { ended = true; break; }
+                    if (!next) break;
+                }
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
                     cpuArm920ClockMode(p->cpu) != quietMode || p->pcStop.armed) break;
                 uint64_t hard = retiredBudget - slice - 1;
@@ -2390,6 +2498,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 if (p->blPrefix) p->blNextPc = blNext;
                 if (!p->fastJit) break;
             }
+            if (ended) break;
         }
     }
     // The slice ends with every cycle charged, so the state, the time and host input see the machine whole.
