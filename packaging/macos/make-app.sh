@@ -26,8 +26,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>NSMicrophoneUsageDescription</key><string>Frond passes the microphone to the emulated device.</string>
 </dict></plist>
 PLIST
-# Icon from the SVG, when rsvg-convert and iconutil are there.
-if command -v rsvg-convert >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+# Icon from the SVG.
+command -v rsvg-convert >/dev/null 2>&1 || { echo "rsvg-convert is needed for the icon"; exit 1; }
+command -v iconutil >/dev/null 2>&1 || { echo "iconutil is needed for the icon"; exit 1; }
+{
     SET=$(mktemp -d)/frond.iconset
     mkdir -p "$SET"
     for s in 16 32 128 256 512; do
@@ -35,7 +37,8 @@ if command -v rsvg-convert >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&
         rsvg-convert -w $((s * 2)) -h $((s * 2)) packaging/frond.svg -o "$SET/icon_${s}x${s}@2x.png"
     done
     iconutil -c icns "$SET" -o "$APP/Contents/Resources/frond.icns"
-fi
+}
+[ -s "$APP/Contents/Resources/frond.icns" ] || { echo "the icon was not made"; exit 1; }
 # Qt frameworks and plugins next to the desktop; the cores only use SDL2 and libslirp.
 LIBPATHS="-libpath=$(brew --prefix qt)/lib -libpath=$(brew --prefix)/lib"
 for d in "$(brew --prefix)"/opt/*/lib; do LIBPATHS="$LIBPATHS -libpath=$d"; done

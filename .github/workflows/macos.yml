@@ -49,14 +49,17 @@ jobs:
           export PATH="$(brew --prefix qt)/bin:$PATH"
           sh packaging/macos/make-app.sh 2>&1 | tee -a build.log
 
-      - name: Fast engine check
-        timeout-minutes: 30
+      - name: Fast engine checks
+        timeout-minutes: 40
         run: |
           set -o pipefail
-          # No firmware in CI, so this is the Dynarmic JIT running guest code on this Mac: the cycle
-          # budget test, then random ARM and Thumb blocks on the JIT and the interpreter, compared.
-          # Apple silicon runs the JIT through MAP_JIT with the compile thread's W^X switching.
-          gmake FROND_FAST=1 test-jit-overshoot 2>&1 | tee -a build.log
+          # No firmware in CI, so these run the Dynarmic JIT on guest code made by the tests: the cycle
+          # budget, the compile thread (MAP_JIT and the W^X switching on Apple silicon), random ARM and
+          # Thumb blocks on the JIT against the interpreter, the S3C2442 machine on Exact and Fast, and
+          # the i.MX1 machine on the JIT.
+          for t in test-jit-overshoot test-jit-compile-thread test-s3c2442-machine test-zodiac-jit; do
+            gmake FROND_FAST=1 "$t" 2>&1 | tee -a build.log
+          done
           gmake FROND_FAST=1 build/test-jit-differential 2>&1 | tee -a build.log
           ./build/test-jit-differential --seeds 1:3001 --duration 600 2> build/jit-differential.err | tail -15
           grep -v ' failed (pc=' build/jit-differential.err | tail -5 || true
@@ -86,15 +89,11 @@ jobs:
             [ "$code" -lt 126 ]
           }
           export QT_QPA_PLATFORM=offscreen
-          ls out/Frond.app/Contents/Frameworks | grep -i sdl || echo "no SDL libraries in Frameworks"
-          strings out/Frond.app/Contents/Frameworks/libSDL2-2.0.0.dylib | grep -iE "libSDL3|sdl3" | head -20
           failed=0
           STILL_RUNNING_RESULT=1 run_a_while "$APP/frond-68k" --version || failed=1
           run_a_while "$APP/frond" || failed=1
           STILL_RUNNING_RESULT=1 run_a_while "$APP/Frond" --version || failed=1
           run_a_while "$APP/Frond" || failed=1
-          echo "=== with the Frameworks folder as a fallback library path"
-          DYLD_FALLBACK_LIBRARY_PATH="$PWD/out/Frond.app/Contents/Frameworks" STILL_RUNNING_RESULT=1 run_a_while "$APP/frond-68k" --version || true
           exit $failed
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
