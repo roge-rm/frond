@@ -1138,7 +1138,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             cardInserted = word == "inserted";
         }
         else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert" || command == "sd-attach" ||
-                 command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-attach") cardPresent = cardInserted = true;
+                 command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-attach") {
+            // frond-68k says ejected for a card attached as a save left it.
+            cardPresent = true;
+            cardInserted = word != "ejected";
+        }
         else if (command == "sd-eject" || command == "ms-eject") cardInserted = false;
         else if (command == "sd-take-out" || command == "ms-take-out") cardPresent = cardInserted = false;
         else if (command == "sd-put-in" || command == "ms-put-in") cardPresent = cardInserted = true;
@@ -1150,7 +1154,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             card2Inserted = word == "inserted";
         }
         else if (command == "sd2-create" || command == "sd2-insert" || command == "sd2-reinsert" || command == "sd2-put-in" ||
-                 command == "sd2-attach") card2Present = card2Inserted = true;
+                 command == "sd2-attach") {
+            card2Present = true;
+            card2Inserted = word != "ejected";
+        }
         else if (command == "sd2-eject") card2Inserted = false;
         else if (command == "sd2-take-out") card2Present = card2Inserted = false;
         if (command.startsWith("sd2-") && command != "sd2-state") sd2Known = true;
@@ -1215,7 +1222,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         bool firstDone = false;
         if (firstStartPending && !stopping && (command == cardCommand("state", 0) || command == cardCommand("put-in", 0))) {
             if (command == cardCommand("state", 0)) {
-                const auto argument = cardPresent ? QString() : putInArgument(0, {}, false);
+                const auto argument = cardPresent ? QString() : frondCards::startAttachArgument(sessionFolder(), runningMachineDir(), 0);
                 if (!argument.isEmpty() && send(cardCommand("put-in", 0), argument)) return;
             }
             firstStartPending = false;
@@ -1230,7 +1237,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         // save, or put in while the machine was off.
         if (secondStartPending && command == "sd2-state" && !stopping) {
             const auto argument = card2Present ? QString()
-                                  : m68k       ? putInArgument(1, {}, false)
+                                  : m68k       ? frondCards::startAttachArgument(sessionFolder(), runningMachineDir(), 1)
                                                : frondCards::secondPutIn(sessionFolder(), runningMachineDir());
             if (!argument.isEmpty() && send(cardCommand("put-in", 1), argument)) return;
             secondStartPending = false;

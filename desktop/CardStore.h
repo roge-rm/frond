@@ -196,7 +196,7 @@ inline bool linkedSession(const QString& frond) {
 }
 struct LinkedRow {
     int n{0};  // the library slot: 0 for card 1 or the stick, 1 for card 2
-    bool stick{false}, writeProtected{false};
+    bool stick{false}, writeProtected{false}, inserted{true};
     QString path, key, protocol;
 };
 inline QList<LinkedRow> linkedRows(const QString& frond) {
@@ -226,6 +226,7 @@ inline QList<LinkedRow> linkedRows(const QString& frond) {
         row.path = path;
         row.key = f[3];
         row.writeProtected = f[6] == "1";
+        row.inserted = f[7] != "0";
         row.protocol = f[11] == "mmc" ? QStringLiteral("mmc") : QStringLiteral("sd");
         rows << row;
     }
@@ -848,6 +849,20 @@ inline QString attachArgument(const QString& sessions, const QString& dir, int n
     auto argument = quotePath(QFileInfo(dir + '/' + file).absoluteFilePath()) + ' ' + card.key +
                     (card.writeProtected ? QStringLiteral(" protected") : QStringLiteral(" writable"));
     if (card.kind == "sd") argument += ' ' + card.type;
+    return argument;
+}
+
+// attachArgument for the card frond-68k left out of slot n at start, with "ejected" when the
+// save had that same card ejected, so it comes back as it was saved.
+inline QString startAttachArgument(const QString& sessions, const QString& dir, int n) {
+    const auto argument = attachArgument(sessions, dir, n);
+    if (argument.isEmpty()) return argument;
+    Card card;
+    LinkedRow row;
+    const auto slot = readSlot(dir, n);
+    if (readCard(entryDir(libraryFor(sessions), slot.card), &card) && linkedRowFor(frondSessions::sessionFrondIn(dir), n, &row) &&
+        !row.inserted && row.key == card.key)
+        return argument + QStringLiteral(" ejected");
     return argument;
 }
 

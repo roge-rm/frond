@@ -93,7 +93,7 @@ class RunningModel(
         startPutIns[n] = true
         if (s != SdCard.State.NONE || (n == 0 && !device.runs68k)) return s
         val dir = machineDir ?: return s
-        val argument = if (device.runs68k) Cards.attachArgument(sessions, dir, n) else Cards.secondPutIn(sessions, dir)
+        val argument = if (device.runs68k) Cards.startAttachArgument(sessions, dir, n) else Cards.secondPutIn(sessions, dir)
         if (argument != null) try {
             c.putInAtStart(n, argument)
             s = c.stateOf(n)

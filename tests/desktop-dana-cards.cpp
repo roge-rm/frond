@@ -169,6 +169,25 @@ class DanaCardsTest : public QObject {
         frondCards::clearSwap(dir); QVERIFY(!frondCards::readSlot(dir,1).swap);
         QCOMPARE(frondCards::quotePath("/a \"b\"\\c"),QString("\"/a \\\"b\\\"\\\\c\""));
     }
+    // A card left out at start goes back ejected when the save had that same card ejected.
+    void startAttachKeepsEjected() {
+        QTemporaryDir root; const auto sessions=root.filePath("sessions"), dir=sessions+"/Dana";
+        QVERIFY(QDir().mkpath(dir));
+        write(dir+"/Dana.frond",manifest());
+        const QByteArray keys[2]={key,second};
+        for (int n=0;n<2;++n) {
+            const QString id=n?"c2":"c1";
+            QVERIFY(QDir().mkpath(root.filePath("cards/"+id)));
+            frondCards::Card card{id,id,"sd",frondCards::now(),"Dana",32ll<<20,frondCards::newIdentity(),false};
+            card.key=QString(keys[n]);
+            QVERIFY(frondCards::writeCard(root.filePath("cards/"+id),card));
+            QFile file(dir+(n?"/sd2.frondsd":"/sd.frondsd")); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+            QVERIFY(frondCards::writeSlot(dir,{true,id,{},id,true},n));
+        }
+        QVERIFY(!frondCards::linkedRows(dir+"/Dana.frond")[0].inserted);
+        QCOMPARE(frondCards::startAttachArgument(sessions,dir,0),frondCards::attachArgument(sessions,dir,0)+" ejected");
+        QCOMPARE(frondCards::startAttachArgument(sessions,dir,1),frondCards::attachArgument(sessions,dir,1));
+    }
     // dana-cards/ cards linked from a save move into the machine folder with their saved changes,
     // once, and never over a file; a card with an unfinished write stays where it is.
     void moveFromDanaCards() {
