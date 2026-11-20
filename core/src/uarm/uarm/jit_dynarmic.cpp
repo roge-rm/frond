@@ -841,8 +841,13 @@ struct Env final : public A32::UserCallbacks {
         if constexpr (sizeof(T) <= 4) {
             if (arm920) {
                 if (const int device = cpuJitLeanDeviceWrite(cpu, va, sizeof(T), uint32_t(v), RanNow())) {
-                    if (device < 0) AccessFailed(va, sizeof(T), true, 0);
-                    else AfterIo();
+                    if (device < 0) {
+                        AccessFailed(va, sizeof(T), true, 0);
+                        return;
+                    }
+                    CheckGen();
+                    AfterIo();
+                    if (memoryCost) Charged();
                     return;
                 }
             }

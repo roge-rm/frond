@@ -61,6 +61,8 @@ struct HostTlb {
     struct HostTlbEntry write[HOST_TLB_SIZE];
     struct HostTlbIoEntry ioRead[HOST_TLB_IO_SIZE];
     struct HostTlbIoEntry ioWrite[HOST_TLB_IO_SIZE];
+    // ARM920T Fast: pages whose stores go to the lean device write (cpuJitLeanDeviceWrite); pa has bit 0 set when in use.
+    struct { uint64_t key; uint32_t pa; } leanDeviceWrite[16];
 };
 
 static inline void hostTlbForgetIo(struct HostTlb *tlb) {
@@ -77,6 +79,7 @@ static inline void hostTlbFlushDomains(struct HostTlb *tlb) {
         for (auto &e : tlb->read) e = {};
         for (auto &e : tlb->write) e = {};
         hostTlbForgetIo(tlb);
+        for (auto &e : tlb->leanDeviceWrite) e = {};
         tlb->gen = 1;
         tlb->epoch++;
     }
