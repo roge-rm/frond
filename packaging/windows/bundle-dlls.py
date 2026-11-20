@@ -29,7 +29,8 @@ def walk(path):
         done.add(name.lower())
         target = os.path.join(dest, name)
         if not os.path.exists(target):
-            shutil.copy(full, target)
+            win = subprocess.run(["cygpath", "-w", full], capture_output=True, text=True).stdout.strip() or full
+            shutil.copy(win, target)
         walk(target)
 
 
