@@ -848,6 +848,9 @@ struct Probe {
         t = saved;
         if (!ok) return false;
         ++jitChargedWrites;
+        // A batch start leaves its busy level for the next advance, which would end the quiet span at once; it
+        // takes it now, so the run goes on to the batch's completion.
+        cs5Configuration.takeBusyLevel();
         updateInterrupts();
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
         cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));

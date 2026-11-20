@@ -258,6 +258,9 @@ class Imx1Cs5Configuration {
     // The card work the SD block left, run on the committed configuration only.
     void runSdCardWork() { if (sd.cardWorkPending()) sd.runCardWork(); }
     const Imx1GraphicsClocks& clockState() const { return clocks; }
+    // The busy level a ring write leaves for the clocks, which advanceGraphicsTicks takes before its first tick.
+    // Taking it now gives the state the next advance would start from, so the quiet span can be worked out.
+    void takeBusyLevel() { clocks.setGpuBusy(!engine.emptyRing()); }
     Imx1GraphicsLookup::Entry lookupEntry(unsigned index) const { return lookup.entry(index); }
     bool memoryInterfaceReady() const { return programmed && interfaceMode == 0x11 && (interfaceControl & ~0xe00u) == 0x0c000000; }
     bool memoryReady(const Imx1Eim& eim) const {
