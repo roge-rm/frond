@@ -44,27 +44,40 @@ class Rx1950FirmwareTest {
     @Test fun eachFileCheckedWithItsOwnMessage() {
         val cebl = sized(Firmware.RX1950_CEBL.bytes)
         val ceos = sized(Firmware.RX1950_CEOS.bytes)
-        assertEquals("Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950.", Firmware.check(rx1950, cebl, null))
+        assertEquals(Firmware.RX1950_OS_MISSING, Firmware.check(rx1950, cebl, null))
         // Right sizes, wrong bytes.
         assertEquals("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.check(rx1950, cebl, ceos))
-        // The two swapped, or CEOS.nbf alone as the NOR.
+        // The two swapped, or an OS image alone as the NOR.
         assertEquals(Firmware.RX1950_SWAPPED, Firmware.check(rx1950, ceos, cebl))
         assertEquals(Firmware.RX1950_SWAPPED, Firmware.check(rx1950, ceos, null))
     }
 
-    // The right NOR (by content: the check hashes it) and a wrong NAND reach the NAND's own message.
-    @Test fun rightNorWrongNand() {
+    // The right NOR (by content: the check hashes it); the OS image is HP's by hash, another NBF that lays out
+    // (accepted, with a warning), or refused.
+    @Test fun osImageAcceptedByLayout() {
         val bytes = File(tmp.root, "cebl").also { it.writeBytes(ByteArray(Firmware.RX1950_CEBL.bytes.toInt())) }
         val known = Firmware.RX1950_CEBL.copy(sha256 = Firmware.sha256(bytes)!!)
         assertTrue(Firmware.matches(bytes, known))
-        val ceos = sized(Firmware.RX1950_CEOS.bytes)
-        assertEquals("The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.checkRx1950(bytes, ceos, known))
+        val other = sized(Firmware.RX1950_CEOS.bytes)
+        assertEquals(Firmware.Rx1950Os.OTHER, Firmware.rx1950Os(other))
+        assertNull(Firmware.checkRx1950(bytes, other, known))
+        // HP's, by a hash told to the check.
+        val hp = Firmware.RX1950_CEOS.copy(sha256 = Firmware.sha256(other)!!)
+        assertEquals(Firmware.Rx1950Os.HP, Firmware.rx1950Os(other, hp))
+        assertNull(Firmware.checkRx1950(bytes, other, known, hp))
+        // A raw dump (wrong size), and a right-sized file whose SectorInfo isn't one.
+        assertEquals(Firmware.RX1950_OS_UNUSABLE, Firmware.checkRx1950(bytes, sized(100000), known))
+        val junk = File(tmp.root, "junk.nbf").also { it.writeBytes(ByteArray(0xa5a + 520) { 0x12 }) }
+        assertEquals(Firmware.Rx1950Os.UNUSABLE, Firmware.rx1950Os(junk))
+        assertEquals(Firmware.RX1950_OS_UNUSABLE, Firmware.checkRx1950(bytes, junk, known))
+        // An OS image as the NOR.
+        assertEquals(Firmware.RX1950_SWAPPED, Firmware.checkRx1950(other, bytes, known))
     }
 
     // Picking CEOS.nbf as the NOR with the rx1950 chosen copies it (check() then names it); past that, and for
     // the other devices past 32 MiB, the message says what's wrong.
     @Test fun pickLimitTakesCeosForTheRx1950() {
-        assertTrue(Firmware.pickLimit(rx1950) >= Firmware.RX1950_CEOS.bytes)
+        assertTrue(Firmware.pickLimit(rx1950) >= Firmware.RX1950_NBF_MAX)
         assertEquals(32L shl 20, Firmware.pickLimit(null))
         assertEquals(Firmware.NOT_DETECTED, Firmware.tooBig(null))
         assertEquals("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.tooBig(rx1950))

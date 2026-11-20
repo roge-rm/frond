@@ -97,6 +97,7 @@ class FirmwareDialog : public QDialog {
     QComboBox* device;
     QLineEdit *nor, *nand;
     QLabel* norLabel{nullptr};
+    QLabel* nandLabel{nullptr};
     frondFirmware::Device stored{frondFirmware::Device::automatic};
 };
 

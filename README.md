@@ -136,7 +136,7 @@ These builds are made as is and I haven't tried them. Get them from [Releases](h
 | Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100 and m105 | one ROM file, 1.2 to 2.1 MB | none |
 | Palm m125, m130, m500, m505, m515, m520 and IBM WorkPad c500 | one ROM file, 2.4 to 4.2 MB | none |
 | AlphaSmart Dana and Dana Wireless | one ROM file, 6 MiB | none |
-| HP iPAQ rx1950 | `CEBL.nbf` from HP's WM5 ROM 1.01.00 ENG (264,794 bytes) | `CEOS.nbf` from the same ROM (67,095,130 bytes) |
+| HP iPAQ rx1950 | `CEBL.nbf` from HP's WM5 ROM 1.01.00 ENG (264,794 bytes) | OS image: `CEOS.nbf` from the same ROM (67,095,130 bytes), or another OS `.nbf` |
 
 Frond works out the device from the NOR and never changes your files. Which ROM each 68k device and the Zodiac take is in [Firmware and machines](doc/using-frond.md#firmware-and-machines).
 

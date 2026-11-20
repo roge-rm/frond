@@ -101,6 +101,50 @@ inline bool firmwareFileMatches(const QString& path, const DeviceFirmwareFile5& 
     return it->sha256 == QByteArray(expected.sha256);
 }
 
+// The rx1950's OS image: HP's CEOS.nbf (by SHA-256), another .nbf that rx1950NandImage can lay out (a header, then
+// 512-byte sectors each with 8 bytes of SectorInfo, the logical sector erased or inside the NAND), or neither.
+// Kept by path, size and modified time like firmwareFileMatches. UI thread only.
+enum class Rx1950Os { unusable, hp, other };
+inline Rx1950Os rx1950OsImage(const QString& path) {
+    constexpr qint64 header = 0xa5a, sector = 520, maxSectors = (4096 - 21) * 32;
+    const QFileInfo info(path);
+    if (!info.isFile() || info.size() < header || (info.size() - header) % sector || (info.size() - header) / sector > maxSectors)
+        return Rx1950Os::unusable;
+    if (firmwareFileMatches(path, rx1950Ceos5)) return Rx1950Os::hp;
+    struct Scanned { qint64 size; QDateTime modified; bool ok; };
+    static QHash<QString, Scanned> scans;
+    const QString key = info.absoluteFilePath();
+    auto it = scans.constFind(key);
+    if (it == scans.constEnd() || it->size != info.size() || it->modified != info.lastModified()) {
+        bool ok = false;
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly) && file.seek(header)) {
+            ok = true;
+            while (ok && !file.atEnd()) {
+                const QByteArray chunk = file.read(sector * 2000);
+                if (chunk.isEmpty() || chunk.size() % sector) { ok = false; break; }
+                for (qint64 at = 0; at < chunk.size(); at += sector) {
+                    const auto* p = reinterpret_cast<const uint8_t*>(chunk.constData() + at + 512);
+                    const uint32_t logical = p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24;
+                    if (logical != 0xffffffffu && logical >= uint32_t(maxSectors)) { ok = false; break; }
+                }
+            }
+        }
+        it = scans.insert(key, {info.size(), info.lastModified(), ok});
+    }
+    return it->ok ? Rx1950Os::other : Rx1950Os::unusable;
+}
+inline QString rx1950OsMissing() { return QStringLiteral("Choose the OS image (CEOS.nbf) for the HP iPAQ rx1950."); }
+inline QString rx1950OsUnusable() {
+    return QStringLiteral("The OS image isn't a usable .nbf (512-byte sectors with SectorInfo). Choose CEOS.nbf or another OS .nbf.");
+}
+inline QString rx1950OsWarning() { return QStringLiteral("This OS image isn't HP's tested CEOS.nbf, so it may not boot."); }
+// A warning for an OS image that isn't HP's, or nothing.
+inline QString importWarning(Device device, const QString& nandPath) {
+    if (device == Device::automatic || profile(device).board != DeviceBoard5::s3c2442Rx1950 || nandPath.isEmpty()) return {};
+    return rx1950OsImage(nandPath) == Rx1950Os::other ? rx1950OsWarning() : QString();
+}
+
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.
 inline bool serialAbsent(Device device) { return device == Device::zire72; }
 // The connector or cradle has a separate HotSync button on these boards.
@@ -174,11 +218,10 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
             return QStringLiteral("Frond can't tell which device this NOR image is for. Choose the device.");
     }
     if (profile(device).board == DeviceBoard5::s3c2442Rx1950) {
-        if (nandPath.isEmpty()) return QStringLiteral("Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950.");
+        if (nandPath.isEmpty()) return rx1950OsMissing();
         if (!firmwareFileMatches(norPath, rx1950Cebl5))
             return QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.");
-        if (!firmwareFileMatches(nandPath, rx1950Ceos5))
-            return QStringLiteral("The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG.");
+        if (rx1950OsImage(nandPath) == Rx1950Os::unusable) return rx1950OsUnusable();
         if (resolved) *resolved = device;
         return {};
     }

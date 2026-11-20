@@ -575,23 +575,25 @@ bool gFastEngineMissing = false;
         if (!sizeDetected && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
             return false;
 
-        // A new rx1950 takes HP's CEBL.nbf as its NOR and CEOS.nbf as --nand, made into the 64 MB flash here.
+        // A new rx1950 takes HP's CEBL.nbf as its NOR and an OS .nbf (HP's CEOS.nbf, or one that lays out the same) as --nand, made into the 64 MB flash here.
         if (rx1950 && sessionDevice == deviceTypeInvalid) {
             if (!rx1950IsCebl(static_cast<const uint8_t*>(nor.data), nor.size)) {
                 cerr << "HP iPAQ rx1950: the NOR must be HP's CEBL.nbf from the WM5 ROM 1.01.00 ENG" << endl;
                 return false;
             }
-            if (!options.nand || !rx1950IsCeos(static_cast<const uint8_t*>(nand.data), nand.size)) {
-                cerr << "HP iPAQ rx1950: --nand must be HP's CEOS.nbf from the WM5 ROM 1.01.00 ENG" << endl;
+            if (!options.nand) {
+                cerr << "HP iPAQ rx1950: --nand must be the OS image (CEOS.nbf)" << endl;
                 return false;
             }
             vector<uint8_t> flash;
             string why;
             if (!rx1950NandImage(static_cast<const uint8_t*>(nor.data) + 0xa5a, 256 * 1024,
                                  static_cast<const uint8_t*>(nand.data), nand.size, flash, why)) {
-                cerr << "HP iPAQ rx1950: " << why << endl;
+                cerr << "HP iPAQ rx1950: the OS image (--nand) isn't a usable .nbf: " << why << endl;
                 return false;
             }
+            if (!rx1950IsCeos(static_cast<const uint8_t*>(nand.data), nand.size))
+                cerr << "HP iPAQ rx1950: this OS image isn't HP's tested CEOS.nbf" << endl;
             delete[] static_cast<uint8_t*>(nand.data);
             nand.data = new uint8_t[flash.size()];
             nand.size = flash.size();

@@ -152,7 +152,7 @@ fun FirmwareScreen(model: HomeModel) {
             )
             // A device with no NAND, like the Zire 72 or the IIIx, doesn't show the row.
             if (device?.hasNand != false) ListItem(
-                headlineContent = { Text(if (device?.nandRequired == false) "NAND image (optional)" else "NAND image") },
+                headlineContent = { Text(if (device?.rx1950 == true) "OS image (CEOS.nbf)" else if (device?.nandRequired == false) "NAND image (optional)" else "NAND image") },
                 supportingContent = { Text(name(nand) ?: "Not chosen", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 trailingContent = { TextButton(onClick = { pickNand.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Choose") } },
             )
@@ -167,7 +167,10 @@ fun FirmwareScreen(model: HomeModel) {
                     busy = true
                     error = null
                     scope.launch {
-                        val result = withContext(Dispatchers.IO) { Firmware.import(context, d, nand.takeIf { d.hasNand }) }
+                        val (result, warning) = withContext(Dispatchers.IO) {
+                            val r = Firmware.import(context, d, nand.takeIf { d.hasNand })
+                            r to if (r == null) Firmware.importWarning(context, d) else null
+                        }
                         busy = false
                         model.reload()
                         if (result != null) {
@@ -175,6 +178,7 @@ fun FirmwareScreen(model: HomeModel) {
                             return@launch
                         }
                         model.firmwareImported(d)
+                        if (warning != null) model.notice = warning
                     }
                 },
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
