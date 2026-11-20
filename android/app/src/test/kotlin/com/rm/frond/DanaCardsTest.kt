@@ -87,6 +87,36 @@ class DanaCardsTest {
         assertNotNull(duplicateMachine(tmp.root,from,dest,{ false },CardChoice.COPY)); assertFalse(dest.exists())
         try { zipPackable(from,ByteArrayOutputStream()); fail() } catch (_: java.io.IOException) {}
     }
+    // A Dana whose save links the cards in its own folder duplicates; each slot the save lists loads
+    // empty in the copy and its own card goes in by path, card 1 still ejected.
+    @Test fun duplicateDanaWithCardsInItsFolder() {
+        val sessions=tmp.newFolder("sessions"); val from=File(sessions,"dana").apply { mkdirs() }
+        val library=Cards.libraryFor(sessions)
+        val own=linked.replace("\"/cards/first.frondsd\"","\"${File(from,"sd.frondsd").path}\"").replace("\"/cards/second.frondsd\"","\"${File(from,"sd2.frondsd").path}\"")
+        val frond=fixture(own,into=File(from,"session.frond"))
+        assertFalse(DanaSession.independent(frond))
+        assertTrue(DanaSession.independent(fixture(linked)))
+        assertTrue(DanaSession.independent(fixture(portable,true)))
+        val keys=listOf(key,second)
+        for (n in 0..1) {
+            val card=Cards.Card("c$n","Card $n","sd",Cards.now(),from.name,32L shl 20,Cards.newIdentity(),false,key=keys[n])
+            assertTrue(Cards.entryDir(library,card.id).mkdirs() && Cards.writeCard(Cards.entryDir(library,card.id),card))
+            File(from,if (n==1) "sd2.frondsd" else "sd.frondsd").writeBytes(ByteArray(64) { (97+n).toByte() })
+            assertTrue(Cards.writeSlot(from,Cards.Slot(true,card.id,null,card.name,false),n))
+        }
+        val copy=File(sessions,"copy")
+        assertNull(duplicateMachine(sessions,from,copy,{ false },CardChoice.COPY)); File(copy,COPY_PART).delete()
+        for (n in 0..1) {
+            val slot=Cards.readSlot(copy,n)
+            assertTrue(slot.swap); assertNotEquals("c$n",slot.card)
+            assertEquals(keys[n],Cards.readCard(Cards.entryDir(library,slot.card!!))!!.key)
+        }
+        assertTrue(Cards.startAttachArgument(sessions,copy,0)!!.endsWith(" ejected"))
+        assertFalse(Cards.startAttachArgument(sessions,copy,1)!!.endsWith(" ejected"))
+        val none=File(sessions,"none")
+        assertNull(duplicateMachine(sessions,from,none,{ false },CardChoice.NONE))
+        for (n in 0..1) { assertTrue(Cards.readSlot(none,n).swap); assertNull(Cards.cardFileIn(none,n)) }
+    }
     @Test fun androidCopyChecksBothSlotsBeforePublishing() {
         assertNull(LinkedCards.sessionCopyError(listOf("none","none")))
         for (states in listOf(listOf("none","ejected $key protected mmc"),listOf("inserted $key writable","none"),

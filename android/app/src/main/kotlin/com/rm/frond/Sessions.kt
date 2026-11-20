@@ -233,7 +233,7 @@ object Sessions {
     // says. Blocks; run it off the main thread. Returns an error message or null (COPY_CANCELLED when
     // cancelled). The copy is deleted if it fails.
     fun duplicate(context: Context, s: Session, cancelled: () -> Boolean = { false }, choice: CardChoice = CardChoice.COPY): String? {
-        if (DanaSession.wrapped(s.file)) return "Android can't duplicate a session with independent cards yet."
+        if (DanaSession.independent(s.file)) return "Android can't duplicate a session with independent cards yet."
         val device = s.device
         if (s.old || device == null) return "This session was saved by an older Frond."
         val id = UUID.randomUUID().toString()
@@ -963,7 +963,8 @@ enum class CardChoice { LINK, COPY, NONE }
 // Copy makes the copy's card a new library card with its own serial, None leaves it out. A copy
 // that had a card loads with swap. Source machine held. `dest` is removed on failure.
 internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled: () -> Boolean, wanted: CardChoice): String? {
-    if (sessionFile(from)?.let { DanaSession.wrapped(it) } == true)
+    val frond = sessionFile(from)
+    if (frond?.let { DanaSession.independent(it) } == true)
         return "Android can't duplicate a session with independent cards yet."
     val failed = "Couldn't duplicate the session."
     val library = Cards.libraryFor(sessions)
@@ -997,7 +998,10 @@ internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled:
         if (!lock.ok) { dest.deleteRecursively(); return Cards.BUSY }
         copies.forEachIndexed { n, c ->
             val had = c.holds || c.linkTo != null
-            var copySlot = Cards.Slot(present = true, swap = c.slot.swap || had, link = if (choice == CardChoice.LINK) c.linkTo else null)
+            // A frond-68k save links its cards by path into the first machine's folder, so each slot
+            // it lists loads empty in the copy and the copy's own card goes in by path after start.
+            val listed = Cards.linkedRowFor(frond, n) != null
+            var copySlot = Cards.Slot(present = true, swap = c.slot.swap || had || listed, link = if (choice == CardChoice.LINK) c.linkTo else null)
             if (choice == CardChoice.COPY && c.holds && c.card != null) {
                 val card = c.card.copy(id = Cards.newId(), identity = Cards.newIdentity(), name = Cards.freeCardName(library, c.card.name),
                     created = Cards.now(), machine = dest.name)
@@ -1006,7 +1010,7 @@ internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled:
                 if (!entry.mkdirs() || !Cards.writeCard(entry, card)) { entry.deleteRecursively(); undo(); return failed }
                 made += entry
             }
-            if ((c.slot.present || had) && !Cards.writeSlot(dest, copySlot, n)) { undo(); return failed }
+            if ((c.slot.present || had || listed) && !Cards.writeSlot(dest, copySlot, n)) { undo(); return failed }
         }
         copies.forEachIndexed { n, c ->
             if (choice != CardChoice.LINK || c.linkTo == null || c.slot.link == c.linkTo) return@forEachIndexed
