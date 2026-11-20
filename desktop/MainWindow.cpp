@@ -951,6 +951,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 usbPortResync = false;
             } else usbPortReply(false, message);
             usbPortStart = false;
+            // The Dana's start ends here: Add device's cards go in now.
+            if (!startCards.isEmpty() && putInStartCard()) return;
             notify(tr("Running. Sessions save automatically on close."));
             return;
         }
@@ -982,6 +984,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 usbPortResync = true;
                 if (send("usb-port-state")) return;
                 usbPortStart = usbPortResync = false;
+                if (!startCards.isEmpty() && putInStartCard()) return;
                 notify(tr("Running. Sessions save automatically on close."));
             }
             else if (!busy) notify(QString());
