@@ -73,6 +73,10 @@ for root, _, names in os.walk(os.path.join(app, "Contents")):
         p = os.path.join(root, n)
         if is_macho(p) and p not in cores:
             queue.append(p)
+# Homebrew's SDL2 is sdl2-compat, which loads SDL3 with dlopen when it starts, so it isn't in the link list.
+sdl3 = find_brew("libSDL3.0.dylib")
+if sdl3:
+    queue.append(copy_in(sdl3))
 queue = [os.path.abspath(p) if not os.path.isabs(p) else p for p in queue]
 while queue:
     fix(queue.pop())
