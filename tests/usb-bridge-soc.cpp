@@ -35,7 +35,7 @@ static void exercise(DeviceType5 type) {
     cpuSetReg(cpu, 15, 0xa0003000);
     auto run = [&](unsigned ms) { for (unsigned i = 0; i < ms; ++i) assert(soc.Run(100000, 100000000) >= 100000); };
     auto udc = [&](unsigned offset, uint32_t value) { assert(cpuMemOpExternal(cpu, &value, 0x40600000 + offset, 4, true)); };
-    assert(soc.UsbTestCableAttached()==tx); // Only the TX cable is in by default.
+    assert(!soc.UsbTestCableAttached()); // No cable is in by default.
     assert(soc.SetUsbTestCable(true));
 
     UsbHostBridge bridge;
@@ -108,23 +108,23 @@ static void exercise(DeviceType5 type) {
     assert(soc.UsbTestCableAttached());
     puts("PASS: a load unplugs the cable and plugs it in again 500 ms later");
 
-    // That save loaded with USB off gets the cable back, as the TX has it without a bridge.
+    // That save loaded with USB off gets the default cable state back (none on any device).
     bridge.Stop();
-    assert(soc.UsbTestCableAttached()==tx);
+    assert(!soc.UsbTestCableAttached());
     UsbHostBridge off;
     assert(off.Start(&soc, {}, error) && off.Describe() == "off");
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     off.Service();
-    assert(soc.UsbTestCableAttached()==tx);
+    assert(!soc.UsbTestCableAttached());
     off.Stop();
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     UsbHostBridge later;
-    assert(later.Start(&soc, {}, error) && soc.UsbTestCableAttached()==tx);
+    assert(later.Start(&soc, {}, error) && !soc.UsbTestCableAttached());
     later.Stop();
     run(10);
-    puts("PASS: USB off puts back a cable a save left out, at start and after a load");
+    puts("PASS: USB off puts back the default cable state, at start and after a load");
 
     // An endpoint that can't open leaves USB off, with the same cable handling.
     const int listener = socket(AF_INET, SOCK_STREAM, 0);
@@ -139,14 +139,14 @@ static void exercise(DeviceType5 type) {
     UsbHostBridge failed;
     error.clear();
     assert(!failed.Start(&soc, {HostSerial::Kind::tcp, ntohs(address.sin_port)}, error) && !error.empty());
-    assert(soc.UsbTestCableAttached()==tx && failed.Describe() == "off");
+    assert(!soc.UsbTestCableAttached() && failed.Describe() == "off");
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     failed.Service();
-    assert(soc.UsbTestCableAttached()==tx);
+    assert(!soc.UsbTestCableAttached());
     failed.Stop();
     close(listener);
-    puts("PASS: a port in use leaves USB off and the cable in, also after a load");
+    puts("PASS: a port in use leaves USB off with the default cable state, also after a load");
 }
 
 int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeFrankenE2);exercise(deviceTypeZire72);exercise(deviceTypeTG50);}

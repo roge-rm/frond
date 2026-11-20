@@ -29,8 +29,7 @@ TEST_KILL_GRACE ?= 10
 export TEST_KILL_GRACE
 test: SHELL = $(CURDIR)/tests/timed-shell.sh
 test-%: SHELL = $(CURDIR)/tests/timed-shell.sh
-test: export TEST_TIMEOUT
-test-%: export TEST_TIMEOUT
+export TEST_TIMEOUT
 test: export TEST_NAME = $@
 test-%: export TEST_NAME = $@
 # make recheck-list shows which checks need running (changed paths, failed, never passed),
@@ -46,6 +45,8 @@ out/% build/% core/% vendor/%: SHELL = /bin/sh
 test-desktop: export TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
 test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: export TEST_TIMEOUT = 1800
+# Card store checks bound by the disk: 230 to 300 s alone on a busy hard drive.
+test-ms-logical-equivalence test-card-backing: export TEST_TIMEOUT = 900
 # Two Zodiacs in Exact for the InkStorm chat.
 test-zodiac-bluetooth: export TEST_TIMEOUT = 2400
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
