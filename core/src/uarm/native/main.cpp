@@ -1234,6 +1234,7 @@ bool gFastEngineMissing = false;
             shownStick = draw.stick;
             shownLcd = draw.lcdEnabled;
             if (redrawAll) {
+                sdlRenderer->RepaintControls();
                 draw.pixels = link.FrontFrame();
                 draw.firstDirtyLine = 0;
                 draw.lastDirtyLine = frameRows - 1;

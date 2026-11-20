@@ -33,10 +33,14 @@ class SdlRenderer {
     // False when SDL couldn't make the renderer, e.g. with no surface yet. Drawing then
     // does nothing.
     bool Valid() const { return renderer != nullptr; }
+    // The target textures were lost (SDL_RENDER_TARGETS_RESET): paint the controls again on the next draw.
+    void RepaintControls() { controlsPainted = sidebarPainted = false; }
 
    private:
     void DrawSilkscreen();
     void ClearWindow();
+    void DrawSidebar(const DeviceControlProfile& controls, int screenWidth, int screenHeight, DeviceKeyMask buttons,
+                     DeviceStick stick, bool changed);
 
    private:
     SDL_Window* window{nullptr};
@@ -47,6 +51,9 @@ class SdlRenderer {
     SDL_Texture* silkscreenTexture{nullptr};
     SDL_Texture* controlsTexture{nullptr};
     bool controlsPainted{false};
+    SDL_Texture* sidebarTexture{nullptr};
+    int sidebarWidth{0}, sidebarHeight{0};
+    bool sidebarPainted{false};
 
     bool frameTextureValid{false};
     bool lcdEnabled{true};
