@@ -182,7 +182,7 @@ Panning is manual.
 
 ## Storage cards
 
-The T|X, E2, E3, Zire 72 and rx1950 take an SD card, the TG50 a Memory Stick. The rx1950 takes cards from 32 MB to 2 GB. Format a new one as FAT16 on your computer first. The m125, m130, m500, c500, m505, m515 and m520 take one SD or MMC card, handled like the Dana's cards below. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
+The T|X, E2, E3, Zire 72 and rx1950 take an SD card, the TG50 a Memory Stick. The rx1950 takes cards from 32 MB to 2 GB. Format a new one as FAT16 on your computer first. The m125, m130, m500, c500, m505, m515 and m520 take one SD or MMC card, handled like the Zodiac and Dana cards in [Two-slot cards](#zodiac-and-68k-palm-cards). A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
 
 While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card slot, where the device has one, and Internal, the Palm's own databases. Each has Files…, the same file manager, see [Files](#files).
 
@@ -195,27 +195,19 @@ While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card s
 
 SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
 
-### Zodiac second card
+### Zodiac and 68k Palm cards
 
-The Zodiac has two SD slots. Slot 1 works like the other devices' card. Slot 2 has its own SD card 2 button on desktop and SD card 2 rows on Android, with New card, Insert image, Eject, Insert and Export image. Its card stays in the machine and is saved and copied with it, as `sd2.frondsd`. It can't go in the Cards drawer yet. Sizes are 32 MB to 2 GB.
+The Zodiac and the Dana have two card slots, and the VZ Palms (m125, m130, m500, c500, m505, m515, m520) and the CLIÉ T415 have one. While the machine runs, Storage shows a Card 1 and a Card 2 row on the two-slot devices. Each row is the same as the one-slot card's: click or tap the name to pick a card from the drawer or make a new one, then Insert, Files…, Eject and Export image. The Zodiac takes SD cards. The Dana and the VZ Palms take SD or MMC cards, and New card offers MMC after SD. The T415 takes its Memory Stick the same way.
 
-### Dana cards
+Each slot links its own card, so a machine holds at most one card per slot, and a card sits in one slot of one machine at a time. The Cards screen lists a card in a two-slot machine as "In Zodiac · Card 2", and Link to machines lists each slot. Take a card out of one slot and it can go in the other slot or another machine.
 
-While Dana runs, open Cards 1 and 2 on desktop, or the Card 1 and Card 2 rows on
-Android. Each slot takes its own SD or MMC card. Choose the family when creating
-or importing an image, and choose Write protected before attaching it. The SD
-size choices are 32, 64, 128, 256 and 512 MB; MMC offers 32, 64, 128 and 256 MB.
-Eject a card before removing it. Export writes that card as a `.frondsd` image.
+Add device has a Card 1 and a Card 2 choice for the Zodiac and the Dana: No card, or a free card from the drawer. They go in after the first start.
 
-The machine's normal session preserves both attachments, including ejected and
-write-protected cards. Desktop can export a native portable session folder while
-the machine is open. Keep that folder intact; moving it to another filesystem or
-copying its files individually is unsupported.
+The write-protect switch is only on the TG50's Memory Stick. On the Dana, the VZ Palms and the T415 set protection in Cards before the card goes in.
 
-Android can export each card image. Copying or importing a whole Dana session
-with attached cards is not supported there yet. Those operations are refused
-without discarding either card. Dana sessions with no attached cards keep the
-ordinary session copy and import paths.
+Duplicate asks about the cards as for one card: Link, Copy or No card, for all of the machine's cards together. A machine's Export packs its cards, and importing makes a new card in the drawer for each. A session saved before this update that has `sd2.frondsd` in it moves into Card 2 when it opens, and cards the older Dana, VZ and T415 saves kept in `dana-cards` move into the drawer.
+
+On the Dana, the VZ Palms and the T415, Files… takes the card out, saves, and puts it back when you close it. Export portable folder… (desktop, while the machine runs) writes the machine with its cards as one folder. Keep it together: moving it to another filesystem or copying its files one by one isn't supported. Android has no portable folder. Save a Copy there asks you to take the cards out first, and a session saved by an older version with independent cards can't be duplicated, exported or imported. Export each card on its own instead.
 
 ### Dana USB port
 

@@ -10,7 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 # Devices the desktop runs that the Android app has no controls for yet. They stay out of its list.
 DESKTOP_ONLY = set()
 # Devices shipped marked Experimental in the Android device list (the desktop picker checks the same id).
-EXPERIMENTAL = {'tapwave-zodiac-2'}
 
 
 def outputs(profiles):
@@ -47,8 +46,6 @@ def outputs(profiles):
         kotlin += '    Device(\n'
         for key, source in fields.items():
             kotlin += f'        {key} = {literal(key, profile[source])},\n'
-        if profile['name'] in EXPERIMENTAL:
-            kotlin += '        experimental = true,\n'
         slots = profile.get('storage_slots', [])
         if slots:
             kotlin += '        storageSlots = listOf(\n'

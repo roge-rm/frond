@@ -96,8 +96,6 @@ data class Device internal constructor(
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
-    // Shown with a Work in progress tag in the device list.
-    val experimental: Boolean = false,
     // A connector the device has that isn't emulated yet, shown greyed out; empty for none.
     val pendingUsb: String = "",
     // A colour LCD, shown as the guest draws it: no contrast setting.
@@ -116,7 +114,7 @@ data class Device internal constructor(
     // The USB link is a network (RNDIS): on or off, with no endpoint.
     val usbNetwork: Boolean get() = !palmOs
     // The name in the Add device and Import firmware lists.
-    val listLabel: String get() = if (experimental) "$label · Work in progress" else label
+    val listLabel: String get() = label
 
     // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
     val serialAbsent: Boolean get() = id == "palm-zire-72"
