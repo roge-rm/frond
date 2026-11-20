@@ -487,7 +487,7 @@ void machine() {
     // little. A long ask can end early on host time.
     for (const bool fast : {false, true}) {
         assert(soc->SetFastEngine(fast));
-        const uint64_t sliceRetired = fast ? 8000 : 4000, sliceWork = fast ? 40000 : 20000;
+        const uint64_t sliceRetired = fast ? 200000 : 4000, sliceWork = fast ? 1000000 : 20000;
         for (const uint64_t asked : {1, 7, 4000, 1000000}) {
             const auto from = soc->Status();
             const uint64_t credit = soc->Run(asked, 100000000);
