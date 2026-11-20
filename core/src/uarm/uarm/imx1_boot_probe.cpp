@@ -434,9 +434,10 @@ struct Probe {
                 status = peripherals.clockStatus();
             }
         } else {
-            // Wait clocks come only from Fast's lean path and JIT, inside a quiet span, where nothing in the graphics
-            // chip changes: it takes the cycles and then the wait clocks (as cs5Wait charges them, in pieces of at
-            // most one transaction) in one advance, and then the board takes both.
+            // Wait clocks come only from Fast's lean path and JIT, inside a quiet span: it takes the cycles and then
+            // the wait clocks (as cs5Wait charges them, in pieces of at most one transaction) in one advance, and
+            // then the board takes both. The JIT can pass the span by up to a block, so a batch that completes in
+            // the cycles part has its completion work after the wait clocks.
             const auto bus = peripherals.busReferencePeriod();
             if (!peripherals.referenceChargeSupported(uint64_t(cycles) * cpuPeriod.numerator, cpuPeriod.denominator) ||
                 !cs5Configuration.referencePeriodSupported(cpuPeriod))
@@ -701,7 +702,7 @@ struct Probe {
                                bool single, uint32_t* value, uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         *cost = 0;
-        if (inJit && (pa & ~1u) == 0x15000000) return single && size == 1 && p.jitYmfAccess(pa, false, *value, ran);
+        if (inJit && (pa & ~1u) == 0x15000000) return single && size == 1 && p.jitYmfAccess(pa, false, *value, ran, pc);
         if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
             return single && p.leanGraphicsRead(pa, size, ran, left, *value, *cost);
         if (size != 4) return false;
@@ -861,7 +862,7 @@ struct Probe {
                           uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
-        if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran);
+        if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran, cpuArm920TakeJitAccessPc(p.cpu));
         // The graphics ring pointer writes of the ROM's two batch producers (Origo submits about 90000 a second).
         // Both are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
         if (pa == 0x16010220 && inJit) {
@@ -977,7 +978,7 @@ struct Probe {
     // cycles before the run and the run's finished blocks (ran) are charged first, then access takes it as the step
     // does. The block it is in is charged at the run's end, so the access lands up to one block early. The interrupt
     // lines follow at once, and the run stops at its next block if the new quiet span ends before its budget.
-    __attribute__((noinline)) bool jitYmfAccess(uint32_t pa, bool write, uint32_t& value, uint32_t ran) {
+    __attribute__((noinline)) bool jitYmfAccess(uint32_t pa, bool write, uint32_t& value, uint32_t ran, uint32_t pc) {
         if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver || options.cs4Observer ||
             !options.cs4Port0InputKnown || !peripherals.ymf768Enabled())
             return false;
@@ -989,7 +990,13 @@ struct Probe {
         cpuArm920JitCharge(cpu, ran, 0);
         if (!chargeDeferred()) return false;
         uint8_t datum = uint8_t(value);
-        if (!access(this, pa, 1, write, &datum)) return false;
+        auto& t = result.trace;
+        const auto saved = t;
+        t.pc = pc;
+        t.cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const bool ok = access(this, pa, 1, write, &datum);
+        t = saved;
+        if (!ok) return false;
         if (!write) value = datum;
         updateInterrupts();
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
@@ -2350,7 +2357,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
         // to see (MMIO, CP15, faults, a guard refusal), which the next step runs. The JIT may pass the span by
         // up to its block length (the charge then comes a little late); the slice, the bounds and the GPIO
         // event it never passes. The last instruction before the slice's retired or work limit is left to the
-        // step, so the slice always ends on a step and result.trace is the last instruction run.
+        // step, so the slice ends on a step. When spanBoundary ends a slice without one, result.trace is the last stepped
+        // instruction, not the last one the JIT ran.
         const uint32_t jitSlack = p->fastJit ? cpuArm920JitMaxUnchecked(p->cpu) : 0;
         for (uint32_t slice = 0; slice < retiredBudget;) {
             if (!runStep(p, idleHclkLimit)) break;
