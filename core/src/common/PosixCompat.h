@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fcntl.h>
+#include <string_view>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -74,6 +75,29 @@ inline uint64_t MtimeNs(const struct stat& st) {
 #else
     return uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
 #endif
+}
+
+// Whether a host file path is absolute: a leading '/', or on Windows a drive letter, a colon and a
+// slash or backslash, or a UNC path starting with two slashes or backslashes.
+inline bool IsAbsolutePath(std::string_view path) {
+#ifdef _WIN32
+    const auto separator = [](char c) { return c == '/' || c == '\\'; };
+    if (path.size() >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+        path[1] == ':' && separator(path[2]))
+        return true;
+    return path.size() >= 2 && separator(path[0]) && separator(path[1]);
+#else
+    return !path.empty() && path.front() == '/';
+#endif
+}
+
+// Whether a path is absolute on either Linux or Windows, for saved paths a session may have been
+// written with on the other host. A card at such a path is dropped later if it isn't there.
+inline bool IsAbsolutePathAnyHost(std::string_view path) {
+    const auto separator = [](char c) { return c == '/' || c == '\\'; };
+    if (!path.empty() && separator(path[0])) return true;
+    return path.size() >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+           path[1] == ':' && separator(path[2]);
 }
 
 // Reserves length bytes of the file like posix_fallocate: 0, ENOSPC when full, or another error

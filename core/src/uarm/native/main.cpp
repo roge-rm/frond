@@ -457,8 +457,7 @@ bool gFastEngineMissing = false;
             cerr << "--desktop-socket cannot be combined with --run-for or --script" << endl;
             return false;
         }
-        if (options.saveOnDisconnect && (!options.desktopSocket || options.saveOnDisconnect->empty() ||
-                                         options.saveOnDisconnect->front() != '/')) {
+        if (options.saveOnDisconnect && (!options.desktopSocket || !frondPosix::IsAbsolutePath(*options.saveOnDisconnect))) {
             cerr << "--save-on-disconnect takes an absolute path and needs --desktop-socket" << endl;
             return false;
         }
