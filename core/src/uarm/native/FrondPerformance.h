@@ -47,15 +47,22 @@ public:
     // Call when a slice of work starts, and ReportWork when it ends.
     void BeginWork() { begin_ = std::chrono::steady_clock::now(); }
 
-    // Reports the time since BeginWork. A changed slice length becomes the new target.
+    // Adds the time since BeginWork to the work so far, and reports it once a full slice of wall
+    // time has passed since the first pass, so passes cut short by input don't each count as a frame.
+    // A changed slice length becomes the new target.
     void ReportWork(uint64_t targetUsec) {
         if (!session_) return;
         if (targetUsec != targetUsec_) {
             targetUsec_ = targetUsec;
             update_(session_, int64_t(targetUsec) * 1000);
         }
-        const auto spent = std::chrono::steady_clock::now() - begin_;
-        report_(session_, std::chrono::duration_cast<std::chrono::nanoseconds>(spent).count());
+        const auto now = std::chrono::steady_clock::now();
+        if (!windowOpen_) { windowOpen_ = true; windowStart_ = begin_; }
+        spent_ += now - begin_;
+        if (now - windowStart_ < std::chrono::microseconds(targetUsec)) return;
+        report_(session_, std::chrono::duration_cast<std::chrono::nanoseconds>(spent_).count());
+        windowOpen_ = false;
+        spent_ = {};
     }
 #else
     explicit FrondPerformance(uint64_t) {}
@@ -97,6 +104,9 @@ private:
     CloseSession close_ = nullptr;
     uint64_t targetUsec_ = 0;
     std::chrono::steady_clock::time_point begin_;
+    std::chrono::steady_clock::time_point windowStart_;
+    std::chrono::steady_clock::duration spent_{};
+    bool windowOpen_ = false;
 #endif
     std::string description_ = "none";
 };
