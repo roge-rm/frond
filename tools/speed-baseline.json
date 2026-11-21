@@ -143,13 +143,13 @@
         "fast": {
           "guest_ns": 124000000000,
           "cycles": 12400000000,
-          "instructions": 2289671981,
-          "jit_instructions": 2278737777,
+          "instructions": 2289656649,
+          "jit_instructions": 2278656157,
           "lcd_frames": 633,
           "changed_frames": 198,
           "pcm_frames": 5243228,
           "frame_sequence_hash": "841228ad89bbdc56",
-          "pcm_hash": "fc0899610d9dd86c",
+          "pcm_hash": "938d730121e220f3",
           "input": "50629746ed5a9b4d"
         }
       }
@@ -168,8 +168,8 @@
         "fast": {
           "guest_ns": 112000000000,
           "cycles": 11200000000,
-          "instructions": 2279787474,
-          "jit_instructions": 2272193457,
+          "instructions": 2279801430,
+          "jit_instructions": 2272192643,
           "lcd_frames": 926,
           "changed_frames": 786,
           "pcm_frames": 4714029,
@@ -193,8 +193,8 @@
         "fast": {
           "guest_ns": 135000000000,
           "cycles": 13500000000,
-          "instructions": 4363036219,
-          "jit_instructions": 4349971225,
+          "instructions": 4362882274,
+          "jit_instructions": 4349761172,
           "lcd_frames": 1766,
           "changed_frames": 149,
           "pcm_frames": 5728328,
@@ -218,13 +218,13 @@
         "fast": {
           "guest_ns": 170000000000,
           "cycles": 17000000000,
-          "instructions": 5165460144,
-          "jit_instructions": 3343540878,
+          "instructions": 5165450802,
+          "jit_instructions": 3343441654,
           "lcd_frames": 4151,
           "changed_frames": 914,
           "pcm_frames": 7271829,
           "frame_sequence_hash": "33915b1f0f24ab2b",
-          "pcm_hash": "4ccdb72031bdd246",
+          "pcm_hash": "c4ac5bef4c768776",
           "input": "3ee3771c3485f9d7"
         }
       }
@@ -243,8 +243,8 @@
         "fast": {
           "guest_ns": 160000000000,
           "cycles": 16000000000,
-          "instructions": 5778449738,
-          "jit_instructions": 5099770210,
+          "instructions": 5778448056,
+          "jit_instructions": 5099792648,
           "lcd_frames": 2770,
           "changed_frames": 1680,
           "pcm_frames": 6830829,
@@ -268,8 +268,8 @@
         "fast": {
           "guest_ns": 136000000000,
           "cycles": 13600000000,
-          "instructions": 2758612421,
-          "jit_instructions": 2744797935,
+          "instructions": 2758612597,
+          "jit_instructions": 2744716349,
           "lcd_frames": 1039,
           "changed_frames": 803,
           "pcm_frames": 5772429,
