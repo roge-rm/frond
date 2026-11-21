@@ -2302,6 +2302,10 @@ Outcome aspPollRun(const std::vector<uint32_t>& words, bool fast) {
 // Fast with the skip passes most rounds of the wait at once and ends as Fast without it does, with the same pc and
 // retired count at the same time, and with Exact's samples and registers.
 void aspPolls() {
+    // On for this test, then back to what FROND_ASP_POLL_SKIP set, read as the core reads it.
+    const char* env = std::getenv("FROND_ASP_POLL_SKIP");
+    const bool was = !(env && *env && !std::strcmp(env, "0"));
+    imx1SetAspPollSkip(true);
     uint64_t skips = 0, rounds = 0;
     for (uint32_t delay = 0; delay < 40; delay += 7) {
         const auto words = aspPollGuest(delay);
@@ -2323,6 +2327,7 @@ void aspPolls() {
     }
     std::printf("asp polls: %llu skips of %llu rounds\n", (unsigned long long)skips, (unsigned long long)rounds);
     std::fflush(stdout);
+    imx1SetAspPollSkip(was);
     assert(skips >= 6 && rounds >= 10000);
 }
 void jitLong() {
