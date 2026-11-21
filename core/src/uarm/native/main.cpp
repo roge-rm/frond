@@ -1118,7 +1118,7 @@ bool gFastEngineMissing = false;
         if (options.bluetooth) {
             const auto& path=*options.bluetooth;
             if (!capabilities.bluetooth ||
-                (path!="off" && (path.empty() || path.front()!='/' || path.find(char(0))!=string::npos))) {
+                (path!="off" && (!frondPosix::IsAbsolutePath(path) || path.find(char(0))!=string::npos))) {
                 cerr << "--bluetooth needs off or an absolute virtual controller Unix socket path on a TX, E2, Zire 72, TG50 or Zodiac" << endl;return false;
             }
             if (!soc->SetBluetooth(path=="off"?string():path,commandContext.bluetoothError)) {

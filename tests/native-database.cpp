@@ -12,6 +12,7 @@ struct Fake {
     std::map<uint32_t,std::function<void(ArmCpu*)>> callbacks;
     bool writeFailure=false, readFailure=false, replacement=false;
     unsigned deletes=0,exports=0;
+    uint32_t current=0;
     uint32_t requestSize=128,exportSize=127;
     uint32_t DataAddress() const {return 1024;}
     uint32_t DataSize() const {return 256;}
@@ -38,6 +39,7 @@ struct Fake {
         case 0x81d4:return 2;
         case 0x8188:return args[0] ? 0x80000010 : 0x20001000;
         case 0x8148:++deletes;return 0;
+        case 0x8800:Write(args[0],&current,4);return 0;
         case 0x8304: {
             ++exports;size_t pos=0;
             while(pos<pdb.size()) {
@@ -85,6 +87,10 @@ int main(){
     assert(db.Find("missing")==0);assert(db.Launch("test"));
     assert(db.Install(f.pdb.data(),f.pdb.size())==0);assert(f.installed==f.pdb);assert(f.callbacks.empty());
     f.replacement=true;assert(db.Install(f.pdb.data(),f.pdb.size())==0);assert(f.deletes==1);assert(f.callbacks.empty());
+    f.current=0x80000010;
+    assert(db.Install(f.pdb.data(),f.pdb.size())==DB_INSTALL_RESULT_ERR_RUNNING);
+    assert(f.deletes==1 && f.installed==f.pdb && f.callbacks.empty());
+    f.current=0;
     f.readFailure=true;assert(db.Install(f.pdb.data(),f.pdb.size())<0);assert(f.callbacks.empty());f.readFailure=false;
     auto zip=db.Export("test");assert(zip.size()>4 && zip[0]=='P' && zip[1]=='K');assert(f.callbacks.empty());verifyZip(zip,f.pdb);
     f.writeFailure=true;bool failed=false;try{db.Export("test");}catch(const std::runtime_error&){failed=true;}assert(failed && f.callbacks.empty());f.writeFailure=false;

@@ -111,7 +111,7 @@ def parser():
     launch = p.add_mutually_exclusive_group(required=True)
     launch.add_argument('--app', help='exact Palm application database name')
     launch.add_argument('--resume-app', action='store_true',
-                        help='continue the saved app without relaunching it')
+                        help='continue the saved app, or relaunch it after installing its replacement')
     p.add_argument('--replay', type=Path)
     p.add_argument('--screenshot', type=int, action='append', default=[], metavar='MS',
                    help='capture at milliseconds after replay starts; repeat for several')
@@ -202,7 +202,8 @@ class Control:
         deadline = min(self.deadline, deadline or self.deadline, time.monotonic() + self.command_timeout)
         check_deadline(deadline)
         self.serial += 1
-        frame = f'{self.serial}\t{command}\t{str(argument).encode().hex()}\n'.encode()
+        wire = argument if isinstance(argument, bytes) else str(argument).encode()
+        frame = f'{self.serial}\t{command}\t{wire.hex()}\n'.encode()
         if len(frame) > 16384:
             raise RunError('argument', 'Socket command exceeds the core frame limit')
         self.connection.settimeout(max(.001, deadline - time.monotonic()))
@@ -225,7 +226,8 @@ class Control:
                     message = bytes.fromhex(fields[3]).decode('utf-8')
                 except (ValueError, UnicodeError) as error:
                     raise RunError('protocol', 'Invalid response text') from error
-                result = {'command': command, 'argument': str(argument), 'ok': fields[1] == 'ok',
+                label = argument.decode(errors='replace') if isinstance(argument, bytes) else str(argument)
+                result = {'command': command, 'argument': label, 'ok': fields[1] == 'ok',
                           'code': fields[2], 'message': message}
                 self.steps.append(result)
                 return result
@@ -238,7 +240,7 @@ class Control:
             raise RunError(result['code'], result['message'])
         return result
 
-    def retry_ready(self, command, argument, seconds):
+    def retry_ready(self, command, argument, seconds, *, retry_codes=('not-ready',)):
         deadline = min(self.deadline, time.monotonic() + seconds)
         saw_not_ready = False
         while True:
@@ -246,7 +248,7 @@ class Control:
                 result = self.request(command, argument, deadline)
                 if result['ok']:
                     return result
-                if result['code'] != 'not-ready':
+                if result['code'] not in retry_codes:
                     raise RunError(result['code'], result['message'])
                 saw_not_ready = True
                 pause(.2, deadline)
@@ -451,9 +453,26 @@ def run(args):
                     control.retry_ready('guest-ready', '', args.ready_timeout)
                 if installs or args.app is not None:
                     control.retry_ready('guest-ready', '', args.ready_timeout)
+                resume = None
                 for path in installs:
                     result['stage'] = 'install'
-                    installed = control.retry_ready('install', path, args.ready_timeout)
+                    try:
+                        installed = control.retry_ready('install', path, args.ready_timeout)
+                    except RunError as error:
+                        if error.code != 'running':
+                            raise
+                        with path.open('rb') as database:
+                            header = database.read(78)
+                        name = header[:32].split(b'\0', 1)[0]
+                        # Leave the running app before retrying. The core owns the rollback
+                        # if the replacement fails, and the runner works on its session copy.
+                        if len(header) != 78 or header[60:64] != b'appl' or not name or name == b'Launcher':
+                            raise
+                        control.retry_ready('launch-app', 'Launcher', args.ready_timeout)
+                        installed = control.retry_ready('install', path, args.ready_timeout,
+                                                        retry_codes=('not-ready', 'running'))
+                        if args.resume_app:
+                            resume = name
                     if installed['code'] == 'needs-reset':
                         control.require('reset')
                         control.retry_ready('guest-ready', '', args.ready_timeout)
@@ -466,8 +485,8 @@ def run(args):
                     control.require('reset')
                     control.retry_ready('guest-ready', '', args.ready_timeout)
                 result['stage'] = 'launch'
-                if args.app is not None:
-                    control.retry_ready('launch-app', args.app, args.ready_timeout)
+                if args.app is not None or resume is not None:
+                    control.retry_ready('launch-app', args.app if args.app is not None else resume, args.ready_timeout)
                 pause(args.settle, deadline)
                 result['stage'] = 'replay'
                 control.require('input-replay', replay)

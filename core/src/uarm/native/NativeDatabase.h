@@ -75,7 +75,10 @@ class NativeDatabase {
     int Install(const uint8_t* bytes, size_t length) {
         if (!bytes || length < 78 || length > maxDatabaseBytes) return DB_INSTALL_RESULT_ERR_CORRUPT;
         size_t offset = 0;
-        bool callbackFailed = false, deleteFailed = false;
+        bool callbackFailed = false, deleteFailed = false, running = false;
+        uint32_t current = 0;
+        write(scratch + 96, &current, 4);
+        if (call(0x8800, {scratch + 96, 0, 0, 0}) == 0) read(scratch + 96, &current, 4);
         unsigned callbacks = 0;
         session.RegisterCallback(scratch + 32, [&](auto* cpu) {
             auto* r = nativeRegisters(cpu);
@@ -93,6 +96,7 @@ class NativeDatabase {
             auto* r = nativeRegisters(cpu);
             if (++callbacks > maxCallbacks) { deleteFailed = true; r[0] = 0; return; }
             const uint32_t database = r[2];
+            if (database && database == current) { running = true; r[0] = 0; return; }
             const bool okay = call(0x8148, {database, 0, 0, 0}) == 0;
             deleteFailed |= !okay;
             nativeRegisters(cpu)[0] = okay;
@@ -104,6 +108,7 @@ class NativeDatabase {
         const uint32_t error = session.Call(0x82fc, {scratch + 32, scratch + 36, 0, scratch + 48}, {scratch + 52, 1});
         uint8_t reset = 0;
         read(scratch + 52, &reset, 1);
+        if (running) return DB_INSTALL_RESULT_ERR_RUNNING;
         if (deleteFailed) return DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE;
         if (callbackFailed) return DB_INSTALL_RESULT_ERR_UNKNOWN;
         switch (error) {

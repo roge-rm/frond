@@ -73,6 +73,10 @@ def fake_core():
                 code = 'needs-reset' if config.get('reset') else 'installed'
                 if config.get('corrupt'):
                     ok, code, message = False, 'corrupt', 'The Palm database is corrupt.'
+                if counts[command] <= config.get('running_install', 0):
+                    ok, code, message = False, 'running', 'Leave this application on the Palm before replacing it.'
+                if config.get('replacement_failure') and counts[command] == 2:
+                    ok, code, message = False, 'memory', 'The Palm does not have enough memory.'
                 assert Path(argument).parent == output
             elif command == 'launch-app':
                 if config.get('missing_app'):
@@ -348,6 +352,23 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertEqual(commands.count('reset'), 2)
         self.assertLess(commands.index('input-replay'), commands.index('export-db'))
         self.assertLess(commands.index('export-db'), commands.index('save'))
+
+    def test_running_prc_is_updated_after_leaving_it(self):
+        prc = ROOT / 'tools/frondbench/FrondBench.prc'
+        result = self.run_case({'running_install': 2}, ['--install', str(prc), '--resume-app'])
+        self.assertEqual(result['status'], 'ok', result.get('error'))
+        steps = [(s['command'], s['argument']) for s in result['steps'] if s['command'] in ('install', 'launch-app')]
+        self.assertEqual([command for command, _ in steps], ['install', 'launch-app', 'install', 'install', 'launch-app'])
+        self.assertEqual(steps[1][1], 'Launcher')
+        self.assertEqual(steps[4][1], 'FrondBench')
+
+    def test_failed_running_prc_replacement_is_not_saved(self):
+        prc = ROOT / 'tools/frondbench/FrondBench.prc'
+        result = self.run_case({'running_install': True, 'replacement_failure': True}, ['--install', str(prc)])
+        self.assertEqual(result['error']['code'], 'memory')
+        self.assertEqual([s['command'] for s in result['steps']], ['guest-ready', 'install', 'launch-app', 'install'])
+        self.assertFalse(result['artifacts']['session_saved'])
+        self.assertTrue(all(result['inputs_unchanged'].values()))
 
     def test_terminal_install_failure_is_not_retried(self):
         prc = self.root / 'bad.prc'; prc.write_bytes(b'bad')

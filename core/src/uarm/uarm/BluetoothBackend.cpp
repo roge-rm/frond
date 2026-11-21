@@ -1,46 +1,133 @@
-#if defined(_WIN32)
-#define FROND_NO_UNIX_BT 1  // Unix socket controllers only
-#endif
 #include "PosixCompat.h"
 #include "BluetoothBackend.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#ifndef FROND_NO_UNIX_BT
+#ifdef _WIN32
+#include <afunix.h>
+#else
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif
 
-bool BluetoothBackend::Open(const std::string& path,std::string& error) {
-#ifdef FROND_NO_UNIX_BT
-    error="Bluetooth controller endpoints require the native runner.";return false;
+namespace {
+#ifdef _WIN32
+using HostSocket = SOCKET;
+constexpr HostSocket invalidSocket = INVALID_SOCKET;
+constexpr int sendFlags = 0, receiveFlags = 0;
+int socketError() { return WSAGetLastError(); }
+bool interrupted(int error) { return error == WSAEINTR; }
+bool wouldBlock(int error) { return error == WSAEWOULDBLOCK; }
+void closeSocket(HostSocket socket) { closesocket(socket); }
+
+bool startWinsock() {
+    struct Winsock {
+        WSADATA data{};
+        const int error = WSAStartup(MAKEWORD(2, 2), &data);
+        ~Winsock() { if (!error) WSACleanup(); }
+    };
+    static const Winsock winsock;
+    return !winsock.error;
+}
+
+bool connectSocket(HostSocket socket, const sockaddr_un& address, int& error) {
+    u_long nonblocking = 1;
+    if (ioctlsocket(socket, FIONBIO, &nonblocking) != 0) {
+        error = socketError();
+        return false;
+    }
+    if (connect(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) return true;
+    error = socketError();
+    if (!wouldBlock(error)) return false;
+    fd_set ready, failed;
+    FD_ZERO(&ready);
+    FD_ZERO(&failed);
+    FD_SET(socket, &ready);
+    FD_SET(socket, &failed);
+    // A local controller has a short deadline. Keep the previous connection on failure.
+    timeval timeout{0, 50000};
+    const int result = select(0, nullptr, &ready, &failed, &timeout);
+    if (result > 0 && FD_ISSET(socket, &ready) && !FD_ISSET(socket, &failed)) return true;
+    if (result == 0) error = WSAETIMEDOUT;
+    else if (result < 0) error = socketError();
+    else {
+        int length = sizeof(error);
+        if (getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length) != 0)
+            error = socketError();
+    }
+    return false;
+}
 #else
-    if(path.empty() || path[0]!='/' || path.find('\0')!=std::string::npos || path.size()>=sizeof(sockaddr_un::sun_path)) {
-        error="Choose an absolute Unix socket path shorter than 108 bytes.";return false;
+using HostSocket = int;
+constexpr HostSocket invalidSocket = -1;
+constexpr int sendFlags = MSG_DONTWAIT | MSG_NOSIGNAL, receiveFlags = MSG_DONTWAIT;
+int socketError() { return errno; }
+bool interrupted(int error) { return error == EINTR; }
+bool wouldBlock(int error) { return error == EAGAIN || error == EWOULDBLOCK; }
+void closeSocket(HostSocket socket) { close(socket); }
+
+bool connectSocket(HostSocket socket, const sockaddr_un& address, int& error) {
+    if (fcntl(socket, F_SETFL, O_NONBLOCK) == 0 &&
+        connect(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) return true;
+    error = socketError();
+    return false;
+}
+#endif
+
+std::string errorText(int error) {
+#ifdef _WIN32
+    return "Windows Bluetooth socket error " + std::to_string(error);
+#else
+    return std::strerror(error);
+#endif
+}
+}  // namespace
+
+bool BluetoothBackend::Open(const std::string& path,std::string& error) {
+    std::string endpoint = path;
+#ifdef _WIN32
+    std::replace(endpoint.begin(), endpoint.end(), '\\', '/');
+#endif
+    sockaddr_un address{};
+    if (!frondPosix::IsAbsolutePath(endpoint) || endpoint.find('\0') != std::string::npos ||
+        endpoint.size() >= sizeof(address.sun_path)) {
+        error = "Choose an absolute Unix socket path shorter than 108 bytes.";
+        return false;
     }
-    const int candidate=frondPosix::Socket(AF_UNIX,SOCK_STREAM|frondPosix::kCloexec,0);
-    if(candidate<0){error=std::strerror(errno);return false;}
-    sockaddr_un address{};address.sun_family=AF_UNIX;
-    std::memcpy(address.sun_path,path.c_str(),path.size()+1);
-    // A local Unix connect has no network route/timeout. Set nonblocking before
-    // connection so a full listener queue cannot stall the emulation thread.
-    if(fcntl(candidate,F_SETFL,O_NONBLOCK)<0 || connect(candidate,reinterpret_cast<sockaddr*>(&address),sizeof(address))<0) {
-        error=std::strerror(errno);close(candidate);return false;
+#ifdef _WIN32
+    if (!startWinsock()) {
+        error = "Could not start Windows Sockets.";
+        return false;
     }
-    Close();fd=candidate;error.clear();
+    const HostSocket candidate = WSASocketW(AF_UNIX, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+#else
+    const HostSocket candidate = frondPosix::Socket(AF_UNIX, SOCK_STREAM | frondPosix::kCloexec, 0);
+#endif
+    if (candidate == invalidSocket) {
+        error = errorText(socketError());
+        return false;
+    }
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, endpoint.c_str(), endpoint.size() + 1);
+    int failure = 0;
+    if (!connectSocket(candidate, address, failure)) {
+        error = errorText(failure);
+        closeSocket(candidate);
+        return false;
+    }
+    Close();
+    fd = static_cast<intptr_t>(candidate);
+    error.clear();
     if(hasAddress){
         const uint8_t command[]={1,0x01,0xfc,6};
         outgoing.assign(command,command+sizeof(command));outgoing.insert(outgoing.end(),localAddress.begin(),localAddress.end());addressReplyDue=true;
     }
     return true;
-#endif
 }
 void BluetoothBackend::Close() {
-#ifndef FROND_NO_UNIX_BT
-    if(fd>=0)close(fd);
-#endif
+    if (Connected()) closeSocket(static_cast<HostSocket>(fd));
     fd=-1;incoming.clear();outgoing.clear();received.clear();expected=sentAt=readAt=frameRemaining=0;addressReplyDue=false;
 }
 // Command Complete or Command Status for Write_BD_ADDR. A controller without it answers
@@ -79,13 +166,14 @@ bool BluetoothBackend::Consume(const uint8_t* bytes,size_t size) {
     return true;
 }
 void BluetoothBackend::Poll(bool receive) {
-#ifndef FROND_NO_UNIX_BT
     if(!Connected())return;
+    const auto socket = static_cast<HostSocket>(fd);
     // Bounded work per guest callback. A short write keeps its exact suffix.
     for(unsigned tries=0;tries<4 && Queued();++tries) {
-        const auto n=send(fd,outgoing.data()+sentAt,Queued(),MSG_DONTWAIT|MSG_NOSIGNAL);
-        if(n<0 && errno==EINTR)continue;
-        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK))break;
+        const auto n=send(socket,reinterpret_cast<const char*>(outgoing.data()+sentAt),int(Queued()),sendFlags);
+        const int error = n < 0 ? socketError() : 0;
+        if(n<0 && interrupted(error))continue;
+        if(n<0 && wouldBlock(error))break;
         if(n<=0){Close();return;}
         sentAt+=size_t(n);
     }
@@ -93,12 +181,12 @@ void BluetoothBackend::Poll(bool receive) {
     if (!receive) return;
     std::array<uint8_t,4096> bytes;
     for(unsigned tries=0;tries<4;++tries) {
-        const auto n=recv(fd,bytes.data(),bytes.size(),MSG_DONTWAIT);
-        if(n<0 && errno==EINTR)continue;
-        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK))break;
+        const auto n=recv(socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),receiveFlags);
+        const int error = n < 0 ? socketError() : 0;
+        if(n<0 && interrupted(error))continue;
+        if(n<0 && wouldBlock(error))break;
         if(n<=0 || !Consume(bytes.data(),size_t(n))){Close();return;}
     }
-#endif
 }
 uint16_t BluetoothBackend::Read() {
     if(!Pending())return 0x100;

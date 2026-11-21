@@ -23,7 +23,7 @@ class BluetoothBackend {
     void SetAddress(const std::array<uint8_t,6>& value){localAddress=value;hasAddress=true;}
     bool Address(std::array<uint8_t,6>& value) const {value=localAddress;return hasAddress;}
     void Close();
-    bool Connected() const {return fd>=0;}
+    bool Connected() const {return fd!=-1;}
     bool Write(const uint8_t* data,size_t size);
     void Poll(bool receive = true);
     uint16_t Read(); // 0x100 means no byte, same as UART_CHAR_NONE.
@@ -31,7 +31,7 @@ class BluetoothBackend {
     size_t Pending() const {return received.size()-readAt;}
     size_t Queued() const {return outgoing.size()-sentAt;}
  private:
-    int fd{-1};
+    intptr_t fd{-1};
     std::vector<uint8_t> incoming,outgoing,received;
     size_t expected{},sentAt{},readAt{},frameRemaining{};
     std::array<uint8_t,6> localAddress{};

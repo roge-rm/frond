@@ -504,8 +504,9 @@ namespace {
                 cout << "out of memory" << endl;
                 break;
 
+            case DB_INSTALL_RESULT_ERR_RUNNING:
             case DB_INSTALL_RESULT_ERR_IS_OPEN:
-                cout << "db cannot is open and cannot be deleted" << endl;
+                cout << "database is open and cannot be deleted" << endl;
                 break;
 
             case DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE:

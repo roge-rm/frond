@@ -559,7 +559,7 @@ class DesktopControl {
                 return {false,"unsupported","This device has no Bluetooth radio."};
             auto* machine=ctx.soc;
             if(command=="bluetooth-mode") {
-                if(path!="off" && (path.empty() || path.front()!='/' || path.find(char(0))!=std::string::npos))
+                if(path!="off" && (!frondPosix::IsAbsolutePath(path) || path.find(char(0))!=std::string::npos))
                     return {false,"argument","Use off or an absolute virtual controller Unix socket path."};
                 if(!machine->SetBluetooth(path=="off"?std::string():path,ctx.bluetoothError))
                     return {false,"bluetooth",ctx.bluetoothError};
@@ -1027,6 +1027,7 @@ class DesktopControl {
                 case DB_INSTALL_RESULT_NEEDS_RESET: return {true, "needs-reset", "Installed. Reset the Palm to finish installation."};
                 case DB_INSTALL_RESULT_ERR_CORRUPT: return {false, "corrupt", "The Palm database is corrupt."};
                 case DB_INSTALL_RESULT_ERR_OOM: return {false, "memory", "The Palm does not have enough memory."};
+                case DB_INSTALL_RESULT_ERR_RUNNING: return {false, "running", "Leave this application on the Palm before replacing it."};
                 case DB_INSTALL_RESULT_ERR_IS_OPEN: return {false, "open", "Close this application on the Palm before replacing it."};
                 case DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE: return {false, "overwrite", "The existing database could not be replaced."};
                 case DB_INSTALL_RESULT_ERR_NOT_SUPPORTED: return {false, "unsupported", "Installation is not supported by this firmware."};

@@ -28,6 +28,7 @@ spec.loader.exec_module(rom)
 
 class HarnessTest(unittest.TestCase):
     def setUp(self):
+        (ROOT / 'build').mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix='device-rom-harness-', dir=ROOT / 'build')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -158,10 +159,19 @@ class HarnessTest(unittest.TestCase):
         probe.touch()
         args = self.args(launcher=True)
         args.fault_contract = {}
-        with patch.object(rom, 'ROOT', self.root), patch.object(rom, 'OBJ', self.root / 'build'):
+        core = self.root / 'core'
+        core.touch()
+        launcher = self.root / 'launcher.frond'
+        launcher.touch()
+        with patch.object(rom, 'ROOT', self.root), patch.object(rom, 'OBJ', self.root / 'build'), \
+             patch.object(rom, 'CORE', core), patch.object(rom, 'launcher_fixture', side_effect=AssertionError('unexpected boot')):
             tests = [test for test in rom.suite(args) if test._testMethodName == 'test_running_session_rollback']
-            with patch.object(rom, 'run_guest', return_value=subprocess.CompletedProcess([], 77, '', 'unsupported')):
+            self.assertEqual(len(tests), 1)
+            with patch.object(type(tests[0]), 'launcher_session', return_value=launcher), \
+                 patch.object(rom, 'run_guest', return_value=subprocess.CompletedProcess([], 77, '', 'unsupported')) as guest:
                 result = unittest.TextTestRunner(stream=io.StringIO()).run(unittest.TestSuite(tests))
+            guest.assert_called_once()
+        self.assertEqual(result.testsRun, 1)
         self.assertFalse(result.wasSuccessful())
         self.assertEqual(len(result.failures), 1)
         self.assertFalse(result.skipped)

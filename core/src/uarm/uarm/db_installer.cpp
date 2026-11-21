@@ -19,7 +19,7 @@ int32_t dbInstallerInstall(struct SyscallDispatch* sd, size_t len, void* data) {
     if (!syscallDispatchM68kSupport(sd)) return DB_INSTALL_RESULT_ERR_NOT_SUPPORTED;
     if (!syscallDispatchPrepare(sd)) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
 
-    const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, 10);
+    const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, 16);
     if (!scratch) return DB_INSTALL_RESULT_ERR_UNKNOWN;
 
     const uint32_t deleteProcP = scratch;
@@ -27,7 +27,10 @@ int32_t dbInstallerInstall(struct SyscallDispatch* sd, size_t len, void* data) {
     const uint32_t needsResetP = scratch + 4;
     const uint32_t dbIDP = scratch + 6;
     size_t bytesRead = 0;
-    bool couldNotOverwrite = false;
+    bool couldNotOverwrite = false, running = false;
+    const bool haveCurrent = syscall68k_SysCurAppDatabase(sd, SC_EXECUTE_FULL, scratch + 10, scratch + 12) == 0;
+    const uint16_t currentCard = haveCurrent ? paceGet16(scratch + 10) : 0;
+    const uint32_t current = haveCurrent ? paceGet32(scratch + 12) : 0;
 
     syscallDispatchRegisterM68kStub(
         sd, deleteProcP,
@@ -37,6 +40,11 @@ int32_t dbInstallerInstall(struct SyscallDispatch* sd, size_t len, void* data) {
 
             const uint16_t cardNo = paceGet16(parameterBase + 6);
             const uint32_t dbID = paceGet32(parameterBase + 8);
+
+            if (dbID && dbID == current && cardNo == currentCard) {
+                running = true;
+                return;
+            }
 
             const uint16_t err = syscall68k_DmDeleteDatabase(sd, SC_EXECUTE_FULL, cardNo, dbID);
             deadMansSwitch();
@@ -88,6 +96,7 @@ int32_t dbInstallerInstall(struct SyscallDispatch* sd, size_t len, void* data) {
     if (syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch) != 0)
         throw std::runtime_error("failed to release scratch memory");
 
+    if (running) return DB_INSTALL_RESULT_ERR_RUNNING;
     if (couldNotOverwrite) return DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE;
 
     switch (err) {

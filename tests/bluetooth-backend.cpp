@@ -4,6 +4,73 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <afunix.h>
+#include <algorithm>
+#include <filesystem>
+#include <iostream>
+#include "BluetoothBackend.h"
+
+int main() {
+    WSADATA winsock{};
+    assert(WSAStartup(MAKEWORD(2, 2), &winsock) == 0);
+    const auto dir = std::filesystem::temp_directory_path() / ("Frond BT " + std::to_string(GetCurrentProcessId()));
+    assert(std::filesystem::create_directory(dir));
+    const std::string path = (dir / "hci").string();
+    std::string portable = path;
+    std::replace(portable.begin(), portable.end(), '\\', '/');
+    sockaddr_un address{};
+    assert(portable.size() < sizeof(address.sun_path));
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, portable.c_str(), portable.size() + 1);
+    const SOCKET listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listener == INVALID_SOCKET) {
+        std::cerr << "AF_UNIX unavailable: " << WSAGetLastError() << '\n';
+        std::filesystem::remove(dir);
+        WSACleanup();
+        return 77;
+    }
+    assert(bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
+    assert(listen(listener, 1) == 0);
+    BluetoothBackend backend;
+    std::string error;
+    assert(!backend.Open("relative", error));
+    if (!backend.Open(path, error)) {
+        std::cerr << error << '\n';
+        return 1;
+    }
+    fd_set incoming;
+    FD_ZERO(&incoming);
+    FD_SET(listener, &incoming);
+    timeval acceptTimeout{1, 0};
+    assert(select(0, &incoming, nullptr, nullptr, &acceptTimeout) == 1);
+    const SOCKET peer = accept(listener, nullptr, nullptr);
+    assert(peer != INVALID_SOCKET);
+    assert(!backend.Open(path + "-missing", error) && backend.Connected());
+    const uint8_t event[] = {4, 14, 4, 1, 3, 12, 0};
+    assert(send(peer, reinterpret_cast<const char*>(event), sizeof(event), 0) == sizeof(event));
+    for (unsigned tries = 0; tries < 100 && !backend.Pending(); ++tries) {
+        backend.Poll();
+        Sleep(1);
+    }
+    for (const auto byte : event) assert(backend.Read() == byte);
+    const uint8_t command[] = {1, 3, 12, 0};
+    assert(backend.Write(command, sizeof(command)));
+    backend.Poll();
+    DWORD timeout = 1000;
+    assert(setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout)) == 0);
+    char received[sizeof(command)]{};
+    assert(recv(peer, received, sizeof(received), MSG_WAITALL) == sizeof(received));
+    assert(std::memcmp(received, command, sizeof(command)) == 0);
+    backend.Close();
+    closesocket(peer);
+    closesocket(listener);
+    std::filesystem::remove_all(dir);
+    WSACleanup();
+    puts("PASS Windows H4 Unix endpoint with a path containing spaces");
+}
+#else
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -61,3 +128,5 @@ int main(){
  assert(b.Open(s.path,error));s.Accept();assert(received(10)==std::vector<uint8_t>(own,own+10));
  puts("PASS H4 Unix endpoint: framing, coalescing, short writes, exact 512KiB output, failed replacement, disconnect, generation, bounds and machine address");
 }
+
+#endif
