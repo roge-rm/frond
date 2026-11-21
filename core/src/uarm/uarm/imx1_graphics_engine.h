@@ -50,22 +50,15 @@ class Imx1GraphicsEngine {
     }
     uint32_t submissionBegin() const { return previousProducer; }
     void start(uint64_t ticks) {
-        if (previousProducer != writePointer) pending.push_back({writePointer, ticks});
+        if (previousProducer != writePointer) pending.push(writePointer, ticks);
     }
-    void advance(uint64_t ticks) {
-        for (auto& batch : pending) {
-            const auto elapsed = std::min(batch.remaining, ticks);
-            batch.remaining -= elapsed;
-            ticks -= elapsed;
-            if (!ticks) break;
-        }
-    }
+    void advance(uint64_t ticks) { pending.advance(ticks); }
     // Ticks until the first queued batch finishes. 0 when one waits to be completed.
-    uint64_t idleQuietTicks() const { return pending.empty() ? UINT64_MAX : pending.front().remaining; }
-    bool completed() const { return ringEnabled && !pending.empty() && !pending.front().remaining; }
+    uint64_t idleQuietTicks() const { return pending.empty() ? UINT64_MAX : pending.frontRemaining(); }
+    bool completed() const { return ringEnabled && !pending.empty() && !pending.frontRemaining(); }
     void complete(uint32_t option) {
-        readPointer = pending.front().end;
-        pending.erase(pending.begin());
+        readPointer = pending.frontEnd();
+        pending.pop();
         nativeOption = option;
         optionRead = false;
     }
@@ -81,8 +74,23 @@ class Imx1GraphicsEngine {
         uint64_t count = pending.size();
         a.Do64(count).Require(count <= 16384, "engine batches");
         if (!a.ok()) return;
-        pending.resize(size_t(count));
-        for (auto& batch : pending) a.Do32(batch.end).Do64(batch.remaining);
+        if constexpr (A::loading) {
+            BatchQueue loaded;
+            for (uint64_t i = 0; i < count && a.ok(); ++i) {
+                uint32_t end = 0;
+                uint64_t remaining = 0;
+                a.Do32(end).Do64(remaining);
+                loaded.push(end, remaining);
+            }
+            if (!a.ok()) return;
+            pending = std::move(loaded);
+        } else {
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t end = pending.end(i);
+                uint64_t remaining = pending.remaining(i);
+                a.Do32(end).Do64(remaining);
+            }
+        }
         a.Do32(nativeOption).DoBool(optionRead);
     }
     // The ring reads of the draw wait (200b8c64, 200b8c70, 200b8cb0) and the other read pointer polls, as access
@@ -258,8 +266,96 @@ class Imx1GraphicsEngine {
     uint8_t runCopy = 0;
     Other other = none;
     uint32_t previousProducer = 0;
-    struct Batch { uint32_t end; uint64_t remaining; };
-    std::vector<Batch> pending;
+    // The queued batches, oldest first. Copies of the chip share one append-only buffer of batches, each
+    // with its own head, tail and progress, so copying the chip copies no batches. Each batch keeps the
+    // running total of the queue's ticks at its end; done is how many of those the engine has worked
+    // through. That gives the same result as taking ticks off each batch in turn, the oldest first, with
+    // ticks beyond the last batch dropped. Machine thread only (the reference count isn't atomic).
+    class BatchQueue {
+       public:
+        BatchQueue() = default;
+        BatchQueue(const BatchQueue& o) : buffer(o.buffer), head(o.head), tail(o.tail), done(o.done) { if (buffer) ++buffer->refs; }
+        BatchQueue(BatchQueue&& o) noexcept : buffer(o.buffer), head(o.head), tail(o.tail), done(o.done) { o.buffer = nullptr; o.head = o.tail = 0; o.done = 0; }
+        BatchQueue& operator=(const BatchQueue& o) {
+            if (o.buffer) ++o.buffer->refs;
+            release();
+            buffer = o.buffer; head = o.head; tail = o.tail; done = o.done;
+            return *this;
+        }
+        BatchQueue& operator=(BatchQueue&& o) noexcept {
+            if (this != &o) {
+                release();
+                buffer = o.buffer; head = o.head; tail = o.tail; done = o.done;
+                o.buffer = nullptr; o.head = o.tail = 0; o.done = 0;
+            }
+            return *this;
+        }
+        ~BatchQueue() { release(); }
+        bool empty() const { return head == tail; }
+        uint32_t size() const { return tail - head; }
+        uint32_t frontEnd() const { return buffer->batches[head].end; }
+        uint64_t frontRemaining() const { return remaining(0); }
+        uint32_t end(uint32_t i) const { return buffer->batches[head + i].end; }
+        uint64_t remaining(uint32_t i) const {
+            const uint64_t total = buffer->batches[head + i].total;
+            const uint64_t begin = head + i ? buffer->batches[head + i - 1].total : buffer->base;
+            return total - std::min(std::max(done, begin), total);
+        }
+        void advance(uint64_t ticks) {
+            if (empty()) return;
+            const uint64_t last = buffer->batches[tail - 1].total;
+            done = ticks >= last - done ? last : done + ticks;
+        }
+        void push(uint32_t endPointer, uint64_t ticks) {
+            if (!buffer) buffer = new Buffer;
+            else if (buffer->refs == 1) {
+                // No other copy sees what's past this tail or before this head.
+                buffer->batches.resize(tail);
+                if (head && head == tail) {
+                    buffer->base = before(head);
+                    buffer->batches.clear();
+                    head = tail = 0;
+                } else if (head >= 256 && head * 2 >= tail) {
+                    buffer->base = before(head);
+                    buffer->batches.erase(buffer->batches.begin(), buffer->batches.begin() + head);
+                    tail -= head;
+                    head = 0;
+                }
+            }
+            const uint64_t total = (tail ? buffer->batches[tail - 1].total : buffer->base) + ticks;
+            auto& batches = buffer->batches;
+            if (batches.size() == tail) batches.push_back({endPointer, total});
+            else if (batches[tail].end != endPointer || batches[tail].total != total) {
+                // Another copy queued something else here: take a buffer of our own.
+                auto* own = new Buffer;
+                own->base = before(head);
+                own->batches.assign(batches.begin() + head, batches.begin() + tail);
+                own->batches.push_back({endPointer, total});
+                release();
+                buffer = own;
+                tail -= head;
+                head = 0;
+            }
+            ++tail;
+        }
+        void pop() {
+            ++head;
+            // The next batch's ticks start where it does.
+            done = std::max(done, before(head));
+        }
+       private:
+        struct Batch { uint32_t end; uint64_t total; };
+        struct Buffer { std::vector<Batch> batches; uint64_t base = 0; uint32_t refs = 1; };
+        uint64_t before(uint32_t i) const { return i ? buffer->batches[i - 1].total : buffer->base; }
+        void release() {
+            if (buffer && !--buffer->refs) delete buffer;
+            buffer = nullptr;
+        }
+        Buffer* buffer = nullptr;
+        uint32_t head = 0, tail = 0;
+        uint64_t done = 0;
+    };
+    BatchQueue pending;
     uint32_t nativeOption = 0;
     bool optionRead = false;
 };
