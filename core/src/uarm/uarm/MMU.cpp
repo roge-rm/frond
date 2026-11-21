@@ -26,16 +26,19 @@ void mmuSetPermHook(struct ArmMmu *mmu, void (*hook)(void *), void *ctx) {
     mmu->permChangedCtx = ctx;
 }
 
+// Every entry from an earlier gen is dead. Gen 0 is never current, so a wrap clears them all once.
+static void mmuPrvNextGen(struct ArmMmu *mmu) {
+    if (++mmu->gen == 0) {
+        for (size_t i = 0; i < TLB_SIZE; i++) mmu->tlb[i].gen = 0;
+        mmu->gen = 1;
+    }
+}
+
 void mmuTlbFlush(struct ArmMmu *mmu) {
     mmuPrvPermChanged(mmu);
     mmu->flushes++;
-    mmu->revision = (mmu->revision + 1) & 0x0f;
-
-    if (mmu->revision == 0) {
-        mmu->revision = 1;
-
-        for (size_t i = 0; i < TLB_SIZE; i++) mmu->tlb[i].revision = 0;
-    }
+    mmu->revision = mmu->revision % 15 + 1;
+    mmuPrvNextGen(mmu);
 }
 
 void mmuReset(struct ArmMmu *mmu) {
@@ -204,7 +207,7 @@ translated:
             tlbEntry->domain = dom;
             tlbEntry->section = section;
             tlbEntry->pa = (paPage + offset) >> 12;
-            tlbEntry->revision = mmu->revision;
+            tlbEntry->gen = mmu->gen;
         }
     }
 
@@ -232,7 +235,7 @@ MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviled
 
     struct TlbEntry *tlbEntry = mmu->tlb + (addr >> 12);
 
-    if (tlbEntry->revision != mmu->revision) {
+    if (tlbEntry->gen != mmu->gen) {
         return translateAndCache(mmu, addr, priviledged, write);
     }
 
@@ -252,7 +255,7 @@ MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviled
 MMUTranslateResult mmuTranslateInspectAccess(ArmMmu* mmu, uint32_t addr, bool privileged, bool write) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
     const auto& entry=mmu->tlb[addr >> 12];
-    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,privileged,write,true);
+    if (entry.gen != mmu->gen) return translateAndCache(mmu,addr,privileged,write,true);
     auto fsr=checkPermissions(mmu,entry.ap,entry.domain,entry.section,privileged,write);
     if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
     return uint64_t((addr & 0xfff) | (entry.pa << 12));
@@ -262,7 +265,7 @@ MMUTranslateResult mmuTranslateInspectAccess(ArmMmu* mmu, uint32_t addr, bool pr
 MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
     const auto& entry=mmu->tlb[addr >> 12];
-    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,true,write,true,false);
+    if (entry.gen != mmu->gen) return translateAndCache(mmu,addr,true,write,true,false);
     if (write) {
         auto fsr=checkPermissions(mmu,entry.ap,entry.domain,entry.section,true,true);
         if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
@@ -278,7 +281,7 @@ MMUTranslateResult mmuTranslateCodeAccess(ArmMmu* mmu, uint32_t addr, uint32_t* 
     *access = 0;
     const auto& entry=mmu->tlb[addr >> 12];
     // TLB entries only hold 4K pages with one AP.
-    if (entry.revision == mmu->revision) {
+    if (entry.gen == mmu->gen) {
         *access = (uint32_t(entry.domain) << 8) | (entry.ap * 0x55u);
         return uint64_t((addr & 0xfff) | (entry.pa << 12));
     }
@@ -414,7 +417,7 @@ void mmuSetDomainCfg(struct ArmMmu *mmu, uint32_t val) {
 int mmuPageClientAccess(struct ArmMmu *mmu, uint32_t va, bool privileged) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) return (MMU_DOMAIN_NONE << 2) | 3;
     const struct TlbEntry &entry = mmu->tlb[va >> 12];
-    if (entry.revision != mmu->revision) return -1;
+    if (entry.gen != mmu->gen) return -1;
     return (entry.domain << 2) | (apAllows(mmu, entry.ap, privileged, false) ? 1 : 0) |
            (apAllows(mmu, entry.ap, privileged, true) ? 2 : 0);
 }
@@ -613,7 +616,7 @@ void mmuArm920Capture(const ArmMmu* mmu, Arm920SavedState& s) {
     s.tlb.clear();
     for (uint32_t i = 0; i < TLB_SIZE; ++i) {
         const auto& e = mmu->tlb[i];
-        if (e.revision != mmu->revision) continue;
+        if (e.gen != mmu->gen) continue;
         s.tlb.push_back(i);
         s.tlb.push_back(uint32_t(e.pa) | uint32_t(e.ap) << 20 | uint32_t(e.domain) << 22 |
                         uint32_t(e.c) << 26 | uint32_t(e.section) << 27 | uint32_t(e.b) << 28);
@@ -625,8 +628,8 @@ void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
     mmu->domainCfg = s.domainCfg;
     mmu->S = s.mmuS;
     mmu->R = s.mmuR;
-    // Revision 0 is never current, so every other entry is dead.
-    memset(mmu->tlb, 0, sizeof(mmu->tlb));
+    // A new gen leaves every other entry dead.
+    mmuPrvNextGen(mmu);
     mmu->revision = s.tlbRevision;
     mmu->flushes = s.tlbFlushes;
     for (size_t n = 0; n + 1 < s.tlb.size(); n += 2) {
@@ -638,7 +641,8 @@ void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
         e.c = (packed >> 26) & 1;
         e.section = (packed >> 27) & 1;
         e.b = (packed >> 28) & 1;
-        e.revision = s.tlbRevision;
+        e.x = 0;
+        e.gen = mmu->gen;
     }
     mmuPrvPermChanged(mmu);
 }
@@ -648,7 +652,7 @@ void mmuEmitDiagnostic(const ArmMmu* mmu, const ArmDiagnosticSink& sink) {
     sink.emit("mmu",state,6);
     for (uint32_t i=0;i<TLB_SIZE;++i) {
         const auto& e=mmu->tlb[i];
-        if (e.revision != mmu->revision) continue;
+        if (e.gen != mmu->gen) continue;
         const uint32_t row[] = {i << 12,uint32_t(e.pa) << 12,e.ap,e.domain,e.section,e.c,e.b};
         sink.emit("tlb",row,7);
     }

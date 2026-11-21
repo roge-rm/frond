@@ -1244,7 +1244,7 @@ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint
                                             bool privileged, uint8_t info) {
     const struct ArmMmu *mmu = cpu->memorySystem.mmu;
     if (mmu->transTablPA != MMU_DISABLED_TTP) {
-        if (mmu->tlb[va >> 12].revision != mmu->revision) return;
+        if (mmu->tlb[va >> 12].gen != mmu->gen) return;
     } else if (mmu->staleOn) {
         return;  // the stale D-cache window: every access goes through mmuStaleTranslate
     }
@@ -1289,7 +1289,7 @@ static __attribute__((noinline)) void cpuPrvJitFill(struct ArmCpu *cpu, uint32_t
                                                    bool privileged, uint8_t info) {
     const struct ArmMmu *mmu = cpu->memorySystem.mmu;
     if (mmu->transTablPA != MMU_DISABLED_TTP) {
-        if (mmu->tlb[va >> 12].revision != mmu->revision) return;
+        if (mmu->tlb[va >> 12].gen != mmu->gen) return;
     } else if (mmu->staleOn) {
         return;
     }
@@ -1436,7 +1436,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
                 // The next stores to this page from generated code skip the translation (cpuJitLeanDeviceWrite),
                 // while the MMU TLB entry it came from holds.
                 if (cpu->leanJit &&
-                    (mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision)) {
+                    (mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].gen == mmu->gen)) {
                     auto &e = cpu->mem->hostTlb.leanDeviceWrite[(va >> 12) & 15];
                     e.key = hostTlbKey(gen, va, privileged);
                     e.pa = (MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu) | 1;
@@ -1458,7 +1458,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
     cpu->leanBus += counted;
     // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
-    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision) &&
+    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].gen == mmu->gen) &&
         !(uintptr_t(page) & 1)) {
         struct HostTlb &t = cpu->mem->hostTlb;
         if (!codePage) {

@@ -5,10 +5,10 @@
 #include "cputil.h"
 #define TLB_SIZE (1 << 20)
 
+// Live while gen matches the MMU's gen.
 struct TlbEntry {
+    uint32_t gen;
     uint32_t pa : 20;
-
-    uint32_t revision : 4;
     uint32_t ap : 2;
     uint32_t domain : 4;
     uint32_t c : 1;
@@ -26,6 +26,9 @@ struct ArmMmu {
     uint32_t domainCfg;
 
     struct TlbEntry tlb[TLB_SIZE];
+    // gen moves on with every flush; only a wrap (2^32 flushes) clears the entries.
+    uint32_t gen;
+    // Cycles 1-15 with every flush as the saved and diagnostic TLB revision; the entries don't use it.
     uint16_t revision;
     // XScale only: dcOn is the C bit as last written (it doesn't read back from c1),
     // staleOn the stale D-cache window, staleTtb the page tables in use when it opened.
@@ -89,7 +92,7 @@ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t 
         return addr;
     }
     const auto& entry = mmu->tlb[addr >> 12];
-    if (entry.revision != mmu->revision)
+    if (entry.gen != mmu->gen)
         return mmuTranslate(mmu, addr, privileged, write);
     const auto fsr = checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, write);
     if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);
