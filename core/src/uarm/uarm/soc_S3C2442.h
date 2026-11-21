@@ -152,6 +152,8 @@ class SocS3C2442 : public SoC {
     S3cPenPacer pen;
     S3cKeyPacer keys;
     std::vector<uint32_t> view, scan;
+    // The LCD's input for the frame in view (S3c2442Machine::screenSource); empty when view isn't from it.
+    std::vector<uint8_t> lcdSource, lcdNextSource;
     bool framePending{false}, redraw{true};
     // Guest ns Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};

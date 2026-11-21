@@ -564,6 +564,9 @@ class S3cLcd {
     // the controller is off or set to something not decoded.
     bool frame(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint32_t>& pixels,
                unsigned& width, unsigned& height, std::string& why) const;
+    // Every input frame() reads: the registers it decodes, then each line's bytes. Equal sources give equal
+    // frames, so a caller can skip converting an unchanged one. False where frame() would fail.
+    bool frameSource(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint8_t>& source) const;
     // The frame's physical start, from LCDSADDR1.
     uint32_t frameAddress() const { return (saddr[0] & 0x3fffffff) << 1; }
 

@@ -533,6 +533,15 @@ bool S3c2442Machine::screen(std::vector<uint32_t>& pixels, unsigned& width, unsi
     return lcd.frame(memory, pixels, width, height, why);
 }
 
+bool S3c2442Machine::screenSource(std::vector<uint8_t>& source) const {
+    auto memory = [&](uint32_t pa, void* out, size_t n) {
+        if (pa < sdramBase || uint64_t(pa) + n > uint64_t(sdramBase) + options.ramBytes) return false;
+        std::memcpy(out, ramBuffer + (pa - sdramBase), n);
+        return true;
+    };
+    return lcd.frameSource(memory, source);
+}
+
 void S3c2442Machine::catchUp() {
     // The instructions the interpreter call has finished; cpuCyclesInProgress counts the one running too.
     const uint32_t inProgress = cpuCyclesInProgress(cpuCore);

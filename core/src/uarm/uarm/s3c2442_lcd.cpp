@@ -1,4 +1,5 @@
 #include "s3c2442_blocks.h"
+#include <cstring>
 
 void S3cLcd::reset() {
     for (auto& r : lcdcon) r = 0;
@@ -127,6 +128,25 @@ void S3cLcd::advance(uint64_t hclkTicks, S3cIntc& intc) {
 uint64_t S3cLcd::ticksToEvent(bool interruptOnly) const {
     if (!enabled() || (interruptOnly && lcdintmsk & 2)) return UINT64_MAX;
     return lineTicks() * frameLines() - phase;
+}
+
+bool S3cLcd::frameSource(const std::function<bool(uint32_t, void*, size_t)>& memory,
+                         std::vector<uint8_t>& source) const {
+    if (!enabled() || ((lcdcon[0] >> 5) & 3) != 3) return false;
+    const unsigned bppmode = (lcdcon[0] >> 1) & 0xf;
+    if (bppmode != 0xc && bppmode != 0xd) return false;
+    const unsigned width = ((lcdcon[2] >> 8) & 0x7ff) + 1, height = ((lcdcon[1] >> 14) & 0x3ff) + 1;
+    const uint32_t stride = ((saddr[2] & 0x7ff) + ((saddr[2] >> 11) & 0x7ff)) * 2;
+    const uint32_t lineBytes = width * (bppmode == 0xd ? 4 : 2);
+    const uint32_t regs[] = {lcdcon[0], lcdcon[1], lcdcon[2], lcdcon[3], lcdcon[4], saddr[0], saddr[2]};
+    source.resize(sizeof(regs) + size_t(lineBytes) * height);
+    std::memcpy(source.data(), regs, sizeof(regs));
+    const uint32_t start = frameAddress();
+    for (unsigned y = 0; y < height; ++y)
+        if (!memory(start + y * (stride ? stride : lineBytes), source.data() + sizeof(regs) + size_t(y) * lineBytes,
+                    lineBytes))
+            return false;
+    return true;
 }
 
 bool S3cLcd::frame(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint32_t>& pixels,

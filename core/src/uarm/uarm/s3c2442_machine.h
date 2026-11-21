@@ -162,6 +162,8 @@ class S3c2442Machine {
     void setStylus(bool down, uint16_t x, uint16_t y);
     // The screen as the LCD controller scans it out of SDRAM (S3cLcd::frame).
     bool screen(std::vector<uint32_t>& pixels, unsigned& width, unsigned& height, std::string& why) const;
+    // What screen() reads (S3cLcd::frameSource): equal sources give equal screens.
+    bool screenSource(std::vector<uint8_t>& source) const;
 
     // Sound. The IIS runs at the sample rate audioRate() gives (frames a second, numerator / denominator, 0 / 1
     // while it's off), moving its FIFOs through DMA and the UDA1380. Each frame it sends goes to pcmSink after

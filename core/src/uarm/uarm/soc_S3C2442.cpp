@@ -950,17 +950,27 @@ bool SocS3C2442::LcdEnabled() { return !machine->asleep() && machine->lcd.enable
 // The panel as the LCD controller scans it, 0xRRGGBB, to the frontend's ABGR8888. Black with the LCD off.
 uint32_t* SocS3C2442::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) {
     const unsigned width = displayConfiguration.width, height = displayConfiguration.height;
-    if (view.size() != size_t(width) * height) view.assign(size_t(width) * height, 0xff000000);
+    if (view.size() != size_t(width) * height) {
+        view.assign(size_t(width) * height, 0xff000000);
+        lcdSource.clear();
+    }
     unsigned w = 0, h = 0;
     std::string why;
     bool changed = false;
-    if (LcdEnabled() && machine->screen(scan, w, h, why) && w == width && h == height) {
+    // An unchanged source gives the frame already in view.
+    const bool on = LcdEnabled();
+    const bool sourced = on && machine->screenSource(lcdNextSource);
+    if (sourced && !lcdSource.empty() && lcdNextSource == lcdSource) {
+    } else if (on && machine->screen(scan, w, h, why) && w == width && h == height) {
+        if (sourced) lcdSource.swap(lcdNextSource);
+        else lcdSource.clear();
         for (size_t i = 0; i < view.size(); ++i) {
             const uint32_t c = scan[i];
             const uint32_t px = 0xff000000u | (c & 0xff) << 16 | (c & 0xff00) | ((c >> 16) & 0xff);
             if (view[i] != px) { view[i] = px; changed = true; }
         }
     } else {
+        lcdSource.clear();
         for (auto& px : view)
             if (px != 0xff000000u) { px = 0xff000000u; changed = true; }
     }
