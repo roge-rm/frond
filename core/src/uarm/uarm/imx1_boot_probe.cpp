@@ -1000,7 +1000,8 @@ struct Probe {
         if (cost) {
             if (quietCycles > cost) quietCycles -= cost;
             else {
-                // A change comes within the clocks: they are charged now, as cs5Wait would have.
+                // A change comes within the clocks: they are charged now, after the write where cs5Wait charges them before it. The
+                // old batch runs those clocks late, so this moves timing only, not the order the guest sees.
                 if (chargeDeferred()) {
                     cs5Configuration.takeBusyLevel();
                     updateInterrupts();
