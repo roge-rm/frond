@@ -69,10 +69,10 @@ class S3cClock {
     uint64_t mpll() const;
     uint64_t upll() const;
     // FCLK, the CPU's clock: HCLK while DVS is on.
-    uint64_t cpuClock() const;
-    uint64_t fclk() const;
-    uint64_t hclk() const;
-    uint64_t pclk() const;
+    uint64_t cpuClock() const { return dvs() ? busHz : fastHz; }
+    uint64_t fclk() const { return fastHz; }
+    uint64_t hclk() const { return busHz; }
+    uint64_t pclk() const { return peripheralHz; }
     bool dvs() const { return camdivn & 0x1000; }
     // CLKCON's IDLE bit, the CPU's clock held until an interrupt. Cleared by the wake.
     bool idle() const { return clkcon & 4; }
@@ -82,11 +82,17 @@ class S3cClock {
     // Called after any write that changes a clock rate.
     std::function<void()> changed;
 
-    uint32_t locktime, mpllcon, upllcon, clkcon, clkslow, clkdivn, camdivn;
+    void restoreRegisters(const S3cClock& saved);
+    uint32_t clkcon;
+    const uint32_t crystal;
     template <class A> void state(A& a) {
         a.Do32(locktime).Do32(mpllcon).Do32(upllcon).Do32(clkcon).Do32(clkslow).Do32(clkdivn).Do32(camdivn);
+        refreshRates();
     }
-    const uint32_t crystal;
+   private:
+    void refreshRates();
+    uint32_t locktime, mpllcon, upllcon, clkslow, clkdivn, camdivn;
+    uint64_t fastHz, busHz, peripheralHz;
 };
 
 // SDRAM and bank control at 0x48000000 (manual chapter 5). The SDRAM itself needs no setup here, so the
