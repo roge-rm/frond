@@ -47,8 +47,10 @@ CFLAGS_NATIVE ?= -O2  -g $(shell sdl2-config --cflags) $(READLINE_CFLAGS)
 CXXFLAGS_NATIVE ?= $(CFLAGS_NATIVE)
 LDFLAGS_NATIVE ?=  $(shell sdl2-config --libs) -lSDL2_image $(READLINE_LIBS) -lpthread $(PLATFORM_LIBS)
 
-BUILDDIR_NATIVE ?= .build
-DEPDIR_NATIVE ?= .deps
+# FROND_CORE_OBJ=/abs/path puts this folder's objects and depfiles in FROND_CORE_OBJ/<folder>/.
+FROND_CORE_OBJ_DIR = $(if $(FROND_CORE_OBJ),$(FROND_CORE_OBJ)/$(notdir $(CURDIR))/)
+BUILDDIR_NATIVE ?= $(FROND_CORE_OBJ_DIR).build
+DEPDIR_NATIVE ?= $(FROND_CORE_OBJ_DIR).deps
 
 DEPFLAGS_NATIVE = -MT $@ -MMD -MP -MF $(DEPDIR_NATIVE)/$*.d
 

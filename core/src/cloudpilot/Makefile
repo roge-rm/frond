@@ -186,8 +186,8 @@ ifdef FROND_68K
 SOURCE_C_NATIVE = $(SOURCE_C)
 SOURCE_CXX_NATIVE = $(SOURCE_CXX_FROND)
 BINARY_NATIVE = frond-68k$(EXE_SUFFIX)
-BUILDDIR_NATIVE = .build-frond
-DEPDIR_NATIVE = .deps-frond
+BUILDDIR_NATIVE = $(FROND_CORE_OBJ_DIR).build-frond
+DEPDIR_NATIVE = $(FROND_CORE_OBJ_DIR).deps-frond
 # frond/ first, for its keys.h in front of the shared art.
 INCLUDE := -Ifrond $(INCLUDE) -Inative
 # ENABLE_DEBUGGER: breakpoints and watchpoints for the GDB stub; idle checks while none is connected.
