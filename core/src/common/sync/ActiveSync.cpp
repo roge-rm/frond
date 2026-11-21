@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 #include "SyncStore.h"
@@ -152,6 +153,90 @@ bool ConfiguredActiveSyncUsesSerial() {
     return selected && profile.Open(library.ProfilePath(*selected), error) && profile.ActiveSyncUsesSerial(key);
 }
 
+std::shared_ptr<SyncPipe> ActiveSyncSession::AcceptAirSync() {
+    std::lock_guard lock(airMutex);
+    if (!air) return nullptr;
+    auto pipe = std::make_shared<SyncPipe>();
+    airPipes.push_back(pipe);
+    AirSyncServer* server = air;
+    airThreads.emplace_back([server, pipe] {
+        SyncPipe::End end(pipe);
+        server->Serve(end);
+        pipe->Close();
+    });
+    return pipe;
+}
+
+std::string ActiveSyncSession::SyncPocketOutlook(FrondRapi* client, SyncProfile& profile, const std::string& key,
+                                                 const std::string& guid, const std::vector<PimKind>& kinds) {
+    AirSyncServer server(profile, key, kinds);
+    struct Close {
+        void operator()(FILE* file) const { std::fclose(file); }
+    };
+    std::unique_ptr<FILE, Close> trace;
+    // Qualification runs set FROND_AIRSYNC_TRACE to a file that gets every request and answer.
+    if (const char* path = std::getenv("FROND_AIRSYNC_TRACE")) trace.reset(std::fopen(path, "a"));
+    server.SetTrace(trace.get());
+    std::string zoneSource;
+    const auto zone = ReadActiveSyncTimeZone(client, &zoneSource);
+    if (!FrondRapiConnected(client)) throw std::runtime_error("Windows Mobile disconnected.");
+    server.SetDeviceTimeZone(zone);
+    if (trace) std::fprintf(trace.get(), "time zone %s %s\n", zone.empty() ? "unknown" : zone.c_str(), zoneSource.c_str());
+    {
+        std::lock_guard lock(airMutex);
+        air = &server;
+    }
+    std::string failure;
+    try {
+        StartActiveSyncDesktopSync(client, profile.PcId(), guid, kinds);
+        // The guest connects about a second after the start and syncs each folder in turn.
+        const auto start = std::chrono::steady_clock::now();
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            const auto idle = server.Idle();
+            if (pipes[1]->Closed()) {
+                failure = "Windows Mobile disconnected during Pocket Outlook sync.";
+                break;
+            }
+            if (!server.Requests() && idle > std::chrono::seconds(60)) {
+                failure = "Pocket Outlook didn't start syncing.";
+                break;
+            }
+            if (server.Finished() && idle > std::chrono::seconds(3)) break;
+            if (server.Requests() && idle > std::chrono::seconds(30)) {
+                failure = "Pocket Outlook stopped before every folder synced.";
+                break;
+            }
+            if (std::chrono::steady_clock::now() - start > std::chrono::minutes(20)) {
+                failure = "Pocket Outlook sync took too long.";
+                break;
+            }
+        }
+    } catch (const std::exception& error) {
+        failure = error.what();
+    }
+    std::vector<std::shared_ptr<SyncPipe>> open;
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard lock(airMutex);
+        air = nullptr;
+        open.swap(airPipes);
+        threads.swap(airThreads);
+    }
+    server.Stop();
+    for (auto& pipe : open) pipe->Close();
+    for (auto& thread : threads) thread.join();
+    if (!server.LastError().empty()) profile.Log(key, "ActiveSync: Pocket Outlook: " + server.LastError());
+    if (!failure.empty()) throw std::runtime_error(failure);
+    std::string error;
+    if (!server.FinishActions(error)) throw std::runtime_error(error);
+    const auto counts = server.Counts();
+    auto summary = "Pocket Outlook synced: " + std::to_string(counts.toDevice) + " to the device, " +
+                   std::to_string(counts.fromDevice) + " from it, " + std::to_string(counts.deleted) + " deleted";
+    if (counts.conflicts) summary += ", " + std::to_string(counts.conflicts) + " conflicts kept as copies";
+    return summary + ".";
+}
+
 ActiveSyncSession::~ActiveSyncSession() { Stop(); }
 
 void ActiveSyncSession::Start() {
@@ -261,6 +346,23 @@ void ActiveSyncSession::Run() {
             if (!FrondRapiConnected(client.get())) throw std::runtime_error(files);
         }
 
+        std::string outlook;
+        if (pairing == "requested" || (pairing == "confirmed" && !partnershipMissing)) {
+            std::vector<PimKind> kinds;
+            for (const auto kind : {PimKind::contacts, PimKind::calendar, PimKind::tasks})
+                if (profile.GetPimAction(key, kind) != PimAction::skip) kinds.push_back(kind);
+            if (!kinds.empty()) {
+                progress("pim", 0, 0, {});
+                try {
+                    outlook = SyncPocketOutlook(client.get(), profile, key, info.guid, kinds);
+                } catch (const std::exception& error) {
+                    outlook = "Pocket Outlook sync failed: " + std::string(error.what());
+                    profile.Log(key, "ActiveSync: " + outlook);
+                    if (!FrondRapiConnected(client.get())) throw std::runtime_error(outlook);
+                }
+            }
+        }
+
         auto queue = profile.PendingInstalls(key);
         queue.erase(std::remove_if(queue.begin(), queue.end(), [](const auto& item) { return item.target != "cab"; }), queue.end());
         int sent = 0;
@@ -283,6 +385,7 @@ void ActiveSyncSession::Run() {
         if (partnershipMissing) message += " Desktop partnership missing. Pair again in sync settings.";
         else if (pairing == "requested" || pairing == "confirmed") message += " Desktop partnership verified.";
         if (!files.empty()) message += " " + files;
+        if (!outlook.empty()) message += " " + outlook;
         profile.Log(key, "ActiveSync: " + message);
         ok = true;
     } catch (const std::exception& error) {

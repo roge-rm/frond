@@ -250,6 +250,14 @@ test-sync-pim: $(COMMON_LIB)
 		-o $(OBJ_ROOT)/test-sync-pim
 	timeout 120 $(OBJ_ROOT)/test-sync-pim $(OBJ_ROOT)/sync-pim-scratch
 
+.PHONY: test-sync-airsync
+test: test-sync-airsync
+test-sync-airsync: core/src/common/libcommon.a
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-airsync.cpp core/src/common/libcommon.a -lpthread \
+		-o $(OBJ_ROOT)/test-sync-airsync
+	timeout 120 $(OBJ_ROOT)/test-sync-airsync $(OBJ_ROOT)/sync-airsync-scratch
+
 # Build the PE shims for a Linux desktop that runs installers through Wine.
 WINDOWS_SHIM_CXX ?= i686-w64-mingw32-g++
 WINDOWS_SHIM_OUT ?= out/installer-shims

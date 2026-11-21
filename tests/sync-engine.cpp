@@ -449,7 +449,7 @@ void TestActiveSync(const std::string& root) {
         CHECK(RapiReply(rapi, 0x19, Words({0, 1})));
     };
     const auto finish = [](ActiveSyncSession& session) {
-        for (unsigned i = 0; i < 1000 && session.Running(); ++i)
+        for (unsigned i = 0; i < 30000 && session.Running(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         CHECK(!session.Running());
     };
@@ -510,9 +510,15 @@ void TestActiveSync(const std::string& root) {
         CHECK(RapiReply(rapi, 0x0e, RapiConfigReply(
             "<characteristic type=\"" + source + "\"><parm name=\"Server\" value=\"" + host +
             "\"/><parm name=\"StoreType\" value=\"2\"/></characteristic>")));
+        // Pocket Outlook: neither registry zone exists (CeRegOpenKeyEx error 2), then the first
+        // desktop sync request is refused.
+        CHECK(RapiReply(rapi, 0x2f, Words({2, 2})));
+        CHECK(RapiReply(rapi, 0x2f, Words({2, 2})));
+        CHECK(RapiReply(rapi, 0x0e, Words({5, 0x80004005})));
         finish(paired);
         CHECK(manager.Status().state == SyncStatus::State::done);
         CHECK(manager.Status().message.find("Desktop partnership verified.") != std::string::npos);
+        CHECK(manager.Status().message.find("Pocket Outlook sync failed") != std::string::npos);
         CHECK(profile.ActiveSyncPairing(key) == "confirmed");
     }
 
