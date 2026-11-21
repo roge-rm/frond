@@ -2,6 +2,7 @@
 """Build the virtual Bluetooth peer (OPP and SPP test peer, and the DUN phone) from the pinned provider's test host."""
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,13 +20,13 @@ def main():
     parser.add_argument('--source', type=Path, default=ROOT / 'build/bluetooth-provider')
     parser.add_argument('--output', type=Path, default=ROOT / 'build/bluetooth-opp-peer')
     # The DUN phone's modem, PPP and slirp: libcommon.a and libcommon-net.a from the core.
-    parser.add_argument('--common', type=Path, default=ROOT / 'core/src/common')
+    parser.add_argument('--common', type=Path, default=Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out') / 'core/common')
     parser.add_argument('--test', action='store_true')
     args = parser.parse_args()
     source, output, common = args.source.resolve(), args.output.resolve(), args.common.resolve()
     for library in ('libcommon.a', 'libcommon-net.a'):
         if not (common / library).is_file():
-            parser.error(f'{common / library} is missing (make -C core/src/common bin net)')
+            parser.error(f'{common / library} is missing (run make bluetooth-opp-peer)')
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
     changes = subprocess.check_output(['git', 'diff', '--no-ext-diff', '--no-color', 'HEAD'], cwd=source, text=True)
     if revision != REVISION or changes != (ROOT / 'tools/bluez-bdaddr.patch').read_text():

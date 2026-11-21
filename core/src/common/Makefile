@@ -56,9 +56,9 @@ SOURCE_CXX_NATIVE = 				\
 	$(SOURCE_CXX)					\
 	Cli.cpp
 
-LIBRARY_NATIVE = libcommon.a
+LIBRARY_NATIVE = $(FROND_CORE_OBJ_DIR)libcommon.a
 # libslirp behind PPP and Wi-Fi, a library of its own so only the cores link libslirp.
-LIBRARY_NET = libcommon-net.a
+LIBRARY_NET = $(FROND_CORE_OBJ_DIR)libcommon-net.a
 OBJECTS_NET = $(BUILDDIR_NATIVE)/net/SlirpIp.o $(BUILDDIR_NATIVE)/net/WifiRouter.o $(BUILDDIR_NATIVE)/net/DesktopLink.o
 GARBAGE_EXTRA = $(LIBRARY_NET)
 

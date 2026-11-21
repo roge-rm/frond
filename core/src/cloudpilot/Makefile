@@ -194,7 +194,7 @@ INCLUDE := -Ifrond $(INCLUDE) -Inative
 CFLAGS_NATIVE = -O2 -g -DENABLE_DEBUGGER $(shell sdl2-config --cflags)
 LDFLAGS_NATIVE = $(shell sdl2-config --libs) -lSDL2_image -lpthread $(shell pkg-config --libs slirp) $(PLATFORM_LIBS)
 # The snap-on modem's slirp side (common/net), ahead of libcommon.a.
-OBJECTS_EXTRA_NATIVE = ../common/libcommon-net.a ../common/libcommon.a
+OBJECTS_EXTRA_NATIVE = $(COMMON_LIB_DIR)libcommon-net.a $(COMMON_LIB_DIR)libcommon.a
 endif
 
 include ../Makefile.common

@@ -159,7 +159,7 @@ SOURCE_CXX_NATIVE =						\
 	native/main.cpp
 
 # The infrared phone's and Wi-Fi's slirp side (common/net), ahead of libcommon.a.
-OBJECTS_EXTRA_NATIVE = ../common/libcommon-net.a ../common/libcommon.a
+OBJECTS_EXTRA_NATIVE = $(COMMON_LIB_DIR)libcommon-net.a $(COMMON_LIB_DIR)libcommon.a
 
 # Fast engine: FROND_DYNARMIC_SRC is a patched Dynarmic source tree and FROND_DYNARMIC_LIBS its
 # built static libraries, in link order. Without them the core builds with the interpreter only.

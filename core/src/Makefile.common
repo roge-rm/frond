@@ -49,6 +49,8 @@ LDFLAGS_NATIVE ?=  $(shell sdl2-config --libs) -lSDL2_image $(READLINE_LIBS) -lp
 
 # FROND_CORE_OBJ=/abs/path puts this folder's objects and depfiles in FROND_CORE_OBJ/<folder>/.
 FROND_CORE_OBJ_DIR = $(if $(FROND_CORE_OBJ),$(FROND_CORE_OBJ)/$(notdir $(CURDIR))/)
+# Where common's libcommon archives are, for the folders that link them.
+COMMON_LIB_DIR = $(if $(FROND_CORE_OBJ),$(FROND_CORE_OBJ)/common/,../common/)
 BUILDDIR_NATIVE ?= $(FROND_CORE_OBJ_DIR).build
 DEPDIR_NATIVE ?= $(FROND_CORE_OBJ_DIR).deps
 

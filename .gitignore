@@ -18,6 +18,5 @@ __pycache__/
 /core/src/*/.build-*/
 /core/src/*/.deps/
 /core/src/*/.deps-*/
-/core/src/common/libcommon-net.a
 /core/src/cloudpilot/frond-68k
 /core/src/uarm/cp-uarm-zodiac-developer

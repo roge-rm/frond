@@ -11,6 +11,8 @@ $(shell mkdir -p $(OBJ_ROOT))
 CORE_OBJ_FLAGS = FROND_CORE_OBJ=$(abspath $(OBJ_ROOT))/core
 UARM_OBJ = $(OBJ_ROOT)/core/uarm/.build
 COMMON_OBJ = $(OBJ_ROOT)/core/common/.build
+COMMON_LIB = $(OBJ_ROOT)/core/common/libcommon.a
+COMMON_NET_LIB = $(OBJ_ROOT)/core/common/libcommon-net.a
 CLOUDPILOT_OBJ = $(OBJ_ROOT)/core/cloudpilot/.build-frond
 # The desktop's CMake build, on the resolved path: moc writes includes relative to it, and those
 # go wrong through a link.
@@ -21,7 +23,7 @@ export FROND_OBJ = $(abspath $(OBJ_ROOT))
 # libcommon-net.a: the core's .o files include HostInfrared's phone (SlirpIp).
 include core/src/Makefile.host
 
-CPU_TEST_LDLIBS ?= core/src/common/libcommon-net.a core/src/common/libcommon.a -lpthread $(shell pkg-config --libs slirp) $(PLATFORM_LIBS)
+CPU_TEST_LDLIBS ?= $(COMMON_NET_LIB) $(COMMON_LIB) -lpthread $(shell pkg-config --libs slirp) $(PLATFORM_LIBS)
 
 # The Fast engine (Dynarmic JIT) is built in on x86-64 and arm64 hosts; FROND_FAST=0 leaves it out.
 # Its source is in vendor/dynarmic and it's built in build/out/dynarmic.
@@ -118,7 +120,7 @@ test-card-swap: out/frond
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
 		tests/card-swap.cpp core/src/common/session/session_file5.cpp core/src/common/md5.cpp \
 		core/src/uarm/uarm/sdcard.cpp core/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		$(OBJ_ROOT)/miniz-card-swap.o core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-card-swap
+		$(OBJ_ROOT)/miniz-card-swap.o $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-card-swap
 	$(OBJ_ROOT)/test-card-swap
 	python3 tests/card-swap-rom.py
 
@@ -139,7 +141,7 @@ test-card-tool: out/frond
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
 		tests/card-tool.cpp core/src/common/session/session_file5.cpp core/src/common/md5.cpp \
 		core/src/uarm/uarm/sdcard.cpp core/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		$(OBJ_ROOT)/miniz-card-tool.o core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-card-tool
+		$(OBJ_ROOT)/miniz-card-tool.o $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-card-tool
 	$(OBJ_ROOT)/test-card-tool
 	python3 tests/card-tool.py
 
@@ -212,7 +214,7 @@ prepare:
 .PHONY: FORCE
 FORCE:
 
-out/frond: core/src/common/libcommon.a core/src/common/libcommon-net.a $(CORE_JIT_DEPS)
+out/frond: $(COMMON_LIB) $(COMMON_NET_LIB) $(CORE_JIT_DEPS)
 	$(MAKE) -C core/src/uarm $(CORE_OBJ_FLAGS) bin $(CORE_JIT_FLAGS)
 	mkdir -p out
 	cp core/src/uarm/cp-uarm$(EXE_SUFFIX) out/frond$(EXE_SUFFIX).new
@@ -226,7 +228,7 @@ out/frond-zodiac-developer: out/frond
 	mv -f out/frond-zodiac-developer.new out/frond-zodiac-developer
 
 # The 68k runner for DragonBall devices, from Cloudpilot's core in src/cloudpilot.
-out/frond-68k: core/src/common/libcommon.a core/src/common/libcommon-net.a
+out/frond-68k: $(COMMON_LIB) $(COMMON_NET_LIB)
 	$(MAKE) -C core/src/cloudpilot $(CORE_OBJ_FLAGS) FROND_68K=1 frond-68k$(EXE_SUFFIX)
 	mkdir -p out
 	cp core/src/cloudpilot/frond-68k$(EXE_SUFFIX) out/frond-68k$(EXE_SUFFIX).new
@@ -234,17 +236,17 @@ out/frond-68k: core/src/common/libcommon.a core/src/common/libcommon-net.a
 
 .PHONY: test-sync-engine
 test: test-sync-engine
-test-sync-engine: core/src/common/libcommon.a
+test-sync-engine: $(COMMON_LIB)
 	mkdir -p $(OBJ_ROOT)
-	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-engine.cpp core/src/common/libcommon.a -lpthread \
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-engine.cpp $(COMMON_LIB) -lpthread \
 		-o $(OBJ_ROOT)/test-sync-engine
 	timeout 120 $(OBJ_ROOT)/test-sync-engine $(OBJ_ROOT)/sync-engine-scratch
 
 .PHONY: test-sync-pim
 test: test-sync-pim
-test-sync-pim: core/src/common/libcommon.a
+test-sync-pim: $(COMMON_LIB)
 	mkdir -p $(OBJ_ROOT)
-	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-pim.cpp core/src/common/libcommon.a -lpthread \
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-pim.cpp $(COMMON_LIB) -lpthread \
 		-o $(OBJ_ROOT)/test-sync-pim
 	timeout 120 $(OBJ_ROOT)/test-sync-pim $(OBJ_ROOT)/sync-pim-scratch
 
@@ -263,10 +265,10 @@ installer-shims:
 		installer-shims/RunInstaller.cpp -ladvapi32 -o "$(WINDOWS_SHIM_OUT)/RunInstaller.exe"
 
 # The sync manager's profiles, install queue and backups from the command line.
-out/frond-sync: core/src/common/libcommon.a core/src/common/sync/SyncTool.cpp
+out/frond-sync: $(COMMON_LIB) core/src/common/sync/SyncTool.cpp
 	mkdir -p out
 	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common/sync core/src/common/sync/SyncTool.cpp \
-		core/src/common/libcommon.a -lpthread -o out/frond-sync$(EXE_SUFFIX)
+		$(COMMON_LIB) -lpthread -o out/frond-sync$(EXE_SUFFIX)
 
 test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
 
@@ -309,7 +311,7 @@ test-cpu: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/core-objects.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/arm-alignment.cpp @$(OBJ_ROOT)/core-objects.rsp core/src/common/libcommon.a \
+		tests/arm-alignment.cpp @$(OBJ_ROOT)/core-objects.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-arm-alignment
 	$(OBJ_ROOT)/test-arm-alignment
 
@@ -317,7 +319,7 @@ test-tx-state: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tx-core-objects.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/tx-session-state.cpp @$(OBJ_ROOT)/tx-core-objects.rsp core/src/common/libcommon.a \
+		tests/tx-session-state.cpp @$(OBJ_ROOT)/tx-core-objects.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tx-session-state
 	$(OBJ_ROOT)/test-tx-session-state
 
@@ -350,7 +352,7 @@ test-replay-snapshot: out/frond
 		tests/replay-snapshot.cpp $(UARM_OBJ)/native/SdlRenderer.o \
 		$(UARM_OBJ)/native/InputReplay.o $(UARM_OBJ)/native/Silkscreen.o \
 		$(UARM_OBJ)/native/DeviceControls.o \
-		@$(OBJ_ROOT)/replay-snapshot-core.rsp core/src/common/libcommon.a \
+		@$(OBJ_ROOT)/replay-snapshot-core.rsp $(COMMON_LIB) \
 		$(shell sdl2-config --libs) -lSDL2_image $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-replay-snapshot
 	$(OBJ_ROOT)/test-replay-snapshot
 
@@ -360,7 +362,7 @@ test-sdl-audio: out/frond
 		-Icore/src/uarm/native -Icore/src/uarm/uarm \
 		-Icore/src/uarm -Icore/src/common \
 		tests/sdl-audio-buffer.cpp core/src/uarm/native/SdlAudioDriver.cpp \
-		@$(OBJ_ROOT)/audio-core-objects.rsp core/src/common/libcommon.a \
+		@$(OBJ_ROOT)/audio-core-objects.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-sdl-audio-buffer
 	$(OBJ_ROOT)/test-sdl-audio-buffer
 
@@ -422,7 +424,7 @@ test-fast-audio: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/fast-audio-core-objects.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/fast-audio-state.cpp @$(OBJ_ROOT)/fast-audio-core-objects.rsp core/src/common/libcommon.a \
+		tests/fast-audio-state.cpp @$(OBJ_ROOT)/fast-audio-core-objects.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-fast-audio-state
 	$(OBJ_ROOT)/test-fast-audio-state
 
@@ -430,7 +432,7 @@ test-instruction-cache: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/cache-core-objects.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/instruction-cache.cpp @$(OBJ_ROOT)/cache-core-objects.rsp core/src/common/libcommon.a \
+		tests/instruction-cache.cpp @$(OBJ_ROOT)/cache-core-objects.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-instruction-cache
 	$(OBJ_ROOT)/test-instruction-cache
 
@@ -439,7 +441,7 @@ $(OBJ_ROOT)/test-gdbstub-target: out/frond tests/gdbstub-target.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/gdbstub-core.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/gdbstub-target.cpp @$(OBJ_ROOT)/gdbstub-core.rsp core/src/common/libcommon.a \
+		tests/gdbstub-target.cpp @$(OBJ_ROOT)/gdbstub-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-gdbstub-target
 
 test-gdbstub: $(OBJ_ROOT)/test-gdbstub-target
@@ -456,14 +458,14 @@ benchmark-session: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/benchmark-core-objects.rsp
 	$(CXX) -std=c++17 -O2 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tools/benchmark-session.cpp @$(OBJ_ROOT)/benchmark-core-objects.rsp core/src/common/libcommon.a \
+		tools/benchmark-session.cpp @$(OBJ_ROOT)/benchmark-core-objects.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/benchmark-session
 
 test-native-governor: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' ! -name cputil.o > $(OBJ_ROOT)/governor-core.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/native-governor.cpp @$(OBJ_ROOT)/governor-core.rsp core/src/common/libcommon.a \
+		tests/native-governor.cpp @$(OBJ_ROOT)/governor-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-native-governor
 	$(OBJ_ROOT)/test-native-governor
 
@@ -476,14 +478,14 @@ test-export-checkpoint: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/export-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/export-checkpoint.cpp @$(OBJ_ROOT)/export-core.rsp core/src/common/libcommon.a \
+		tests/export-checkpoint.cpp @$(OBJ_ROOT)/export-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-export-checkpoint
 	$(OBJ_ROOT)/test-export-checkpoint
 
 test-db-backup: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Icore/src/common/zip \
 		tests/db-backup.cpp core/src/uarm/uarm/db_backup.cpp \
-		core/src/common/libcommon.a -o $(OBJ_ROOT)/test-db-backup
+		$(COMMON_LIB) -o $(OBJ_ROOT)/test-db-backup
 	$(OBJ_ROOT)/test-db-backup
 
 .PHONY: test-jit-overshoot
@@ -495,7 +497,7 @@ test-jit-overshoot: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/jit-overshoot-core.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/jit-overshoot.cpp @$(OBJ_ROOT)/jit-overshoot-core.rsp core/src/common/libcommon.a \
+		tests/jit-overshoot.cpp @$(OBJ_ROOT)/jit-overshoot-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-jit-overshoot
 	$(OBJ_ROOT)/test-jit-overshoot
 
@@ -510,7 +512,7 @@ $(OBJ_ROOT)/test-jit-differential: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/jit-differential-core.rsp
 	$(CXX) -std=c++17 -O2 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/jit-differential.cpp @$(OBJ_ROOT)/jit-differential-core.rsp core/src/common/libcommon.a \
+		tests/jit-differential.cpp @$(OBJ_ROOT)/jit-differential-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-jit-differential
 test-jit-differential: $(OBJ_ROOT)/test-jit-differential
 	@# The core logs every guest data abort to stderr, so that goes to a file.
@@ -539,7 +541,7 @@ test-pxa270-wmmx: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/wmmx-core.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa270-wmmx.cpp @$(OBJ_ROOT)/wmmx-core.rsp core/src/common/libcommon.a \
+		tests/pxa270-wmmx.cpp @$(OBJ_ROOT)/wmmx-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa270-wmmx
 	$(OBJ_ROOT)/test-pxa270-wmmx
 
@@ -548,7 +550,7 @@ test-arm-conditions: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/conditions-core.rsp
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/arm-conditions.cpp @$(OBJ_ROOT)/conditions-core.rsp core/src/common/libcommon.a \
+		tests/arm-conditions.cpp @$(OBJ_ROOT)/conditions-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-arm-conditions
 	$(OBJ_ROOT)/test-arm-conditions
 
@@ -556,7 +558,7 @@ benchmark-menu: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/menu-core.rsp
 	$(CXX) -std=c++17 -O2 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tools/benchmark-menu.cpp @$(OBJ_ROOT)/menu-core.rsp core/src/common/libcommon.a \
+		tools/benchmark-menu.cpp @$(OBJ_ROOT)/menu-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/benchmark-menu
 
 .PHONY: desktop test-desktop deb
@@ -627,13 +629,13 @@ test-sd-image: prepare
 test-sd: out/frond
 	python3 tests/sd-results.py
 	$(CXX) -std=c++17 -O1 -g -Icore/src/common -Icore/src/uarm/native -Icore/src/uarm/uarm \
-		tests/sd-session.cpp core/src/uarm/uarm/sdcard.cpp core/src/common/libcommon.a \
+		tests/sd-session.cpp core/src/uarm/uarm/sdcard.cpp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-sd-session
 	$(OBJ_ROOT)/test-sd-session
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/pxa-mmc.cpp core/src/uarm/uarm/pxa_MMC.cpp core/src/uarm/uarm/vSD.cpp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -Wl,--gc-sections -o $(OBJ_ROOT)/test-pxa-mmc
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -Wl,--gc-sections -o $(OBJ_ROOT)/test-pxa-mmc
 	$(OBJ_ROOT)/test-pxa-mmc
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
@@ -641,16 +643,16 @@ test-sd: out/frond
 	$(OBJ_ROOT)/test-pxa-dma
 
 .PHONY: test-network
-test-network: prepare core/src/common/libcommon.a
+test-network: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/network-simulation.cpp core/src/uarm/uarm/NetworkSimulation.cpp core/src/uarm/uarm/HostNetwork.cpp \
-		core/src/common/libcommon.a -lz -pthread -o $(OBJ_ROOT)/test-network-simulation
+		$(COMMON_LIB) -lz -pthread -o $(OBJ_ROOT)/test-network-simulation
 	$(OBJ_ROOT)/test-network-simulation
 
 .PHONY: test-keyboard
 test-keyboard: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/ir-keyboard.cpp core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-ir-keyboard
+		tests/ir-keyboard.cpp $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-ir-keyboard
 	$(OBJ_ROOT)/test-ir-keyboard
 
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
@@ -660,11 +662,11 @@ test-keyboard: out/frond
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
 		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/host-keyboard.cpp core/src/uarm/native/SdlEventHandler.cpp @$(OBJ_ROOT)/keyboard-core-objects.rsp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o $(OBJ_ROOT)/test-host-keyboard
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o $(OBJ_ROOT)/test-host-keyboard
 	$(OBJ_ROOT)/test-host-keyboard
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/ir-keyboard-board.cpp @$(OBJ_ROOT)/keyboard-core-objects.rsp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-ir-keyboard-board
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-ir-keyboard-board
 	$(OBJ_ROOT)/test-ir-keyboard-board
 
 .PHONY: test-host-network
@@ -675,59 +677,59 @@ test-host-network: prepare
 
 .PHONY: test-modem
 test: test-modem
-test-modem: prepare core/src/common/libcommon.a core/src/common/libcommon-net.a
+test-modem: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/modem.cpp \
-		core/src/common/libcommon-net.a core/src/common/libcommon.a \
+		$(COMMON_NET_LIB) $(COMMON_LIB) \
 		$(shell pkg-config --cflags --libs slirp) -o $(OBJ_ROOT)/test-modem
 	$(OBJ_ROOT)/test-modem
 
 .PHONY: test-rndis-host
 test: test-rndis-host
-test-rndis-host: prepare core/src/common/libcommon.a core/src/common/libcommon-net.a
+test-rndis-host: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -UNDEBUG -Icore/src/common tests/rndis-host.cpp \
-		core/src/common/libcommon-net.a core/src/common/libcommon.a \
+		$(COMMON_NET_LIB) $(COMMON_LIB) \
 		$(shell pkg-config --cflags --libs slirp) -o $(OBJ_ROOT)/test-rndis-host
 	$(OBJ_ROOT)/test-rndis-host
 
 .PHONY: test-ir-peer
 test: test-ir-peer
-test-ir-peer: prepare core/src/common/libcommon.a
+test-ir-peer: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/ir-peer.cpp \
-		core/src/common/libcommon.a -o $(OBJ_ROOT)/test-ir-peer
+		$(COMMON_LIB) -o $(OBJ_ROOT)/test-ir-peer
 	$(OBJ_ROOT)/test-ir-peer
 
 .PHONY: test-ir-printer
 test: test-ir-printer
 # The IR printer's IrLPT and IrCOMM jobs from a scripted IrLAP primary (tests/ir-printer.cpp).
-test-ir-printer: prepare core/src/common/libcommon.a
+test-ir-printer: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/ir-printer.cpp \
-		core/src/common/libcommon.a -o $(OBJ_ROOT)/test-ir-printer
+		$(COMMON_LIB) -o $(OBJ_ROOT)/test-ir-printer
 	$(OBJ_ROOT)/test-ir-printer
 
 # Always checked, like libcommon.a, so edits in core/src/common/net are rebuilt.
-.PHONY: core/src/common/libcommon-net.a
-core/src/common/libcommon-net.a:
+.PHONY: $(COMMON_NET_LIB)
+$(COMMON_NET_LIB):
 	$(MAKE) -C core/src/common $(CORE_OBJ_FLAGS) net
 
 .PHONY: test-wifi
-test-wifi: prepare core/src/common/libcommon.a
+test-wifi: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/common/net \
-		tests/wifi-router.cpp core/src/common/net/WifiRouter.cpp core/src/common/libcommon.a \
+		tests/wifi-router.cpp core/src/common/net/WifiRouter.cpp $(COMMON_LIB) \
 		$(shell pkg-config --cflags --libs slirp) -pthread -o $(OBJ_ROOT)/test-wifi-router
 	$(OBJ_ROOT)/test-wifi-router
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/libertas-cf.cpp core/src/uarm/uarm/LibertasCF.cpp \
 		core/src/common/net/WifiRouter.cpp core/src/uarm/uarm/NetworkSimulation.cpp \
-		core/src/uarm/uarm/HostNetwork.cpp core/src/common/libcommon.a \
+		core/src/uarm/uarm/HostNetwork.cpp $(COMMON_LIB) \
 		$(shell pkg-config --cflags --libs slirp) -pthread -lz -o $(OBJ_ROOT)/test-libertas-cf
 	$(OBJ_ROOT)/test-libertas-cf
 
 # The shared Ethernet router from libcommon-net.a, as both cores link it.
 .PHONY: test-net-wifi-router
 test: test-net-wifi-router
-test-net-wifi-router: prepare core/src/common/libcommon-net.a core/src/common/libcommon.a
+test-net-wifi-router: prepare $(COMMON_NET_LIB) $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/net-wifi-router.cpp \
-		core/src/common/libcommon-net.a core/src/common/libcommon.a $(shell pkg-config --cflags --libs slirp) -pthread \
+		$(COMMON_NET_LIB) $(COMMON_LIB) $(shell pkg-config --cflags --libs slirp) -pthread \
 		-o $(OBJ_ROOT)/test-net-wifi-router
 	$(OBJ_ROOT)/test-net-wifi-router
 
@@ -745,7 +747,7 @@ test-device-controls: out/frond
 		core/src/uarm/native/InputReplay.cpp \
 		core/src/uarm/native/DeviceControls.cpp core/src/uarm/native/SdlRenderer.cpp \
 		core/src/uarm/native/Silkscreen.cpp @$(OBJ_ROOT)/controls-core-objects.rsp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -lSDL2_image -o $(OBJ_ROOT)/test-device-controls
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -lSDL2_image -o $(OBJ_ROOT)/test-device-controls
 	$(OBJ_ROOT)/test-device-controls
 
 # Fingers on the buttons and pen, ARM (T|X, E2) and 68k (IIIx): several held at once, no private sessions.
@@ -764,7 +766,7 @@ test-multi-touch: out/frond out/frond-68k
 		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Icore/src/cloudpilot/frond \
 		tests/multi-touch.cpp core/src/uarm/native/SdlEventHandler.cpp \
 		core/src/uarm/native/DeviceControls.cpp @$(OBJ_ROOT)/multi-touch-core-objects.rsp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o $(OBJ_ROOT)/test-multi-touch
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o $(OBJ_ROOT)/test-multi-touch
 	$(OBJ_ROOT)/test-multi-touch
 
 .PHONY: test-developer-run
@@ -775,7 +777,7 @@ test-developer-run:
 test-xscale-prefetch: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/prefetch-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/xscale-prefetch.cpp @$(OBJ_ROOT)/prefetch-core.rsp core/src/common/libcommon.a \
+		tests/xscale-prefetch.cpp @$(OBJ_ROOT)/prefetch-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-xscale-prefetch
 	$(OBJ_ROOT)/test-xscale-prefetch
 
@@ -783,7 +785,7 @@ test-xscale-prefetch: out/frond
 $(OBJ_ROOT)/test-compatibility-core: out/frond tests/compatibility-core.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/compatibility-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/compatibility-core.cpp @$(OBJ_ROOT)/compatibility-core.rsp core/src/common/libcommon.a \
+		tests/compatibility-core.cpp @$(OBJ_ROOT)/compatibility-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-compatibility-core
 
 test-compatibility: $(OBJ_ROOT)/test-compatibility-core
@@ -795,13 +797,13 @@ test-compatibility: $(OBJ_ROOT)/test-compatibility-core
 test-tx-power-rom: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/power-rom-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/tx-power-rom.cpp @$(OBJ_ROOT)/power-rom-core.rsp core/src/common/libcommon.a \
+		tests/tx-power-rom.cpp @$(OBJ_ROOT)/power-rom-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tx-power-rom
 
 # Share one recursive library build across emulator and standalone tests,
 # and always check for edits in generated common source.
-.PHONY: core/src/common/libcommon.a
-core/src/common/libcommon.a:
+.PHONY: $(COMMON_LIB)
+$(COMMON_LIB):
 	$(MAKE) -C core/src/common $(CORE_OBJ_FLAGS) bin
 
 .PHONY: test-network-reliability
@@ -819,14 +821,14 @@ test-network-reliability: prepare
 test-pxa-power: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/power-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa-power.cpp @$(OBJ_ROOT)/power-core.rsp core/src/common/libcommon.a \
+		tests/pxa-power.cpp @$(OBJ_ROOT)/power-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa-power
 	$(OBJ_ROOT)/test-pxa-power
 
 test-pxa-clock: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/clock-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa-clock.cpp @$(OBJ_ROOT)/clock-core.rsp core/src/common/libcommon.a \
+		tests/pxa-clock.cpp @$(OBJ_ROOT)/clock-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa-clock
 	$(OBJ_ROOT)/test-pxa-clock
 
@@ -836,7 +838,7 @@ test-pxa-clock: out/frond
 test-pxa-faster: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/faster-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa-faster.cpp @$(OBJ_ROOT)/faster-core.rsp core/src/common/libcommon.a \
+		tests/pxa-faster.cpp @$(OBJ_ROOT)/faster-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa-faster
 	$(OBJ_ROOT)/test-pxa-faster
 
@@ -862,14 +864,14 @@ benchmark-replay: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' ! -name timeutil.o > $(OBJ_ROOT)/replay-core.rsp
 	$(CXX) -std=c++17 -O2 -g $(shell sdl2-config --cflags) \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
-		tools/benchmark-replay.cpp @$(OBJ_ROOT)/replay-core.rsp core/src/common/libcommon.a \
+		tools/benchmark-replay.cpp @$(OBJ_ROOT)/replay-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) -o $(OBJ_ROOT)/benchmark-replay
 
 .PHONY: test-mmu-fast-path
 test-mmu-fast-path: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/mmu-core.rsp
 	$(CXX) -std=c++17 -O2 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/mmu-fast-path.cpp @$(OBJ_ROOT)/mmu-core.rsp core/src/common/libcommon.a \
+		tests/mmu-fast-path.cpp @$(OBJ_ROOT)/mmu-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-mmu-fast-path
 	$(OBJ_ROOT)/test-mmu-fast-path
 
@@ -879,7 +881,7 @@ test: test-xscale-stale-dcache
 test-xscale-stale-dcache: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/stale-dcache-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/xscale-stale-dcache.cpp @$(OBJ_ROOT)/stale-dcache-core.rsp core/src/common/libcommon.a \
+		tests/xscale-stale-dcache.cpp @$(OBJ_ROOT)/stale-dcache-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-xscale-stale-dcache
 	$(OBJ_ROOT)/test-xscale-stale-dcache 2>$(OBJ_ROOT)/xscale-stale-dcache.err
 
@@ -889,7 +891,7 @@ test: test-xscale-cost-session
 test-xscale-cost-session: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/cost-session-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/xscale-cost-session.cpp @$(OBJ_ROOT)/cost-session-core.rsp core/src/common/libcommon.a \
+		tests/xscale-cost-session.cpp @$(OBJ_ROOT)/cost-session-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-xscale-cost-session
 	$(OBJ_ROOT)/test-xscale-cost-session
 
@@ -897,7 +899,7 @@ test-xscale-cost-session: out/frond
 test-mem-region-bounds: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/mem-bounds-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/mem-region-bounds.cpp @$(OBJ_ROOT)/mem-bounds-core.rsp core/src/common/libcommon.a \
+		tests/mem-region-bounds.cpp @$(OBJ_ROOT)/mem-bounds-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-mem-region-bounds
 	$(OBJ_ROOT)/test-mem-region-bounds
 
@@ -907,10 +909,10 @@ test-gameplay-metrics: benchmark-replay
 
 # Capability regressions report missing transport explicitly; no host endpoint or firmware.
 .PHONY: test-tx-serial
-test-tx-serial: prepare core/src/common/libcommon.a
+test-tx-serial: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/tx-serial-model.cpp core/src/uarm/uarm/pxa_UART.cpp \
-		core/src/uarm/uarm/pxa270_UDC.cpp core/src/common/libcommon.a \
+		core/src/uarm/uarm/pxa270_UDC.cpp $(COMMON_LIB) \
 		-lz -o $(OBJ_ROOT)/test-tx-serial-model
 	$(OBJ_ROOT)/test-tx-serial-model
 	python3 tests/tx-serial.py
@@ -1035,7 +1037,7 @@ device-profiles: prepare
 test-device-profiles: out/frond device-profiles
 	$(CXX) -std=c++17 -O1 -g -Icore/src/common -Icore/src/uarm/uarm \
 		tests/device-profiles.cpp core/src/uarm/uarm/device_configuration.cpp \
-		core/src/common/libcommon.a -o $(OBJ_ROOT)/test-device-profiles
+		$(COMMON_LIB) -o $(OBJ_ROOT)/test-device-profiles
 	$(OBJ_ROOT)/test-device-profiles
 	python3 tests/device-rom.py --device sony-clie-tg50 --synthetic-rejection
 	python3 tests/device-input.py
@@ -1062,13 +1064,13 @@ $(OBJ_ROOT)/zodiac-boot-probe: out/frond tools/zodiac-boot-probe.cpp tools/zodia
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_STATE_BUILD_NOTE='"$(ZODIAC_STATE_BUILD_NOTE)"' \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tools/zodiac-boot-probe.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $@
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -lz -o $@
 
 test-zodiac-boot-probe: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-boot-probe.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-boot-probe
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-boot-probe
 	$(OBJ_ROOT)/test-zodiac-boot-probe
 	python3 tests/zodiac-diagnostic-cli.py
 
@@ -1079,7 +1081,7 @@ test-zodiac-live-controls: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-live-controls.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-live-controls
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-live-controls
 	$(OBJ_ROOT)/test-zodiac-live-controls
 
 .PHONY: test-zodiac-normal-runtime
@@ -1088,7 +1090,7 @@ test-zodiac-normal-runtime: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-runtime-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/zodiac-normal-runtime.cpp @$(OBJ_ROOT)/zodiac-runtime-core.rsp core/src/common/libcommon.a \
+		tests/zodiac-normal-runtime.cpp @$(OBJ_ROOT)/zodiac-runtime-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-normal-runtime
 	$(OBJ_ROOT)/test-zodiac-normal-runtime
 	FROND_ZODIAC_STOP_ON_EXCEPTION=1 ZODIAC_TEST_STOP=1 $(OBJ_ROOT)/test-zodiac-normal-runtime
@@ -1102,7 +1104,7 @@ test: test-pxa-battery-pins
 test-pxa-battery-pins: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/pxa-battery-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa-battery-pins.cpp @$(OBJ_ROOT)/pxa-battery-core.rsp core/src/common/libcommon.a \
+		tests/pxa-battery-pins.cpp @$(OBJ_ROOT)/pxa-battery-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa-battery-pins
 	$(OBJ_ROOT)/test-pxa-battery-pins
 
@@ -1122,7 +1124,7 @@ test-zodiac-battery: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-battery-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
-		tests/zodiac-battery.cpp @$(OBJ_ROOT)/zodiac-battery-core.rsp core/src/common/libcommon.a \
+		tests/zodiac-battery.cpp @$(OBJ_ROOT)/zodiac-battery-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-battery
 	$(OBJ_ROOT)/test-zodiac-battery
 	$(OBJ_ROOT)/test-zodiac-battery halted
@@ -1137,7 +1139,7 @@ test-zodiac-guest-calls: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-guest-calls-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common -Icore/src/common/zip \
-		tests/zodiac-guest-calls.cpp @$(OBJ_ROOT)/zodiac-guest-calls-core.rsp core/src/common/libcommon.a \
+		tests/zodiac-guest-calls.cpp @$(OBJ_ROOT)/zodiac-guest-calls-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-guest-calls
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" $(OBJ_ROOT)/test-zodiac-guest-calls hard-reset-yes
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 $(OBJ_ROOT)/test-zodiac-guest-calls hard-reset-yes
@@ -1151,7 +1153,7 @@ test-zodiac-resume: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-resume-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
-		tests/zodiac-resume.cpp @$(OBJ_ROOT)/zodiac-resume-core.rsp core/src/common/libcommon.a \
+		tests/zodiac-resume.cpp @$(OBJ_ROOT)/zodiac-resume-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-resume
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" $(OBJ_ROOT)/test-zodiac-resume
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 $(OBJ_ROOT)/test-zodiac-resume
@@ -1163,7 +1165,7 @@ $(OBJ_ROOT)/test-zodiac-bluetooth: out/frond tests/zodiac-bluetooth.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-bluetooth-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common -Icore/src/common/zip \
-		tests/zodiac-bluetooth.cpp @$(OBJ_ROOT)/zodiac-bluetooth-core.rsp core/src/common/libcommon.a \
+		tests/zodiac-bluetooth.cpp @$(OBJ_ROOT)/zodiac-bluetooth-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-bluetooth
 test-zodiac-bluetooth: $(OBJ_ROOT)/test-zodiac-bluetooth
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" python3 tests/zodiac-bluetooth.py --fast 1 \
@@ -1177,7 +1179,7 @@ test-zodiac-session-cards: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-session-cards-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
-		tests/zodiac-session-cards.cpp @$(OBJ_ROOT)/zodiac-session-cards-core.rsp core/src/common/libcommon.a \
+		tests/zodiac-session-cards.cpp @$(OBJ_ROOT)/zodiac-session-cards-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-session-cards
 	$(OBJ_ROOT)/test-zodiac-session-cards
 
@@ -1187,12 +1189,12 @@ test-zodiac-machine: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-machine.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-machine
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-machine
 	$(OBJ_ROOT)/test-zodiac-machine
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-machine-cli.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-machine-cli
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-machine-cli
 	FROND_ZODIAC_PROBE=$(OBJ_ROOT)/test-zodiac-machine-cli python3 tests/zodiac-graphics-plain-copy.py
 	FROND_ZODIAC_PROBE=$(OBJ_ROOT)/test-zodiac-machine-cli FROND_ZODIAC_PROBE_ENGINE=fast python3 tests/zodiac-graphics-plain-copy.py
 	FROND_ZODIAC_PROBE=$(OBJ_ROOT)/test-zodiac-machine-cli python3 tests/zodiac-gpio-event.py
@@ -1208,7 +1210,7 @@ $(OBJ_ROOT)/test-zodiac-jit: out/frond tests/zodiac-jit.cpp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-jit.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-jit-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+		@$(OBJ_ROOT)/zodiac-jit-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $@
 test-zodiac-jit: $(OBJ_ROOT)/test-zodiac-jit
 	$(OBJ_ROOT)/test-zodiac-jit
 
@@ -1218,7 +1220,7 @@ test: test-arm920-fcse
 $(OBJ_ROOT)/test-arm920-fcse: out/frond tests/arm920-fcse.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/arm920-fcse-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/arm920-fcse.cpp @$(OBJ_ROOT)/arm920-fcse-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+		tests/arm920-fcse.cpp @$(OBJ_ROOT)/arm920-fcse-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $@
 test-arm920-fcse: $(OBJ_ROOT)/test-arm920-fcse
 	$(OBJ_ROOT)/test-arm920-fcse
 
@@ -1233,10 +1235,10 @@ test-pace-step: $(OBJ_ROOT)/test-gdbstub-target
 	python3 tests/watchpoint-contract.py
 
 .PHONY: test-uart-lifecycle
-test-uart-lifecycle: prepare core/src/common/libcommon.a
+test-uart-lifecycle: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/uart-lifecycle.cpp core/src/uarm/uarm/pxa_UART.cpp \
-		core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-uart-lifecycle
+		$(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-uart-lifecycle
 	$(OBJ_ROOT)/test-uart-lifecycle
 
 .PHONY: test-uart-checkpoint
@@ -1244,7 +1246,7 @@ test-uart-checkpoint: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/uart-checkpoint-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/uart-checkpoint.cpp @$(OBJ_ROOT)/uart-checkpoint-core.rsp core/src/common/libcommon.a \
+		tests/uart-checkpoint.cpp @$(OBJ_ROOT)/uart-checkpoint-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-uart-checkpoint
 	$(OBJ_ROOT)/test-uart-checkpoint
 
@@ -1252,7 +1254,7 @@ test-uart-checkpoint: out/frond
 test-e2-state: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/e2-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/e2-state.cpp @$(OBJ_ROOT)/e2-core.rsp core/src/common/libcommon.a \
+		tests/e2-state.cpp @$(OBJ_ROOT)/e2-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-e2-state
 	$(OBJ_ROOT)/test-e2-state
 
@@ -1261,15 +1263,15 @@ test: test-hotsync-line
 test-hotsync-line: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/hotsync-line-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/hotsync-line.cpp @$(OBJ_ROOT)/hotsync-line-core.rsp core/src/common/libcommon.a \
+		tests/hotsync-line.cpp @$(OBJ_ROOT)/hotsync-line-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-hotsync-line
 	$(OBJ_ROOT)/test-hotsync-line
 
 .PHONY: test-uart-flow
-test-uart-flow: prepare core/src/common/libcommon.a
+test-uart-flow: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/uart-flow.cpp core/src/uarm/uarm/pxa_UART.cpp \
-		core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-uart-flow
+		$(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-uart-flow
 	$(OBJ_ROOT)/test-uart-flow
 
 .PHONY: test-uart-dma-peer
@@ -1277,35 +1279,35 @@ $(OBJ_ROOT)/test-uart-dma-peer: out/frond tests/uart-dma-peer.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/uart-dma-peer-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/uart-dma-peer.cpp @$(OBJ_ROOT)/uart-dma-peer-core.rsp core/src/common/libcommon.a \
+		tests/uart-dma-peer.cpp @$(OBJ_ROOT)/uart-dma-peer-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-uart-dma-peer
 
 test-uart-dma-peer: $(OBJ_ROOT)/test-uart-dma-peer
 	$(OBJ_ROOT)/test-uart-dma-peer
 
 .PHONY: test-pxa255-udc
-test-pxa255-udc: core/src/common/libcommon.a
+test-pxa255-udc: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa255-udc.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-pxa255-udc
+		tests/pxa255-udc.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-pxa255-udc
 	$(OBJ_ROOT)/test-pxa255-udc
 
 .PHONY: test-pxa270-udc
-test-pxa270-udc: core/src/common/libcommon.a
+test-pxa270-udc: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa270-udc.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-pxa270-udc
+		tests/pxa270-udc.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-pxa270-udc
 	$(OBJ_ROOT)/test-pxa270-udc
 
 .PHONY: test-usb-enumeration
-test-usb-enumeration: core/src/common/libcommon.a
+test-usb-enumeration: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/usb-enumeration.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-usb-enumeration
+		tests/usb-enumeration.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-usb-enumeration
 	$(OBJ_ROOT)/test-usb-enumeration
 
 .PHONY: test-usb-bridge
-test-usb-bridge: core/src/common/libcommon.a
+test-usb-bridge: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/usb-bridge.cpp core/src/uarm/uarm/pxa255_UDC.cpp core/src/uarm/uarm/UsbBusHost.cpp core/src/uarm/uarm/HostSerial.cpp \
-		core/src/uarm/uarm/pxa_UART.cpp core/src/common/libcommon.a -lz -lpthread -o $(OBJ_ROOT)/test-usb-bridge
+		core/src/uarm/uarm/pxa_UART.cpp $(COMMON_LIB) -lz -lpthread -o $(OBJ_ROOT)/test-usb-bridge
 	timeout 300 $(OBJ_ROOT)/test-usb-bridge
 
 .PHONY: test-usb-bridge-soc
@@ -1313,7 +1315,7 @@ test-usb-bridge-soc: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/usb-bridge-soc-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/usb-bridge-soc.cpp @$(OBJ_ROOT)/usb-bridge-soc-core.rsp core/src/common/libcommon.a \
+		tests/usb-bridge-soc.cpp @$(OBJ_ROOT)/usb-bridge-soc-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-usb-bridge-soc
 	timeout 300 $(OBJ_ROOT)/test-usb-bridge-soc
 
@@ -1330,7 +1332,7 @@ test-tg50-voicerec: out/frond
 test: test-clie-gamepad
 test-clie-gamepad: out/frond
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/clie-gamepad-model.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-clie-gamepad-model
+		tests/clie-gamepad-model.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-clie-gamepad-model
 	$(OBJ_ROOT)/test-clie-gamepad-model
 ifeq ($(FROND_TG50_SESSION),)
 	@echo "test-clie-gamepad: TG50 session part skipped, no FROND_TG50_SESSION"
@@ -1344,9 +1346,9 @@ test-tg50-usb-hotsync: out/frond
 	python3 tests/tg50-usb-hotsync.py
 
 .PHONY: test-usb-host-fixture test-tx-usb-rom
-test-usb-host-fixture: core/src/common/libcommon.a
+test-usb-host-fixture: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/usb-host-fixture.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-usb-host-fixture
+		tests/usb-host-fixture.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-usb-host-fixture
 	$(OBJ_ROOT)/test-usb-host-fixture
 
 # Optional diagnostic: builds only; run explicitly with a private TX session.
@@ -1354,7 +1356,7 @@ test-usb-host-fixture: core/src/common/libcommon.a
 test-tx-usb-rom: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' ! -name pxa270_UDC.o > $(OBJ_ROOT)/usb-rom-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/tx-usb-rom.cpp @$(OBJ_ROOT)/usb-rom-core.rsp core/src/common/libcommon.a \
+		tests/tx-usb-rom.cpp @$(OBJ_ROOT)/usb-rom-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tx-usb-rom
 
 .PHONY: test-checkpoint-input test-native-database
@@ -1362,7 +1364,7 @@ test-checkpoint-input: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/checkpoint-input-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/checkpoint-input.cpp @$(OBJ_ROOT)/checkpoint-input-core.rsp core/src/common/libcommon.a \
+		tests/checkpoint-input.cpp @$(OBJ_ROOT)/checkpoint-input-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-checkpoint-input
 	$(OBJ_ROOT)/test-checkpoint-input
 
@@ -1372,7 +1374,7 @@ test-nand-store-fail: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/nand-store-fail-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/nand-store-fail.cpp @$(OBJ_ROOT)/nand-store-fail-core.rsp core/src/common/libcommon.a \
+		tests/nand-store-fail.cpp @$(OBJ_ROOT)/nand-store-fail-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-nand-store-fail
 	$(OBJ_ROOT)/test-nand-store-fail
 
@@ -1383,14 +1385,14 @@ test-save-replay: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/save-replay-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/save-replay.cpp @$(OBJ_ROOT)/save-replay-core.rsp core/src/common/libcommon.a \
+		tests/save-replay.cpp @$(OBJ_ROOT)/save-replay-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-save-replay
 	$(OBJ_ROOT)/test-save-replay
 
-test-native-database: prepare core/src/common/libcommon.a
+test-native-database: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common -Icore/src/common/zip \
-		tests/native-database.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-native-database
+		tests/native-database.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-native-database
 	$(OBJ_ROOT)/test-native-database
 
 # Firmware-free native CPU/callback/memory and SoC lifecycle regressions.
@@ -1400,7 +1402,7 @@ test-native-primitives: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/native-primitives-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/native-primitives.cpp @$(OBJ_ROOT)/native-primitives-core.rsp core/src/common/libcommon.a \
+		tests/native-primitives.cpp @$(OBJ_ROOT)/native-primitives-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-native-primitives
 	$(OBJ_ROOT)/test-native-primitives exact-hooks
 	$(OBJ_ROOT)/test-native-primitives nested-hooks
@@ -1416,7 +1418,7 @@ test-debugger-inspect: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/debugger-inspect-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/debugger-inspect.cpp @$(OBJ_ROOT)/debugger-inspect-core.rsp core/src/common/libcommon.a \
+		tests/debugger-inspect.cpp @$(OBJ_ROOT)/debugger-inspect-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-debugger-inspect
 	$(OBJ_ROOT)/test-debugger-inspect
 
@@ -1428,17 +1430,17 @@ test-lifecycle: out/frond
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
 		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/audio-lifecycle.cpp core/src/uarm/native/SdlAudioDriver.cpp \
-		@$(OBJ_ROOT)/audio-lifecycle-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-audio-lifecycle
+		@$(OBJ_ROOT)/audio-lifecycle-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-audio-lifecycle
 	$(OBJ_ROOT)/test-audio-lifecycle
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/peripheral-lifecycle.cpp @$(OBJ_ROOT)/lifecycle-core.rsp core/src/common/libcommon.a \
+		tests/peripheral-lifecycle.cpp @$(OBJ_ROOT)/lifecycle-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-peripheral-lifecycle
 	$(OBJ_ROOT)/test-peripheral-lifecycle
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/sd-lifecycle.cpp core/src/uarm/uarm/pxa_MMC.cpp core/src/uarm/uarm/vSD.cpp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -Wl,--gc-sections -o $(OBJ_ROOT)/test-sd-lifecycle
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -Wl,--gc-sections -o $(OBJ_ROOT)/test-sd-lifecycle
 	$(OBJ_ROOT)/test-sd-lifecycle
 
 # Optional: build only; invoke explicitly with private sessions and a host deadline.
@@ -1446,7 +1448,7 @@ test-tx-lifecycle-rom: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tx-lifecycle-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/tx-lifecycle-rom.cpp @$(OBJ_ROOT)/tx-lifecycle-core.rsp core/src/common/libcommon.a \
+		tests/tx-lifecycle-rom.cpp @$(OBJ_ROOT)/tx-lifecycle-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tx-lifecycle-rom
 
 .PHONY: test-host-serial
@@ -1458,10 +1460,10 @@ test-xscale-cost:
 	$(OBJ_ROOT)/test-xscale-cost
 
 test: test-host-serial
-test-host-serial: prepare core/src/common/libcommon.a
+test-host-serial: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/host-serial.cpp core/src/uarm/uarm/pxa_UART.cpp core/src/uarm/uarm/HostSerial.cpp \
-		core/src/common/libcommon.a -lz -lpthread -o $(OBJ_ROOT)/test-host-serial
+		$(COMMON_LIB) -lz -lpthread -o $(OBJ_ROOT)/test-host-serial
 	timeout 120 $(OBJ_ROOT)/test-host-serial
 
 .PHONY: test-audio-results
@@ -1476,7 +1478,7 @@ test-earlier-audio: out/frond
 	$(OBJ_ROOT)/test-early-audio
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm tests/early-audio-checkpoint.cpp core/src/uarm/uarm/audio_queue.cpp -pthread -o $(OBJ_ROOT)/test-early-audio-checkpoint
 	$(OBJ_ROOT)/test-early-audio-checkpoint
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/patch-dispatch.cpp core/src/uarm/uarm/patch_dispatch.cpp $(UARM_OBJ)/cputil.o core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-patch-dispatch
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/patch-dispatch.cpp core/src/uarm/uarm/patch_dispatch.cpp $(UARM_OBJ)/cputil.o $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-patch-dispatch
 	$(OBJ_ROOT)/test-patch-dispatch
 
 .PHONY: test-irda-endpoint
@@ -1484,7 +1486,7 @@ test: test-irda-endpoint
 test-irda-endpoint: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/irda-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/irda-endpoint.cpp @$(OBJ_ROOT)/irda-core.rsp core/src/common/libcommon.a \
+		tests/irda-endpoint.cpp @$(OBJ_ROOT)/irda-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-irda-endpoint
 	$(OBJ_ROOT)/test-irda-endpoint
 
@@ -1514,19 +1516,19 @@ test-bluetooth: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm tests/bluetooth-uart-messaging.cpp -o $(OBJ_ROOT)/test-bluetooth-uart-messaging
 	$(OBJ_ROOT)/test-bluetooth-uart-messaging
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/bluetooth-bootstrap.cpp core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-bluetooth-bootstrap
+		tests/bluetooth-bootstrap.cpp $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-bluetooth-bootstrap
 	$(OBJ_ROOT)/test-bluetooth-bootstrap
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common \
 		tests/bluetooth-backend.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o $(OBJ_ROOT)/test-bluetooth-backend
 	$(OBJ_ROOT)/test-bluetooth-backend
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/bluetooth-controller.cpp core/src/uarm/uarm/uartdev_bcm2035.cpp \
-		core/src/uarm/uarm/BluetoothBackend.cpp core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-bluetooth-controller
+		core/src/uarm/uarm/BluetoothBackend.cpp $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-bluetooth-controller
 	$(OBJ_ROOT)/test-bluetooth-controller
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/bluetooth-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native -Icore/src/uarm/uarm \
 		-Icore/src/uarm -Icore/src/common tests/bluetooth-soc.cpp @$(OBJ_ROOT)/bluetooth-core.rsp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-bluetooth-soc
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-bluetooth-soc
 	$(OBJ_ROOT)/test-bluetooth-soc
 
 .PHONY: test-bluetooth-results
@@ -1550,12 +1552,12 @@ check-device-data: prepare
 test-tg50-state: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tg50-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/tg50-state.cpp @$(OBJ_ROOT)/tg50-core.rsp core/src/common/libcommon.a \
+		tests/tg50-state.cpp @$(OBJ_ROOT)/tg50-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-state
 	$(OBJ_ROOT)/test-tg50-state
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/tg50-touch.cpp core/src/uarm/uarm/sspdev_AD7873.cpp \
-		$(UARM_OBJ)/cputil.o core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-tg50-touch
+		$(UARM_OBJ)/cputil.o $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-tg50-touch
 	$(OBJ_ROOT)/test-tg50-touch
 
 # TG50 sound replay with a guest-time consumer and forced backpressure, in Exact and Fast.
@@ -1564,7 +1566,7 @@ test: test-tg50-audio-replay
 test-tg50-audio-replay: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tg50-audio-replay-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/tg50-audio-replay.cpp @$(OBJ_ROOT)/tg50-audio-replay-core.rsp core/src/common/libcommon.a \
+		tests/tg50-audio-replay.cpp @$(OBJ_ROOT)/tg50-audio-replay-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-audio-replay
 	ulimit -c 0; $(OBJ_ROOT)/test-tg50-audio-replay exact
 	ulimit -c 0; $(OBJ_ROOT)/test-tg50-audio-replay fast
@@ -1573,7 +1575,7 @@ test-tg50-audio-replay: out/frond
 device-session-probe: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/device-session-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/device-session.cpp @$(OBJ_ROOT)/device-session-core.rsp core/src/common/libcommon.a \
+		tests/device-session.cpp @$(OBJ_ROOT)/device-session-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-device-session
 
 .PHONY: test-savestate-layout
@@ -1619,20 +1621,20 @@ test-tg50-call-budget: prepare
 	$(OBJ_ROOT)/test-tg50-call-budget
 
 .PHONY: test-memory-stick-controller
-test-memory-stick-controller: core/src/common/libcommon.a
+test-memory-stick-controller: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/memory-stick-controller.cpp core/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		core/src/uarm/uarm/sdcard.cpp core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-memory-stick-controller
+		core/src/uarm/uarm/sdcard.cpp $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-memory-stick-controller
 	$(OBJ_ROOT)/test-memory-stick-controller
 
 .PHONY: test-memory-stick-pro
 test: test-memory-stick-pro
-test-memory-stick-pro: core/src/common/libcommon.a
+test-memory-stick-pro: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
 		tests/memory-stick-pro.cpp core/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		core/src/uarm/uarm/sdcard.cpp core/src/common/libcommon.a -lz -o $(OBJ_ROOT)/test-memory-stick-pro
+		core/src/uarm/uarm/sdcard.cpp $(COMMON_LIB) -lz -o $(OBJ_ROOT)/test-memory-stick-pro
 	$(OBJ_ROOT)/test-memory-stick-pro
 
 .PHONY: test-tg50-serial-configuration test-microwire64x16
@@ -1646,7 +1648,7 @@ test-tg50-serial-configuration: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tg50-serial-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/tg50-serial-configuration.cpp @$(OBJ_ROOT)/tg50-serial-core.rsp core/src/common/libcommon.a \
+		tests/tg50-serial-configuration.cpp @$(OBJ_ROOT)/tg50-serial-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-serial-configuration
 	$(OBJ_ROOT)/test-tg50-serial-configuration
 
@@ -1742,22 +1744,22 @@ frond-jit: out/frond
 test: test-tg50-serial-board
 test-tg50-serial-board: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tg50-serial-board-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-serial-board.cpp @$(OBJ_ROOT)/tg50-serial-board-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-serial-board
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-serial-board.cpp @$(OBJ_ROOT)/tg50-serial-board-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-serial-board
 	$(OBJ_ROOT)/test-tg50-serial-board
 
 test: test-pxa255-udc-dma test-pxa255-udc-dma-state
 
 .PHONY: test-pxa255-udc-dma
-test-pxa255-udc-dma: core/src/common/libcommon.a
+test-pxa255-udc-dma: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -Wno-class-memaccess -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa255-udc-dma.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-pxa255-udc-dma
+		tests/pxa255-udc-dma.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-pxa255-udc-dma
 	$(OBJ_ROOT)/test-pxa255-udc-dma
 
 .PHONY: test-pxa255-udc-dma-state
 test-pxa255-udc-dma-state: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/pxa255-udc-dma-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa255-udc-dma-state.cpp @$(OBJ_ROOT)/pxa255-udc-dma-core.rsp core/src/common/libcommon.a \
+		tests/pxa255-udc-dma-state.cpp @$(OBJ_ROOT)/pxa255-udc-dma-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa255-udc-dma-state
 	$(OBJ_ROOT)/test-pxa255-udc-dma-state
 
@@ -1766,7 +1768,7 @@ test: test-pxa255-udc-clock
 test-pxa255-udc-clock: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/pxa255-udc-clock-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa255-udc-clock.cpp @$(OBJ_ROOT)/pxa255-udc-clock-core.rsp core/src/common/libcommon.a \
+		tests/pxa255-udc-clock.cpp @$(OBJ_ROOT)/pxa255-udc-clock-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa255-udc-clock
 	$(OBJ_ROOT)/test-pxa255-udc-clock
 
@@ -1783,7 +1785,7 @@ test-tg50-microphone-adc: prepare
 .PHONY: test-tg50-microphone-state
 test-tg50-microphone-state: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tg50-microphone-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-microphone-state.cpp @$(OBJ_ROOT)/tg50-microphone-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-microphone-state
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-microphone-state.cpp @$(OBJ_ROOT)/tg50-microphone-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-microphone-state
 	$(OBJ_ROOT)/test-tg50-microphone-state
 
 .PHONY: test-tg50-microphone-dma
@@ -1803,14 +1805,14 @@ test: test-tg50-microphone-adc test-tg50-microphone-state test-tg50-microphone-d
 test: test-z72-microphone
 test-z72-microphone: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/z72-microphone-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/z72-microphone.cpp @$(OBJ_ROOT)/z72-microphone-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-z72-microphone
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/z72-microphone.cpp @$(OBJ_ROOT)/z72-microphone-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-z72-microphone
 	$(OBJ_ROOT)/test-z72-microphone
 
 .PHONY: test-z72-camera
 test: test-z72-camera
 test-z72-camera: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/z72-camera-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/z72-camera.cpp @$(OBJ_ROOT)/z72-camera-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-z72-camera
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/z72-camera.cpp @$(OBJ_ROOT)/z72-camera-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-z72-camera
 	$(OBJ_ROOT)/test-z72-camera
 
 # Zire 72 camera host sources (native/HostCamera.h): a picture file and pushed frames through the
@@ -1819,7 +1821,7 @@ test-z72-camera: out/frond
 test: test-z72-camera-host
 test-z72-camera-host: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/z72-camera-host-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common $(shell sdl2-config --cflags) tests/z72-camera-host.cpp @$(OBJ_ROOT)/z72-camera-host-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -lSDL2_image -o $(OBJ_ROOT)/test-z72-camera-host
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common $(shell sdl2-config --cflags) tests/z72-camera-host.cpp @$(OBJ_ROOT)/z72-camera-host-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -lSDL2_image -o $(OBJ_ROOT)/test-z72-camera-host
 	$(OBJ_ROOT)/test-z72-camera-host
 
 # iWMMXt shifts, rotates, TMCRR and TMRRC against a reference.
@@ -1827,7 +1829,7 @@ test-z72-camera-host: out/frond
 test: test-iwmmxt-shift
 test-iwmmxt-shift: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/iwmmxt-shift-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/iwmmxt-shift.cpp @$(OBJ_ROOT)/iwmmxt-shift-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-iwmmxt-shift
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/iwmmxt-shift.cpp @$(OBJ_ROOT)/iwmmxt-shift-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-iwmmxt-shift
 	$(OBJ_ROOT)/test-iwmmxt-shift
 
 # The iWMMXt instructions the Zire 72 video encoder runs, against a plain reference.
@@ -1835,7 +1837,7 @@ test-iwmmxt-shift: out/frond
 test: test-iwmmxt-ops
 test-iwmmxt-ops: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/iwmmxt-ops-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/iwmmxt-ops.cpp @$(OBJ_ROOT)/iwmmxt-ops-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-iwmmxt-ops
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/iwmmxt-ops.cpp @$(OBJ_ROOT)/iwmmxt-ops-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-iwmmxt-ops
 	$(OBJ_ROOT)/test-iwmmxt-ops
 
 # Zire 72 Camera on the real ROM shows and photographs the built-in test pattern at each size
@@ -1873,7 +1875,7 @@ z72-test-mic: out/frond
 		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		-Icore/src/common/zip -Icore/src/argparse -c $(Z72_MIC_DIR)/main.cpp -o $(Z72_MIC_DIR)/main.o
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/main.o' > $(Z72_MIC_DIR)/core.rsp
-	$(CXX) -o $(Z72_MIC_DIR)/frond-test-mic $(Z72_MIC_DIR)/main.o @$(Z72_MIC_DIR)/core.rsp core/src/common/libcommon.a \
+	$(CXX) -o $(Z72_MIC_DIR)/frond-test-mic $(Z72_MIC_DIR)/main.o @$(Z72_MIC_DIR)/core.rsp $(COMMON_LIB) \
 		$(shell pkg-config --libs sdl2 SDL2_image slirp) $(READLINE_LIBS) $(CPU_TEST_LDLIBS)
 
 # Zire 72 Camera on the real ROM records a 320 x 240 clip of the test pattern and the fake
@@ -1900,7 +1902,7 @@ test-host-microphone: prepare
 test-host-microphone-state: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/host-microphone-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		$(shell sdl2-config --cflags) tests/host-microphone-state.cpp @$(OBJ_ROOT)/host-microphone-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-host-microphone-state
+		$(shell sdl2-config --cflags) tests/host-microphone-state.cpp @$(OBJ_ROOT)/host-microphone-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-host-microphone-state
 	$(OBJ_ROOT)/test-host-microphone-state
 
 .PHONY: test-csr-bcsp
@@ -1911,7 +1913,7 @@ test-csr-bcsp: out/frond
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Icore/src/uarm/uarm -Icore/src/common tests/csr-backpressure.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o $(OBJ_ROOT)/test-csr-backpressure
 	$(OBJ_ROOT)/test-csr-backpressure
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/csr-bcsp-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-bcsp-board.cpp @$(OBJ_ROOT)/csr-bcsp-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-bcsp-board
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-bcsp-board.cpp @$(OBJ_ROOT)/csr-bcsp-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-bcsp-board
 	$(OBJ_ROOT)/test-csr-bcsp-board
 	$(OBJ_ROOT)/test-csr-bcsp-board --lifecycle
 
@@ -1928,16 +1930,16 @@ test-csr-peer-services: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o $(OBJ_ROOT)/test-csr-peer-radio-state
 	$(OBJ_ROOT)/test-csr-peer-radio-state
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/csr-peer-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @$(OBJ_ROOT)/csr-peer-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-peer-state
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @$(OBJ_ROOT)/csr-peer-core.rsp $(COMMON_LIB) -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-peer-state
 	$(OBJ_ROOT)/test-csr-peer-state
 
 .PHONY: bluetooth-opp-peer test-bluetooth-opp-peer test-bluetooth-dun
 # The checkout tools/build-bluetooth-provider.py --fetch made and built.
 BLUETOOTH_PROVIDER ?= build/bluetooth-provider
-bluetooth-opp-peer: prepare core/src/common/libcommon.a core/src/common/libcommon-net.a $(BLUETOOTH_PROVIDER)/emulator/btvirt
+bluetooth-opp-peer: prepare $(COMMON_LIB) $(COMMON_NET_LIB) $(BLUETOOTH_PROVIDER)/emulator/btvirt
 	python3 tools/build-bluetooth-opp-peer.py --source $(BLUETOOTH_PROVIDER)
 
-test-bluetooth-opp-peer: prepare core/src/common/libcommon.a core/src/common/libcommon-net.a $(BLUETOOTH_PROVIDER)/emulator/btvirt
+test-bluetooth-opp-peer: prepare $(COMMON_LIB) $(COMMON_NET_LIB) $(BLUETOOTH_PROVIDER)/emulator/btvirt
 	python3 tools/build-bluetooth-opp-peer.py --source $(BLUETOOTH_PROVIDER) --test
 
 # The DUN phone through btvirt: a scripted client dials and brings LCP and IPCP up.
@@ -1956,22 +1958,22 @@ test-csr-controller-lifecycle: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/common tests/csr-peer-radio-state.cpp core/src/uarm/uarm/CsrBcspRadio.cpp core/src/uarm/uarm/BcspTransport.cpp core/src/uarm/uarm/BluetoothBackend.cpp -o $(OBJ_ROOT)/test-csr-peer-radio-state
 	$(OBJ_ROOT)/test-csr-peer-radio-state
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/csr-controller-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @$(OBJ_ROOT)/csr-controller-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-peer-state
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-peer-state.cpp @$(OBJ_ROOT)/csr-controller-core.rsp $(COMMON_LIB) -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-peer-state
 	$(OBJ_ROOT)/test-csr-peer-state
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-bcsp-board.cpp @$(OBJ_ROOT)/csr-controller-core.rsp core/src/common/libcommon.a -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-bcsp-board
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/csr-bcsp-board.cpp @$(OBJ_ROOT)/csr-controller-core.rsp $(COMMON_LIB) -lSDL2 -lSDL2_image $(READLINE_LIBS) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-csr-bcsp-board
 	$(OBJ_ROOT)/test-csr-bcsp-board --lifecycle
 	$(OBJ_ROOT)/test-csr-bcsp-board
 
 .PHONY: test-tg50-audio-queue
 test-tg50-audio-queue: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tg50-audio-queue-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-audio-queue.cpp @$(OBJ_ROOT)/tg50-audio-queue-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-audio-queue
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-audio-queue.cpp @$(OBJ_ROOT)/tg50-audio-queue-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-audio-queue
 	ulimit -c 0; $(OBJ_ROOT)/test-tg50-audio-queue
 
 .PHONY: test-tg50-audio-lifecycle
 test-tg50-audio-lifecycle: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/tg50-audio-lifecycle-core.rsp
-	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) -Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-audio-lifecycle.cpp core/src/uarm/native/SdlAudioDriver.cpp @$(OBJ_ROOT)/tg50-audio-lifecycle-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-audio-lifecycle
+	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) -Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-audio-lifecycle.cpp core/src/uarm/native/SdlAudioDriver.cpp @$(OBJ_ROOT)/tg50-audio-lifecycle-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-tg50-audio-lifecycle
 	ulimit -c 0; $(OBJ_ROOT)/test-tg50-audio-lifecycle
 
 # Link protocol library (link/): pairing, Noise KK, records and the channel mux. Monocypher is
@@ -2009,7 +2011,7 @@ test-e2-family-peripherals: out/frond
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/e2-family-peripherals.cpp @$(OBJ_ROOT)/e2-family-peripherals-core.rsp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-e2-family-peripherals
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-e2-family-peripherals
 	timeout 120 $(OBJ_ROOT)/test-e2-family-peripherals
 
 .PHONY: test-zodiac-mmio
@@ -2021,7 +2023,7 @@ test-zodiac-mmio: $(OBJ_ROOT)/zodiac-boot-probe
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-mmio-probe.cpp core/src/uarm/uarm/imx1_boot_probe.cpp \
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp @$(OBJ_ROOT)/zodiac-core.rsp \
-		core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-mmio-probe
+		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-mmio-probe
 	$(OBJ_ROOT)/test-zodiac-mmio-probe
 
 # Firmware-free GPIO scenario checks through the command-line probe.
@@ -2045,7 +2047,7 @@ test-zodiac-armv4-probe: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-armv4-probe
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-armv4-probe
 	$(OBJ_ROOT)/test-zodiac-armv4-probe
 
 # ARMv4T multiply flags and probe guards, with ordinary generated-code checks.
@@ -2057,7 +2059,7 @@ test-zodiac-multiply: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-multiply
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-multiply
 	$(OBJ_ROOT)/test-zodiac-multiply
 
 # ARMv4 SWP and SWPB, Exact and Fast, and their probe guards.
@@ -2069,7 +2071,7 @@ test-zodiac-swap: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-swap
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-swap
 	$(OBJ_ROOT)/test-zodiac-swap
 
 # ARM920 privileged User-bank LDM/STM, bank selection and aborts.
@@ -2081,7 +2083,7 @@ test-zodiac-user-bank: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-user-bank
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-user-bank
 	$(OBJ_ROOT)/test-zodiac-user-bank
 
 # ARM920 LDM exception return, bank ordering, aborts and fallback.
@@ -2093,7 +2095,7 @@ test-zodiac-ldm-return: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-ldm-return
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-ldm-return
 	$(OBJ_ROOT)/test-zodiac-ldm-return
 
 # The TwGlue log on a small ARM program.
@@ -2105,7 +2107,7 @@ test-zodiac-twglue-log: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-twglue-log
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-twglue-log
 	$(OBJ_ROOT)/test-zodiac-twglue-log
 
 # ARM920 word stores of PC, base-restored abort and interpreter fallback.
@@ -2117,7 +2119,7 @@ test-zodiac-store-pc: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-store-pc
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-store-pc
 	$(OBJ_ROOT)/test-zodiac-store-pc
 
 # ARM920 aligned ARM linkage stub branches.
@@ -2129,7 +2131,7 @@ test-zodiac-arm-add-pc: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-arm-add-pc
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-arm-add-pc
 	$(OBJ_ROOT)/test-zodiac-arm-add-pc
 
 # Explicit contrast-only LCDC policy, without an internal panel or DMA.
@@ -2141,7 +2143,7 @@ test-zodiac-lcdc-contrast: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-lcdc-contrast
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-lcdc-contrast
 	$(OBJ_ROOT)/test-zodiac-lcdc-contrast
 
 # SSI1 pin mux, idle configuration and guarded transport.
@@ -2153,7 +2155,7 @@ test-zodiac-ssi-startup: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-ssi-startup
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-ssi-startup
 	$(OBJ_ROOT)/test-zodiac-ssi-startup
 
 # Disabled i.MX1 UART startup and guarded peripheral access.
@@ -2165,7 +2167,7 @@ test-zodiac-pcm-transport: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-pcm-transport
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-pcm-transport
 	$(OBJ_ROOT)/test-zodiac-pcm-transport
 
 # The Zodiac's PCM sound out: words Exact and Fast alike, frame rate, a state saved mid-stream, PWM volume, D25
@@ -2175,7 +2177,7 @@ test-zodiac-sound: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-sound.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-sound
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-sound
 	$(OBJ_ROOT)/test-zodiac-sound
 
 # The stick turned to the guest's frame for each screen orientation.
@@ -2191,7 +2193,7 @@ test-zodiac-rumble: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-rumble.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-rumble
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-rumble
 	$(OBJ_ROOT)/test-zodiac-rumble
 
 # The Zodiac's YMF768 on CS4: register answers, FIFO and interrupt, pitch, a stored note sequence, FM on guest
@@ -2202,7 +2204,7 @@ test-zodiac-ymf768: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-ymf768.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-ymf768
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-ymf768
 	$(OBJ_ROOT)/test-zodiac-ymf768
 
 # i.MX1 UART control at startup and refused modes.
@@ -2214,7 +2216,7 @@ test-zodiac-uart-startup: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-uart-startup
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-uart-startup
 	$(OBJ_ROOT)/test-zodiac-uart-startup
 
 # Idle i.MX1 DMA reset, control and guarded channels.
@@ -2226,7 +2228,7 @@ test-zodiac-dma-startup: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-startup
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-startup
 	$(OBJ_ROOT)/test-zodiac-dma-startup
 
 # Disabled i.MX1 DMA channel allocation and configuration.
@@ -2238,7 +2240,7 @@ test-zodiac-dma-channel: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-channel
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-channel
 	$(OBJ_ROOT)/test-zodiac-dma-channel
 
 # ARM software exception entry, return and FIQ mask preservation.
@@ -2250,7 +2252,7 @@ test-zodiac-exception: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-exception
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-exception
 	$(OBJ_ROOT)/test-zodiac-exception
 
 # IRQ/FIQ boundaries, pending levels, generated batches and Timer 2 acknowledgement.
@@ -2262,7 +2264,7 @@ test-zodiac-irq: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-irq
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-irq
 	$(OBJ_ROOT)/test-zodiac-irq
 
 .PHONY: test-zodiac-thumb-probe
@@ -2273,7 +2275,7 @@ test-zodiac-thumb-probe: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-thumb-probe
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-thumb-probe
 	$(OBJ_ROOT)/test-zodiac-thumb-probe
 
 .PHONY: test-zodiac-thumb-add-pc
@@ -2284,7 +2286,7 @@ test-zodiac-thumb-add-pc: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-thumb-add-pc
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-thumb-add-pc
 	$(OBJ_ROOT)/test-zodiac-thumb-add-pc
 
 # Directed ARM920 translation, abort and instruction-cache checks in both engines.
@@ -2293,7 +2295,7 @@ $(OBJ_ROOT)/test-zodiac-mmu: out/frond tests/zodiac-mmu.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-mmu-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/zodiac-mmu.cpp @$(OBJ_ROOT)/zodiac-mmu-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+		tests/zodiac-mmu.cpp @$(OBJ_ROOT)/zodiac-mmu-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $@
 test-zodiac-mmu: $(OBJ_ROOT)/test-zodiac-mmu
 	$(OBJ_ROOT)/test-zodiac-mmu
 
@@ -2303,7 +2305,7 @@ $(OBJ_ROOT)/test-zodiac-dcache: out/frond tests/zodiac-dcache.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-dcache-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/zodiac-dcache.cpp @$(OBJ_ROOT)/zodiac-dcache-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+		tests/zodiac-dcache.cpp @$(OBJ_ROOT)/zodiac-dcache-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $@
 test-zodiac-dcache: $(OBJ_ROOT)/test-zodiac-dcache
 	$(OBJ_ROOT)/test-zodiac-dcache
 
@@ -2428,7 +2430,7 @@ test-zodiac-timer-probe: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-timer-probe
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-timer-probe
 	$(OBJ_ROOT)/test-zodiac-timer-probe
 
 # Named System Control configuration and strict bootstrap integration.
@@ -2659,9 +2661,9 @@ test-zodiac-graphics-interrupts: zodiac-boot-probe prepare
 .PHONY: test-zodiac-graphics-sd
 # Slot 2 (the W4200 SD block): the empty slot's answers, then a card: detect and its interrupt, init, PIO
 # transfers, errors and a state saved mid-transfer.
-test-zodiac-graphics-sd: prepare core/src/common/libcommon.a
+test-zodiac-graphics-sd: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/zodiac-graphics-sd.cpp core/src/uarm/uarm/vSD.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-zodiac-graphics-sd
+		tests/zodiac-graphics-sd.cpp core/src/uarm/uarm/vSD.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-zodiac-graphics-sd
 	$(OBJ_ROOT)/test-zodiac-graphics-sd
 
 test-zodiac-graphics-acquisition: zodiac-boot-probe prepare test-zodiac-live-controls
@@ -2678,7 +2680,7 @@ test-imx1-mpll-retune: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-imx1-mpll-retune
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-imx1-mpll-retune
 	$(OBJ_ROOT)/test-imx1-mpll-retune
 
 # RTC interrupt configuration with an active watchdog.
@@ -2690,7 +2692,7 @@ test-imx1-rtc-live-writes: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-imx1-rtc-live-writes
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-imx1-rtc-live-writes
 	$(OBJ_ROOT)/test-imx1-rtc-live-writes
 
 # Independent SSI serial and bus-clock divider transitions.
@@ -2702,7 +2704,7 @@ test-zodiac-cscr-ssi-clocks: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-cscr-ssi-clocks
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-cscr-ssi-clocks
 	$(OBJ_ROOT)/test-zodiac-cscr-ssi-clocks
 
 # Stop mode: both PLLs off, CLK32 only, wake on the GPIO lines and the RTC.
@@ -2714,7 +2716,7 @@ test-zodiac-stop-mode: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-stop-mode
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-stop-mode
 	$(OBJ_ROOT)/test-zodiac-stop-mode
 
 # MCU PLL shutdown and qualified WFI wake.
@@ -2726,18 +2728,18 @@ test-zodiac-idle-wake: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-idle-wake
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-idle-wake
 	$(OBJ_ROOT)/test-zodiac-idle-wake
 	python3 tests/zodiac-idle-wake-cli.py
 
 .PHONY: test-imx1-mmcsd-card
-test-imx1-mmcsd-card: prepare core/src/common/libcommon.a
+test-imx1-mmcsd-card: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/imx1-mmcsd-card.cpp core/src/uarm/uarm/vSD.cpp core/src/uarm/uarm/imx1_sysctrl.cpp \
 		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
 		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		core/src/common/libcommon.a -o $(OBJ_ROOT)/test-imx1-mmcsd-card
+		$(COMMON_LIB) -o $(OBJ_ROOT)/test-imx1-mmcsd-card
 	$(OBJ_ROOT)/test-imx1-mmcsd-card
 
 .PHONY: test-imx1-memory-dma
@@ -2745,7 +2747,7 @@ test-imx1-memory-dma: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/imx1-memory-dma.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-imx1-memory-dma
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-imx1-memory-dma
 	$(OBJ_ROOT)/test-imx1-memory-dma
 
 .PHONY: test-zodiac-mmcsd-empty
@@ -2761,14 +2763,14 @@ $(OBJ_ROOT)/zodiac-asp-pen-probe: $(OBJ_ROOT)/zodiac-boot-probe tests/zodiac-asp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-asp-pen-probe.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $@
 
 .PHONY: test-zodiac-machine-state
 test-zodiac-machine-state: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-machine-state.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-machine-state
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-machine-state
 	$(OBJ_ROOT)/test-zodiac-machine-state
 
 .PHONY: test-zodiac-ymf-ready
@@ -2783,7 +2785,7 @@ test-zodiac-fast-lean: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-fast-lean.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-fast-lean
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-fast-lean
 	$(OBJ_ROOT)/test-zodiac-fast-lean
 
 .PHONY: test-zodiac-code-hooks
@@ -2792,7 +2794,7 @@ test-zodiac-code-hooks: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Itests \
 		tests/zodiac-code-hooks.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-code-hooks
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-code-hooks
 	$(OBJ_ROOT)/test-zodiac-code-hooks
 
 .PHONY: test-zodiac-guest-exceptions
@@ -2800,7 +2802,7 @@ test-zodiac-guest-exceptions: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-guest-exceptions.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-guest-exceptions
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-guest-exceptions
 	$(OBJ_ROOT)/test-zodiac-guest-exceptions
 
 .PHONY: test-zodiac-state-fingerprint
@@ -2822,7 +2824,7 @@ test-zodiac-machine-state-reject: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-machine-state-reject.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-machine-state-reject
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-machine-state-reject
 	$(OBJ_ROOT)/test-zodiac-machine-state-reject
 
 # Two probe processes: one saves, the other loads and has to end like an uninterrupted run.
@@ -2834,7 +2836,7 @@ test-zodiac-bounded: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-bounded.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-bounded
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-bounded
 	$(OBJ_ROOT)/test-zodiac-bounded
 
 # Faster speed on the Zodiac: FCLK times the multiplier in the clock model and on a running machine.
@@ -2843,7 +2845,7 @@ test-zodiac-faster: $(OBJ_ROOT)/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-faster.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@$(OBJ_ROOT)/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-faster
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-faster
 	$(OBJ_ROOT)/test-zodiac-faster
 
 # The Zodiac checks not listed elsewhere in the suite. Left out for time: arm-add-pc, ldm-return and fast-lean;
@@ -2911,7 +2913,7 @@ test-68k-card-swap: prepare out/frond
 test-68k-card-provider: prepare
 	$(MAKE) -C core/src/common $(CORE_OBJ_FLAGS) bin
 	$(CXX) -std=c++17 -O1 -Icore/src/common -Icore/src/uarm/uarm \
-		tests/68k-card-provider.cpp core/src/common/libcommon.a -o $(OBJ_ROOT)/test-68k-card-provider
+		tests/68k-card-provider.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-68k-card-provider
 	$(OBJ_ROOT)/test-68k-card-provider $(OBJ_ROOT)/provider-runtime-check
 
 .PHONY: test-dana-card-inventory
@@ -3048,7 +3050,7 @@ $(OBJ_ROOT)/rx1950-boot: out/frond tools/rx1950-boot.cpp $(S3C2442_SOURCES) $(S3
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' ! -name 's3c2442_*' ! -name 'acx100*' ! -name 'wifi_access_point*' ! -name 'rx1950_*' ! -name 'soc_S3C2442*' ! -name 'UsbHostBridge*' > $(OBJ_ROOT)/rx1950-core.rsp
 	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Izodiac-rom \
 		tools/rx1950-boot.cpp core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp zodiac-rom/ZodiacRom.cpp \
-		$(S3C2442_SOURCES) @$(OBJ_ROOT)/rx1950-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $@
+		$(S3C2442_SOURCES) @$(OBJ_ROOT)/rx1950-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -lz -o $@
 
 # Each block's registers, timer ticks, interrupt priority and sub-source masking, UART output.
 test: test-s3c2442
@@ -3062,7 +3064,7 @@ test-s3c2442-machine: out/frond tests/s3c2442-machine.cpp $(S3C2442_SOURCES) $(S
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' ! -name 's3c2442_*' ! -name 'acx100*' ! -name 'wifi_access_point*' ! -name 'rx1950_*' ! -name 'soc_S3C2442*' ! -name 'UsbHostBridge*' > $(OBJ_ROOT)/rx1950-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/s3c2442-machine.cpp core/src/uarm/uarm/s3c2442_machine.cpp \
-		$(S3C2442_SOURCES) @$(OBJ_ROOT)/rx1950-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-s3c2442-machine
+		$(S3C2442_SOURCES) @$(OBJ_ROOT)/rx1950-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-s3c2442-machine
 	$(OBJ_ROOT)/test-s3c2442-machine
 
 test: test-acx100
