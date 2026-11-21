@@ -371,3 +371,31 @@ class StickKeys {
     fun forget(device: Int) { held.remove(device) }
     fun forgetAll() = held.clear()
 }
+
+// The right stick on Z and RZ. Some controllers put their triggers there, so an axis counts only when
+// the device reports it centred (range reaching below 0, not 0..1), and one already past the press
+// point the first time it is seen is ignored until it comes back to rest. Call from the UI thread.
+class RightStickAxes {
+    private val ignored = mutableSetOf<Pair<Int, Int>>()
+    private val seen = mutableSetOf<Pair<Int, Int>>()
+
+    // axis is any number that tells the device's two axes apart.
+    fun value(device: Int, axis: Int, raw: Float, centred: Boolean): Float {
+        if (!centred) return 0f
+        val tag = device to axis
+        if (seen.add(tag) && Math.abs(raw) > ControllerInput.PRESS) ignored.add(tag)
+        if (tag in ignored) {
+            if (Math.abs(raw) >= ControllerInput.RELEASE) return 0f
+            ignored.remove(tag)
+        }
+        return raw
+    }
+
+    fun forgetAll() { ignored.clear(); seen.clear() }
+
+    companion object {
+        // True when the device's motion range for the axis runs below 0, so it isn't a 0..1 trigger.
+        fun centred(event: android.view.MotionEvent, axis: Int): Boolean =
+            (event.device?.getMotionRange(axis, event.source)?.min ?: return false) < 0f
+    }
+}

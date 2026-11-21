@@ -202,4 +202,19 @@ class ControllerTest {
         assertEquals(0x4000003E, PalmButtons.sdlKey(PalmButton.VOICE))
         assertEquals(0, PalmButtons.sdlKey(PalmButton.MENU))
     }
+
+    @Test
+    fun triggersOnZAreNotARightStick() {
+        val axes = RightStickAxes()
+        // A 0..1 trigger is never a stick, even resting at -1.
+        assertEquals(0f, axes.value(1, 0, -1f, centred = false), 0f)
+        assertEquals(0f, axes.value(1, 0, 1f, centred = false), 0f)
+        // A centred axis passes through.
+        assertEquals(0.8f, axes.value(2, 0, 0f, centred = true) + axes.value(2, 0, 0.8f, centred = true), 0f)
+        // One that starts past the press point is ignored until it comes back to rest.
+        assertEquals(0f, axes.value(3, 1, -1f, centred = true), 0f)
+        assertEquals(0f, axes.value(3, 1, -0.6f, centred = true), 0f)
+        assertEquals(0.1f, axes.value(3, 1, 0.1f, centred = true), 0f)
+        assertEquals(0.9f, axes.value(3, 1, 0.9f, centred = true), 0f)
+    }
 }

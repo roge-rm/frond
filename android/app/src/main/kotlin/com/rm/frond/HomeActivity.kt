@@ -495,6 +495,7 @@ class HomeActivity : ComponentActivity() {
     // Stick directions while Settings waits for a key: one pushed past half travel from nearer the
     // middle is assigned, so a stick already held over doesn't take the next button too.
     private val captureSticks = StickKeys()
+    private val captureRight = RightStickAxes()
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             val capture = model.capturing != null && model.settingsOpen
@@ -502,7 +503,8 @@ class HomeActivity : ComponentActivity() {
             captureSticks.update(event.deviceId, ControllerMap.STICK_LEFT,
                 event.getAxisValue(android.view.MotionEvent.AXIS_X), event.getAxisValue(android.view.MotionEvent.AXIS_Y), assign)
             captureSticks.update(event.deviceId, ControllerMap.STICK_RIGHT,
-                event.getAxisValue(android.view.MotionEvent.AXIS_Z), event.getAxisValue(android.view.MotionEvent.AXIS_RZ), assign)
+                captureRight.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
+                captureRight.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)), assign)
             if (capture) return true
         }
         return super.dispatchGenericMotionEvent(event)
