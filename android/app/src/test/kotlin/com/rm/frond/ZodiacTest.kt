@@ -180,6 +180,7 @@ class ZodiacTest {
     @Test fun aRemappedKeyReachesTheRightInput() {
         val events = mutableListOf<ZodiacPad.Event>()
         val map = ControllerMap.defaults(zodiac)
+            .clear(PalmButton.APP2)
             .assign(PalmButton.APP2, KeyEvent.KEYCODE_BUTTON_C)
             .assign(PalmButton.TRIGGER_RIGHT, KeyEvent.KEYCODE_BUTTON_A)
             .clear(PalmButton.HOME)
@@ -187,7 +188,7 @@ class ZodiacTest {
         assertTrue(pad.key(1, KeyEvent.KEYCODE_BUTTON_C, true))
         assertTrue(pad.key(1, KeyEvent.KEYCODE_BUTTON_A, true))
         assertFalse(pad.key(1, KeyEvent.KEYCODE_BUTTON_START, true))
-        // B was Action 2 and now does nothing.
+        // B was Action 2 and was cleared off it.
         assertFalse(pad.key(1, KeyEvent.KEYCODE_BUTTON_B, true))
         assertEquals(listOf(Button(1, ZodiacPad.BUTTON_B, true), Button(1, ZodiacPad.RIGHT_SHOULDER, true)), events)
     }

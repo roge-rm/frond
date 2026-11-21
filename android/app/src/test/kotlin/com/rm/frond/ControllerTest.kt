@@ -64,12 +64,22 @@ class ControllerTest {
     }
 
     @Test
-    fun assignTakesTheKeyAndReplacesTheButtonsKeys() {
+    fun assignAddsTheKeyAndTakesItFromItsOldButton() {
         val map = ControllerMap.defaults(Device.TX).assign(PalmButton.APP2, KeyEvent.KEYCODE_BUTTON_R1)
-        assertEquals(listOf(KeyEvent.KEYCODE_BUTTON_R1), map.keysFor(PalmButton.APP2))
+        assertEquals(listOf(KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_R1), map.keysFor(PalmButton.APP2))
         assertEquals(emptyList<Int>(), map.keysFor(PalmButton.APP4))
-        assertFalse(map.keys.containsKey(KeyEvent.KEYCODE_BUTTON_X))
+        // Assigning a key a button already has changes nothing.
+        assertEquals(map, map.assign(PalmButton.APP2, KeyEvent.KEYCODE_BUTTON_X))
         assertEquals(emptyList<Int>(), map.clear(PalmButton.CENTRE).keysFor(PalmButton.CENTRE))
+    }
+
+    @Test
+    fun removeTakesOffOneKey() {
+        val map = ControllerMap.defaults(Device.TX)
+        val removed = map.remove(KeyEvent.KEYCODE_BUTTON_L1)
+        assertEquals(listOf(KeyEvent.KEYCODE_BUTTON_START), removed.keysFor(PalmButton.APP1))
+        assertEquals(map.keys - KeyEvent.KEYCODE_BUTTON_L1, removed.keys)
+        assertEquals(removed, removed.remove(KeyEvent.KEYCODE_BUTTON_L1))
     }
 
     @Test

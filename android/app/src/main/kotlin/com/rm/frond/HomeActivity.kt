@@ -104,6 +104,10 @@ class HomeModel(private val activity: HomeActivity) {
         setController(device, controllers.getValue(device).assign(button, key))
     }
 
+    fun removeKey(device: Device, key: Int) {
+        setController(device, controllers.getValue(device).remove(key))
+    }
+
     fun clearButton(device: Device, button: PalmButton) {
         capturing = null
         setController(device, controllers.getValue(device).clear(button))

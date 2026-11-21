@@ -104,9 +104,11 @@ enum class PalmButton(val id: String) {
 data class ControllerMap(val keys: Map<Int, PalmButton>) {
     fun keysFor(button: PalmButton): List<Int> = keys.filterValues { it == button }.keys.sorted()
 
-    // Makes key the only key for button, taking it from whatever it pressed before.
-    fun assign(button: PalmButton, key: Int): ControllerMap =
-        ControllerMap(keys.filterValues { it != button } + (key to button))
+    // Adds key to button's keys, taking it from whatever it pressed before.
+    fun assign(button: PalmButton, key: Int): ControllerMap = ControllerMap(keys + (key to button))
+
+    // Takes one key off whatever it pressed.
+    fun remove(key: Int): ControllerMap = ControllerMap(keys - key)
 
     fun clear(button: PalmButton): ControllerMap = ControllerMap(keys.filterValues { it != button })
 

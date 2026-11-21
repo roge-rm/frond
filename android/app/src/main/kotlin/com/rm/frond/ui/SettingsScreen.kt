@@ -13,6 +13,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -122,7 +123,8 @@ private fun DebuggerPort(port: Int, onChange: (Int) -> Unit) {
     }
 }
 
-// Each Palm button with the controller keys that press it. Tap one, then press a controller key.
+// Each Palm button with the controller keys that press it. Tap one, then press a controller key or push
+// a stick to add it; its keys can be taken off one at a time there.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ControlsScreen(model: HomeModel, device: Device) {
@@ -166,6 +168,17 @@ private fun ControllerButtons(model: HomeModel, device: Device) {
                     if (keys.isEmpty()) "None" else keys.joinToString(", ") { ControllerMap.keyName(it) },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+        if (waiting) {
+            for (key in map.keysFor(button)) {
+                val name = ControllerMap.keyName(key)
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(name, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    IconButton(onClick = { model.removeKey(device, key) }) {
+                        Icon(Icons.Default.Close, contentDescription = "Remove $name")
+                    }
+                }
             }
         }
     }
