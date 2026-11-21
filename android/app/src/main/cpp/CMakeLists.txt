@@ -244,3 +244,5 @@ target_compile_options(main PRIVATE -O2 -g
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-visibility
     -Wno-constant-conversion -Wno-constant-logical-operand)
 target_link_libraries(main PRIVATE frondcore SDL2 SDL2main SDL2_image log)
+# Calls inside libmain.so bind to its own functions at link time, with no PLT stub on each call into the core.
+target_link_options(main PRIVATE "-Wl,-Bsymbolic-functions")
