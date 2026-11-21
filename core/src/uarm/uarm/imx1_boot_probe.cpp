@@ -91,6 +91,19 @@ uint64_t jitChargedWrites = 0;  // for tests
 // commits the write at once, with no preview and no cs5Wait, and jitChargedWrite defers the clocks (deferredHclk).
 bool leanSubmit = false;
 bool scanPollSkip = true, fifoWaitSkip = true, uartPollSkip = true;
+// Fast blocks: the pen routine's ASP FIFO wait (skipAspPoll). FROND_ASP_POLL_SKIP=0 turns it off, for measuring. A
+// FIFO_PTR read by the loop's load that sees the loop go on ends the JIT run, so the next run starts on the load
+// (aspHalted); aspHaltOff stops that until the next step once a skip after such a halt passed nothing.
+bool aspPollSkip = [] {
+    const char* v = std::getenv("FROND_ASP_POLL_SKIP");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+bool aspHalted = false, aspHaltOff = false;
+uint64_t aspPollSkips = 0, aspPollRounds = 0, aspPollCycles = 0;  // for tests and traces
+// The loop at 20096d92 (Thumb): ldr r3, [r0, #52] (FIFO_PTR); lsls r3, #28; lsrs r3, #28; cmp r3, #3; bcc back.
+// It waits for the write pointer to reach 3, the calibration round's three samples. Its load is a marked access pc.
+constexpr uint32_t aspPollPc = 0x20096d92;
+constexpr uint16_t aspPollCode[] = {0x6b43, 0x071b, 0x0f1b, 0x2b03, 0xd3fa};
 // Fast blocks: a vertical wait read (200adb08, 200adb14) that saw the value its loop waits on ends the JIT run, so
 // the next run starts on the load and skipScanPoll can pass the rounds (scanHalted). scanHaltOff stops that until
 // the next step once a skip after such a halt passed nothing.
@@ -709,7 +722,16 @@ struct Probe {
         if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
             return single && p.leanGraphicsRead(pa, size, ran, left, *value, *cost);
         if (size != 4) return false;
-        if (Imx1Bootstrap::quietReadAddress(pa)) return single && p.leanBoardRead(pa, ran, *value);
+        if (Imx1Bootstrap::quietReadAddress(pa)) {
+            if (!single || !p.leanBoardRead(pa, ran, *value)) return false;
+            // The ASP FIFO wait's load seeing the loop go on ends the run, for skipAspPoll.
+            if (inJit && pa == 0x00215034 && (*value & 15) < 3 && aspPollSkip && !aspHaltOff && !jitHalt &&
+                p.atAspPoll(pc)) {
+                jitHalt = aspHalted = true;
+                cpuSetSlowPath(p.cpu, SLOW_PATH_REASON_RESCHEDULE);
+            }
+            return true;
+        }
         if (!Imx1Bootstrap::timerCountAddress(pa))
             return single && p.leanRegisterRead(pa, pc, ran, left, *value, *cost);
         // Wait clocks still deferred (graphics accesses answered earlier) count after the CPU cycles, as
@@ -1363,6 +1385,59 @@ struct Probe {
         ++uartPollSkips;
         uartPollRounds += n;
         return 3 * n;
+    }
+    // Whether pc is the ASP FIFO wait's load (aspPollPc) with the wait's code (aspPollCode).
+    bool atAspPoll(uint32_t pc) {
+        if (pc != aspPollPc) return false;
+        uint32_t w = 0, pa, at = ~0u;
+        for (unsigned i = 0; i < std::size(aspPollCode); ++i) {
+            const uint32_t va = pc + 2 * i;
+            if ((va & ~3u) != at) {
+                at = va & ~3u;
+                if (!cpuArm920PeekWord(cpu, at, &w, &pa)) return false;
+            }
+            if (((va & 2) ? w >> 16 : w & 0xffff) != aspPollCode[i]) return false;
+        }
+        return true;
+    }
+    // Fast blocks: the ROM pen routine's wait for the ASP's calibration samples (aspPollCode). FIFO_PTR changes only
+    // at an ASP conversion's end, which ends the quiet span, or at a guest access, so inside the span every round reads
+    // what the last one did. At the load, after a round that read a write pointer below 3 (r3 holds it, the flags are
+    // what cmp r3, #3 left), the rounds up to the span's end pass at once: 5 instructions and their cost model clocks
+    // each, as the JIT takes them with the read on the lean path. The last rounds of the span run in the JIT and see
+    // the sample land. hard is the most work the slice has left. Returns the instructions passed.
+    uint64_t skipAspPoll(uint64_t hard) {
+        if (!aspPollSkip || !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu) || failed ||
+            graphicsWireStatus != Imx1BootstrapAccess::ok)
+            return 0;
+        const uint32_t* r = cpuGetRegisters(cpu);
+        const uint32_t pc = r[15];
+        if (!atAspPoll(pc)) return 0;
+        const uint32_t cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const uint32_t va = r[0] + 52;
+        uint32_t pa;
+        if ((va & 3) || (cpsr & 31) == ARM_SR_MODE_USR || !cpuArm920PeekWord(cpu, va, nullptr, &pa) || pa != 0x00215034)
+            return 0;
+        uint32_t value;
+        if (peripherals.access(pa, 4, false, value, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok) return 0;
+        // The round before read the same pointer and stayed: cmp of a value below 3 with 3 leaves N set, Z, C and V clear.
+        const uint32_t pointer = value & 15;
+        if (pointer >= 3 || r[3] != pointer || (cpsr & 0xf0000000u) != 0x80000000u) return 0;
+        uint64_t round = 0;
+        for (const uint16_t h : aspPollCode) round += cost::thumbCost(h, cost::Core::arm920t);
+        // The span keeps room for the last rounds; the slice for the work the rounds add.
+        const uint64_t keep = leanMinimumSpan + 4 * round;
+        if (quietCycles <= keep) return 0;
+        const uint64_t n = std::min((quietCycles - keep) / round, hard / 8);
+        if (!n) return 0;
+        deferredCycles += round * n;
+        quietCycles -= round * n;
+        work += 5 * n;
+        retired += 5 * n;
+        ++aspPollSkips;
+        aspPollRounds += n;
+        aspPollCycles += round * n;
+        return 5 * n;
     }
     // Fast blocks: the ROM's graphics FIFO wait (200b9010-200b9078) calls the Thumb delay at 20084912 for one timer
     // count, reads the engine's read pointer (1601021c) and loops while the ring has too little room, r5 counting
@@ -2411,6 +2486,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             bool ended = false;
             delayHalted = delayHaltOff = delayPassed = false;
             scanHalted = scanHaltOff = false;
+            aspHalted = aspHaltOff = false;
             for (;;) {
                 // A span the JIT ran to its end, or one a step started with the interrupt lines still to look at,
                 // goes on at once where it can (spanBoundary).
@@ -2454,6 +2530,13 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         continue;
                     }
                     scanHaltOff |= halted;
+                    if (std::exchange(aspHalted, false)) {
+                        if (const uint64_t passed = p->skipAspPoll(hard - jitSlack)) {
+                            slice += uint32_t(passed);
+                            continue;
+                        }
+                        aspHaltOff = true;
+                    }
                     int stop;
                     jitBudget = uint32_t(std::min(quietCycles, hard - jitSlack + 1));
                     leanCs5 = {};
@@ -2569,10 +2652,12 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
     // The register reads the graphics model answers by pc that Fast blocks take in generated code: the identity
     // read in the register read helper, the scan status reads and the engine's ring pointer polls. And the delay
-    // loops' timer reads (delayLoopPc), and the batch producers' ring pointer writes (jitChargedWrite).
+    // loops' timer reads (delayLoopPc), the batch producers' ring pointer writes (jitChargedWrite) and the ASP FIFO
+    // wait's pointer read (aspPollPc).
     static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0,
                                              0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030,
-                                             0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4, 0x200a9788};
+                                             0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4, 0x200a9788,
+                                             aspPollPc};
     cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
@@ -2612,6 +2697,10 @@ void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
 uint64_t imx1MachineUartPollSkips(const Imx1Machine*) { return uartPollSkips; }
 uint64_t imx1MachineUartPollRounds(const Imx1Machine*) { return uartPollRounds; }
 void imx1SetUartPollSkip(bool skip) { uartPollSkip = skip; }
+uint64_t imx1MachineAspPollSkips(const Imx1Machine*) { return aspPollSkips; }
+uint64_t imx1MachineAspPollRounds(const Imx1Machine*) { return aspPollRounds; }
+uint64_t imx1MachineAspPollCycles(const Imx1Machine*) { return aspPollCycles; }
+void imx1SetAspPollSkip(bool skip) { aspPollSkip = skip; }
 bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on) {
     auto* p = machine->probe;
     if (p->bounds || p->stopped) return false;
