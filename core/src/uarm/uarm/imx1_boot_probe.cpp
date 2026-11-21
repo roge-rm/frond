@@ -377,6 +377,10 @@ struct Probe {
         // The explicit virtual pull-up resolves a released INTb to high.
         const uint32_t value = line == Imx1GpioLine::clear ? 0x2000 : 0;
         const uint32_t known = line == Imx1GpioLine::unknown ? 0 : 0x2000;
+        // A board left behind by a lean submit catches up first, so the pin changes at the board's own time.
+        if (commit && (pendingBoardCycles || pendingBoardHclk) &&
+            (!known || !peripherals.gpioDriveSettled(0, value, known)))
+            flushSubmitBoard();
         return peripherals.driveGpioInput(0, value, known, commit);
     }
     // What follows a committed graphics state.
@@ -1172,7 +1176,10 @@ struct Probe {
         }
         uint64_t side = 0;
         if (keepBoard && lean && remaining > cost &&
-            cs5Configuration.interruptState().interruptOutput() == lineBefore) {
+            cs5Configuration.interruptState().interruptOutput() == lineBefore &&
+            graphicsWireStatus == Imx1BootstrapAccess::ok) {
+            // The board hasn't moved since the span's start, so the rest of boundaryStatus is its clock status as
+            // checked then; the chip's period support is checked again at its next charge.
             // The board still lags. chargeDeferred cleared boardSlack; the board's quiet cycles from here are the rest
             // of the span and the slack it had.
             side = remaining + slackBefore;
