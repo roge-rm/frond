@@ -25,6 +25,17 @@ bool FrondRapiReady(FrondRapi* client);
 bool FrondRapiConnected(const FrondRapi* client);
 uint32_t FrondRapiError(FrondRapi* client);
 bool FrondRapiProvision(FrondRapi* client, const uint16_t* config, uint16_t* reply, size_t capacity);
+// result is the device's return value: an HRESULT for CeSyncStart, a BOOL for CeStartReplication.
+bool FrondRapiSyncStart(FrondRapi* client, const uint16_t* params, uint32_t* result);
+bool FrondRapiStartReplication(FrondRapi* client, uint32_t* result);
+bool FrondRapiSyncResume(FrondRapi* client, uint32_t* result);
+bool FrondRapiSyncPause(FrondRapi* client, uint32_t* result);
+// Registry calls return the device's Win32 error, 0 on success. key is an open key or a root
+// such as 0x80000002 (HKEY_LOCAL_MACHINE). size is the buffer size in, the value's size out.
+uint32_t FrondRapiRegOpenKey(FrondRapi* client, uint32_t key, const uint16_t* subKey, uint32_t* result);
+uint32_t FrondRapiRegQueryValue(FrondRapi* client, uint32_t key, const uint16_t* name, uint32_t* type, void* data,
+                                uint32_t* size);
+uint32_t FrondRapiRegCloseKey(FrondRapi* client, uint32_t key);
 uint32_t FrondRapiOpenFile(FrondRapi* client, const uint16_t* path);
 bool FrondRapiRead(FrondRapi* client, uint32_t handle, void* data, uint32_t capacity, uint32_t* count);
 bool FrondRapiMakeDirectory(FrondRapi* client, const uint16_t* path);

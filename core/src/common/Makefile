@@ -49,7 +49,9 @@ SOURCE_CXX = 						\
 	sync/SyncManager.cpp \
 	sync/ActiveSync.cpp \
 	sync/ActiveSyncFiles.cpp \
-	sync/ActiveSyncPartnership.cpp
+	sync/ActiveSyncPartnership.cpp \
+	sync/AirSync.cpp \
+	sync/Wbxml.cpp
 
 SOURCE_C_NATIVE = $(SOURCE_C)
 SOURCE_CXX_NATIVE = 				\

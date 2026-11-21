@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -15,7 +16,8 @@
 namespace frondNet {
 
 // Map the two device-initiated TCP connections on port 990 to two slirp
-// guest-forward addresses. This keeps the built-in endpoint inside Frond.
+// guest-forward addresses, and Desktop AirSync's connections to port 26675 to a few more.
+// This keeps the built-in endpoint inside Frond.
 class ActiveSyncForward {
    public:
     void Configure(Slirp* slirp, uint32_t host, uint32_t network, uint32_t mask, uint32_t guest, uint32_t dns,
@@ -39,6 +41,14 @@ class ActiveSyncForward {
                 return;
             }
         }
+        // Desktop AirSync opens a connection per request burst, so its slots are reused.
+        for (auto& channel : web) {
+            while (address == host || address == guest || address == dns) ++address;
+            if ((address & mask) != network || (address | mask) == UINT32_MAX) break;
+            channel.address.s_addr = htonl(address++);
+            if (slirp_add_guestfwd(slirp, WriteWeb, &channel, &channel.address, webPort) != 0) break;
+            channel.ready = true;
+        }
         this->slirp = slirp;
     }
 
@@ -50,6 +60,7 @@ class ActiveSyncForward {
         auto* ip = IPv4Tcp(frame);
         if (!ip || Get32(ip + 12) != guest || Get32(ip + 16) != host) return true;
         auto* tcp = ip + (ip[0] & 15) * 4;
+        if (Get16(tcp + 2) == webPort) return WebInput(ip, tcp);
         if (Get16(tcp + 2) != port) return true;
         const auto source = Get16(tcp);
         auto match = std::find_if(channels.begin(), channels.end(), [source](const Channel& c) { return c.peer == source; });
@@ -70,6 +81,16 @@ class ActiveSyncForward {
         auto* ip = IPv4Tcp(frame);
         if (!ip || Get32(ip + 16) != guest) return;
         auto* tcp = ip + (ip[0] & 15) * 4;
+        if (Get16(tcp) == webPort) {
+            for (const auto& channel : web) {
+                const auto alias = ntohl(channel.address.s_addr);
+                if (channel.ready && channel.peer == Get16(tcp + 2) && alias == Get32(ip + 12)) {
+                    Rewrite(ip, tcp, ip + 12, alias, host);
+                    return;
+                }
+            }
+            return;
+        }
         if (Get16(tcp) != port) return;
         for (const auto& channel : channels) {
             const auto alias = ntohl(channel.address.s_addr);
@@ -94,6 +115,19 @@ class ActiveSyncForward {
             const auto count = channel.pipe->HostToDevice(bytes.data(), std::min(room, bytes.size()));
             if (count) slirp_socket_recv(slirp, channel.address, port, bytes.data(), int(count));
         }
+        for (auto& channel : web) {
+            if (!channel.pipe) continue;
+            if (channel.closing) {
+                channel.pipe->Close();
+                channel.pipe.reset();
+                continue;
+            }
+            const auto room = slirp_socket_can_recv(slirp, channel.address, webPort);
+            if (!room) continue;
+            std::array<uint8_t, 4096> bytes;
+            const auto count = channel.pipe->HostToDevice(bytes.data(), std::min(room, bytes.size()));
+            if (count) slirp_socket_recv(slirp, channel.address, webPort, bytes.data(), int(count));
+        }
     }
 
    private:
@@ -103,9 +137,54 @@ class ActiveSyncForward {
         uint16_t peer{};
         bool closing{false};
     };
-    static constexpr uint16_t port = 990;
+    struct WebChannel {
+        in_addr address{};
+        std::shared_ptr<frondSync::SyncPipe> pipe;
+        uint16_t peer{};
+        bool ready{false}, closing{false};
+        std::chrono::steady_clock::time_point ended{};
+    };
+    static constexpr uint16_t port = 990, webPort = 26675;
     std::shared_ptr<frondSync::ActiveSyncSession> session;
     std::array<Channel, 2> channels;
+    std::array<WebChannel, 6> web;
+
+    bool WebInput(uint8_t* ip, uint8_t* tcp) {
+        const auto source = Get16(tcp);
+        auto match = std::find_if(web.begin(), web.end(), [source](const WebChannel& c) { return c.ready && c.peer == source; });
+        if (match == web.end() || (match->closing && (tcp[13] & 0x12) == 0x02)) {
+            // Only a new connection takes a slot. A slot is reused after its last connection
+            // has been closed for a while, the oldest first.
+            if ((tcp[13] & 0x12) != 0x02) return false;
+            const auto now = std::chrono::steady_clock::now();
+            WebChannel* free = nullptr;
+            for (auto& channel : web) {
+                if (!channel.ready || (channel.peer && (!channel.closing || now - channel.ended < std::chrono::seconds(2))))
+                    continue;
+                if (!free || channel.ended < free->ended) free = &channel;
+            }
+            if (!free) return false;
+            auto pipe = session->AcceptAirSync();
+            if (!pipe) return false;
+            if (free->pipe) free->pipe->Close();
+            free->pipe = std::move(pipe);
+            free->peer = source;
+            free->closing = false;
+            match = web.begin() + (free - web.data());
+        }
+        Rewrite(ip, tcp, ip + 16, host, ntohl(match->address.s_addr));
+        if ((tcp[13] & 0x05) && !match->closing) {
+            match->closing = true;
+            match->ended = std::chrono::steady_clock::now();
+        }
+        return true;
+    }
+
+    static slirp_ssize_t WriteWeb(const void* data, size_t size, void* opaque) {
+        const auto& channel = *static_cast<WebChannel*>(opaque);
+        if (!channel.pipe) return slirp_ssize_t(size);
+        return channel.pipe->DeviceToHost(static_cast<const uint8_t*>(data), size);
+    }
     Slirp* slirp{};
     uint32_t host{}, guest{};
 

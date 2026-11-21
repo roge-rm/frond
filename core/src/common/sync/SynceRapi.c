@@ -119,6 +119,78 @@ bool FrondRapiProvision(FrondRapi* client, const uint16_t* config, uint16_t* rep
 }
 
 
+bool FrondRapiSyncStart(FrondRapi* client, const uint16_t* params, uint32_t* result) {
+    RapiContext* rapi = &client->rapi;
+    // CeSyncStart: the device hands params to its ActiveSync application.
+    return rapi_context_begin_command(rapi, 0x59) && rapi2_buffer_write_string(rapi->send_buffer, params) &&
+           rapi2_context_call(rapi) && rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) &&
+           rapi_buffer_read_uint32(rapi->recv_buffer, result);
+}
+
+bool FrondRapiStartReplication(FrondRapi* client, uint32_t* result) {
+    RapiContext* rapi = &client->rapi;
+    // CeStartReplication: posts start replication to the device's ActiveSync window.
+    return rapi_context_begin_command(rapi, 0x02) && rapi2_context_call(rapi) &&
+           rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) &&
+           rapi_buffer_read_uint32(rapi->recv_buffer, result);
+}
+
+bool FrondRapiSyncResume(FrondRapi* client, uint32_t* result) {
+    RapiContext* rapi = &client->rapi;
+    // CeSyncResume: lets the device start desktop syncs again.
+    return rapi_context_begin_command(rapi, 0x10) && rapi2_context_call(rapi) &&
+           rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) &&
+           rapi_buffer_read_uint32(rapi->recv_buffer, result);
+}
+
+bool FrondRapiSyncPause(FrondRapi* client, uint32_t* result) {
+    RapiContext* rapi = &client->rapi;
+    // CeSyncPause: holds the device's desktop syncs until CeSyncResume.
+    return rapi_context_begin_command(rapi, 0x0f) && rapi2_context_call(rapi) &&
+           rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) &&
+           rapi_buffer_read_uint32(rapi->recv_buffer, result);
+}
+
+uint32_t FrondRapiRegOpenKey(FrondRapi* client, uint32_t key, const uint16_t* subKey, uint32_t* result) {
+    RapiContext* rapi = &client->rapi;
+    // CeRegOpenKeyEx: the device answers its error, then the key on success.
+    int32_t status = 31;  // ERROR_GEN_FAILURE
+    if (!rapi_context_begin_command(rapi, 0x2f) || !rapi_buffer_write_uint32(rapi->send_buffer, key) ||
+        !rapi2_buffer_write_string(rapi->send_buffer, subKey) || !rapi2_context_call(rapi) ||
+        !rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) ||
+        !rapi_buffer_read_int32(rapi->recv_buffer, &status)) return 31;
+    if (status == 0 && !rapi_buffer_read_uint32(rapi->recv_buffer, result)) return 31;
+    return (uint32_t)status;
+}
+
+uint32_t FrondRapiRegQueryValue(FrondRapi* client, uint32_t key, const uint16_t* name, uint32_t* type, void* data,
+                                uint32_t* size) {
+    RapiContext* rapi = &client->rapi;
+    // CeRegQueryValueEx: sends the buffer size; the device answers type, full size and up to that many bytes.
+    int32_t status = 31;
+    if (!rapi_context_begin_command(rapi, 0x37) || !rapi_buffer_write_uint32(rapi->send_buffer, key) ||
+        !rapi2_buffer_write_string(rapi->send_buffer, name) || !rapi_buffer_write_uint32(rapi->send_buffer, *size) ||
+        !rapi2_context_call(rapi) || !rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) ||
+        !rapi_buffer_read_int32(rapi->recv_buffer, &status)) return 31;
+    if (status != 0) return (uint32_t)status;
+    uint32_t full = 0;
+    if (!rapi_buffer_read_uint32(rapi->recv_buffer, type) || !rapi_buffer_read_uint32(rapi->recv_buffer, &full))
+        return 31;
+    const uint32_t count = full < *size ? full : *size;
+    if (count && !rapi_buffer_read_data(rapi->recv_buffer, data, count)) return 31;
+    *size = full;
+    return 0;
+}
+
+uint32_t FrondRapiRegCloseKey(FrondRapi* client, uint32_t key) {
+    RapiContext* rapi = &client->rapi;
+    int32_t status = 31;
+    if (!rapi_context_begin_command(rapi, 0x32) || !rapi_buffer_write_uint32(rapi->send_buffer, key) ||
+        !rapi2_context_call(rapi) || !rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) ||
+        !rapi_buffer_read_int32(rapi->recv_buffer, &status)) return 31;
+    return (uint32_t)status;
+}
+
 uint32_t FrondRapiOpenFile(FrondRapi* client, const uint16_t* path) {
     return _CeCreateFile2(&client->rapi, path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                           FILE_ATTRIBUTE_NORMAL, 0);
