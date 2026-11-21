@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -6,6 +7,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 spec = importlib.util.spec_from_file_location('metrics', ROOT / 'tools/analyze-gameplay.py')
 metrics = importlib.util.module_from_spec(spec); spec.loader.exec_module(metrics)
 
@@ -70,7 +72,7 @@ class GameplayMetrics(unittest.TestCase):
             ]:
                 with self.subTest(script=script):
                     path.write_text(script)
-                    result = subprocess.run([str(ROOT / 'build/benchmark-replay'), '--check-replay', str(path), '1000'], capture_output=True)
+                    result = subprocess.run([str(OBJ / 'benchmark-replay'), '--check-replay', str(path), '1000'], capture_output=True)
                     self.assertEqual(result.returncode == 0, valid, result.stderr)
 
 if __name__ == '__main__':

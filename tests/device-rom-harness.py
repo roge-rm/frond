@@ -144,7 +144,7 @@ class HarnessTest(unittest.TestCase):
             argv = ['device-rom', '--device', 'sony-clie-tg50', '--launcher', '--resets', '--nor',
                     str(self.root / 'missing-nor' if missing == 'original' else self.nor),
                     '--sha256', data['nor_sha256'], '--expected-faults', str(expectation)]
-            with self.subTest(missing=missing), patch.object(rom, 'ROOT', self.root), \
+            with self.subTest(missing=missing), patch.object(rom, 'ROOT', self.root), patch.object(rom, 'OBJ', self.root / 'build'), \
                  patch.object(rom, 'CORE', self.root / 'missing-core' if missing == 'core' else core), \
                  patch.object(sys, 'argv', argv), contextlib.redirect_stderr(io.StringIO()), \
                  self.assertRaises(SystemExit) as error:
@@ -158,7 +158,7 @@ class HarnessTest(unittest.TestCase):
         probe.touch()
         args = self.args(launcher=True)
         args.fault_contract = {}
-        with patch.object(rom, 'ROOT', self.root):
+        with patch.object(rom, 'ROOT', self.root), patch.object(rom, 'OBJ', self.root / 'build'):
             tests = [test for test in rom.suite(args) if test._testMethodName == 'test_running_session_rollback']
             with patch.object(rom, 'run_guest', return_value=subprocess.CompletedProcess([], 77, '', 'unsupported')):
                 result = unittest.TextTestRunner(stream=io.StringIO()).run(unittest.TestSuite(tests))
@@ -192,7 +192,7 @@ class HarnessTest(unittest.TestCase):
         argv = ['device-rom', '--device', 'sony-clie-tg50', '--nor', str(self.nor),
                 '--sha256', data['nor_sha256'], '--launcher', '--resets',
                 '--expected-faults', str(expectation), '--evidence', str(evidence)]
-        with patch.object(rom, 'ROOT', self.root), patch.object(rom, 'CORE', core), \
+        with patch.object(rom, 'ROOT', self.root), patch.object(rom, 'OBJ', self.root / 'build'), patch.object(rom, 'CORE', core), \
              patch.object(rom, 'suite', side_effect=replace_source), patch.object(sys, 'argv', argv), \
              patch.object(rom, 'launcher_fixture', return_value=fixture), \
              patch.object(rom, 'run_guest', return_value=subprocess.CompletedProcess([], 0, 'continued guest input', '')), \

@@ -2,7 +2,7 @@
 """Boots the HP iPAQ rx1950's eboot and OS on the S3C2442 machine past the kernel's first debug lines,
 until the file system has written pages to NAND, and checks nothing stopped the run before its budget.
 
-    tests/rx1950-boot.py build/rx1950-boot
+    tests/rx1950-boot.py build/out/rx1950-boot
 
 eboot's lines come from UART0, with the serial cable attached, and the kernel's from its debug text ring
 (nk.log). Skips when the

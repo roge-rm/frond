@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Runs build/test-storage-settle, then reads each leftover card it settled with mtools and
+"""Runs build/out/test-storage-settle, then reads each leftover card it settled with mtools and
 checks it holds what the app that made it says (tests/fixtures/card-leftovers/*/*.expect).
 Needs a UTF-8 locale for mtools to show the non-ASCII name."""
 
 from pathlib import Path
+import os
 import struct
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 FIXTURES = ROOT / 'tests/fixtures/card-leftovers'
 
 
@@ -39,7 +41,7 @@ def listing(image):
 
 
 def main():
-    binary = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'build/test-storage-settle')
+    binary = Path(sys.argv[1] if len(sys.argv) > 1 else OBJ / 'test-storage-settle')
     with tempfile.TemporaryDirectory(prefix='storage-settle-') as work:
         out = Path(work)
         subprocess.run([str(binary), str(FIXTURES), str(out)], check=True, cwd=ROOT)

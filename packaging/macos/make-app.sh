@@ -1,13 +1,13 @@
 #!/bin/sh
 # Builds out/Frond.app (the desktop with the cores beside it) and out/Frond-VERSION-ARCH.dmg.
-# Run from the repository root after out/frond, out/frond-68k and build/desktop/frond-desktop exist.
+# Run from the repository root after out/frond, out/frond-68k and build/out/desktop/frond-desktop exist.
 set -eu
 VERSION=$(head -n 1 VERSION)
 ARCH=$(uname -m)
 APP=out/Frond.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp build/desktop/frond-desktop "$APP/Contents/MacOS/Frond"
+cp build/out/desktop/frond-desktop "$APP/Contents/MacOS/Frond"
 cp out/frond out/frond-68k "$APP/Contents/MacOS/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

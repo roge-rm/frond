@@ -5,7 +5,7 @@
 
 A blank stick is made, attached, formatted by the guest (the probe's format step), written and read
 back, ejected and inserted, write protected, saved with the stick and loaded again, then taken out
-for Files: the frontends' Files edits the freed file host-side (--storage-tool, build/test-storage-ms
+for Files: the frontends' Files edits the freed file host-side (--storage-tool, build/out/test-storage-ms
 from make test-storage-ms, stands in for it) and put-in links it again. At the end it is taken out
 once more, which settles its writes into stick.frondms. --tg50-stick is a formatted stick a TG50
 wrote: the T415 has to mount it. --tg50 puts the T415's stick in a TG50 session (out/frond; the smoke
@@ -16,6 +16,7 @@ speed, so it takes a few minutes.
 import argparse, os, signal, struct, subprocess, sys, time
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
@@ -25,7 +26,7 @@ p.add_argument('--probe', type=Path, required=True)
 p.add_argument('--evidence', type=Path, required=True)
 p.add_argument('--core', type=Path, default=ROOT / 'out/frond-68k')
 p.add_argument('--card-tool', type=Path, default=ROOT / 'out/frond')
-p.add_argument('--storage-tool', type=Path, default=ROOT / 'build/test-storage-ms')
+p.add_argument('--storage-tool', type=Path, default=OBJ / 'test-storage-ms')
 p.add_argument('--tg50-stick', type=Path)
 p.add_argument('--tg50', nargs='?', const='', metavar='SESSION', help="read the T415's stick on the TG50 (its smoke session unless SESSION)")
 p.add_argument('--size', type=int, default=8)

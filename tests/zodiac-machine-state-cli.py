@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Zodiac machine states through the boot probe: one process saves, another loads and ends like an uninterrupted run."""
 from pathlib import Path
+import os
 import gzip
 import re
 import struct
@@ -8,7 +9,8 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / 'build/zodiac-boot-probe'
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE = OBJ / 'zodiac-boot-probe'
 BUDGET = 15000
 
 

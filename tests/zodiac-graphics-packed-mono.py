@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Private virtual packed 1bpp policy CLI, using only a short generated ROM."""
 from pathlib import Path
+import os
 import struct
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / 'build/zodiac-boot-probe'
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE = OBJ / 'zodiac-boot-probe'
 FLAG = '--graphics-virtual-packed-mono'
 PROFILE = '--graphics-profile=virtual5744-compatible-8mib'
 BOOT = '--bootstrap-peripherals'

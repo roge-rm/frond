@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 with tempfile.TemporaryDirectory(prefix='zodiac-mmcsd-', dir=ROOT/'build') as work:
     rom = bytearray(0x7d0000)
     def word(at, value): struct.pack_into('<I', rom, at, value)
@@ -110,7 +111,7 @@ with tempfile.TemporaryDirectory(prefix='zodiac-mmcsd-', dir=ROOT/'build') as wo
         thumb(0x4cfe80,[0x4770])
         thumb(0x4c8f98,[0x4800,0x4770]); word(0x4c8f9c,0x2904)
     path=Path(work)/'generated.rom'; path.write_bytes(rom)
-    result=subprocess.run([str(ROOT/'build/zodiac-boot-probe'),str(path),'linked','500000','exact',
+    result=subprocess.run([str(OBJ / 'zodiac-boot-probe'),str(path),'linked','500000','exact',
         '--bootstrap-peripherals','--imx1-mmcsd-empty-slot','--trace=peripherals'],
         capture_output=True,text=True,timeout=30)
     output=result.stdout+result.stderr

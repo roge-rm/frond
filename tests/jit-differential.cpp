@@ -14,10 +14,10 @@
 // cut down to the shortest block that still fails the same way and printed with its seed,
 // which reproduces it exactly.
 //
-// build/test-jit-differential               directed tests and the fixed seeds 1 to 30000
-// build/test-jit-differential --seed N      one case (--show prints the block first, --trace
+// build/out/test-jit-differential               directed tests and the fixed seeds 1 to 30000
+// build/out/test-jit-differential --seed N      one case (--show prints the block first, --trace
 //                                           steps both engines through it)
-// build/test-jit-differential --seeds A:B [--duration S] [--no-directed]
+// build/out/test-jit-differential --seeds A:B [--duration S] [--no-directed]
 //                                           seeds A to B-1 (A: for no end), for at most S s
 // --max-unchecked L sets the JIT's unchecked limit (FROND_JIT_MAX_UNCHECKED) for the run.
 // --hot N compiles a block once its start has been reached N times (FROND_JIT_HOT), with the

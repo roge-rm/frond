@@ -8,7 +8,8 @@ import struct
 import subprocess
 import tempfile
 ROOT=Path(__file__).resolve().parents[1]
-PROBE=ROOT/os.environ.get('FROND_ZODIAC_PROBE','build/test-zodiac-machine-cli')
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE=ROOT/os.environ.get('FROND_ZODIAC_PROBE',str(OBJ / 'test-zodiac-machine-cli'))
 with tempfile.TemporaryDirectory(prefix='zodiac-machine-frame-',dir=ROOT/'build') as work:
     rom=bytearray(0x7d0000)
     def word(at,value):struct.pack_into('<I',rom,at,value)

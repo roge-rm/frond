@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Generated-ROM checks for a passive instruction-entry window."""
 from pathlib import Path
+import os
 import re
 import struct
 import subprocess
 import tempfile
+OBJ = Path(os.environ.get('FROND_OBJ') or Path(__file__).resolve().parents[1] / 'build/out')
 
 with tempfile.TemporaryDirectory(prefix='zodiac-trace-window-', dir='build') as work:
     rom = Path(work) / 'generated.rom'
@@ -19,7 +21,7 @@ with tempfile.TemporaryDirectory(prefix='zodiac-trace-window-', dir='build') as 
     rom.write_bytes(image)
 
     def run(*flags, budget=5000, code=2):
-        result = subprocess.run(['build/zodiac-boot-probe', str(rom), 'physical', str(budget),
+        result = subprocess.run([str(OBJ / 'zodiac-boot-probe'), str(rom), 'physical', str(budget),
                                  'exact', '--trace=peripherals', *flags],
                                 capture_output=True, text=True, timeout=15)
         assert result.returncode == code, (flags, result.stdout, result.stderr)

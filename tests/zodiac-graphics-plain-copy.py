@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / os.environ.get('FROND_ZODIAC_PROBE', 'build/zodiac-boot-probe')
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE = ROOT / os.environ.get('FROND_ZODIAC_PROBE', str(OBJ / 'zodiac-boot-probe'))
 with tempfile.TemporaryDirectory(prefix='zodiac-plain-copy-', dir=ROOT / 'build') as work:
     rom = bytearray(0x7d0000)
     for base in (0, 0x20000):

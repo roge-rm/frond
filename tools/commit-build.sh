@@ -49,10 +49,17 @@ build() {
     if complete "$dir"; then return; fi
     src=$HOME/.worktrees/frond/commit-build-$hash
     tmp=$store/.out-$hash.tmp.$$
-    trap 'rm -rf "$tmp"; git worktree remove --force "$src" 2>/dev/null; rm -rf "$src"' EXIT
+    scratch=/mnt/scratch/frond/core-commit-build-$hash
+    trap 'rm -rf "$tmp" "$scratch"; git worktree remove --force "$src" 2>/dev/null; rm -rf "$src"' EXIT
     git worktree remove --force "$src" 2>/dev/null || rm -rf "$src"
     git worktree prune
     git worktree add -q --detach "$src" "$full"
+    # Its build/out and out/ go on the scratch SSD when it's there, deleted with the worktree.
+    if [ -d /mnt/scratch/frond ]; then
+        rm -rf "$scratch"; mkdir -p "$scratch/obj" "$scratch/out" "$src/build"
+        ln -s "$scratch/obj" "$src/build/out"
+        ln -s "$scratch/out" "$src/out"
+    fi
     echo "commit-build: building $hash in $src" >&2
     (cd "$src" && "$store/build-slot.sh" heavy build make -j"${BUILD_JOBS:-32}" BUILD_JOBS="${BUILD_JOBS:-32}" out/frond out/frond-68k benchmark-replay) >&2
     if dirty "$src" || [ "$(git -C "$src" rev-parse HEAD)" != "$full" ]; then
@@ -61,7 +68,7 @@ build() {
         exit 1
     fi
     rm -rf "$tmp"; mkdir -p "$tmp"
-    cp "$src/out/frond" "$src/out/frond-68k" "$src/build/benchmark-replay" "$tmp/"
+    cp "$src/out/frond" "$src/out/frond-68k" "$src/build/out/benchmark-replay" "$tmp/"
     echo "$full" > "$tmp/COMMIT"
     rm -rf "$dir"
     mv "$tmp" "$dir"
@@ -118,7 +125,8 @@ prune)
     # Temporary folders from a stopped build or copy, an hour old and not open.
     if [ $on_tdeck = 0 ]; then
         for d in $(find "$store" -maxdepth 1 -name '.out-*.tmp.*' -mmin +60 2>/dev/null) \
-                $(find "$HOME/.worktrees/frond" -maxdepth 1 -name 'commit-build-*' -mmin +60 2>/dev/null); do
+                $(find "$HOME/.worktrees/frond" -maxdepth 1 -name 'commit-build-*' -mmin +60 2>/dev/null) \
+                $(find /mnt/scratch/frond -maxdepth 1 -name 'core-commit-build-*' -mmin +60 2>/dev/null); do
             if lsof +D "$d" >/dev/null 2>&1; then echo "in use, kept: $d"; continue; fi
             echo "remove $d"
             [ $dry = 1 ] || { git worktree remove --force "$d" 2>/dev/null || rm -rf "$d"; }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the TX compatibility matrix; firmware-backed rows are optional and private."""
+import os
 import argparse
 from datetime import datetime, timezone
 import importlib.util
@@ -14,6 +15,7 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 TOOLING = ('tools/check-compatibility.py', 'tools/compatibility-results.py',
            'tools/frond-run.py', 'tools/build-palm-probe.py',
            'tests/palm/compatibility-probe.c', 'tests/palm/compatibility-probe.rcp',
@@ -35,7 +37,7 @@ runner = module('frond_run', ROOT / 'tools/frond-run.py')
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', required=True, type=Path, help='new private result directory')
-    p.add_argument('--core-test', type=Path, default=ROOT / 'build/test-compatibility-core')
+    p.add_argument('--core-test', type=Path, default=OBJ / 'test-compatibility-core')
     p.add_argument('--core', type=Path, default=ROOT / 'out/frond')
     origin = p.add_mutually_exclusive_group()
     origin.add_argument('--session', type=Path, help='optional user-supplied ready TX session')

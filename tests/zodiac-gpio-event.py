@@ -5,6 +5,7 @@ import os
 import struct
 import subprocess
 import tempfile
+OBJ = Path(os.environ.get('FROND_OBJ') or Path(__file__).resolve().parents[1] / 'build/out')
 
 with tempfile.TemporaryDirectory(prefix='zodiac-gpio-event-', dir='build') as work:
     rom = Path(work) / 'generated.rom'
@@ -19,7 +20,7 @@ with tempfile.TemporaryDirectory(prefix='zodiac-gpio-event-', dir='build') as wo
              0xeafffffe, 0x0021c024, 0x0021c324)
     struct.pack_into('<8I', image, 0x100, *words)
     rom.write_bytes(image)
-    base = [os.environ.get('FROND_ZODIAC_PROBE', 'build/zodiac-boot-probe'), str(rom), 'physical', '10', 'exact']
+    base = [os.environ.get('FROND_ZODIAC_PROBE', str(OBJ / 'zodiac-boot-probe')), str(rom), 'physical', '10', 'exact']
     baseline = ['--bootstrap-peripherals', '--gpio-a-input=0x80', '--gpio-d-input=0x600']
     def run(*flags, initial=baseline, code=2):
         result = subprocess.run(base + initial + list(flags), capture_output=True, text=True, timeout=15)

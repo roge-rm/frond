@@ -20,7 +20,7 @@ Fast interprets code until a block has been reached a few times, then compiles i
 
 Correctness against the interpreter: `make test-jit-differential` and `make test-jit-overshoot` (see [testing.md](testing.md)). The benchmark below runs Exact unless `FROND_JIT=1` is set, so run it both ways and compare speed and hashes.
 
-`make frond-jit` copies `out/frond` to `build/frond-jit`, kept for older scripts. `make benchmark-replay-jit` does the same for the benchmark.
+`make frond-jit` copies `out/frond` to `build/out/frond-jit`, kept for older scripts. `make benchmark-replay-jit` does the same for the benchmark.
 
 ## 68k timing
 
@@ -42,12 +42,12 @@ The Tapwave Zodiac 2 has its own clock model (the i.MX1's PLLs, CS5 waits and th
 
 ## Fixed guest-time benchmarks
 
-`make benchmark-replay` builds `build/benchmark-replay`, which restores a session and runs a replay for a fixed amount of guest time with no wall-clock pacing:
+`make benchmark-replay` builds `build/out/benchmark-replay`, which restores a session and runs a replay for a fixed amount of guest time with no wall-clock pacing:
 
 ```sh
-./build/benchmark-replay SESSION REPLAY GUEST_MS MHZ|original on|off NEWDIR [PALM_EPOCH_SECONDS]
-./build/benchmark-replay --device sony-clie-tg50 NOR.bin REPLAY GUEST_MS MHZ|original on|off NEWDIR
-./build/benchmark-replay --device palm-tx --nand NAND.bin NOR.bin REPLAY GUEST_MS MHZ|original on|off NEWDIR
+./build/out/benchmark-replay SESSION REPLAY GUEST_MS MHZ|original on|off NEWDIR [PALM_EPOCH_SECONDS]
+./build/out/benchmark-replay --device sony-clie-tg50 NOR.bin REPLAY GUEST_MS MHZ|original on|off NEWDIR
+./build/out/benchmark-replay --device palm-tx --nand NAND.bin NOR.bin REPLAY GUEST_MS MHZ|original on|off NEWDIR
 ```
 
 - `MHZ` is the core clock the run is capped at; `original` follows the device's own clock, as its CCCR and CLKCFG set it. `on|off` is PCM scheduling: compare on with on and off with off, because off changes what the guest runs.
@@ -61,9 +61,9 @@ The Tapwave Zodiac 2 has its own clock model (the i.MX1's PLLs, CS5 waits and th
 
 Workloads:
 - A game level: `tests/fixtures/bike-level1.replay` (10000 guest ms) on a paused level-one session you make with the runner (install the app, resume it with `--resume-app`, save). Check the screenshots to see the replay really plays.
-- `make frondbench` builds `build/frondbench/FrondBench.prc`, a Palm benchmark with Integer, Memory, Drawing and Database tests (needs `m68k-palmos-gcc`, `pilrc`, `build-prc` and `PALM_SDK`). The build is reproducible: `tools/frondbench/FrondBench.prc` is the committed copy, and `make check-frondbench` rebuilds and compares (skipped when the tools are missing). A run writes its results to a new Memo (device, ROM and OS version, the four times, total and checksum) and shows the same on screen. Run it once in the guest, save the session, and replay `tests/fixtures/frondbench-run-tx0414.replay` (40000 guest ms) from it. Its Run tap is placed for the reference session, which was calibrated by hand; `frondbench-run.replay` is the same tap for cores before 0414.
-- `make benchmark-menu` builds `build/benchmark-menu`; `./build/benchmark-menu SESSION [MIPS]` runs 24 guest seconds of a playing SunVox session with the menu closed and reports CPU cost, guest latency and the first menu region's hash.
-- `make benchmark-session` builds `build/benchmark-session`; `./build/benchmark-session SESSION SECONDS MIPS [NEW.raw]` runs a playing session without pacing and drains the codec directly, to compare execution cost apart from SDL starvation. Silence statistics skip the first 132300 frames. It rejects sessions with an embedded card.
+- `make frondbench` builds `build/out/frondbench/FrondBench.prc`, a Palm benchmark with Integer, Memory, Drawing and Database tests (needs `m68k-palmos-gcc`, `pilrc`, `build-prc` and `PALM_SDK`). The build is reproducible: `tools/frondbench/FrondBench.prc` is the committed copy, and `make check-frondbench` rebuilds and compares (skipped when the tools are missing). A run writes its results to a new Memo (device, ROM and OS version, the four times, total and checksum) and shows the same on screen. Run it once in the guest, save the session, and replay `tests/fixtures/frondbench-run-tx0414.replay` (40000 guest ms) from it. Its Run tap is placed for the reference session, which was calibrated by hand; `frondbench-run.replay` is the same tap for cores before 0414.
+- `make benchmark-menu` builds `build/out/benchmark-menu`; `./build/out/benchmark-menu SESSION [MIPS]` runs 24 guest seconds of a playing SunVox session with the menu closed and reports CPU cost, guest latency and the first menu region's hash.
+- `make benchmark-session` builds `build/out/benchmark-session`; `./build/out/benchmark-session SESSION SECONDS MIPS [NEW.raw]` runs a playing session without pacing and drains the codec directly, to compare execution cost apart from SDL starvation. Silence statistics skip the first 132300 frames. It rejects sessions with an embedded card.
 
 `make speed-check` runs both workloads through `benchmark-replay` and prints host time per guest second, host MIPS, frame and PCM hashes and the FrondBench times per test. JSON goes to `build/speed-check/<timestamp>/speed-check.json`. Set `BIKE_SESSION` and `FRONDBENCH_SESSION` to your session files (no defaults; a workload without one is skipped), `SPEED_MIPS` (the clock in MHz, or `original`; default 100) and `SPEED_BENCH` (another benchmark binary). `SPEED_HOST=user@host` runs it on another machine over ssh in `~/frond-speed/` (`SPEED_SSH_KEY` picks a key). `SPEED_REAL_MS=Integer=1000,Memory=500,...` adds your real device's FrondBench times and a ratio column. Host MIPS is guest instructions per host second. Host time per guest second under 1 means faster than real time at that clock.
 

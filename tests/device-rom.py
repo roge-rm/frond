@@ -19,6 +19,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 # FROND_DEVICE_IMAGES is the firmware folder (deviceimages/palm).
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
@@ -329,10 +330,10 @@ def suite(args):
                 self.assertEqual(core.close(), 0)
 
         @unittest.skipUnless(args.launcher and args.device not in DEVICES_68K and
-                             (ROOT / 'build/test-device-session').is_file(),
+                             (OBJ / 'test-device-session').is_file(),
                              'pass --launcher and build device-session-probe for running-state rollback')
         def test_running_session_rollback(self):
-            result = run_guest([str(ROOT / 'build/test-device-session'), str(session_file(self.launcher_session()))],
+            result = run_guest([str(OBJ / 'test-device-session'), str(session_file(self.launcher_session()))],
                                capture_output=True, text=True, timeout=args.boot_timeout)
             (self.root / 'rollback.log').write_text(result.stdout + result.stderr)
             if result.returncode == 77:
@@ -388,7 +389,7 @@ def main():
         if args.expected_faults:
             if args.synthetic_rejection or not args.nor or not args.nor.is_file() or not core_for(args.device).is_file():
                 raise ValueError('expected-faults qualification requires the original NOR and built core')
-            if not (ROOT / 'build/test-device-session').is_file():
+            if not (OBJ / 'test-device-session').is_file():
                 raise ValueError('build device-session-probe before expected-faults qualification')
             args.fault_contract_bytes = args.expected_faults.read_bytes()
             args.fault_contract_hash = hashlib.sha256(args.fault_contract_bytes).hexdigest()
