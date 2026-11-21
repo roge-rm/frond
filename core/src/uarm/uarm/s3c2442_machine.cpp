@@ -141,8 +141,11 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
         if (pa >= sdramBase && uint64_t(pa) + size <= uint64_t(sdramBase) + bank6Size) {
             const uint32_t at = (pa - sdramBase) % this->options.ramBytes;
             if (at + size > this->options.ramBytes) return false;
-            if (write) std::memcpy(ramBuffer + at, &value, size);
-            else {
+            if (write) {
+                std::memcpy(ramBuffer + at, &value, size);
+                // Fast: drops translated and decoded code the write lands on, as a CPU store does.
+                if (fastOn) cpuArm920LeanStoredBytes(cpuCore, sdramBase + at, size);
+            } else {
                 value = 0;
                 std::memcpy(&value, ramBuffer + at, size);
             }

@@ -61,8 +61,9 @@ struct Stats {
     uint64_t codePages = 0, unwatched = 0, pagesWritten = 0, mapChecks = 0, mapChanged = 0, unwatchedDropped = 0;
     uint64_t fetchDropped = 0;
     // ARM920T: code pages of another PID's slot a flush found moved, those found mapped as before when the
-    // PID came back, and compile-thread blocks installed under another PID than the one they were fetched under.
-    uint64_t suspends = 0, resumes = 0, otherPidInstalls = 0;
+    // PID came back, compile-thread blocks installed under another PID than the one they were fetched under,
+    // and suspended pages whose blocks at their MVA a later flush dropped.
+    uint64_t suspends = 0, resumes = 0, otherPidInstalls = 0, suspendedMvaDrops = 0;
     std::unordered_map<uint32_t, uint64_t> interpPc;
     // Instruction at each interpreted PC (Thumb: the halfword), and the guest PC current
     // at each whole-cache invalidation with the word there.
@@ -140,8 +141,9 @@ struct Stats {
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
                 (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
-        fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu\n", (unsigned long long)suspends,
-                (unsigned long long)resumes, (unsigned long long)otherPidInstalls);
+        fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu suspendedMvaDrops %llu\n",
+                (unsigned long long)suspends, (unsigned long long)resumes, (unsigned long long)otherPidInstalls,
+                (unsigned long long)suspendedMvaDrops);
         fprintf(stderr,
                 "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
                 "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
@@ -447,6 +449,7 @@ struct Env final : public A32::UserCallbacks {
         uint32_t access;
         bool suspended = false;  // in suspended[] until its PID runs again
         bool stale = false;  // suspended, and its blocks from before were read from another physical page
+        bool noted = false;  // suspended, and code was noted from it since: blocks at its MVA may be live
     };
     std::unordered_map<uint32_t, uint32_t> accessPages;  // code pages by access
     uint64_t permContext = ~0ull;
@@ -487,6 +490,7 @@ struct Env final : public A32::UserCallbacks {
         auto it = code.find(page);
         if (it == code.end()) it = NotePage(page);
         else if (it->second.suspended) it = NoteSuspended(it, page);
+        if (it->second.suspended) it->second.noted = true;
         // Fast blocks: the CPU keeps the 64-byte lines by physical page; a store to one drops the page's code.
         if (arm920 && !lineBound && it->second.host) cpuJitNoteArm920Code(cpu, (it->second.pa << 12) | (va & 0xfffu));
         uint8_t *lines = it->second.lines;
@@ -639,20 +643,30 @@ struct Env final : public A32::UserCallbacks {
 
     // After a TLB flush, drop the code of every page whose mapping moved. ARM920T Fast blocks: a page of
     // another PID's slot (with a tag) is suspended instead, dropping only blocks run at its MVA, which any
-    // PID can reach. Suspended pages wait for Resume.
+    // PID can reach. Suspended pages wait for Resume; one with code noted since (compiled at its MVA, by
+    // another PID or the owner under the absent tag) drops the blocks at its MVA again when it moves.
     void CheckMappings() {
         stats.mapChecks++;
         std::vector<uint32_t> moved;
         const uint32_t current = cpuGetPid(cpu) >> 25;
         const bool suspend = arm920 && !lineBound && pidTags;
         for (auto &[page, c] : code) {
-            if (c.suspended) continue;
+            if (c.suspended && !c.noted) continue;
             uint32_t access;
             if (CodePa(page, access) == c.pa && access == c.access) continue;
+            if (c.suspended) {
+                c.noted = false;
+                if (jit->HasCodeIn(page << 12, 4096)) {
+                    stats.suspendedMvaDrops++;
+                    jit->InvalidateCacheRange(page << 12, 4096);
+                }
+                continue;
+            }
             const uint32_t slot = page >> 13;
             if (suspend && slot && slot != current && pidTags[slot]) {
                 stats.suspends++;
                 c.suspended = true;
+                c.noted = false;
                 suspended[slot].push_back(page);
                 if (jit->HasCodeIn(page << 12, 4096)) jit->InvalidateCacheRange(page << 12, 4096);
                 continue;
@@ -1073,6 +1087,8 @@ struct Env final : public A32::UserCallbacks {
     // Ahead of need: as SnapshotCode, reading only RAM and ROM. Code that reaches anything
     // else isn't compiled ahead.
     std::unique_ptr<A32::CodeSnapshot> SnapshotCodeAhead(A32::VAddr pc, bool thumb, bool whole) override {
+        // Under the absent tag nothing below 32 MB is ever installed, so it isn't compiled ahead either.
+        if (absent && pc < 0x02000000u) return nullptr;
         cpuJitMemoryOnly(cpu, true);
         auto s = SnapshotCode(pc, thumb, whole);
         cpuJitMemoryOnly(cpu, false);
