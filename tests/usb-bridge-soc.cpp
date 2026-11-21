@@ -23,6 +23,57 @@ static std::vector<uint8_t> saved(SoC& soc) {
     return std::vector<uint8_t>(data, data + state.size);
 }
 
+static void exerciseCablePutBack(SocPXA& soc, const std::vector<uint8_t>& unplugged,
+                                 const UsbHostBridge::Config& busyPort) {
+    // Give the bridge a plugged default while keeping the real GPIO and load hook.
+    const UsbHostBridge::Backend backend{
+        [&] { return soc.GetUsbPort(); },
+        [&](bool attached) { assert(soc.SetUsbTestCable(attached)); },
+        [&] { return soc.UsbTestCableAttached(); },
+        [] { return true; },
+        [&] { return soc.UsbHostIoPaused(); },
+        [&] { return soc.GetTime(); },
+        [&] { soc.KickUsbHost(); },
+        [&](const UsbHostHooks* hooks) { soc.SetUsbHostHooks(hooks); },
+        {}, {}, {}, {}
+    };
+    std::string error;
+    UsbHostBridge bridge;
+    assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
+    assert(!soc.UsbTestCableAttached());
+    assert(bridge.Start(backend, {}, error) && bridge.Describe() == "off");
+    assert(soc.UsbTestCableAttached());
+
+    assert(bridge.Start(backend, {HostSerial::Kind::pty, 0}, error));
+    assert(!soc.UsbTestCableAttached());
+    bridge.Stop();
+    assert(soc.UsbTestCableAttached());
+
+    assert(bridge.Start(backend, {HostSerial::Kind::pty, 0}, error));
+    assert(!soc.UsbTestCableAttached());
+    assert(bridge.Start(backend, {}, error) && bridge.Describe() == "off");
+    assert(soc.UsbTestCableAttached());
+    assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
+    assert(!soc.UsbTestCableAttached());
+    bridge.Service();
+    assert(soc.UsbTestCableAttached());
+    assert(soc.SetUsbTestCable(false));
+    bridge.Service();
+    assert(!soc.UsbTestCableAttached());
+    puts("PASS: USB off puts back a plugged default once after a load, and at start and stop");
+
+    bridge.Stop();
+    assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
+    assert(!soc.UsbTestCableAttached());
+    assert(!bridge.Start(backend, busyPort, error) && !error.empty());
+    assert(bridge.Describe() == "off" && soc.UsbTestCableAttached());
+    assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
+    assert(!soc.UsbTestCableAttached());
+    bridge.Service();
+    assert(soc.UsbTestCableAttached());
+    puts("PASS: a port in use puts back a plugged default, also after a load");
+}
+
 static void exercise(DeviceType5 type) {
     const bool tg50=type==deviceTypeTG50, tx=type==deviceTypeTX, zire=type==deviceTypeZire72, pxa270=tx || zire;
     std::vector<uint8_t> rom(tg50?4096:zire?14942208:(tx?16:8) * 1024 * 1024), nand(zire||tg50?0:tx?132 * 1024 * 1024:34603008, 0xff);
@@ -137,16 +188,19 @@ static void exercise(DeviceType5 type) {
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     UsbHostBridge failed;
+    const UsbHostBridge::Config busyPort{HostSerial::Kind::tcp, ntohs(address.sin_port)};
     error.clear();
-    assert(!failed.Start(&soc, {HostSerial::Kind::tcp, ntohs(address.sin_port)}, error) && !error.empty());
+    assert(!failed.Start(&soc, busyPort, error) && !error.empty());
     assert(!soc.UsbTestCableAttached() && failed.Describe() == "off");
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     failed.Service();
     assert(!soc.UsbTestCableAttached());
     failed.Stop();
-    close(listener);
     puts("PASS: a port in use leaves USB off with the default cable state, also after a load");
+
+    if (tx) exerciseCablePutBack(soc, unplugged, busyPort);
+    close(listener);
 }
 
 int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeFrankenE2);exercise(deviceTypeZire72);exercise(deviceTypeTG50);}
