@@ -677,7 +677,64 @@ static void delaySkipTests() {
     }
 }
 
+// The other polls skipDelay takes, Exact against Fast at every stop: the microsecond delay with lr, r1 and r2
+// (017150bc), and the touch driver's ADCCON wait for ECFLG (01711890) over conversions started one after another.
+static void pollSkipTests() {
+    auto same = [](S3c2442Machine& exact, S3c2442Machine& fast) {
+        for (const uint64_t slice : {1u, 7u, 1000u, 33333u, 250000u, 1000000u, 5000000u}) {
+            exact.run(slice);
+            fast.run(slice);
+            for (unsigned r = 0; r < 17; ++r)
+                if (cpuGetRegExternal(exact.cpu(), r) != cpuGetRegExternal(fast.cpu(), r)) {
+                    std::fprintf(stderr, "poll skip: r%u %08x against %08x after %" PRIu64 " (pc %08x %08x, skips %" PRIu64 ")\n", r,
+                                 cpuGetRegExternal(exact.cpu(), r), cpuGetRegExternal(fast.cpu(), r), exact.retired(),
+                                 exact.pc(), fast.pc(), fast.delaySkips());
+                    assert(false);
+                }
+            assert(exact.retired() == fast.retired() && exact.nanoseconds() == fast.nanoseconds());
+        }
+    };
+    // mov lr, #0x53000000; ldr r1, [lr, #8]; mov r2, #0x40
+    // ldr r3, [lr, #8]; sub r3, r1, r3; mov r3, r3, lsl #16; cmp r2, r3, lsr #16; bhs back
+    // add r8, r8, #1; b to the first ldr
+    for (const bool known : {true, false}) {
+        std::vector<uint32_t> program{0xe3a0e453, 0xe59e1008, 0xe3a02040, 0xe59e3008, 0xe0413003,
+                                      0xe1a03803, 0xe1520823, 0x2afffffa, 0xe2888001, 0xeafffff6};
+        if (!known) program[4] = 0xe0513003;  // subs r3, r1, r3
+        auto exact = make(program), fast = make(program);
+        if (!fast->setFastEngine(true)) return;
+        for (auto* m : {exact.get(), fast.get()}) {
+            m->watchdog.wtdat = m->watchdog.wtcnt = 0xffff;
+            m->watchdog.wtcon = 0x0220;
+        }
+        same(*exact, *fast);
+        assert(cpuGetRegExternal(fast->cpu(), 8) > 50);
+        assert(known ? fast->delaySkips() > 50 : fast->delaySkips() == 0);
+    }
+    // mov r4, #0x58000000; ldr r0, [r4]; orr r0, r0, #1; str r0, [r4] (ENABLE_START)
+    // ldr r3, [r4]; tst r3, #0x8000; beq back
+    // add r7, r7, #1; ldr r5, [r4, #12]; b to the first ldr
+    for (const unsigned variant : {0u, 1u, 2u}) {
+        std::vector<uint32_t> program{0xe3a04458, 0xe5940000, 0xe3800001, 0xe5840000, 0xe5943000,
+                                      0xe3130902, 0x0afffffc, 0xe2877001, 0xe594500c, 0xeafffff6};
+        if (variant == 2) program[5] = 0xe2139902;  // ands r9, r3, #0x8000
+        auto exact = make(program), fast = make(program);
+        if (!fast->setFastEngine(true)) return;
+        for (auto* m : {exact.get(), fast.get()}) {
+            m->adc.adccon = (1u << 14) | (49u << 6);  // prescaler on, 50, out of standby
+            if (variant == 1) {
+                m->adc.adctsc = 4;  // AUTO_PST: ADCDLY first
+                m->adc.adcdly = 0x2000;
+            }
+        }
+        same(*exact, *fast);
+        assert(cpuGetRegExternal(fast->cpu(), 7) > 10 && fast->adc.conversions > 10);
+        assert(variant == 2 ? fast->delaySkips() == 0 : fast->delaySkips() > 10);
+    }
+}
+
 int main() {
+    pollSkipTests();
     delaySkipTests();
     usbTests();
     hostServiceTests();

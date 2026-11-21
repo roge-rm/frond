@@ -89,7 +89,7 @@ class S3c2442Machine {
     uint64_t jitRetired() const { return jitRetiredCount; }
     uint64_t leanRetired() const { return leanRetiredCount; }
     uint64_t stepRetired() const { return stepRetiredCount; }
-    // Fast: the WTCNT delay loops passed at once (skipDelay) and the instructions they would have run. delaySkip
+    // Fast: the WTCNT delay loops and ADC waits passed at once (skipDelay) and the instructions they would have run. delaySkip
     // turns it off for measuring (FROND_DELAY_SKIP=0 at create does too).
     uint64_t delaySkips() const { return delaySkipCount; }
     uint64_t delaySkipRetired() const { return delaySkipRetiredCount; }
