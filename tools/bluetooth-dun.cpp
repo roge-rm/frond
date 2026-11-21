@@ -1,12 +1,14 @@
 // The Bluetooth phone's modem for bluetooth-opp-peer --dun, see bluetooth-dun.h.
 #include "bluetooth-dun.h"
 
+#include <cstdio>
 #include <memory>
 #include <string>
 
 #include "modem/HayesModem.h"
 #include "modem/PppServer.h"
 #include "net/SlirpIp.h"
+#include "sync/SyncManager.h"
 
 using frondModem::HayesModem;
 
@@ -20,9 +22,21 @@ struct frond_dun {
 
 extern "C" {
 
-struct frond_dun* frond_dun_create(void) {
+struct frond_dun* frond_dun_create(const char* sync_folder, const char* sync_profile) {
     auto dun = std::make_unique<frond_dun>();
     if (!dun->network.Valid()) return nullptr;
+    if (sync_folder) {
+        dun->network.EnableZodiacNetSyncWakeup();
+        frondSync::SyncOptions options;
+        options.root = sync_folder;
+        if (sync_profile) options.profile = sync_profile;
+        options.network = true;
+        auto& manager = frondSync::SyncManager::Get();
+        manager.Configure(options);
+        manager.SetListener([](const std::string& status) {
+            std::fprintf(stderr, "Network HotSync: %s\n", status.c_str());
+        });
+    }
     return dun.release();
 }
 

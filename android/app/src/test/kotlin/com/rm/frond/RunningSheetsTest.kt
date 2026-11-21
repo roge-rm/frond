@@ -137,6 +137,7 @@ class RunningSheetsTest {
             val rows = RunningSheets.connectionRows(device, off, false)
             assertEquals(ConnRow.BEAM, rows.first())
             assertEquals(device.id, device.hotSyncButton, ConnRow.HOTSYNC in rows)
+            assertEquals(device.id, device.zodiac, ConnRow.CRADLE in rows)
             assertEquals(device.id, !device.serialAbsent, ConnRow.SERIAL in rows)
             assertEquals(device.id, !device.runs68k || device.usb, ConnRow.USB in rows)
             assertEquals(device.id, !device.runs68k || device.bluetooth, ConnRow.BLUETOOTH in rows)

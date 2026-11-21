@@ -452,7 +452,7 @@ void SocIMX1::StateChanged() {
     if (RestoringCheckpoint()) return;
     pcm.restart();
     // A load or reset brings the state's own D22 (high unless saved while held); the host's button is up.
-    cradleDown = false;
+    cradleDown = cradleReleasePending = false;
     hotSyncTicks = 0;
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
@@ -472,12 +472,14 @@ std::function<void()> SocIMX1::CapturePeripheralInput() {
     };
     auto fence = std::make_shared<Fence>(*this);
     // The Bluetooth shim's guest-time marks go back with the guest; its controller and started state stay the host's.
-    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks, sound = pcm.sound,
+    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks,
+            cradleReleasePending = cradleReleasePending, sound = pcm.sound,
             lastDoze = bluetooth.lastDoze, lastStart = bluetooth.lastStart, portShutSince = bluetooth.portShutSince,
             driverR9 = bluetooth.driverR9] {
         this->input = input;
         this->cradleDown = cradleDown;
         this->hotSyncTicks = hotSyncTicks;
+        this->cradleReleasePending = cradleReleasePending;
         pcm.sound = sound;
         bluetooth.lastDoze = lastDoze;
         bluetooth.lastStart = lastStart;
@@ -762,18 +764,29 @@ bool SocIMX1::SetCradleInputs(bool& setting, bool attached) {
 // the awake ROM's key scan (20084af4) ignores it; asleep, its low level interrupt wakes the Zodiac.
 bool SocIMX1::SetCradleButton(bool down) {
     if (halted) return false;
+    if (down && cradleDown) {
+        cradleReleasePending = false;
+        return true;
+    }
+    // A short host hold can miss the ROM's key scan when an Exact guest is behind.
+    if (!down && cradleDown && hotSyncTicks) {
+        cradleReleasePending = true;
+        return true;
+    }
     uint32_t values[4]{}, masks[4]{};
     masks[3] = cradlePinD;
     values[3] = down ? 0 : cradlePinD;
     if (!replaceGpioInputs(machine, values, masks)) return false;
     cradleDown = down;
-    hotSyncTicks = 0;
+    cradleReleasePending = false;
+    hotSyncTicks = down && CradleAttached() ? ticksPerSecond / 2 : 0;
     return true;
 }
 
 bool SocIMX1::PressHotSync() {
     if (halted || cradleDown || !SetCradleButton(true)) return false;
     hotSyncTicks = ticksPerSecond / 2;
+    cradleReleasePending = true;
     return true;
 }
 
@@ -1040,9 +1053,9 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     if (hotSyncTicks) {
         const uint64_t passed = waiting ? std::max(wanted, elapsed) : elapsed;
         hotSyncTicks = passed >= hotSyncTicks ? 0 : hotSyncTicks - passed;
-        // A release the machine refuses just now is tried again after the next run.
-        if (!hotSyncTicks && !SetCradleButton(false)) hotSyncTicks = 1;
     }
+    // A release the machine refuses just now is tried again after the next run.
+    if (cradleReleasePending && !hotSyncTicks) SetCradleButton(false);
     const bool stopped = imx1MachineSystemStopped(machine);
     if (wasStopped && !stopped) ++wakes;
     wasStopped = stopped;

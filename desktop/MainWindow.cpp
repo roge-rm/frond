@@ -268,6 +268,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (figure != speedText) { speedText = figure; if (!embedded) updateBarMachine(); }
         }
         if (command == "gamepad-state" && ok) gamepadReply(message);
+        if (command == "cradle-setting") showCradle(ok ? message : QString());
         if (command == "battery-state" || command == "battery") {
             if (command == "battery" && !ok) { batterySent.clear(); failure(message); return; }
             if (!ok) return;
@@ -670,7 +671,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     resetButton = reset;
     auto* rotate = button(tr("Rotate"), "rotate");
     rotateButton = rotate;
-    // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
+    cradleToggle = new QCheckBox(tr("Cradle attached"), root);
+    cradleToggle->setObjectName("cradleAttached");
+    connectionsLayout->addWidget(cradleToggle, 0, Qt::AlignLeft);
+    connect(cradleToggle, &QCheckBox::clicked, this, [this](bool attached) {
+        if (!send("cradle", attached ? "attached" : "detached")) refresh();
+    });
     hotSyncButton = button(tr("HotSync"), "hotsync");
     displayLayout->addWidget(rotate, 0, Qt::AlignLeft);
     displayLayout->addStretch();
@@ -875,7 +881,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
-        holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); showCamera("pattern");
+        holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); cradleSetting.clear(); cradleStartupPending = false; showCamera("pattern");
         mipsTimer->stop();
         batteryTimer->stop();
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
@@ -954,6 +960,14 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (stopping) { save(); return; }
             if (ok) { if (!syncRunning) notify(message, 0); }
             else { log->appendPlainText(command + ": " + message); notify(message, 8000); }
+            return;
+        }
+        if (command == "cradle-setting") {
+            const bool startup = cradleStartupPending;
+            cradleStartupPending = false;
+            showCradle(ok ? message : QString());
+            if (stopping) save();
+            else if (startup) afterCradle();
             return;
         }
         if (command == "db-list") { databasesReply(ok, code, message); return; }
@@ -1165,6 +1179,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send("hold-state");
             return;
         }
+        if (!stopping && frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2" &&
+            (command == "cradle" || command == "reset" || command == "hard-reset") && send("cradle-setting")) return;
         // frond-68k's state replies go on with the card's key and flags: the first word says it.
         const auto word = message.section(' ', 0, 0);
         if (command == "sd-state" || command == "ms-state") {
@@ -1510,6 +1526,9 @@ void MainWindow::refresh() {
     if (speedBox->count() != frondSessions::speedChoices(m68k).size())
         fillSpeedBox(speedBox, m68k, frondSessions::speedName(runningPreferences));
     liveDisplay({});
+    shown(frondFirmware::deviceId(currentDevice()) == "tapwave-zodiac-2", {cradleToggle});
+    cradleToggle->setEnabled(enabled && !cradleSetting.isEmpty());
+    cradleToggle->setChecked(cradleSetting == "attached");
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
     shown(!m68k, {rotateButton});
     contrast->setEnabled(enabled);
@@ -2030,9 +2049,21 @@ void MainWindow::afterDevice() {
     // Asks the core what it supports, once a second until it answers, then the host battery once a minute.
     batteryTimer->start(1000);
     batteryTick();
+    if (frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2" && send("cradle-setting")) {
+        cradleStartupPending = true;
+        return;
+    }
+    afterCradle();
+}
+void MainWindow::afterCradle() {
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
          storageSupported() ? cardCommand("state", 0) : "network-state");
 }
+void MainWindow::showCradle(const QString& state) {
+    cradleSetting = state == "attached" || state == "detached" ? state : QString();
+    refresh();
+}
+
 // The game controller's state, asked in the background each second and when the Machine menu opens,
 // so a session load or a peripheral taking the connector shows in the menu.
 void MainWindow::pollGamepad() {
@@ -2622,6 +2653,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     sessionPath = target;
     holdKnown = holdOn = false;
     gamepadState.clear();
+    cradleSetting.clear();
+    cradleStartupPending = false;
     const auto caps = frondFirmware::capabilities(startDevice);
     const bool m68k = frondFirmware::runs68k(startDevice);
     if (m68k) {

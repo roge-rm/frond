@@ -19,6 +19,7 @@
 #include "modem/HayesModem.h"
 #include "modem/LineSwitch.h"
 #include "modem/PppServer.h"
+#include "net/NetSyncWakeup.h"
 #include "net/SlirpIp.h"
 
 using namespace frondModem;
@@ -715,14 +716,14 @@ static uint16_t Sum(const Bytes& b, size_t start, size_t length, uint32_t sum = 
     return uint16_t(~sum);
 }
 
-static Bytes IpPacket(uint8_t protocol, const Bytes& body) {
+static Bytes IpPacket(uint8_t protocol, const Bytes& body, uint32_t destination = frondNet::hostAddress) {
     Bytes b(20 + body.size(), 0);
     b[0] = 0x45;
     Put16(b, 2, uint16_t(b.size()));
     b[8] = 64;
     b[9] = protocol;
     Put32(b, 12, frondNet::guestAddress);
-    Put32(b, 16, frondNet::hostAddress);
+    Put32(b, 16, destination);
     Put16(b, 10, Sum(b, 0, 20));
     std::copy(body.begin(), body.end(), b.begin() + 20);
     const uint32_t pseudo = Get16(b, 12) + Get16(b, 14) + Get16(b, 16) + Get16(b, 18) + protocol + body.size();
@@ -731,13 +732,14 @@ static Bytes IpPacket(uint8_t protocol, const Bytes& body) {
     return b;
 }
 
-static Bytes Udp(uint16_t sport, uint16_t dport, const Bytes& payload) {
+static Bytes Udp(uint16_t sport, uint16_t dport, const Bytes& payload,
+                 uint32_t destination = frondNet::hostAddress) {
     Bytes b(8);
     Put16(b, 0, sport);
     Put16(b, 2, dport);
     Put16(b, 4, uint16_t(8 + payload.size()));
     b.insert(b.end(), payload.begin(), payload.end());
-    return IpPacket(17, b);
+    return IpPacket(17, b, destination);
 }
 
 static Bytes Tcp(uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ack, uint8_t flags, const Bytes& data = {}) {
@@ -940,34 +942,71 @@ static void TestSlirp() {
 static void TestNetSyncWakeup() {
     frondNet::SlirpIp net;
     CHECK(net.Valid());
-    const Bytes wakeup = {0xfa, 0xde, 0x01, 0x00, 0x0a, 0x00, 0x02, 0x02, 0, 0, 0, 0, 'f', 'r', 'o', 'n', 'd', 0};
-    const Bytes packet = Udp(1031, 14237, wakeup);
-    net.Input(packet.data(), packet.size(), 1000 * ms);
+    Bytes wakeup = {0xfa, 0xde, 0x01, 0x00, 0x0a, 0x00, 0x02, 0x02, 0, 0, 0, 0, 'f', 'r', 'o', 'n', 'd', 0};
     Bytes answer;
-    CHECK(net.Receive(answer));
-    CHECK(answer.size() == 20 + 8 + wakeup.size());
-    if (answer.size() != 20 + 8 + wakeup.size()) return;
-    CHECK(answer[9] == 17 && Get32(answer, 12) == frondNet::hostAddress && Get32(answer, 16) == frondNet::guestAddress);
-    CHECK(Sum(answer, 0, 20) == 0);
-    CHECK(Get16(answer, 20) == 14237 && Get16(answer, 22) == 1031 && Get16(answer, 24) == 8 + wakeup.size());
-    const uint32_t pseudo = Get16(answer, 12) + Get16(answer, 14) + Get16(answer, 16) + Get16(answer, 18) + 17 +
-                            uint32_t(8 + wakeup.size());
-    CHECK(Sum(answer, 20, 8 + wakeup.size(), pseudo) == 0);
-    Bytes expected = wakeup;
-    expected[2] = 2;
-    CHECK(Bytes(answer.begin() + 28, answer.end()) == expected);
-    CHECK(!net.Receive(answer));
+    // Legacy Palm and Zodiac send the signature in opposite byte orders.
+    uint64_t now = 1000 * ms;
+    for (uint16_t port : {1031, 1032}) {
+        const Bytes packet = Udp(port, 14237, wakeup);
+        net.Input(packet.data(), packet.size(), now);
+        now += ms;
+        CHECK(net.Receive(answer));
+        CHECK(answer.size() == 20 + 8 + wakeup.size());
+        if (answer.size() != 20 + 8 + wakeup.size()) return;
+        CHECK(answer[9] == 17 && Get32(answer, 12) == frondNet::hostAddress && Get32(answer, 16) == frondNet::guestAddress);
+        CHECK(Sum(answer, 0, 20) == 0);
+        CHECK(Get16(answer, 20) == 14237 && Get16(answer, 22) == port && Get16(answer, 24) == 8 + wakeup.size());
+        const uint32_t pseudo = Get16(answer, 12) + Get16(answer, 14) + Get16(answer, 16) + Get16(answer, 18) + 17 +
+                                uint32_t(8 + wakeup.size());
+        CHECK(Sum(answer, 20, 8 + wakeup.size(), pseudo) == 0);
+        Bytes expected = wakeup;
+        expected[2] = 2;
+        CHECK(Bytes(answer.begin() + 28, answer.end()) == expected);
+        CHECK(!net.Receive(answer));
+        std::swap(wakeup[0], wakeup[1]);
+    }
     // Other UDP to that port, and an answer packet, go on to slirp as before.
     const Bytes other = Udp(1031, 14237, {0xfa, 0xde, 0x02, 0x00});
-    net.Input(other.data(), other.size(), 1001 * ms);
+    net.Input(other.data(), other.size(), 1002 * ms);
     const Bytes short_ = Udp(1031, 14237, {0xfa, 0xde});
-    net.Input(short_.data(), short_.size(), 1002 * ms);
-    net.Poll(1003 * ms);
+    net.Input(short_.data(), short_.size(), 1003 * ms);
+    net.Poll(1004 * ms);
     // With nothing on the host's UDP 14237, slirp may hand back an ICMP port unreachable; no
     // UDP answer comes.
     bool udp = false;
     while (net.Receive(answer)) udp |= answer.size() >= 20 && answer[9] == 17;
     CHECK(!udp);
+
+    constexpr uint32_t zodiacAddress = 0x0202000a;
+    const Bytes zodiac = {0xde, 0xfa, 1, 0, 2, 2, 0, 10, 0, 0, 0, 0, 'f', 'r', 'o', 'n', 'd', 0};
+    const Bytes swapped = Udp(1033, 14237, zodiac, zodiacAddress);
+    CHECK(frondNet::NetSyncWakeupAnswer(swapped.data(), swapped.size()).empty());
+    const Bytes wrongAddress = Udp(1033, 14237, zodiac, zodiacAddress + 1);
+    CHECK(frondNet::NetSyncWakeupAnswer(wrongAddress.data(), wrongAddress.size(), true).empty());
+    Bytes mismatched = zodiac;
+    std::swap(mismatched[0], mismatched[1]);
+    const Bytes wrongSignature = Udp(1033, 14237, mismatched, zodiacAddress);
+    CHECK(frondNet::NetSyncWakeupAnswer(wrongSignature.data(), wrongSignature.size(), true).empty());
+    mismatched = zodiac;
+    mismatched[7] = 9;
+    const Bytes wrongPayload = Udp(1033, 14237, mismatched, zodiacAddress);
+    CHECK(frondNet::NetSyncWakeupAnswer(wrongPayload.data(), wrongPayload.size(), true).empty());
+
+    net.EnableZodiacNetSyncWakeup();
+    net.Reset();
+    net.Input(swapped.data(), swapped.size(), 1005 * ms);
+    CHECK(net.Receive(answer));
+    CHECK(answer.size() == 20 + 8 + zodiac.size());
+    if (answer.size() != 20 + 8 + zodiac.size()) return;
+    CHECK(Get32(answer, 12) == zodiacAddress && Get32(answer, 16) == frondNet::guestAddress);
+    CHECK(Sum(answer, 0, 20) == 0);
+    const uint32_t pseudo = Get16(answer, 12) + Get16(answer, 14) + Get16(answer, 16) + Get16(answer, 18) + 17 +
+                            uint32_t(8 + zodiac.size());
+    CHECK(Sum(answer, 20, 8 + zodiac.size(), pseudo) == 0);
+    Bytes expected = zodiac;
+    expected[2] = 2;
+    CHECK(Bytes(answer.begin() + 28, answer.end()) == expected);
+    CHECK(!net.Receive(answer));
 }
 
 // ---- The HotSync number: routing and the byte bridge ----

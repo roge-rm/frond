@@ -48,10 +48,10 @@ def main():
                source / 'lib/.libs/libbluetooth-internal.a']
     run('cc', *flags, '-c', patched, '-o', output / 'bthost.o')
     slirp = subprocess.check_output(['pkg-config', '--cflags', '--libs', 'slirp'], text=True).split()
-    run('c++', '-std=c++17', '-O2', '-g', '-I' + str(common), *slirp, '-c', ROOT / 'tools/bluetooth-dun.cpp',
+    run('c++', '-std=c++17', '-O2', '-g', '-pthread', '-I' + str(ROOT / 'core/src/common'), *slirp, '-c', ROOT / 'tools/bluetooth-dun.cpp',
         '-o', output / 'bluetooth-dun.o')
     run('cc', *flags, '-I' + str(ROOT / 'tools'), '-c', ROOT / 'tools/bluetooth-opp-peer.c', '-o', output / 'peer.o')
-    run('c++', output / 'peer.o', output / 'bluetooth-dun.o', output / 'bthost.o', *objects,
+    run('c++', '-pthread', output / 'peer.o', output / 'bluetooth-dun.o', output / 'bthost.o', *objects,
         common / 'libcommon-net.a', common / 'libcommon.a', *slirp, '-o', output / 'bluetooth-opp-peer')
     if args.test:
         run('cc', *flags, ROOT / 'tests/bluetooth-bthost-config.c', *objects,

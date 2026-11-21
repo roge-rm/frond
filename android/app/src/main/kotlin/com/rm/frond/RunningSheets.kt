@@ -108,7 +108,7 @@ object RunningSheets {
 
     // ---- Connections ----
 
-    enum class ConnRow { BEAM, BLUETOOTH, SERIAL, USB, USB_RETRY, USB_PORT, WIFI_MODULE, DEBUGGER, HOTSYNC }
+    enum class ConnRow { BEAM, BLUETOOTH, SERIAL, USB, USB_RETRY, USB_PORT, WIFI_MODULE, DEBUGGER, CRADLE, HOTSYNC }
 
     fun connectionRows(
         device: Device, usb: NetRelay.Phase, debuggerShown: Boolean,
@@ -122,6 +122,7 @@ object RunningSheets {
         if (PrintJob.rowShown(device)) rows += ConnRow.USB_PORT
         if (device.builtInWifi) rows += ConnRow.WIFI_MODULE
         if (debuggerShown) rows += ConnRow.DEBUGGER
+        if (device.zodiac) rows += ConnRow.CRADLE
         if (device.hotSyncButton) rows += ConnRow.HOTSYNC
         return rows
     }

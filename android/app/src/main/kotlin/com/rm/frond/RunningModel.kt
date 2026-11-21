@@ -1036,6 +1036,35 @@ class RunningModel(
 
     fun rotate() = device("Rotating", "Couldn't rotate", true) { send(it, "rotate") }
 
+    var cradleAttached by mutableStateOf<Boolean?>(null)
+        private set
+
+    private fun cradleSetting(reply: ControlLink.Reply): Boolean? = if (reply.ok) when (reply.message) {
+        "attached" -> true
+        "detached" -> false
+        else -> null
+    } else null
+
+    fun readCradle() {
+        val l = link ?: return
+        if (!device.zodiac || waitingForGdb) return
+        cradleAttached = null
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("cradle-setting", timeoutSeconds = 5) }
+            cradleAttached = cradleSetting(reply)
+        }
+    }
+
+    fun changeCradle(attached: Boolean) {
+        if (!device.zodiac || cradleAttached == null) return
+        device("Changing cradle", "Couldn't change the cradle", false) { l ->
+            val changed = l.request("cradle", if (attached) "attached" else "detached", timeoutSeconds = 30)
+            val current = l.request("cradle-setting", timeoutSeconds = 5)
+            activity.runOnUiThread { cradleAttached = cradleSetting(current) }
+            if (!changed.ok) changed.message else if (!current.ok) current.message else null
+        }
+    }
+
     // Presses the cradle's HotSync button and goes back to the Palm.
     fun hotSync() = device("Starting HotSync", "Couldn't start HotSync", true) { send(it, "hotsync") }
 

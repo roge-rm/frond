@@ -178,6 +178,8 @@ class MainWindow : public QMainWindow {
     // The core's reply to window-id: embeds the Palm, or keeps its own window.
     void embedReply(bool ok, const QString& message);
     void afterDevice();
+    void afterCradle();
+    void showCradle(const QString& state);
     void pollGamepad();
     void gamepadReply(const QString& message);
     void setBarShown(bool shown);
@@ -343,6 +345,9 @@ class MainWindow : public QMainWindow {
     QLabel *serialLabel, *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
     QSlider* contrast;
     QPushButton *rotateButton, *hotSyncButton;
+    QCheckBox* cradleToggle;
+    QString cradleSetting;
+    bool cradleStartupPending{false};
     bool protectionKnown{false}, protection2Known{false}, protectionStartsSecond{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};

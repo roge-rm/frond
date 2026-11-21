@@ -20,6 +20,7 @@ class SlirpIp : public IpNetwork {
     explicit SlirpIp(std::shared_ptr<frondSync::ActiveSyncSession> activeSync = {});
     ~SlirpIp() override;
     bool Valid() const;
+    void EnableZodiacNetSyncWakeup();
     void Input(const uint8_t* packet, size_t size, uint64_t now) override;
     void Poll(uint64_t now) override;
     bool Receive(std::vector<uint8_t>& packet) override;
