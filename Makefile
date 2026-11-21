@@ -258,6 +258,14 @@ test-sync-airsync: $(COMMON_LIB)
 		-o $(OBJ_ROOT)/test-sync-airsync
 	umask 077 && timeout 120 $(OBJ_ROOT)/test-sync-airsync build/sync-airsync-scratch
 
+.PHONY: test-sync-pwi
+test: test-sync-pwi
+test-sync-pwi:
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-pwi.cpp core/src/common/sync/PwiNote.cpp \
+		-o $(OBJ_ROOT)/test-sync-pwi
+	$(OBJ_ROOT)/test-sync-pwi
+
 # Build the PE shims for a Linux desktop that runs installers through Wine.
 WINDOWS_SHIM_CXX ?= i686-w64-mingw32-g++
 WINDOWS_SHIM_OUT ?= out/installer-shims
