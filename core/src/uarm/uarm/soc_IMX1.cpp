@@ -1,4 +1,5 @@
 #include "soc_IMX1.h"
+#include "input_trace.h"
 
 #include "syscall_dispatch.h"
 
@@ -53,10 +54,17 @@ namespace {
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
         // cradleHeld keeps the release after a load or reset off D22 once the host's cradle button is down again.
-        MachinePort(Imx1Machine* machine, bool cradleHeld) : machine(machine), cradleHeld(cradleHeld) {}
+        MachinePort(Imx1Machine* machine, bool cradleHeld, int* traceStick) : machine(machine), cradleHeld(cradleHeld), traceStick(traceStick) {}
         bool setControl(unsigned control, bool down) override {
-            return imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, false) == Imx1BootstrapAccess::ok &&
-                   imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
+            const bool set = imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, false) == Imx1BootstrapAccess::ok &&
+                             imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
+            if (inputTrace::on && set && control < unsigned(Imx1ZodiacControl::count)) {
+                uint32_t width = 0, height = 0;
+                const uint32_t* frame = imx1MachinePeekFrame(machine, width, height);
+                const auto& pin = imx1ZodiacControlPins[control];
+                inputTrace::applyControl(control, down, pin.port, pin.pin, frame, size_t(width) * height);
+            }
+            return set;
         }
         bool releaseControls() override {
             const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD | (cradleHeld ? 0 : cradlePinD)};
@@ -67,7 +75,15 @@ namespace {
             return imx1MachineReplacePenInputs(machine, pen, false) == Imx1BootstrapAccess::ok &&
                    imx1MachineReplacePenInputs(machine, pen, true) == Imx1BootstrapAccess::ok;
         }
-        bool setPen(bool down, int x, int y) override { return replacePen(zodiacPenInputs(down, x, y)); }
+        bool setPen(bool down, int x, int y) override {
+            const bool set = replacePen(zodiacPenInputs(down, x, y));
+            if (inputTrace::on && set) {
+                uint32_t width = 0, height = 0;
+                const uint32_t* frame = imx1MachinePeekFrame(machine, width, height);
+                inputTrace::applyPen(down, x, y, frame, size_t(width) * height);
+            }
+            return set;
+        }
         bool liftPen() override {
             auto pen = imx1MachinePenInputs(machine);
             if (!pen.contactKnown || !pen.contactDown) return true;
@@ -75,11 +91,20 @@ namespace {
             return replacePen(pen);
         }
         bool setStick(int x, int y) override {
-            return imx1MachineSetZodiacStick(machine, x, y, false) == Imx1BootstrapAccess::ok &&
-                   imx1MachineSetZodiacStick(machine, x, y, true) == Imx1BootstrapAccess::ok;
+            const bool set = imx1MachineSetZodiacStick(machine, x, y, false) == Imx1BootstrapAccess::ok &&
+                             imx1MachineSetZodiacStick(machine, x, y, true) == Imx1BootstrapAccess::ok;
+            if (inputTrace::on && set) {
+                uint32_t width = 0, height = 0;
+                const uint32_t* frame = imx1MachinePeekFrame(machine, width, height);
+                inputTrace::applyStick(x, y, traceStick[0] == 0 && traceStick[1] == 0, frame, size_t(width) * height);
+                traceStick[0] = x;
+                traceStick[1] = y;
+            }
+            return set;
         }
         Imx1Machine* machine;
         bool cradleHeld;
+        int* traceStick; // the last stick position sent, for the input trace
     };
 
     // Previews then commits one set of GPIO input pins.
@@ -251,7 +276,10 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     }
 };
 
-SocIMX1::~SocIMX1() { paceReleaseExternalMemory(this); }
+SocIMX1::~SocIMX1() {
+    inputTrace::clearGuestClock(machine);
+    paceReleaseExternalMemory(this);
+}
 
 HostUartPort* SocIMX1::SerialHostPort() {
     if (!serialPort) serialPort = std::make_unique<SerialPort>(*this);
@@ -295,6 +323,8 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
         return nullptr;
     }
     imx1MachineEnableYmf768(soc->machine);
+    inputTrace::setGuestClock([](void* m) { return imx1MachineGetStatus(static_cast<Imx1Machine*>(m)).time.ticks; },
+                              soc->machine);
     // Aborts and undefined instructions go to the guest's own handlers, as on a real Zodiac.
     // FROND_ZODIAC_STOP_ON_EXCEPTION stops the machine on them instead, for debugging.
     imx1MachineSetGuestExceptions(soc->machine, !std::getenv("FROND_ZODIAC_STOP_ON_EXCEPTION"));
@@ -788,13 +818,13 @@ void SocIMX1::PushStick() {
 void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
     const int control = zodiacControlFor(key);
     if (control < 0 || halted) return;
-    MachinePort port(machine, cradleDown);
+    MachinePort port(machine, cradleDown, traceStick);
     input.jam(port, unsigned(control), durationMsec);
 }
 
 // Hands queued host input to the machine. An input the machine refuses just now stays queued.
 void SocIMX1::PumpInput() {
-    MachinePort port(machine, cradleDown);
+    MachinePort port(machine, cradleDown, traceStick);
     input.hostTime(uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count()));
     input.pump(port);

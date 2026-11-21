@@ -1,9 +1,10 @@
 // RenderLink's event handover: queued events and ones pushed by another thread while the
 // filter goes in reach the guest queue once each, in order, and render resets ask for a
-// full redraw and a new renderer.
+// full redraw and a new renderer, and an event ends the guest thread's wait.
 #include <SDL.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -74,6 +75,36 @@ int main() {
     notices = link.TakeNotices(background);
     check(notices.redrawAll && notices.lost, "device reset makes a new renderer");
     SDL_SetEventFilter(nullptr, nullptr);
+
+    // The guest thread's wait ends when an event comes in, and runs its whole time without one.
+    {
+        RenderLink waiting(4, 4);
+        waiting.InstallFilter();
+        std::vector<RenderLink::Input> taken;
+        waiting.TakeInputs(taken);
+        auto started = std::chrono::steady_clock::now();
+        waiting.WaitForInput(20000);
+        const auto idle = std::chrono::steady_clock::now() - started;
+        check(idle >= std::chrono::milliseconds(19), "a wait with no input runs its time");
+        std::thread pusher([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            pushUser(1);
+        });
+        started = std::chrono::steady_clock::now();
+        waiting.WaitForInput(2000000);
+        const auto woken = std::chrono::steady_clock::now() - started;
+        pusher.join();
+        check(woken < std::chrono::milliseconds(500), "input ends the wait");
+        waiting.TakeInputs(taken);
+        check(taken.size() == 1 && taken[0].event.user.code == 1, "the waking event is queued");
+        // An event taken before the wait doesn't end the next one.
+        pushUser(2);
+        waiting.TakeInputs(taken);
+        started = std::chrono::steady_clock::now();
+        waiting.WaitForInput(20000);
+        check(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(19), "taken input doesn't wake");
+        SDL_SetEventFilter(nullptr, nullptr);
+    }
 
     SDL_Quit();
     if (failures) return 1;

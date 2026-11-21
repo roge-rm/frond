@@ -1,6 +1,7 @@
 #ifndef FROND_IMX1_GRAPHICS_ACQUISITION_H
 #define FROND_IMX1_GRAPHICS_ACQUISITION_H
 
+#include "input_trace.h"
 #include "imx1_bootstrap.h"
 #include <array>
 
@@ -128,6 +129,7 @@ class Imx1GraphicsAcquisition {
                                                std::array<uint32_t,2>{mode == 1 ? 0x09000000 | mode1Input :
                                                                                0x0a000000 | (aux ? auxInput : input[selectedSource]), 0};
                     remaining = conversionTicks;
+                    if (inputTrace::on && axes) inputTrace::stickSampled(input[0], input[1]);
                 } else if (!(v & 0x400)) {
                     // Stop cancels unfinished work. Completed records remain available to the guest.
                     remaining = 0;

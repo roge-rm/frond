@@ -8,7 +8,9 @@ import android.view.KeyEvent
 // Select Function and the left stick's click the stick's press. The map says which controller key
 // presses which of those; its defaults are that layout. A key mapped to a stick direction pushes the
 // stick all the way. The hat counts as the d-pad keys and the analogue triggers as L2 and R2, so they
-// follow the map too. The left stick always drives the analogue stick.
+// follow the map too. The left stick always drives the analogue stick. Either stick pushed past half
+// travel also presses what the map gives that direction (ControllerMap.stickKey), so the right stick can
+// be the Action keys.
 // Not thread-safe: call it from the UI thread.
 class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private val send: (Event) -> Unit) {
     sealed class Event {
@@ -30,6 +32,7 @@ class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private
         var sentY = 0
     }
     private val pads = mutableMapOf<Int, Pad>()
+    private val stickKeys = StickKeys()
 
     // Returns whether the key is one the map uses.
     fun key(device: Int, key: Int, down: Boolean): Boolean {
@@ -51,10 +54,13 @@ class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private
     }
 
     // Stick, hat and analogue trigger positions for one device: sticks and hats -1 to 1, triggers 0 to 1.
-    fun axes(device: Int, stickX: Float, stickY: Float, hatX: Float, hatY: Float, leftTrigger: Float, rightTrigger: Float) {
+    fun axes(device: Int, stickX: Float, stickY: Float, hatX: Float, hatY: Float, leftTrigger: Float, rightTrigger: Float,
+             rightX: Float = 0f, rightY: Float = 0f) {
         val pad = pads.getOrPut(device) { Pad() }
         pad.stickX = stickX
         pad.stickY = stickY
+        stickKeys.update(device, ControllerMap.STICK_LEFT, stickX, stickY) { key, down -> key(device, key, down) }
+        stickKeys.update(device, ControllerMap.STICK_RIGHT, rightX, rightY) { key, down -> key(device, key, down) }
         hat(device, pad, hatX, hatY)
         trigger(device, pad, KeyEvent.KEYCODE_BUTTON_L2, leftTrigger)
         trigger(device, pad, KeyEvent.KEYCODE_BUTTON_R2, rightTrigger)
@@ -89,6 +95,7 @@ class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private
 
     // Lets go of everything one device holds, as when it's unplugged.
     fun release(device: Int) {
+        stickKeys.forget(device)
         val pad = pads.remove(device) ?: return
         for (button in pad.holds.keys.sorted()) send(Event.Button(device, button, false))
         if (pad.sentX != 0) send(Event.Axis(device, AXIS_LEFT_X, 0))

@@ -1,4 +1,5 @@
 #include "imx1_bootstrap.h"
+#include "input_trace.h"
 #include "zodiac_ymf768_core.h"
 
 #include <cstring>
@@ -1345,6 +1346,7 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool 
             if (gate != Imx1BootstrapAccess::ok) return gate;
             asp = next;
             value = preview;
+            if (inputTrace::on && !write && address == 0x00215000) inputTrace::penFifoRead(value);
         }
         switch (status) {
             case Imx1AspAccess::ok: return Imx1BootstrapAccess::ok;
@@ -1397,6 +1399,7 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool 
             // A read only marks the port accessed, which a drive doesn't look at.
             if (write) runCache.driveSettled = false;
             value = preview;
+            if (inputTrace::on && !write && (address & 0xff) == 0x24) inputTrace::gpioRead((address >> 8) & 3, value);
         }
         switch (status) {
             case Imx1GpioAccess::ok: return Imx1BootstrapAccess::ok;

@@ -54,13 +54,11 @@ class ZodiacInput {
     // POLICY, host input only: a key or the pen stays down for as much guest time as the host held it,
     // up to this much, so a tap is as long for a guest that runs slower than the host's clock.
     static constexpr uint64_t longestOwedHoldTicks = ticksPerSecond / 2;
-    // POLICY, host input only: the stick travels like a thumb pushing it, at most stickStepCounts on
-    // an axis every stickStepTicks (15 ms), so rest to full takes 75 ms. The ROM's stick driver samples
-    // every 30 ms and drops a sample more than 200 counts from the one before (filter at 20095de6),
-    // which a host key going straight from rest to full (511) would trip. Two steps fit between two
-    // of its samples, so it sees 200 at most. How fast a real stick moves is not measured.
-    static constexpr int stickStepCounts = 100;
-    static constexpr uint64_t stickStepTicks = ticksPerSecond * 15 / 1000 + 1;
+    // The stick goes straight to where the host has it. The ROM's stick driver (20095de6) samples every
+    // 30 ms, drops a sample more than 200 counts from the raw one before (and keeps that raw sample to
+    // compare the next with), then averages the last three it took with weights 27, 46 and 27. So a jump
+    // from rest to full loses one sample and the driver reports full travel on the fourth, which a stick
+    // stepped 200 counts a sample at a time only reaches on the fifth. A real thumb that fast does the same.
 
     // After a load or a reset the host's keys and pen are up, whatever the machine had held.
     void machineChanged() {
@@ -156,20 +154,12 @@ class ZodiacInput {
         const uint64_t held = (hostNow - downHostAt) * ticksPerSecond / 1000;
         return held < least ? least : held > longestOwedHoldTicks ? longestOwedHoldTicks : held;
     }
-    static int stickToward(int from, int to) {
-        return to > from ? (to - from > stickStepCounts ? from + stickStepCounts : to)
-                         : (from - to > stickStepCounts ? from - stickStepCounts : to);
-    }
-    // A new machine's stick is put where the host's is in one go. After that it moves in steps.
+    // Puts the machine's stick where the host's is.
     void pumpStick(ZodiacInputPort& port) {
-        if (stickSet && (stickSettled() || now - stickMovedAt < stickStepTicks)) return;
-        const int x = stickSet ? stickToward(stickSetX, stickX) : stickX;
-        const int y = stickSet ? stickToward(stickSetY, stickY) : stickY;
-        if (!port.setStick(x, y)) return;
+        if (stickSettled() || !port.setStick(stickX, stickY)) return;
         stickSet = true;
-        stickSetX = x;
-        stickSetY = y;
-        stickMovedAt = now;
+        stickSetX = stickX;
+        stickSetY = stickY;
     }
     uint64_t now{0}, hostNow{0};
     bool releasePending{true}, liftPending{true};
@@ -183,7 +173,6 @@ class ZodiacInput {
     int penX{0}, penY{0};
     int stickX{0}, stickY{0}, stickSetX{0}, stickSetY{0};
     bool stickSet{false};
-    uint64_t stickMovedAt{0};
 };
 
 #endif

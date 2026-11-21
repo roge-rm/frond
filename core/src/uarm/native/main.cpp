@@ -1246,6 +1246,7 @@ bool gFastEngineMissing = false;
             const uint64_t renderStart = zodiacSpeed ? timestampUsec() : 0;
             sdlRenderer->Render(draw.pixels, draw.firstDirtyLine, draw.lastDirtyLine, draw.lcdEnabled,
                                 draw.buttons, draw.stick);
+            if (draw.pixels) inputTrace::presented();
             if (zodiacSpeed) zodiacSpeed->Drawn(draw.pixels != nullptr, timestampUsec() - renderStart);
         };
 
@@ -1296,6 +1297,7 @@ bool gFastEngineMissing = false;
                     if (!input.layout) {
                         if (input.event.type == SDL_AUDIODEVICEREMOVED && input.event.adevice.iscapture)
                             microphone.Removed(input.event.adevice.which);
+                        traceInputEvent("take", true, input.event);
                         sdlEventHandler.HandleEvent(input.event);
                         continue;
                     }
@@ -1364,6 +1366,7 @@ bool gFastEngineMissing = false;
                 serial.Service();
                 usb.Service();
                 infrared.Service();
+                inputTrace::note("cycle", true, "start");
                 if (zodiacSpeed) {
                     const uint64_t cycleStart = timestampUsec();
                     mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
@@ -1371,6 +1374,7 @@ bool gFastEngineMissing = false;
                 } else {
                     mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
                 }
+                inputTrace::note("cycle", true, "end");
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.
                 if (sdInsertPending || msInsertPending) {
                     const uint64_t time = soc->GetTime();
@@ -1414,6 +1418,7 @@ bool gFastEngineMissing = false;
                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
                         link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
+                        if (frame) inputTrace::published();
                         soc->ResetPendingFrame();
                     }
                     if (zodiacSpeed && frame) zodiacSpeed->HandedOver(timestampUsec() - handoffStart);
@@ -1522,7 +1527,7 @@ bool gFastEngineMissing = false;
 
                 performance.ReportWork(mainLoop.GetTimesliceSizeUsec());
                 const auto delay = mainLoop.GetSuggestedDelayUsec(timestampUsec());
-                if (delay > 10) usleep(delay);
+                if (delay > 10) link.WaitForInput(delay);
             }
         };
 
@@ -1586,11 +1591,11 @@ bool gFastEngineMissing = false;
             // pause and resume (which come as semaphores, not events) and checks AAudio.
             // On Android the filter gets touches and window events without a pump, so the
             // pump runs only after a window or app event and every 100 ms. X11 events only
-            // come in while SDL pumps, so the desktop pumps every 8 ms.
+            // come in while SDL pumps, so the desktop pumps every 2 ms (about 1% of a core).
 #ifdef __ANDROID__
             constexpr uint64_t pumpUsec = 100000;
 #else
-            constexpr uint64_t pumpUsec = 8000;
+            constexpr uint64_t pumpUsec = 2000;
 #endif
             uint64_t lastPump = 0;
             while (!link.Finished()) {

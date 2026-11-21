@@ -64,12 +64,63 @@ class ControllerTest {
     }
 
     @Test
-    fun assignTakesTheKeyAndReplacesTheButtonsKeys() {
+    fun assignAddsTheKeyAndTakesItFromItsOldButton() {
         val map = ControllerMap.defaults(Device.TX).assign(PalmButton.APP2, KeyEvent.KEYCODE_BUTTON_R1)
-        assertEquals(listOf(KeyEvent.KEYCODE_BUTTON_R1), map.keysFor(PalmButton.APP2))
+        assertEquals(listOf(KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_R1), map.keysFor(PalmButton.APP2))
         assertEquals(emptyList<Int>(), map.keysFor(PalmButton.APP4))
-        assertFalse(map.keys.containsKey(KeyEvent.KEYCODE_BUTTON_X))
+        // Assigning a key a button already has changes nothing.
+        assertEquals(map, map.assign(PalmButton.APP2, KeyEvent.KEYCODE_BUTTON_X))
         assertEquals(emptyList<Int>(), map.clear(PalmButton.CENTRE).keysFor(PalmButton.CENTRE))
+    }
+
+    @Test
+    fun removeTakesOffOneKey() {
+        val map = ControllerMap.defaults(Device.TX)
+        val removed = map.remove(KeyEvent.KEYCODE_BUTTON_L1)
+        assertEquals(listOf(KeyEvent.KEYCODE_BUTTON_START), removed.keysFor(PalmButton.APP1))
+        assertEquals(map.keys - KeyEvent.KEYCODE_BUTTON_L1, removed.keys)
+        assertEquals(removed, removed.remove(KeyEvent.KEYCODE_BUTTON_L1))
+    }
+
+    @Test
+    fun stickKeysSaveAndName() {
+        val up = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.UP)
+        val left = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.LEFT)
+        assertTrue(ControllerMap.isStickKey(up) && ControllerMap.isStickKey(left))
+        assertFalse(ControllerMap.isStickKey(KeyEvent.KEYCODE_BUTTON_A) || ControllerMap.isStickKey(KeyEvent.KEYCODE_BUTTON_16))
+        assertEquals("Right stick up", ControllerMap.keyName(up))
+        assertEquals("Left stick left", ControllerMap.keyName(left))
+        val map = ControllerMap.defaults(Device.TX).assign(PalmButton.APP3, up).assign(PalmButton.APP4, left)
+        assertEquals(map, ControllerMap.decode(map.encode(), Device.TX))
+        // A map saved before stick keys reads the same.
+        val old = ControllerMap.defaults(Device.TX)
+        assertEquals(old, ControllerMap.decode(old.encode(), Device.TX))
+        // Eight stick keys, all different.
+        val all = (0..1).flatMap { s -> StickDirection.entries.map { ControllerMap.stickKey(s, it) } }
+        assertEquals(8, all.toSet().size)
+    }
+
+    @Test
+    fun stickDirectionsPressWhatTheMapGivesThem() {
+        val rightUp = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.UP)
+        val rightLeft = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.LEFT)
+        val leftDown = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.DOWN)
+        val (c, sent) = input(ControllerMap(mapOf(rightUp to PalmButton.APP1, rightLeft to PalmButton.APP2, leftDown to PalmButton.MENU)))
+        c.axes(1, 0f, 0f, 0f, 0f, 0f, -0.4f)
+        assertEquals(emptyList<String>(), sent)
+        c.axes(1, 0f, 0f, 0f, 0f, 0f, -0.6f)
+        assertEquals(listOf("+app1"), sent)
+        // Held between the release and press points stays down.
+        c.axes(1, 0f, 0f, 0f, 0f, -0.7f, -0.4f)
+        assertEquals(listOf("+app1", "+app2"), sent)
+        c.axes(1, 0f, 0f, 0f, 0f, 0f, -0.2f)
+        assertEquals(listOf("+app1", "+app2", "-app2", "-app1"), sent)
+        // The left stick's direction presses its key as well as the 5-way.
+        sent.clear()
+        c.axes(1, 0f, 0.9f, 0f, 0f)
+        assertEquals(setOf("+down", "+menu"), sent.toSet())
+        c.release(1)
+        assertTrue(c.held.isEmpty())
     }
 
     @Test
@@ -150,5 +201,20 @@ class ControllerTest {
         // F5, the core's keyIdVoice.
         assertEquals(0x4000003E, PalmButtons.sdlKey(PalmButton.VOICE))
         assertEquals(0, PalmButtons.sdlKey(PalmButton.MENU))
+    }
+
+    @Test
+    fun triggersOnZAreNotARightStick() {
+        val axes = RightStickAxes()
+        // A 0..1 trigger is never a stick, even resting at -1.
+        assertEquals(0f, axes.value(1, 0, -1f, centred = false), 0f)
+        assertEquals(0f, axes.value(1, 0, 1f, centred = false), 0f)
+        // A centred axis passes through.
+        assertEquals(0.8f, axes.value(2, 0, 0f, centred = true) + axes.value(2, 0, 0.8f, centred = true), 0f)
+        // One that starts past the press point is ignored until it comes back to rest.
+        assertEquals(0f, axes.value(3, 1, -1f, centred = true), 0f)
+        assertEquals(0f, axes.value(3, 1, -0.6f, centred = true), 0f)
+        assertEquals(0.1f, axes.value(3, 1, 0.1f, centred = true), 0f)
+        assertEquals(0.9f, axes.value(3, 1, 0.9f, centred = true), 0f)
     }
 }

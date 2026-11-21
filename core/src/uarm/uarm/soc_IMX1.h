@@ -302,6 +302,7 @@ class SocIMX1 : public SoC {
     bool ApplyHeadphones();
     bool ApplyCradle();
     bool SetCradleInputs(bool& setting, bool attached);
+    int traceStick[2]{0, 0};
     bool headphones{false}, cradleDown{false}, cradle{false}, usbCable{false};
     // CLK32 ticks until a PressHotSync lets go of D22, 0 with none going.
     uint64_t hotSyncTicks{0};

@@ -554,6 +554,7 @@ open class FrondActivity : SDLActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    private val rightStick = RightStickAxes()
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             val pad = zodiacPad
@@ -567,6 +568,8 @@ open class FrondActivity : SDLActivity() {
                     event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y),
                     maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_LTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_BRAKE)),
                     maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_RTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_GAS)),
+                    rightStick.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
+                    rightStick.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)),
                 )
             } else if (!leaving) {
                 controller.axes(
@@ -575,6 +578,8 @@ open class FrondActivity : SDLActivity() {
                     event.getAxisValue(android.view.MotionEvent.AXIS_Y),
                     event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
                     event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y),
+                    rightStick.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
+                    rightStick.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)),
                 )
             }
             return true

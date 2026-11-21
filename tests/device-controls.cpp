@@ -2335,6 +2335,21 @@ static void clieGamepadJog(const char* directory) {
     }
 }
 
+static void zodiacRightStick() {
+    GamepadRightHeld held;
+    GamepadState pad;
+    auto down=[&](int rightY) {pad.rightY=int16_t(rightY);return (zodiacGamepadInput(pad,&held).keys&deviceKeyBit(keyIdHard1))!=0;};
+    assert(!down(16384));
+    assert(down(16385));
+    assert(down(12000) && down(11500));
+    assert(!down(11000));
+    assert(!down(12000));
+    assert(down(20000) && !down(0));
+    // Without held state the press point alone decides.
+    pad.rightY=12000;
+    assert(!(zodiacGamepadInput(pad).keys&deviceKeyBit(keyIdHard1)));
+}
+
 static void clieGamepad() {
     const auto& p=deviceControls(DeviceArt::tg50,true);
     const auto& plain=deviceControls(DeviceArt::tg50,false);
@@ -2710,6 +2725,12 @@ static void zodiacControls() {
             s.*member=true;all|=deviceKeyBit(key);
         }
         assert(zodiacGamepadInput(s).keys==all);
+        // The right stick: the Action keys by place past half travel, nothing short of it.
+        auto right=[](int x,int y) {GamepadState g;g.rightX=int16_t(x);g.rightY=int16_t(y);return zodiacGamepadInput(g);};
+        assert(right(16384,0).keys==0 && right(32767,0).keys==deviceKeyBit(keyIdHard2) && !right(32767,0).stick.held);
+        assert(right(-32768,0).keys==deviceKeyBit(keyIdHard3) && right(0,-32768).keys==deviceKeyBit(keyIdHard4));
+        assert(right(0,32767).keys==deviceKeyBit(keyIdHard1));
+        assert(right(32767,32767).keys==(deviceKeyBit(keyIdHard1)|deviceKeyBit(keyIdHard2)));
         // Every key the controller sends is on the Zodiac's bar, and none is Bluetooth or power.
         for(unsigned k=1;k<keyIdCount;++k) if(all&deviceKeyBit(KeyId(k))) assert(zodiacControlFor(KeyId(k))>=0);
         assert(!(all&(deviceKeyBit(keyIdBluetooth)|deviceKeyBit(keyIdPower))));
@@ -2760,8 +2781,15 @@ static void zodiacControls() {
     padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,false,2);st=guest.lastStick();assert(st.x==1 && st.y==1);
     padButton(SDL_CONTROLLER_BUTTON_DPAD_DOWN,false,1);st=guest.lastStick();assert(st.x==1 && st.y==0);
     padAxis(SDL_CONTROLLER_AXIS_LEFTX,0,2);st=guest.lastStick();assert(st.x==0 && st.y==0);guest.expect({});
-    // The other axes do nothing.
-    padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT,32767);guest.expect({});guest.noStick();
+    // The right stick past half travel holds the Action key that way, by place, and never moves the stick.
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTX,16000);guest.expect({});
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);guest.expect({{keyIdHard2,true}});
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTX,-32768);guest.expect({{keyIdHard2,false},{keyIdHard3,true}});
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTX,0);padAxis(SDL_CONTROLLER_AXIS_RIGHTY,-20000);guest.expect({{keyIdHard3,false},{keyIdHard4,true}});
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTY,20000);guest.expect({{keyIdHard1,true},{keyIdHard4,false}});
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTY,0);guest.expect({{keyIdHard1,false}});guest.noStick();
+    // The trigger axes do nothing.
+    padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT,32767);guest.expect({});guest.noStick();
     // Start and Guide together hold Home once, and a key held on the keyboard too stays down until both let go.
     padButton(SDL_CONTROLLER_BUTTON_START,true);padButton(SDL_CONTROLLER_BUTTON_GUIDE,true);guest.expect({{keyIdHome,true}});
     padButton(SDL_CONTROLLER_BUTTON_START,false);guest.expect({});padButton(SDL_CONTROLLER_BUTTON_GUIDE,false);guest.expect({{keyIdHome,false}});
@@ -3094,5 +3122,6 @@ int main(int argc,char** argv) {
     tg50LiveDisplay();
     zodiacControls();
     clieGamepad();
+    zodiacRightStick();
     SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx, m125 and TG50 hit areas, the IIIe, IIIxe, IIIc, V, Vx, m100, m105, m130, m500, c500, m505 and m520 art, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys; iPAQ 210, rx1950 and h4350 bars and h4350 keyboard hiding; T415 art, jog tab and silkscreen; TG50 game controller art");
 }

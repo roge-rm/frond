@@ -125,6 +125,7 @@ class SdlEventHandler {
     // Each game controller as last reported (by instance id), the one whose stick moved last, and
     // the keys and stick they hold on the device together. Off while the window has lost focus.
     std::map<SDL_JoystickID, GamepadState> pads;
+    GamepadRightHeld rightHeld;
     SDL_JoystickID lastStickPad{-1};
     bool padFocused{true};
     // The rumble is on, and when it was last sent; SDL stops it after rumbleMs unless sent again.
