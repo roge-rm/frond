@@ -149,16 +149,16 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         return reply.ok && reply.message.startsWith("pro ")
     }
     // While Files… has the stick taken out the slot is empty, so the take-out's answer stands.
-    fun protection(): Boolean? {
-        if (!memoryStick) return null
-        if (cardFile != null) return protectedCard
+    fun protection(n: Int, present: Boolean): Boolean? {
+        if (!(stickDevice && n == 0) && !device.sdWriteProtection) return null
+        if (cardFile != null && n == slot) return protectedCard
+        if (!present) return null
         if (m68k) {
-            val reply = link.request(command("state"), timeoutSeconds = 30)
+            val reply = link.request(command("state", n), timeoutSeconds = 30)
             val words = reply.message.split(' ')
             return if (reply.ok && words.size >= 3) words[2] == "protected" else null
         }
-        if (state() == State.NONE) return null
-        val reply = link.request("ms-protection", timeoutSeconds = 30)
+        val reply = link.request(command("protection", n), timeoutSeconds = 30)
         return if (!reply.ok) null else when (reply.message) {
             "read-only" -> true
             "writable" -> false
@@ -166,8 +166,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         }
     }
     fun protect(on: Boolean) {
-        if (!memoryStick) throw Failed("Write protection is not available for this card.")
-        run("ms-read-only", if (on) "on" else "off")
+        if (!memoryStick && !device.sdWriteProtection) throw Failed("Write protection is not available for this card.")
+        run(command("read-only"), if (on) "on" else "off")
     }
 
     // Writes the ejected card's image to a picked document. frond-68k writes a card file

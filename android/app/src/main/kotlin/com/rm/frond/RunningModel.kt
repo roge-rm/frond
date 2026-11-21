@@ -42,8 +42,10 @@ class RunningModel(
         private set
     var writeProtected by mutableStateOf<Boolean?>(null)
         private set
+    private var secondWriteProtected by mutableStateOf<Boolean?>(null)
+    fun protectionOf(n: Int) = if (n == 0) writeProtected else secondWriteProtected
     override val title get() = device.cardLabel
-    override val canWrite get() = !device.memoryStick || writeProtected == false
+    override val canWrite get() = (!device.memoryStick && !device.sdWriteProtection) || protectionOf(cardSlot) == false
     override val leaveLabel get() = "Insert"
     override val prompt = ClashPrompt()
     // The second SD slot: the Zodiac's and the Dana's.
@@ -191,16 +193,20 @@ class RunningModel(
                 }
             }
             val s = withContext(Dispatchers.IO) { slotState(c, 0) }
-            val protection = withContext(Dispatchers.IO) { c.protection() }
+            val protection = withContext(Dispatchers.IO) { c.protection(0, s == SdCard.State.INSERTED || s == SdCard.State.EJECTED) }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
             val second = withContext(Dispatchers.IO) { slotState(c, 1) }
+            val protection2 = withContext(Dispatchers.IO) {
+                if (twoSlots) c.protection(1, second == SdCard.State.INSERTED || second == SdCard.State.EJECTED) else null
+            }
             val shown2 = withContext(Dispatchers.IO) { if (twoSlots) slotInfo(second, 1) else SlotShown("No card") }
             slotShown = slot
             state = s
             secondState = second
             secondShown = shown2
             writeProtected = protection
+            secondWriteProtected = protection2
             memoryStickPro = pro
             changed = c.changed
             link?.sdProgress = null
@@ -219,11 +225,14 @@ class RunningModel(
         if (busy != null || waitingForGdb || !device.cardSupported) return
         activity.lifecycleScope.launch {
             val s = withContext(Dispatchers.IO) { slotState(c, 0) }
-            val protection = withContext(Dispatchers.IO) { c.protection() }
+            val protection = withContext(Dispatchers.IO) { c.protection(0, s == SdCard.State.INSERTED || s == SdCard.State.EJECTED) }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
             if (busy != null) return@launch
             val second = withContext(Dispatchers.IO) { slotState(c, 1) }
+            val protection2 = withContext(Dispatchers.IO) {
+                if (twoSlots) c.protection(1, second == SdCard.State.INSERTED || second == SdCard.State.EJECTED) else null
+            }
             val shown2 = withContext(Dispatchers.IO) { if (twoSlots) slotInfo(second, 1) else SlotShown("No card") }
             if (busy != null) return@launch
             slotShown = slot
@@ -231,6 +240,7 @@ class RunningModel(
             secondState = second
             secondShown = shown2
             writeProtected = protection
+            secondWriteProtected = protection2
             memoryStickPro = pro
             sayStartPutInError()
             nextStartCard()

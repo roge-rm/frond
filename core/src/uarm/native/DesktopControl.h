@@ -419,6 +419,7 @@ class DesktopControl {
             }
             if (!result.ok) return {false, result.code, result.message};
             frondNative::slotCards().sd2Protected = false;
+            soc.SetSd2WriteProtect(false);
             if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
             return {true, "inserted", "SD card inserted in the second slot."};
         }
@@ -430,6 +431,7 @@ class DesktopControl {
             const auto result = frondNative::takeOutFileCard(ctx.sessionFolder, frondMachine::kindSd2, protect, identity);
             if (!result.ok) return {false, result.code, result.message};
             frondNative::slotCards().sd2Protected = false;
+            soc.SetSd2WriteProtect(false);
             return {true, "taken-out", frondNative::takenOutReply(identity, protect)};
         }
         if (command == "sd2-put-in") {
@@ -439,6 +441,7 @@ class DesktopControl {
                 return {false, "argument", "Use the card's 64-digit identity, then protected or writable."};
             const auto result = frondNative::putInSd2(ctx.sessionFolder, soc.GetDeviceType(), identity, protect);
             if (!result.ok) return {false, result.code, result.message};
+            soc.SetSd2WriteProtect(protect);
             if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
             return {true, "inserted", "SD card inserted in the second slot."};
         }
@@ -480,6 +483,25 @@ class DesktopControl {
         }
         if (command.rfind("sd2-", 0) == 0 && !ctx.soc->HasSecondSdSlot())
             return {false, "unsupported", "This device has no second SD slot."};
+        const bool sdProtection = command == "sd-protection" || command == "sd2-protection";
+        const bool sdReadOnly = command == "sd-read-only" || command == "sd2-read-only";
+        if (sdProtection || sdReadOnly) {
+            if (ctx.soc->GetDeviceType() != deviceTypeZodiac2)
+                return {false, "unsupported", "Write protection isn't available on this SD slot."};
+            const bool second = command.rfind("sd2-", 0) == 0;
+            if (!sdCardStore(second ? 1 : 0).initialized()) return {false, "empty", "This session has no card in that slot."};
+            auto& slots = frondNative::slotCards();
+            bool& protectedSlot = second ? slots.sd2Protected : slots.sdProtected;
+            if (sdReadOnly) {
+                if (path != "on" && path != "off") return {false, "argument", "Use on or off."};
+                if (second ? ctx.soc->Sd2Inserted() : ctx.soc->SdInserted())
+                    return {false, "busy", "Eject the card before changing write protection."};
+                protectedSlot = path == "on";
+                if (second) ctx.soc->SetSd2WriteProtect(protectedSlot);
+                else ctx.soc->SetSdWriteProtect(protectedSlot);
+            } else if (!path.empty()) return {false, "argument", "This command takes no argument."};
+            return {true, "protection", protectedSlot ? "read-only" : "writable"};
+        }
         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
@@ -982,6 +1004,7 @@ class DesktopControl {
             const auto result = frondNative::takeOutFileCard(ctx.sessionFolder, frondMachine::kindSd, protect, identity);
             if (!result.ok) return {false, result.code, result.message};
             frondNative::slotCards().sdProtected = false;
+            ctx.soc->SetSdWriteProtect(false);
             return {true, "taken-out", frondNative::takenOutReply(identity, protect)};
         }
         if (command == "sd-put-in") {

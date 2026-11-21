@@ -44,6 +44,7 @@ struct VSD {
     uint16_t rca;
 
     bool hcCard;
+    bool writeProtected;  // The host card descriptor owns this switch.
     bool acmdShift;
     bool reportAcmdNext;
     bool illegalPending;  // ILLEGAL_COMMAND goes out in the next response (spec 4.10.1)
@@ -263,6 +264,7 @@ static void vsdGetCsd(struct VSD *vsd, uint8_t *reply) {
         vsdGetCsdV2(vsd, reply);
     else
         vsdGetCsdV1(vsd, reply);
+    if (vsd->writeProtected) reply[14] |= 0x10;  // TMP_WRITE_PROTECT
 }
 
 enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
@@ -495,6 +497,8 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
                        (param % 512)) {  // param must be a multiple of 512b for non-HC card
 
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam, wasAcmd);
+            } else if (vsd->writeProtected) {
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 1u << 26);  // WP_VIOLATION
             } else {
                 if (!vsd->hcCard) param /= 512;
 
@@ -541,6 +545,9 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             } else if (!vsd->eraseHaveStart || !vsd->eraseHaveEnd || vsd->eraseStart > vsd->eraseEnd) {
                 vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
                 replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 1UL << 28);  // ERASE_SEQ_ERROR
+            } else if (vsd->writeProtected) {
+                vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 1u << 26);  // WP_VIOLATION
             } else {
                 uint8_t zero[512];
                 uint32_t sec, last = vsd->eraseEnd;
@@ -700,7 +707,7 @@ enum SdDataReplyType vsdDataXferBlockToCard(struct VSD *vsd, const void *data, u
     // fprintf(stderr, "host to card xfer: %u bytes for sec %u\n", blockSz, vsd->curSec);
 
     if (vsd->bufIsData) {
-        if (!vsd->secW(vsd->curSec, data)) {
+        if (vsd->writeProtected || !vsd->secW(vsd->curSec, data)) {
             fprintf(stderr, "failed to write SD backing store sec %lu\n",
                     (unsigned long)vsd->curSec);
             // A failed single block ends the command; a multiple block one waits for CMD12.
@@ -782,6 +789,8 @@ void vsdReset(struct VSD *vsd, uint32_t nSec) {
 
     vsdCardReset(vsd);
 }
+
+void vsdSetWriteProtect(struct VSD *vsd, bool on) { vsd->writeProtected = on; }
 
 void vsdPowerOff(struct VSD *vsd) { vsdCardReset(vsd); }
 

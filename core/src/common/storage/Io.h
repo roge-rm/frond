@@ -19,7 +19,7 @@ namespace frondStorage {
 inline bool writeAllAt(int fd, const void* data, size_t n, uint64_t offset) {
     const auto* p = static_cast<const uint8_t*>(data);
     while (n) {
-        const auto w = pwrite(fd, p, n, off_t(offset));
+        const auto w = pwrite(fd, p, n, int64_t(offset));
         if (w < 0 && errno == EINTR) continue;
         if (w <= 0) return false;
         p += w;
@@ -32,7 +32,7 @@ inline bool writeAllAt(int fd, const void* data, size_t n, uint64_t offset) {
 inline bool readAllAt(int fd, void* data, size_t n, uint64_t offset) {
     auto* p = static_cast<uint8_t*>(data);
     while (n) {
-        const auto r = pread(fd, p, n, off_t(offset));
+        const auto r = pread(fd, p, n, int64_t(offset));
         if (r < 0 && errno == EINTR) continue;
         if (r <= 0) return false;
         p += r;
@@ -81,6 +81,7 @@ inline void removePath(const std::filesystem::path& p) {
 
 inline int64_t sizeOf(int fd) {
 #ifdef _WIN32
+    std::lock_guard<std::mutex> guard(frondWinIoLock());
     return int64_t(_filelengthi64(fd));
 #else
     struct stat st {};

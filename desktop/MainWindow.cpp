@@ -311,6 +311,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     linkedInsert = button(tr("Insert"), "linkedInsert", true);
     linkedRow->addWidget(linkedState); linkedRow->addWidget(linkedInsert); linkedRow->addStretch();
     cardLayout->addLayout(linkedRow);
+    cardReadOnly = new QCheckBox(tr("Write protected"), root);
+    cardReadOnly->setObjectName("cardReadOnly");
+    cardLayout->addWidget(cardReadOnly);
     // The second SD slot of a two-slot machine: the same row, under Card 2.
     storage2Heading = new QLabel(tr("Card 2"), root);
     storage2Heading->setObjectName("storage2Heading");
@@ -334,6 +337,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     linked2Insert = button(tr("Insert"), "linked2Insert", true);
     linked2Row->addWidget(linked2State); linked2Row->addWidget(linked2Insert); linked2Row->addStretch();
     cardLayout->addLayout(linked2Row);
+    card2ReadOnly = new QCheckBox(tr("Write protected"), root);
+    card2ReadOnly->setObjectName("card2ReadOnly");
+    cardLayout->addWidget(card2ReadOnly);
+    connect(card2ReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("sd2-read-only", on ? "on" : "off"); });
     for (int n : {0, 1}) {
         connect(n ? card2Pick : cardPick, &QPushButton::clicked, this, [this, n] { pickCard(n); });
         connect(n ? linked2Insert : linkedInsert, &QPushButton::clicked, this, [this, n] {
@@ -377,9 +384,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (!file.isEmpty()) send(cardCommand("export", 0), file);
     });
 
-    cardReadOnly = new QCheckBox(tr("Write protected"), root);
-    cardReadOnly->setObjectName("cardReadOnly");
-    cardLayout->addWidget(cardReadOnly);
     portableExport = button(tr("Export portable folder…"), "portableExport", true);
     cardLayout->addWidget(portableExport);
     connect(portableExport, &QPushButton::clicked, this, [this] {
@@ -400,7 +404,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     cardLayout->addStretch();
     connect(internalButton, &QPushButton::clicked, this, &MainWindow::openInternal);
     connect(cardsButton, &QPushButton::clicked, this, [this] { showCards(); });
-    connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("ms-read-only", on ? "on" : "off"); });
+    connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send(cardCommand("read-only", 0), on ? "on" : "off"); });
 
     danaControls = new DanaViewControls(root);
     displayLayout->addWidget(danaControls);
@@ -890,7 +894,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 log->appendPlainText(error);
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
     linked2Watcher.reset(); linked2WatcherId.clear(); cardSlot = 0; secondStartPending = false;
-        sdKnown = protectionKnown = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
+        sdKnown = protectionKnown = protection2Known = protectionStartsSecond = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         refresh();
         // The machine's card is free for Files and the rest once its lock is gone.
         if (cardsWindow) cardsWindow->refresh();
@@ -1087,7 +1091,16 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 }
             }
             if (command == "ms-type") msExportPending = false;
-            if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
+            if (command == "ms-protection" || command == "ms-read-only" ||
+                command == "sd-protection" || command == "sd-read-only") { protectionKnown = false; refresh(); }
+            if (command == "sd2-protection" || command == "sd2-read-only") { protection2Known = false; refresh(); }
+            if (!stopping && command == "sd-protection" && protectionStartsSecond) {
+                protectionStartsSecond = false;
+                secondStartPending = true;
+                send("sd2-state");
+                return;
+            }
+            if (!stopping && command == "sd2-protection") { send("network-state"); return; }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
             if (command == "camera-mode") { showCamera(message.startsWith("pattern") ? message : "pattern " + message); refresh(); }
             // A failed switch leaves the core off (serial, infrared) or as it was (Bluetooth); the
@@ -1183,9 +1196,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         else if (command == "sd2-eject") card2Inserted = false;
         else if (command == "sd2-take-out") card2Present = card2Inserted = false;
         if (command.startsWith("sd2-") && command != "sd2-state") sd2Known = true;
-        if (command == "ms-protection" || command == "ms-read-only") {
+        if (command == "ms-protection" || command == "ms-read-only" || command == "sd-protection" || command == "sd-read-only") {
             protectionKnown = message == "read-only" || message == "writable";
             cardReadOnly->setChecked(message == "read-only");
+        }
+        if (command == "sd2-protection" || command == "sd2-read-only") {
+            protection2Known = message == "read-only" || message == "writable";
+            card2ReadOnly->setChecked(message == "read-only");
         }
         if (cardMove.stage != CardMove::None && continueCardMove(command, message)) return;
         if (exchangeStage != ExchangeStage::None) { exchangeResult(true, message); return; }
@@ -1250,26 +1267,36 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             firstStartPending = false;
             firstDone = true;
         }
-        if ((command == "sd-state" || firstDone) && !stopping && secondSlot()) {
+        const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
+        if (!stopping && zodiac && cardPresent && command == "sd-state" && send("sd-protection")) {
+            protectionStartsSecond = true;
+            return;
+        }
+        const bool protectedStart = command == "sd-protection" && protectionStartsSecond;
+        if (command == "sd-protection") protectionStartsSecond = false;
+        if ((command == "sd-state" || protectedStart || firstDone) && !stopping && secondSlot()) {
             secondStartPending = true;
             send("sd2-state");
             return;
         }
-        // Slot 2's card goes in now when the core left it out at start: changed since the last
-        // save, or put in while the machine was off.
-        if (secondStartPending && command == "sd2-state" && !stopping) {
-            const auto argument = card2Present ? QString()
-                                  : m68k       ? frondCards::startAttachArgument(sessionFolder(), runningMachineDir(), 1)
-                                               : frondCards::secondPutIn(sessionFolder(), runningMachineDir());
+        // A changed card that the core left out of slot 2 goes in after startup.
+        if (secondStartPending && command == "sd2-state" && !stopping && !card2Present) {
+            const auto argument = m68k ? frondCards::startAttachArgument(sessionFolder(), runningMachineDir(), 1)
+                                       : frondCards::secondPutIn(sessionFolder(), runningMachineDir());
             if (!argument.isEmpty() && send(cardCommand("put-in", 1), argument)) return;
+        }
+        if (secondStartPending && !stopping && (command == "sd2-state" || command == cardCommand("put-in", 1))) {
             secondStartPending = false;
-            send("network-state");
+            send(zodiac && card2Present ? "sd2-protection" : "network-state");
             return;
         }
-        if (secondStartPending && command == cardCommand("put-in", 1) && !stopping) {
-            secondStartPending = false;
-            send("network-state");
-            return;
+        if (!stopping && zodiac) {
+            if (cardPresent && (command == "sd-create" || command == "sd-insert" || command == "sd-put-in"))
+                { send("sd-protection"); return; }
+            if (card2Present && (command == "sd2-create" || command == "sd2-insert" || command == "sd2-put-in" ||
+                                 command == "sd2-state"))
+                { send("sd2-protection"); return; }
+            if (command == "sd2-protection") { send("network-state"); return; }
         }
         if ((command == "sd-state" || command == "ms-state" || firstDone) && !stopping) {
             send(command == "ms-state" && cardPresent && !m68k ? "ms-protection" : "network-state"); return;
@@ -1560,7 +1587,8 @@ void MainWindow::refresh() {
     sdExchange->setVisible(known && cardPresent);
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
-    sdRetry->setVisible(!known || (memoryStick && cardPresent && !protectionKnown));
+    const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
+    sdRetry->setVisible(!known || ((memoryStick || zodiac) && cardPresent && !protectionKnown));
     cardPick->setVisible(known);
     cardPick->setText(known ? runningCardName() : tr("No card"));
     // A linked card held by another machine, or free to go in.
@@ -1600,7 +1628,7 @@ void MainWindow::refresh() {
     sd2Exchange->setVisible(second && known2 && card2Present);
     sd2Eject->setVisible(second && known2 && card2Inserted);
     sd2Export->setVisible(second && known2 && card2Present && !card2Inserted);
-    sd2Retry->setVisible(second && !known2);
+    sd2Retry->setVisible(second && (!known2 || (zodiac && card2Present && !protection2Known)));
     card2Pick->setVisible(second && known2);
     card2Pick->setText(known2 ? runningCardName(1) : tr("No card"));
     const auto slot2 = running && second ? frondCards::readSlot(runningMachineDir(), 1) : frondCards::Slot{};
@@ -1625,8 +1653,10 @@ void MainWindow::refresh() {
     for (auto* b : {card2Pick, sd2Reinsert, sd2Exchange, sd2Eject, sd2Export, sd2Retry, linked2Insert}) b->setEnabled(enabled && second);
     if (oldPlace(1)) for (auto* b : {card2Pick, sd2Exchange}) b->setEnabled(false);
     // frond-68k's stick takes its protection from Cards when it goes in.
-    cardReadOnly->setVisible(memoryStick && supported && known && cardPresent && !m68k);
+    cardReadOnly->setVisible((memoryStick || zodiac) && supported && known && cardPresent && !m68k);
     cardReadOnly->setEnabled(enabled && protectionKnown && !cardInserted);
+    card2ReadOnly->setVisible(zodiac && known2 && card2Present);
+    card2ReadOnly->setEnabled(enabled && protection2Known && !card2Inserted);
     runningRules::State state;
     state.ready = enabled;
     state.running = running;

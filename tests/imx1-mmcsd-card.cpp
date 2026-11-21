@@ -102,8 +102,9 @@ int main() {
     const uint32_t rca = (r6[0] & 0xff) << 8 | r6[1] >> 8;
     assert(rca);
     stop();
+    vsdSetWriteProtect(card, true);
     assert(command(9,rca << 16,2,48+2+136) == 0x2100);
-    halfwords(8);
+    assert(halfwords(8)[7] & 0x10);  // CSD TMP_WRITE_PROTECT
     stop();
     // A response format the card doesn't answer with times out after RES_TO.
     assert(command(9,rca << 16,1,48+0x40) == 0x2102);
@@ -114,6 +115,12 @@ int main() {
     stop();
     assert(command(16,512,1,48+2+48) == 0x2100);
     stop();
+    // A protected write reports R1 WP_VIOLATION without starting the FIFO transfer.
+    write(mmc+0x18, 512); write(mmc+0x1c, 1);
+    assert(command(24, 0, 0x19, 48+2+48) == 0x2100);
+    assert(halfwords(3)[0] & 4);
+    stop();
+    vsdSetWriteProtect(card, false);
     // Guarded edges: stream mode, R4/R5, no block length or count, oversized blocks.
     write(mmc+0x18,512); write(mmc+0x1c,1);
     write(mmc+0x28,17); write(mmc+0x2c,0); write(mmc+0x30,0);

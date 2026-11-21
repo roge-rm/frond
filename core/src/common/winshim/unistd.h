@@ -7,20 +7,29 @@
 #include <stdint.h>
 #ifdef __cplusplus
 #include <mutex>
+#include <limits.h>
 #include <string.h>
 #include <direct.h>
 extern "C++" {
-// pread and pwrite as a seek and a read under one lock; every positional access goes through these.
+// The storage handles use positional I/O. Keep their CRT cursor unchanged.
 inline std::mutex& frondWinIoLock() { static std::mutex lock; return lock; }
-inline ssize_t pread(int fd, void* buffer, size_t count, off_t offset) {
+template <typename Buffer, typename Operation>
+inline ssize_t frondWinAt(int fd, Buffer buffer, size_t count, int64_t offset, Operation operation) {
+    if (offset < 0) { errno = EINVAL; return -1; }
     std::lock_guard<std::mutex> guard(frondWinIoLock());
-    if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    return _read(fd, buffer, unsigned(count));
+    const auto previous = _lseeki64(fd, 0, SEEK_CUR);
+    if (previous < 0 || _lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+    const auto result = operation(fd, buffer, unsigned(count > INT_MAX ? INT_MAX : count));
+    const int error = errno;
+    if (_lseeki64(fd, previous, SEEK_SET) < 0) return -1;
+    errno = error;
+    return result;
 }
-inline ssize_t pwrite(int fd, const void* buffer, size_t count, off_t offset) {
-    std::lock_guard<std::mutex> guard(frondWinIoLock());
-    if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    return _write(fd, buffer, unsigned(count));
+inline ssize_t pread(int fd, void* buffer, size_t count, int64_t offset) {
+    return frondWinAt(fd, buffer, count, offset, _read);
+}
+inline ssize_t pwrite(int fd, const void* buffer, size_t count, int64_t offset) {
+    return frondWinAt(fd, buffer, count, offset, _write);
 }
 inline int fsync(int fd) { return _commit(fd); }
 inline int fchmod(int, unsigned) { return 0; }

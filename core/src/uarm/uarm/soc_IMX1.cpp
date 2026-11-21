@@ -350,6 +350,17 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
 // The largest card the ROM can take: it has no CMD8, so only standard capacity, which vSD gives up to here.
 static constexpr size_t zodiacCardSectors = size_t(2048) << 11;
 
+void SocIMX1::SetSdWriteProtect(bool on) {
+    sdProtected = on;
+    if (vsd) vsdSetWriteProtect(vsd, on);
+}
+
+void SocIMX1::SetSd2WriteProtect(bool on) {
+    sd2Protected = on;
+    if (vsd2) vsdSetWriteProtect(vsd2, on);
+    imx1MachineSetGraphicsSdWriteProtect(machine, on);
+}
+
 void SocIMX1::OnSdInsert() {
     const size_t sectors = sdCardSectorCount();
     if (sectors > zodiacCardSectors) {
@@ -358,6 +369,7 @@ void SocIMX1::OnSdInsert() {
     }
     if (!vsd) vsd = vsdInit(sdCardRead, sdCardWrite, 0);
     vsdReset(vsd, uint32_t(sectors));
+    vsdSetWriteProtect(vsd, sdProtected);
     cardIn = true;
     cardSync = true;
     SyncCard();
@@ -395,6 +407,8 @@ bool SocIMX1::Sd2Insert() {
     }
     if (!vsd2) vsd2 = vsdInit(sdCardStore1Read, sdCardStore1Write, 0);
     vsdReset(vsd2, uint32_t(sectors));
+    vsdSetWriteProtect(vsd2, sd2Protected);
+    imx1MachineSetGraphicsSdWriteProtect(machine, sd2Protected);
     card2In = true;
     card2Sync = true;
     SyncSecondCard();

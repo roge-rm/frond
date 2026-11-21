@@ -511,7 +511,7 @@ class FileCardBacking : public CardBacking {
             auto* p = static_cast<uint8_t*>(buf);
             size_t got = 0;
             while (got < n) {
-                const ssize_t r = pread(fd, p + got, n - got, static_cast<off_t>(off + got));
+                const ssize_t r = pread(fd, p + got, n - got, static_cast<int64_t>(off + got));
                 if (r <= 0) return false;
                 got += static_cast<size_t>(r);
             }
@@ -524,7 +524,7 @@ class FileCardBacking : public CardBacking {
             auto* p = static_cast<const uint8_t*>(buf);
             size_t put = 0;
             while (put < n) {
-                const ssize_t w = pwrite(fd, p + put, n - put, static_cast<off_t>(off + put));
+                const ssize_t w = pwrite(fd, p + put, n - put, static_cast<int64_t>(off + put));
                 if (w <= 0) return false;
                 put += static_cast<size_t>(w);
             }

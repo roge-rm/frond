@@ -404,6 +404,7 @@ void imx1MachineSetMmcsdCardId(Imx1Machine*, const char* id);
 // registers, the transfer under way and the card's own state in its SD2 section. Setting the card already in
 // changes nothing.
 Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine*, VSD* card, bool commit = true);
+void imx1MachineSetGraphicsSdWriteProtect(Imx1Machine*, bool on);
 VSD* imx1MachineGraphicsSdCard(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
                                                  bool commit = true);
