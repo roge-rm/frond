@@ -67,7 +67,7 @@ class AirSyncServer {
    private:
     AirSyncResponse HandleLocked(const AirSyncRequest& request);
     Bytes FolderSync(const Bytes& body, int& status);
-    Bytes Sync(const Bytes& body, int& status);
+    Bytes Sync(const AirSyncRequest& frame, int& status);
     Bytes Estimate(const Bytes& body, int& status);
     void Trace(const std::string& text);
     // The folder's PIM action, read once per connection.
@@ -85,6 +85,7 @@ class AirSyncServer {
     AirSyncCounts counts;
     std::string lastError, timeZone;
     // The last Sync request and its answer, to repeat when the guest retries a lost answer.
+    std::string lastSyncTarget;
     Bytes lastSyncRequest, lastSyncResponse;
     FILE* trace{nullptr};
 };

@@ -591,6 +591,559 @@ struct FakeStream : SyncStream {
     void Abort() override {}
 };
 
+void TestGhostedPhones(SyncLibrary& library) {
+    struct Sample {
+        uint8_t clearedWork, keptWork, clearedHome, keptHome;
+        const char *clearedWorkSlot, *keptWorkSlot, *clearedHomeSlot, *keptHomeSlot;
+    };
+    const Sample samples[] = {
+        {0x13, 0x0c, 0x27, 0x20, "phone1", "phone3", "phone2", "phone4"},
+        {0x0c, 0x13, 0x20, 0x27, "phone3", "phone1", "phone4", "phone2"},
+    };
+    for (const auto& sample : samples) {
+        std::string error, key, serverId;
+        int64_t id;
+        ProfileInfo info;
+        CHECK(library.CreateProfile("Ghosted phones " + std::to_string(sample.clearedWork), info, error));
+        const auto path = library.ProfilePath(info);
+        {
+            SyncProfile profile;
+            CHECK(profile.Open(path, error));
+            id = Save(profile, PimKind::contacts,
+                      {{"firstName", "Ada"}, {sample.keptWorkSlot, "work"}, {sample.clearedWorkSlot, "clear work"},
+                       {sample.keptHomeSlot, "home"}, {sample.clearedHomeSlot, "clear home"},
+                       {"phoneLabel3", "0"}, {"phoneLabel4", "1"}}).id;
+            AirSyncServer server(profile, "machine:phones", {PimKind::contacts});
+            Client client{server};
+            auto initial = Hex(contactsStart);
+            initial.insert(initial.end() - 3, {0x60, 0, 1, sample.clearedWork, sample.clearedHome, 1});
+            key = NextKey(client.Post("Sync", initial));
+            const auto added = client.Sync(contactsChanges, key);
+            key = NextKey(added);
+            serverId = TextOf(added, 0, ServerId);
+            CHECK(TextOf(added, 1, sample.keptWork) == "work");
+            CHECK(TextOf(added, 1, sample.keptHome) == "home");
+            CHECK(TextOf(added, 1, sample.clearedWork) == "clear work");
+            CHECK(TextOf(added, 1, sample.clearedHome) == "clear home");
+            auto change = Command(Change, serverId, Node(1, {{0x1f, "Ada"}}));
+            key = NextKey(client.Post("Sync", SyncWith(contactsChanges, key, {change})));
+        }
+
+        SyncProfile profile;
+        CHECK(profile.Open(path, error));
+        AirSyncServer server(profile, "machine:phones", {PimKind::contacts});
+        Client client{server};
+        auto local = *profile.FindPimRecord(id);
+        CHECK(local.fields.at(sample.clearedWorkSlot).empty() && local.fields.at(sample.clearedHomeSlot).empty());
+        CHECK(local.fields.at(sample.keptWorkSlot) == "work" && local.fields.at(sample.keptHomeSlot) == "home");
+
+        Bytes palmBytes;
+        CHECK(EncodePalmPim(local, PalmPimFormat::garnet, palmBytes, error));
+        PimRecord palm;
+        CHECK(DecodePalmPim(PimKind::contacts, PalmPimFormat::garnet, palmBytes, palm, error));
+        palm.fields[sample.keptWorkSlot] = "Palm work";
+        ApplyPalmPim(palm, PalmPimFormat::garnet, local);
+        CHECK(profile.SavePimRecord(local, error));
+        auto exported = client.Sync(contactsChanges, key);
+        key = NextKey(exported);
+        CHECK(TextOf(exported, 1, sample.keptWork) == "Palm work");
+        CHECK(TextOf(exported, 1, sample.keptHome) == "home");
+        CHECK(!Find(exported, 1, sample.clearedWork) && !Find(exported, 1, sample.clearedHome));
+
+        auto update = Node(1, {{sample.keptWork, "Windows work"}, {sample.clearedWork, "restored work"}});
+        key = NextKey(client.Post("Sync", SyncWith(contactsChanges, key, {Command(Change, serverId, update)})));
+        local = *profile.FindPimRecord(id);
+        CHECK(local.fields.at(sample.keptWorkSlot) == "Windows work");
+        CHECK(local.fields.at(sample.clearedWorkSlot) == "restored work");
+        local.fields.erase(sample.clearedWorkSlot);
+        CHECK(profile.SavePimRecord(local, error));
+        exported = client.Sync(contactsChanges, key);
+        CHECK(TextOf(exported, 1, sample.keptWork) == "Windows work");
+        CHECK(TextOf(exported, 1, sample.keptHome) == "home");
+        CHECK(Find(exported, 1, sample.clearedWork) && TextOf(exported, 1, sample.clearedWork).empty());
+    }
+}
+
+void TestLegacyPhoneClear(SyncLibrary& library) {
+    std::string error, key;
+    ProfileInfo info;
+    CHECK(library.CreateProfile("Legacy phone clear", info, error));
+    const auto path = library.ProfilePath(info);
+    const std::string device = "machine:legacy-phones";
+    SyncProfile profile;
+    CHECK(profile.Open(path, error));
+    const auto id = Save(profile, PimKind::contacts,
+                         {{"firstName", "Ada"}, {"phone1", "work"}, {"phone2", "home"},
+                          {"phone3", "work two"}, {"phone4", "home two"},
+                          {"phoneLabel3", "0"}, {"phoneLabel4", "1"}}).id;
+    {
+        AirSyncServer server(profile, device, {PimKind::contacts});
+        Client client{server};
+        key = NextKey(client.Post("Sync", Hex(contactsStart)));
+        const auto added = client.Sync(contactsChanges, key);
+        key = NextKey(added);
+        CHECK(TextOf(added, 1, 0x13) == "work" && TextOf(added, 1, 0x0c) == "work two");
+        CHECK(TextOf(added, 1, 0x27) == "home" && TextOf(added, 1, 0x20) == "home two");
+        auto record = *profile.FindPimRecord(id);
+        for (int slot = 1; slot <= 4; ++slot) CHECK(!record.fields.count("airsyncPhoneTag" + std::to_string(slot)));
+        record.fields.erase("phone1");
+        record.fields.erase("phone2");
+        CHECK(profile.SavePimRecord(record, error));
+        const auto cleared = client.Sync(contactsChanges, key);
+        key = NextKey(cleared);
+        CHECK(Find(cleared, 1, 0x13) && TextOf(cleared, 1, 0x13).empty());
+        CHECK(Find(cleared, 1, 0x27) && TextOf(cleared, 1, 0x27).empty());
+        CHECK(TextOf(cleared, 1, 0x0c) == "work two" && TextOf(cleared, 1, 0x20) == "home two");
+    }
+
+    profile.Close();
+    CHECK(profile.Open(path, error));
+    auto record = *profile.FindPimRecord(id);
+    record.fields["phone3"] = "work two edited";
+    record.fields["phone4"] = "home two edited";
+    CHECK(profile.SavePimRecord(record, error));
+    AirSyncServer server(profile, device, {PimKind::contacts});
+    Client client{server};
+    const auto exported = client.Sync(contactsChanges, key);
+    CHECK(!Find(exported, 1, 0x13) && !Find(exported, 1, 0x27));
+    CHECK(TextOf(exported, 1, 0x0c) == "work two edited" && TextOf(exported, 1, 0x20) == "home two edited");
+}
+
+std::string UncompressedRtf(const std::string& text) {
+    auto bytes = Hex("00000000000000004d454c4100000000");
+    for (unsigned i = 0; i < 4; ++i) {
+        bytes[i] = uint8_t((12 + text.size()) >> (8 * i));
+        bytes[4 + i] = uint8_t(text.size() >> (8 * i));
+    }
+    bytes.insert(bytes.end(), text.begin(), text.end());
+    return AirSyncBase64(bytes);
+}
+
+void TestLegacyBodies(SyncLibrary& library) {
+    std::string error;
+    ProfileInfo info;
+    CHECK(library.CreateProfile("Legacy bodies", info, error));
+    const auto path = library.ProfilePath(info);
+    const auto compressed = Hex("2d0000002b0000004c5a4675f1c5c7a703000a007263706731323542320af320"
+                                      "68656c090020627705b06c647d0a800fa0");  // MS-OXRTFCP 3.1.1.1
+    const auto rtf = AirSyncBase64(compressed);
+    const std::string picture = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    struct Sample {
+        PimKind kind;
+        const char *start, *changes;
+        uint8_t page, body, size, truncated, rich;
+        WbxmlNode data;
+    };
+    const Sample samples[] = {
+        {PimKind::contacts, contactsStart, contactsChanges, 1, 0x09, 0x0a, 0x0b, 0x3b, Node(1, {{0x1f, "A"}})},
+        {PimKind::calendar, calendarStart, calendarChanges, 4, 0x0b, 0, 0x0c, 0x10,
+         Node(4, {{0x26, "B"}, {0x27, "20261124T180000Z"}, {0x12, "20261124T190000Z"}})},
+        {PimKind::tasks, tasksStart, tasksChanges, 9, 0x05, 0x06, 0x07, 0x21, Node(9, {{0x20, "C"}})},
+    };
+
+    for (const auto& sample : samples) {
+        const auto page = sample.page;
+        const bool contact = sample.kind == PimKind::contacts;
+        std::string key, serverId;
+        int64_t id;
+        {
+            SyncProfile profile;
+            CHECK(profile.Open(path, error));
+            AirSyncServer server(profile, "machine:rich", {sample.kind});
+            Client client{server};
+            auto initial = Hex(sample.start);
+            // An empty Supported (page 0, token 0x20) ghosts all fields.
+            initial.insert(initial.end() - 3, 0x20);
+            key = NextKey(client.Post("Sync", initial));
+            CHECK(NextKey(client.Post("Sync", initial)) == key);
+            auto upload = sample.data;
+            upload.Add(page, sample.body, "hello world");
+            upload.Add(page, sample.rich, rtf);
+            if (contact) {
+                upload.Add(page, 0x13, "555-0100");  // BusinessPhone
+                upload.Add(page, 0x3c, picture);
+            }
+            const auto reply = client.Post("Sync", SyncWith(sample.changes, key, {Command(Add, "rich", upload)}));
+            key = NextKey(reply);
+            serverId = TextOf(reply, 0, ServerId);
+            CHECK(TextOf(reply, 0, Status, 1) == "1");
+            id = std::stoll(serverId.substr(serverId.find(':') + 1));
+        }
+
+        SyncProfile profile;
+        CHECK(profile.Open(path, error));
+        AirSyncServer server(profile, "machine:rich", {sample.kind});
+        Client client{server};
+        const auto change = [&](WbxmlNode item) {
+            auto reply = client.Post("Sync", SyncWith(sample.changes, key, {Command(Change, serverId, std::move(item))}));
+            key = NextKey(reply);
+            return reply;
+        };
+        auto truncated = sample.data;
+        const auto before = *profile.FindPimRecord(id);
+        if (contact) CHECK(before.fields.at("phone1") == "555-0100");
+        auto sparse = Node(page, {});
+        sparse.Add(page, 0x3e, "ignored");
+        auto later = Decode(SyncWith(sample.changes, key, {Command(Change, serverId, sparse)}));
+        // A later Supported must be ignored, even when it lists the note.
+        auto* collection = const_cast<WbxmlNode*>(Find(later, 0, 0x0f));
+        collection->Add(0, 0x20).Add(page, sample.body);
+        const auto laterBytes = EncodeWbxml(later);
+        key = NextKey(client.Post("Sync", laterBytes));
+        const auto after = *profile.FindPimRecord(id);
+        CHECK(after.fields == before.fields);
+        CHECK(NextKey(client.Post("Sync", laterBytes)) == key);
+        CHECK(profile.FindPimRecord(id)->revision == after.revision);
+        truncated.Add(page, sample.body, "hello");
+        truncated.Add(page, sample.truncated, "1");
+        if (sample.size) truncated.Add(page, sample.size, "11");
+        change(truncated);
+        auto saved = *profile.FindPimRecord(id);
+        CHECK(saved.fields.at("note") == "hello world" && saved.fields.at("airsyncRtf") == rtf);
+        if (contact) CHECK(saved.fields.at("airsyncPicture") == picture);
+        if (sample.size) {
+            auto inconsistent = sample.data;
+            inconsistent.Add(page, sample.body, "hello");
+            inconsistent.Add(page, sample.size, "11");
+            const auto hash = saved.fields.at("airsyncRtfBodyHash");
+            change(inconsistent);
+            CHECK(profile.FindPimRecord(id)->fields.at("note") == "hello world");
+            CHECK(profile.FindPimRecord(id)->fields.at("airsyncRtfBodyHash") == hash);
+
+            // A valid but different RTF payload from a truncated body cannot replace the old one.
+            inconsistent.Add(page, sample.rich,
+                             AirSyncBase64(Hex("13000000070000004d454c41000000007b5c727466317d")));
+            CHECK(!Find(change(inconsistent), 0, Status, 1));
+            saved = *profile.FindPimRecord(id);
+            CHECK(saved.fields.at("note") == "hello world" && saved.fields.at("airsyncRtf") == rtf);
+        }
+
+        auto invalid = sample.data;
+        invalid.Add(page, sample.rich, "AAAA");
+        CHECK(TextOf(change(invalid), 0, Status, 1) == "6");
+        auto corrupt = compressed;
+        corrupt[16] ^= 1;
+        invalid.children.back().text = AirSyncBase64(corrupt);
+        CHECK(TextOf(change(invalid), 0, Status, 1) == "6");
+        corrupt = compressed;
+        corrupt[8] ^= 1;
+        invalid.children.back().text = AirSyncBase64(corrupt);
+        CHECK(TextOf(change(invalid), 0, Status, 1) == "6");
+        if (contact) {
+            invalid = sample.data;
+            invalid.Add(page, 0x3c, std::string(49156, 'A'));
+            CHECK(TextOf(change(invalid), 0, Status, 1) == "6");
+        }
+        CHECK(profile.FindPimRecord(id)->revision == saved.revision);
+        if (contact) {
+            auto atLimit = sample.data;
+            atLimit.Add(page, 0x3c, std::string(49152, 'A'));
+            change(atLimit);
+            saved = *profile.FindPimRecord(id);
+            CHECK(saved.fields.at("airsyncPicture") == std::string(49152, 'A'));
+        }
+
+        const std::string formattedRtf = "{\\rtf1\\b hello world}";
+        const auto richEdit = UncompressedRtf(formattedRtf);
+        auto richOnly = Node(page, {{sample.rich, richEdit}});
+        CHECK(!Find(change(richOnly), 0, Status, 1));
+        saved = *profile.FindPimRecord(id);
+        CHECK(saved.fields.at("note") == "hello world" && saved.fields.at("airsyncRtf") == richEdit);
+
+        // A Palm edit merges only fields in its record format.
+        PimRecord palm = saved;
+        palm.fields.erase("airsyncRtf");
+        palm.fields.erase("airsyncRtfBodyHash");
+        palm.fields.erase("airsyncPicture");
+        ApplyPalmPim(palm, PalmPimFormat::garnet, saved);
+        CHECK(saved.fields.at("airsyncRtf") == richEdit);
+        if (contact) CHECK(saved.fields.at("airsyncPicture") == std::string(49152, 'A'));
+        saved.category = "Edited";
+        CHECK(profile.SavePimRecord(saved, error));
+        auto response = client.Sync(sample.changes, key);
+        key = NextKey(response);
+        CHECK(TextOf(response, page, sample.rich) == richEdit && TextOf(response, page, sample.body) == "hello world");
+        if (sample.size) CHECK(!Find(response, page, sample.size));
+        if (contact) CHECK(TextOf(response, page, 0x3c) == std::string(49152, 'A'));
+
+        // A host body edit takes precedence over the saved RTF. The UTF-8 prefix ends at a character.
+        saved = *profile.FindPimRecord(id);
+        const std::string prefix(5119, 'a');
+        saved.fields["note"] = prefix + "éz";
+        if (contact) saved.fields["airsyncPicture"] = std::string(49156, 'A');
+        CHECK(profile.SavePimRecord(saved, error));
+        response = client.Sync(sample.changes, key);
+        key = NextKey(response);
+        CHECK(TextOf(response, page, sample.body) == prefix + "é" && TextOf(response, page, sample.truncated) == "1");
+        CHECK(Find(response, page, sample.rich) && TextOf(response, page, sample.rich).empty());
+        if (contact) CHECK(Find(response, page, 0x3c) && TextOf(response, page, 0x3c).empty());
+        if (sample.size) CHECK(TextOf(response, page, sample.size) == "5121");
+        CHECK(profile.FindPimRecord(id)->fields.at("note") == prefix + "éz");
+
+        const auto download = [&](const std::string& opt, const std::string& note) {
+            saved = *profile.FindPimRecord(id);
+            saved.fields["note"] = note;
+            CHECK(profile.SavePimRecord(saved, error));
+            auto request = Decode(SyncWith(sample.changes, key, {}));
+            if (opt.empty()) {
+                auto* options = const_cast<WbxmlNode*>(Find(request, 0, 0x17));
+                options->children.clear();
+            } else {
+                CHECK(Set(request, 0, 0x19, opt));
+            }
+            auto result = client.Post("Sync", EncodeWbxml(request));
+            key = NextKey(result);
+            return result;
+        };
+        for (const auto& [opt, limit] : std::map<std::string, size_t>{{"6", 20480}, {"7", 51200}, {"8", 102400}}) {
+            const auto boundary = std::string(limit - 1, 'x') + "😀";
+            auto result = download(opt, boundary);
+            CHECK(TextOf(result, page, sample.body) == boundary && !Find(result, page, sample.truncated));
+            result = download(opt, boundary + "z");
+            CHECK(TextOf(result, page, sample.body) == boundary && TextOf(result, page, sample.truncated) == "1");
+            if (sample.size) CHECK(TextOf(result, page, sample.size) == std::to_string(limit + 1));
+        }
+        const std::string full(110000, 'x');
+        for (const auto* opt : {"", "9"}) {
+            auto result = download(opt, full);
+            CHECK(TextOf(result, page, sample.body) == full && !Find(result, page, sample.truncated));
+        }
+        auto cleared = download("9", "");
+        CHECK(Find(cleared, page, sample.body) && TextOf(cleared, page, sample.body).empty());
+
+        auto restore = sample.data;
+        restore.Add(page, sample.body, "clear this");
+        restore.Add(page, sample.rich, rtf);
+        if (contact) restore.Add(page, 0x3c, picture);
+        change(restore);
+        auto clear = sample.data;
+        clear.Add(page, sample.body);
+        clear.Add(page, sample.rich);
+        if (contact) clear.Add(page, 0x3c);
+        change(clear);
+        saved = *profile.FindPimRecord(id);
+        CHECK(!saved.fields.count("note") && !saved.fields.count("airsyncRtf") && !saved.fields.count("airsyncPicture"));
+        // Start again with a selective Supported list. It replaces the earlier empty list.
+        const bool calendar = sample.kind == PimKind::calendar;
+        const uint8_t optionalTag = contact ? 0x29 : calendar ? 0x17 : 0x0c;
+        const char* optionalField = contact ? "lastName" : calendar ? "location" : "dueDate";
+        auto initial = Hex(sample.start);
+        initial.insert(initial.end() - 3, {0x60, 0, page, sample.rich, optionalTag, 1});
+        key = NextKey(client.Post("Sync", initial));
+        saved.fields["note"] = "keep this text";
+        saved.fields["unrelated"] = "keep this field";
+        CHECK(profile.SavePimRecord(saved, error));
+        response = client.Sync(sample.changes, key);
+        key = NextKey(response);
+        auto formatted = sample.data;
+        formatted.Add(page, sample.body, "keep this text");
+        formatted.Add(page, sample.rich, rtf);
+        formatted.Add(page, optionalTag, contact ? "Lovelace" : calendar ? "Library" : "2026-11-26T00:00:00.000Z");
+        if (contact) formatted.Add(page, 0x3c, picture);
+        change(formatted);
+        CHECK(!profile.FindPimRecord(id)->fields.at(optionalField).empty());
+        change(sample.data);
+        saved = *profile.FindPimRecord(id);
+        CHECK(saved.fields.at("note") == "keep this text" && !saved.fields.count("airsyncRtf"));
+        CHECK(!saved.fields.count(optionalField) || saved.fields.at(optionalField).empty());
+        if (contact) CHECK(saved.fields.at("airsyncPicture") == picture);
+
+        // A reset without Supported returns to full replacement for captured WM5 requests.
+        key = NextKey(client.Post("Sync", Hex(sample.start)));
+        response = client.Sync(sample.changes, key);
+        key = NextKey(response);
+        change(formatted);
+        change(sample.data);
+        saved = *profile.FindPimRecord(id);
+        CHECK(!saved.fields.count("note") && !saved.fields.count("airsyncRtf") && !saved.fields.count("airsyncPicture"));
+        CHECK(saved.fields.at("unrelated") == "keep this field");
+
+        WbxmlNode remove(0, Delete);
+        remove.Add(0, ServerId, serverId);
+        NextKey(client.Post("Sync", SyncWith(sample.changes, key, {remove})));
+        CHECK(profile.FindPimRecord(id)->deleted);
+    }
+}
+
+void TestWm5ContactNote(SyncLibrary& library) {
+    SyncProfile profile;
+    OpenProfile(library, "WM5 contact note", profile);
+    std::string error;
+    const auto id = Save(profile, PimKind::contacts, {{"firstName", "Ada"}, {"lastName", "Lovelace"},
+                                                      {"note", "Old note"}, {"airsyncPicture", "AQID"}}).id;
+    AirSyncServer server(profile, "machine:wm5-notes", {PimKind::contacts});
+    Client client{server};
+    auto key = NextKey(client.Post("Sync", Hex(contactsStart)));
+    key = NextKey(client.Sync(contactsChanges, key));
+    const auto serverId = "1:" + std::to_string(id);
+    // Synthetic LZFu with the WM5 packet's escaped text and formatting controls.
+    const auto rich = AirSyncBase64(Hex(
+        "97000000820000004c5a4675044378ac010009205c6465666630007b5c666f6e747462006c7b5c66305c666e"
+        "00696c205461686f6d00613b7d7d7b5c636f006c6f7274626c3b5c00726564305c67726500656e305c626c75"
+        "6500303b7d5c66305c6600733136205c273465005c2736355c273737005c2732305c62205c002736655c2736"
+        "665c002737345c2736355c0062305c706172207d011510"));
+    auto item = Node(1, {{0x1e, "Lovelace, Ada"}, {0x1f, "Ada"}, {0x29, "Lovelace"}, {0x3b, rich}});
+    const auto upload = [&] {
+        const auto reply = client.Post("Sync", SyncWith(contactsChanges, key, {Command(Change, serverId, item)}));
+        CHECK(!Find(reply, 0, Status, 1));
+        key = NextKey(reply);
+    };
+    upload();
+    auto saved = *profile.FindPimRecord(id);
+    CHECK(saved.fields.at("note") == "New note");
+    CHECK(saved.fields.at("airsyncRtf") == rich && saved.fields.at("airsyncPicture") == "AQID");
+    const auto accented = UncompressedRtf(R"({\rtf1\ansi\ansicpg1252 Caf\'e9 \{\'80\}})");
+    CHECK(Set(item, 1, 0x3b, accented));
+    upload();
+    saved = *profile.FindPimRecord(id);
+    CHECK(saved.fields.at("note") == "Caf\xc3\xa9 {\xe2\x82\xac}");
+    CHECK(saved.fields.at("airsyncRtf") == accented && saved.fields.at("airsyncPicture") == "AQID");
+
+    for (const auto* unsupported : {R"({\rtf1\ansi\ansicpg932 \'82\'a0})",
+                                    R"({\rtf1\ansi{\fonttbl{\f0\fnil\fcharset204 Arial;}}\f0 \'e9})"}) {
+        CHECK(Set(item, 1, 0x3b, UncompressedRtf(unsupported)));
+        const auto rejected = client.Post("Sync", SyncWith(contactsChanges, key, {Command(Change, serverId, item)}));
+        CHECK(TextOf(rejected, 0, Status, 1) == "6");
+        key = NextKey(rejected);
+        CHECK(profile.FindPimRecord(id)->fields == saved.fields);
+        CHECK(profile.FindPimRecord(id)->revision == saved.revision);
+    }
+    CHECK(Set(item, 1, 0x3b, accented));
+    upload();
+    CHECK(profile.FindPimRecord(id)->fields == saved.fields);
+    saved = *profile.FindPimRecord(id);
+    saved.fields["note"] = "Edited on host";
+    CHECK(profile.SavePimRecord(saved, error));
+    auto response = client.Sync(contactsChanges, key);
+    key = NextKey(response);
+    CHECK(TextOf(response, 1, 0x09) == "Edited on host" && TextOf(response, 1, 0x3b).empty());
+    upload();
+    response = client.Sync(contactsChanges, key);
+    key = NextKey(response);
+    CHECK(!Find(response, 1, 0x3b));
+    CHECK(profile.FindPimRecord(id)->fields.at("note") == "Edited on host");
+    item.Add(1, 0x09);
+    item.Add(1, 0x3c);
+    CHECK(Set(item, 1, 0x3b, ""));
+    upload();
+    saved = *profile.FindPimRecord(id);
+    CHECK(!saved.fields.count("note") && !saved.fields.count("airsyncRtf") && !saved.fields.count("airsyncPicture"));
+}
+
+void TestDeleteRetry(SyncLibrary& library) {
+    SyncProfile profile;
+    std::string error;
+    ProfileInfo info;
+    CHECK(library.CreateProfile("Delete retry", info, error));
+    CHECK(profile.Open(library.ProfilePath(info), error));
+    const std::string device = "machine:delete-retry";
+    const auto id = Save(profile, PimKind::contacts, {{"firstName", "Ada"}}).id;
+    const auto other = Save(profile, PimKind::contacts, {{"firstName", "Grace"}}).id;
+    Bytes request, answer;
+    int64_t deletedRevision;
+    {
+        AirSyncServer server(profile, device, {PimKind::contacts});
+        Client client{server};
+        auto key = NextKey(client.Post("Sync", Hex(contactsStart)));
+        key = NextKey(client.Sync(contactsChanges, key));
+        CHECK(profile.SetPimAction(device, PimKind::contacts, PimAction::handheldOverwrites, error));
+        WbxmlNode remove(0, Delete);
+        remove.Add(0, ServerId, "1:" + std::to_string(id));
+        request = SyncWith(contactsChanges, key, {remove});
+    }
+    {
+        AirSyncServer server(profile, device, {PimKind::contacts});
+        Client client{server};
+        CHECK(NextKey(client.Post("Sync", request)) == "3");
+        answer = client.last.body;
+        const auto deleted = profile.FindPimRecord(id);
+        CHECK(deleted->deleted);
+        deletedRevision = deleted->revision;
+    }
+    profile.Close();
+    CHECK(profile.Open(library.ProfilePath(info), error));
+    CHECK(profile.GetPimAction(device, PimKind::contacts) == PimAction::handheldOverwrites);
+    {
+        AirSyncServer server(profile, device, {PimKind::contacts});
+        Client client{server};
+        auto distinct = Decode(request);
+        CHECK(Set(distinct, 0, ServerId, "1:" + std::to_string(other)));
+        CHECK(TextOf(client.Post("Sync", EncodeWbxml(distinct)), 0, Status) == "3");
+        CHECK(!profile.FindPimRecord(other)->deleted);
+        CHECK(NextKey(client.Post("Sync", request)) == "3" && client.last.body == answer);
+        CHECK(profile.FindPimRecord(id)->revision == deletedRevision && server.Counts().deleted == 0);
+        CHECK(server.Finished() && server.FinishActions(error));
+        CHECK(profile.GetPimAction(device, PimKind::contacts) == PimAction::synchronize);
+        CHECK(NextKey(client.Sync(contactsChanges, "3")) == "4");
+    }
+    AirSyncServer server(profile, device, {PimKind::contacts});
+    Client client{server};
+    CHECK(TextOf(client.Post("Sync", request), 0, Status) == "3");
+}
+
+void TestLargeDeleteRetry(SyncLibrary& library) {
+    SyncProfile profile;
+    std::string error;
+    ProfileInfo info;
+    CHECK(library.CreateProfile("Large Delete retry", info, error));
+    const auto path = library.ProfilePath(info);
+    CHECK(profile.Open(path, error));
+    const std::string device = "machine:large-delete-retry";
+    const auto id = Save(profile, PimKind::contacts, {{"firstName", "Delete me"}}).id;
+    const std::string picture(48 * 1024, 'A');
+    Bytes request, answer;
+    int64_t deletedRevision;
+    std::string next;
+    {
+        AirSyncServer server(profile, device, {PimKind::contacts});
+        Client client{server};
+        auto key = NextKey(client.Post("Sync", Hex(contactsStart)));
+        key = NextKey(client.Sync(contactsChanges, key));
+        for (int i = 0; i < 6; ++i)
+            Save(profile, PimKind::contacts, {{"firstName", "Picture " + std::to_string(i)}, {"airsyncPicture", picture}});
+        WbxmlNode remove(0, Delete);
+        remove.Add(0, ServerId, "1:" + std::to_string(id));
+        request = SyncWith(contactsChanges, key, {remove});
+        const auto reply = client.Post("Sync", request);
+        next = NextKey(reply);
+        CHECK(CountTag(reply, 1, 0x3c) == 6 && CountTag(reply, 0, MoreAvailable) == 0);
+        answer = client.last.body;
+        CHECK(answer.size() > 256 * 1024);
+        CHECK(profile.FindPimRecord(id)->deleted);
+        deletedRevision = profile.FindPimRecord(id)->revision;
+    }
+
+    profile.Close();
+    CHECK(profile.Open(path, error));
+    AirSyncServer server(profile, device, {PimKind::contacts});
+    Client client{server};
+    CHECK(NextKey(client.Post("Sync", request)) == next && client.last.body == answer);
+    CHECK(profile.FindPimRecord(id)->revision == deletedRevision && server.Counts().deleted == 0);
+    const auto settled = client.Sync(contactsChanges, next);
+    CHECK(TextOf(settled, 0, Status) == "1" && CountTag(settled, 0, Commands) == 0);
+}
+
+void TestNotesUnavailable(SyncLibrary& library) {
+    SyncProfile profile;
+    OpenProfile(library, "Notes unavailable", profile);
+    const auto memo = Save(profile, PimKind::memos, {{"text", "Palm memo"}});
+    AirSyncServer server(profile, "machine:notes", {PimKind::contacts, PimKind::calendar, PimKind::tasks, PimKind::memos});
+    Client client{server};
+    const auto folders = client.Post("FolderSync", Hex(folderSync));
+    CHECK(TextOf(folders, 7, 0x17) == "3" && CountTag(folders, 7, 0x0f) == 3);
+    CHECK(AirSyncFolderId(PimKind::memos).empty());
+
+    // Even with a valid Contacts id, a Notes class cannot address it.
+    auto sync = Decode(Hex(contactsStart));
+    CHECK(Set(sync, 0, 0x10, "Notes"));
+    CHECK(TextOf(client.Post("Sync", EncodeWbxml(sync)), 0, Status) == "8");
+    auto request = Decode(Hex(estimate));
+    CHECK(Set(request, 6, 0x09, "Notes"));
+    const auto result = client.Post("GetItemEstimate", EncodeWbxml(request));
+    CHECK(TextOf(result, 6, 0x0e) == "2" && CountTag(result, 6, 0x0c) == 2);
+    CHECK(profile.FindPimRecord(memo.id)->fields.at("text") == "Palm memo");
+}
+
 void TestBadInput(SyncLibrary& library) {
     SyncProfile profile;
     OpenProfile(library, "Bad input", profile);
@@ -882,6 +1435,13 @@ int main(int argc, char** argv) {
     TestZoneAcrossRequests(library);
     TestBirthdays(library);
     TestBadInput(library);
+    TestGhostedPhones(library);
+    TestLegacyPhoneClear(library);
+    TestLegacyBodies(library);
+    TestWm5ContactNote(library);
+    TestDeleteRetry(library);
+    TestLargeDeleteRetry(library);
+    TestNotesUnavailable(library);
     std::printf("sync-airsync: ok\n");
     return 0;
 }

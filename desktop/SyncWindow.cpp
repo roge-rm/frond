@@ -920,7 +920,7 @@ void SyncWindow::queueFiles() {
         }
         std::vector<InstallerFile> unpacked;
         if (!IsInstallerFileName(file.name)) failed << tr("%1: Unsupported installer.").arg(text(file.name));
-        else if (frondInstallerRunner::unpack(path, text(library.Root()), unpacked, error)) choosePayloads(unpacked, files);
+        else if (frondInstallerRunner::unpack(this, path, text(library.Root()), unpacked, error)) choosePayloads(unpacked, files);
         else failed << tr("%1: %2").arg(text(file.name), error);
     }
     queuePayloads(files, std::move(failed));
@@ -935,12 +935,45 @@ void SyncWindow::runWindowsInstaller() {
     bool chosen = false;
     const auto kind = QInputDialog::getItem(this, tr("Run Windows installer"), tr("Installer expects"), kinds, 0, false, &chosen);
     if (!chosen) return;
-    std::vector<InstallerFile> staged;
-    QString error;
-    if (!frondInstallerRunner::run(this, path, profiles->currentText(), kind == kinds.back(), text(library.Root()), staged, error))
-        return showError(this, error);
+    const bool windowsMobile = kind == kinds.back();
+    const auto syncRoot = text(library.Root());
+    bool extract = false;
+    frondInstallerRunner::RunResult launch;
+#ifdef Q_OS_WIN
+    QMessageBox method(QMessageBox::Question, tr("Run Windows installer"),
+                       tr("Run the installer or extract its files?"), QMessageBox::Cancel, this);
+    auto* run = method.addButton(tr("Run installer"), QMessageBox::AcceptRole);
+    auto* unpack = method.addButton(tr("Extract files"), QMessageBox::ActionRole);
+    method.setDefaultButton(QMessageBox::Cancel);
+    method.exec();
+    extract = method.clickedButton() == unpack;
+    if (!extract && method.clickedButton() != run) return;
+#endif
+    if (!extract) {
+        launch = frondInstallerRunner::run(this, path, profiles->currentText(), windowsMobile, syncRoot);
+        if (!launch.error.isEmpty()) {
+            QMessageBox fallback(QMessageBox::Warning, tr("Run Windows installer"), launch.error, QMessageBox::Cancel, this);
+            auto* staged = launch.files.empty() ? nullptr : fallback.addButton(tr("Choose staged files"), QMessageBox::AcceptRole);
+            auto* unpack = fallback.addButton(tr("Extract files"), QMessageBox::ActionRole);
+            fallback.setDefaultButton(QMessageBox::Cancel);
+            fallback.exec();
+            extract = fallback.clickedButton() == unpack;
+            if (!extract && (!staged || fallback.clickedButton() != staged)) return;
+        }
+    }
+    if (extract) {
+        QString error;
+        std::vector<InstallerFile> unpacked;
+        if (!frondInstallerRunner::unpack(this, path, syncRoot, unpacked, error)) return showError(this, error);
+        unpacked.erase(std::remove_if(unpacked.begin(), unpacked.end(), [windowsMobile](const InstallerFile& file) {
+            return IsCabFileName(file.name) != windowsMobile;
+        }), unpacked.end());
+        if (unpacked.empty()) return showError(this, tr("The extracted files are for a different device type."));
+        frondInstallerRunner::removeDuplicatePayloads(unpacked);
+        launch.files = std::move(unpacked);
+    }
     std::vector<InstallerFile> files;
-    choosePayloads(staged, files);
+    choosePayloads(launch.files, files);
     queuePayloads(files, {});
 }
 
