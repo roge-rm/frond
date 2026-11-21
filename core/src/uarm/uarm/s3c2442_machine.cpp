@@ -40,6 +40,11 @@ namespace {
 
     uint64_t mulDiv(uint64_t a, uint64_t b, uint64_t c, uint64_t& rest) {
         const __uint128_t total = __uint128_t(a) * b + rest;
+        if (total <= UINT64_MAX) {
+            const uint64_t narrow = uint64_t(total);
+            rest = narrow % c;
+            return narrow / c;
+        }
         rest = uint64_t(total % c);
         return uint64_t(total / c);
     }
@@ -1625,9 +1630,7 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
     std::memcpy(ramBuffer, sdram.data(), sdram.size());
     std::memcpy(steppingstone, stone.data(), stone.size());
     intc = blocks.intc;
-    clock.locktime = blocks.clock.locktime; clock.mpllcon = blocks.clock.mpllcon; clock.upllcon = blocks.clock.upllcon;
-    clock.clkcon = blocks.clock.clkcon; clock.clkslow = blocks.clock.clkslow; clock.clkdivn = blocks.clock.clkdivn;
-    clock.camdivn = blocks.clock.camdivn;
+    clock.restoreRegisters(blocks.clock);
     memory = blocks.memory;
     pwm = blocks.pwm;
     watchdog = blocks.watchdog;

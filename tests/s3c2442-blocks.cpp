@@ -134,6 +134,14 @@ static void clockTests() {
     uint32_t v;
     assert(clock.read(0x1c, v) == S3cAccess::unknown);
 
+    S3cClock restored(16934400);
+    restored.restoreRegisters(clock);
+    assert(restored.cpuClock() == clock.cpuClock() && restored.pclk() == clock.pclk());
+    restored.write(0x10, 0x13);
+    assert(restored.fclk() == 16934400 / 6 && restored.cpuClock() == restored.fclk() / 6);
+    restored.reset();
+    assert(restored.hclk() == restored.fclk() / 4 && !restored.dvs());
+
     S3cMemoryController memory;
     memory.reset();
     assert(get(memory, 0x1c) == 0x18008 && get(memory, 0x24) == 0xac0000);

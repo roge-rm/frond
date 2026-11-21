@@ -9,6 +9,7 @@ void S3cClock::reset() {
     clkslow = 0x4;
     clkdivn = 0x4;
     camdivn = 0;
+    refreshRates();
 }
 
 S3cAccess S3cClock::read(uint32_t offset, uint32_t& value) {
@@ -36,6 +37,7 @@ S3cAccess S3cClock::write(uint32_t offset, uint32_t value) {
         case 0x18: camdivn = value & 0x1f1f; break;
         default: return S3cAccess::unknown;
     }
+    refreshRates();
     if (changed) changed();
     return S3cAccess::ok;
 }
@@ -52,28 +54,28 @@ uint64_t S3cClock::upll() const {
     return m * crystal / (p << s);
 }
 
-uint64_t S3cClock::fclk() const {
-    // Slow mode runs FCLK from the crystal divided by SLOW_VAL.
-    if (clkslow & 0x10) {
-        const uint32_t slowVal = clkslow & 7;
-        return slowVal ? crystal / (2 * slowVal) : crystal;
-    }
-    return mpll();
+void S3cClock::refreshRates() {
+    // Slow mode uses the crystal, with SLOW_VAL 0 leaving it undivided.
+    const uint32_t slowVal = clkslow & 7;
+    fastHz = clkslow & 0x10 ? crystal / (slowVal ? 2 * slowVal : 1) : mpll();
+    static constexpr unsigned dividers[] = {1, 2, 4, 3};
+    const unsigned select = (clkdivn >> 1) & 3;
+    unsigned divisor = dividers[select];
+    if ((select == 2 && (camdivn & 0x200)) || (select == 3 && (camdivn & 0x100))) divisor *= 2;
+    busHz = fastHz / divisor;
+    peripheralHz = clkdivn & 1 ? busHz / 2 : busHz;
 }
 
-uint64_t S3cClock::hclk() const {
-    const uint64_t f = fclk();
-    switch ((clkdivn >> 1) & 3) {
-        case 0: return f;
-        case 1: return f / 2;
-        case 2: return camdivn & 0x200 ? f / 8 : f / 4;
-        default: return camdivn & 0x100 ? f / 6 : f / 3;
-    }
+void S3cClock::restoreRegisters(const S3cClock& saved) {
+    locktime = saved.locktime;
+    mpllcon = saved.mpllcon;
+    upllcon = saved.upllcon;
+    clkcon = saved.clkcon;
+    clkslow = saved.clkslow;
+    clkdivn = saved.clkdivn;
+    camdivn = saved.camdivn;
+    refreshRates();
 }
-
-uint64_t S3cClock::pclk() const { return clkdivn & 1 ? hclk() / 2 : hclk(); }
-
-uint64_t S3cClock::cpuClock() const { return dvs() ? hclk() : fclk(); }
 
 // The memory controller's registers, BWSCON to MRSRB7, with their reset values.
 void S3cMemoryController::reset() {
