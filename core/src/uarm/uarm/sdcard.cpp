@@ -157,13 +157,14 @@ bool SdCardStore::adoptSavedFromRam(const char* path, uint64_t payloadBytes, uin
     if (!takeTracked(tracked)) return false;
     options.keepHeld = true;
     auto held = FileCardBacking::HoldGenerations(path);
+    if (!held.ok) return false;
     auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options, adoptHooks);
     if (!fresh || !replayTracked(*fresh, tracked)) {
         fresh.reset();
-        held.Return();
+        if (!held.Return()) std::fprintf(stderr, "frond: could not return the held card generations\n");
         return false;
     }
-    held.Drop();
+    if (!held.Drop()) std::fprintf(stderr, "frond: could not remove the held card generations\n");
     backing = std::move(fresh);
     backingStale = false;
     dataViewValid = false;
@@ -233,13 +234,14 @@ bool SdCardStore::adoptSaved(const char* path, uint64_t payloadBytes, uint64_t p
     // go once the card is on its new backing, and come back if it can't move.
     options.keepHeld = true;
     auto held = FileCardBacking::HoldGenerations(path);
+    if (!held.ok) return false;
     auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options, adoptHooks);
     if (!fresh || !replayTracked(*fresh, tracked)) {
         fresh.reset();
-        held.Return();
+        if (!held.Return()) std::fprintf(stderr, "frond: could not return the held card generations\n");
         return false;
     }
-    held.Drop();
+    if (!held.Drop()) std::fprintf(stderr, "frond: could not remove the held card generations\n");
     backing = std::move(fresh);
     backingStale = false;
     dataViewValid = false;

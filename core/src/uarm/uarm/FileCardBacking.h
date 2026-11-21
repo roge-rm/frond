@@ -4,7 +4,9 @@
 #include "PosixCompat.h"
 #include "CardBacking.h"
 #include "FrondSdImage.h"
+#include "storage/Io.h"
 
+#include <algorithm>
 #include <atomic>
 #include <fcntl.h>
 #include <filesystem>
@@ -96,7 +98,7 @@ class FileCardBacking : public CardBacking {
     bool DurableIs(const std::filesystem::path& path) const {
         struct stat open{}, named{};
         return impl_->durableFd >= 0 && fstat(impl_->durableFd, &open) == 0 && ::stat(path.c_str(), &named) == 0 &&
-               open.st_dev == named.st_dev && open.st_ino == named.st_ino;
+               frondPosix::FileMatchesPath(impl_->durableFd, path, open, named);
     }
     // A snapshot handle still refers to this backing.
     bool Pinned() const { return impl_.use_count() > 1; }
@@ -145,60 +147,66 @@ class FileCardBacking : public CardBacking {
         return false;
     }
 
-    // Generations moved aside under ".held-" names (which no load or discard looks at), for a move
-    // onto `durable` that may still fail. Open descriptors on them stay valid across the renames.
-    struct HeldGenerations {
-        std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moved;  // original, held
-        // The move failed: they go back under their own names, the root last, so a crash part way
-        // never leaves a root whose generations are still held.
-        void Return() {
-            std::error_code ec;
-            for (int rootPass = 0; rootPass < 2; ++rootPass)
-                for (const auto& [original, held] : moved) {
-                    const auto name = original.filename().string();
-                    const bool root = name.size() > 5 && name.compare(name.size() - 5, 5, "-root") == 0;
-                    if (root == bool(rootPass)) std::filesystem::rename(held, original, ec);
-                }
-            moved.clear();
-        }
-        // The move worked: they go.
-        void Drop() {
-            std::error_code ec;
-            for (const auto& entry : moved) std::filesystem::remove(entry.second, ec);
-            moved.clear();
-        }
-    };
-    // As DiscardGenerations, but moved aside, to Return or Drop.
-    static HeldGenerations HoldGenerations(const std::filesystem::path& durable) {
-        SettleHeld(durable);
-        auto dir = durable.parent_path();
-        if (dir.empty()) dir = ".";
-        std::error_code ec;
-        HeldGenerations held;
-        std::vector<std::filesystem::path> found;
-        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-            const auto name = it->path().filename().string();
-            if (GeneratedName(durable.filename().string(), name) && !NeighbourName(durable, name))
-                found.push_back(it->path());
-        }
-        for (const auto& path : found) {
-            const auto aside = dir / (".held-" + path.filename().string());
-            std::error_code renamed;
-            std::filesystem::rename(path, aside, renamed);
-            if (!renamed) held.moved.emplace_back(path, aside);
-        }
-        return held;
+    using HeldFiles = std::vector<std::pair<std::filesystem::path, std::filesystem::path>>;
+
+    static std::filesystem::path DroppingRoot(const std::filesystem::path& heldRoot) {
+        auto path = heldRoot;
+        path += ".drop";
+        return path;
     }
 
-    // Held generations a crash left behind (between HoldGenerations and Return or Drop). They come
-    // back under their names when their root binds the durable file there now and no live root
-    // does; otherwise the durable file has replaced them and they go.
-    static void SettleHeld(const std::filesystem::path& durable) {
-        auto dir = durable.parent_path();
-        if (dir.empty()) dir = ".";
+    // Open descriptors stay valid across the renames. The root goes aside first and
+    // comes back last so it can identify the history throughout an interrupted move.
+    struct HeldGenerations {
+        HeldFiles moved;  // held, original
+        std::filesystem::path root;
+        bool ok = false;
+
+        bool Return() const {
+            std::error_code ec;
+            for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
+                const auto status = std::filesystem::symlink_status(it->second, ec);
+                if (status.type() != std::filesystem::file_type::not_found ||
+                    ::rename(it->first.c_str(), it->second.c_str()) != 0) return false;
+            }
+            return true;
+        }
+
+        bool Drop() const {
+            if (moved.empty()) return true;
+            const auto heldRoot = root.parent_path() / (".held-" + root.filename().string());
+            const auto dropping = DroppingRoot(heldRoot);
+            const bool hasRoot = moved.front().second == root;
+            // Keep the original root bytes until cleanup succeeds. The name records
+            // the disposal decision even when the base still has the same stamp.
+            if (hasRoot && !BeginDrop(root, heldRoot, dropping)) return false;
+            return RemoveHeld(moved, root, dropping);
+        }
+    };
+
+    static bool BeginDrop(const std::filesystem::path& root, const std::filesystem::path& heldRoot,
+                          const std::filesystem::path& dropping) {
+        return ::rename(heldRoot.c_str(), dropping.c_str()) == 0 &&
+               frondStorage::syncDir(root.parent_path());
+    }
+
+    static bool RemoveHeld(const HeldFiles& files, const std::filesystem::path& root,
+                           const std::filesystem::path& last) {
+        std::error_code ec;
+        for (const auto& [held, original] : files) {
+            if (original == root) continue;
+            std::filesystem::remove(held, ec);
+            if (ec) return false;
+        }
+        if (!frondStorage::syncDir(root.parent_path())) return false;
+        std::filesystem::remove(last, ec);
+        return !ec && frondStorage::syncDir(root.parent_path());
+    }
+
+    static bool FindHeld(const std::filesystem::path& durable, const std::filesystem::path& dir,
+                         HeldFiles& found) {
         const auto tag = durable.filename().string();
         std::error_code ec;
-        std::vector<std::pair<std::filesystem::path, std::filesystem::path>> found;  // held, original
         for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
             const auto name = it->path().filename().string();
             if (name.compare(0, 6, ".held-")) continue;
@@ -206,38 +214,122 @@ class FileCardBacking : public CardBacking {
             if (GeneratedName(tag, original) && !NeighbourName(durable, original))
                 found.emplace_back(it->path(), dir / original);
         }
-        if (found.empty()) return;
-        const auto rootName = ".gen-" + tag + "-root";
-        const bool restore = !std::filesystem::exists(dir / rootName, ec) && !ec &&
-                             RootBinds(dir / (".held-" + rootName), durable);
-        for (const auto& [held, original] : found) {
-            std::error_code done;
-            if (restore && !std::filesystem::exists(original, done) && !done)
-                std::filesystem::rename(held, original, done);
-            else
-                std::filesystem::remove(held, done);
-        }
+        return !ec;
     }
 
-    // True when the v2 root at `rootPath` was written for the durable file now at `durable`.
-    static bool RootBinds(const std::filesystem::path& rootPath, const std::filesystem::path& durable) {
+    // As DiscardGenerations, but moved aside, to Return or Drop.
+    static HeldGenerations HoldGenerations(const std::filesystem::path& durable) {
+        if (!SettleHeld(durable)) return {};
+        auto dir = durable.parent_path();
+        if (dir.empty()) dir = ".";
+        const auto tag = durable.filename().string();
+        HeldGenerations held;
+        held.root = dir / (".gen-" + tag + "-root");
+        std::error_code ec;
+        std::vector<std::filesystem::path> found;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (GeneratedName(tag, name) && !NeighbourName(durable, name))
+                found.push_back(it->path());
+        }
+        if (ec) return held;
+        if (!found.empty()) {
+            HeldFiles residue;
+            if (!FindHeld(durable, dir, residue) || !residue.empty()) return held;
+        }
+        const auto rootEntry = std::find(found.begin(), found.end(), held.root);
+        if (rootEntry != found.end()) {
+            if (RootBinds(held.root, durable) == RootBinding::unknown) return held;
+            std::iter_swap(found.begin(), rootEntry);
+        }
+        for (const auto& path : found) {
+            const auto aside = dir / (".held-" + path.filename().string());
+            if (::rename(path.c_str(), aside.c_str()) != 0) {
+                held.Return();
+                return held;
+            }
+            held.moved.emplace_back(aside, path);
+            if (path == held.root && !frondStorage::syncDir(dir)) {
+                held.Return();
+                return held;
+            }
+        }
+        held.ok = true;
+        return held;
+    }
+
+    enum class RootBinding { matches, mismatch, unknown };
+
+    static RootBinding CompareBinding(const uint8_t* buf, const frondPosix::FileStamp& stamp) {
+        const frondPosix::FileStamp recorded{
+            frondSdFile::get64(buf + 28), frondSdFile::get64(buf + 36), frondSdFile::get64(buf + 44)};
+#ifdef _WIN32
+        if (!frondPosix::HasWindowsIdentity(recorded.dev)) return RootBinding::unknown;
+#endif
+        return recorded == stamp ? RootBinding::matches : RootBinding::mismatch;
+    }
+
+    static RootBinding RootBinds(const std::filesystem::path& rootPath,
+                                 const std::filesystem::path& durable) {
+        std::error_code ec;
+        if (std::filesystem::file_size(rootPath, ec) != kRootBytes || ec) return RootBinding::unknown;
         uint8_t buf[kRootBytes]{};
-        const int fd = ::open(rootPath.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) return false;
+        const int fd = ::open(rootPath.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) return RootBinding::unknown;
         const bool read = ::pread(fd, buf, kRootBytes, 0) == ssize_t(kRootBytes);
         ::close(fd);
-        struct stat st {};
+        frondPosix::FileStamp stamp;
         if (!read || std::memcmp(buf, "FRONDRT\0", 8) != 0 || frondSdFile::get32(buf + 8) != 2 ||
-            stat(durable.c_str(), &st) != 0)
-            return false;
-        const uint64_t mtime = frondPosix::MtimeNs(st);
-        return frondSdFile::get64(buf + 28) == uint64_t(st.st_dev) &&
-               frondSdFile::get64(buf + 36) == uint64_t(st.st_ino) && frondSdFile::get64(buf + 44) == mtime;
+            !frondPosix::ReadPathStamp(durable, stamp)) return RootBinding::unknown;
+        return CompareBinding(buf, stamp);
+    }
+
+    // Finish an interrupted hold or disposal. Rootless residue has no binding
+    // evidence and stays outside the live namespace.
+    static bool SettleHeld(const std::filesystem::path& durable) {
+        auto dir = durable.parent_path();
+        if (dir.empty()) dir = ".";
+        HeldFiles found;
+        if (!FindHeld(durable, dir, found)) return false;
+        const auto root = dir / (".gen-" + durable.filename().string() + "-root");
+        const auto heldRoot = dir / (".held-" + root.filename().string());
+        const auto dropping = DroppingRoot(heldRoot);
+        std::error_code ec;
+        const auto dropStatus = std::filesystem::symlink_status(dropping, ec);
+        if (ec && dropStatus.type() != std::filesystem::file_type::not_found) return false;
+        const bool hasHeldRoot = std::any_of(found.begin(), found.end(), [&](const auto& entry) {
+            return entry.first == heldRoot;
+        });
+        if (dropStatus.type() != std::filesystem::file_type::not_found) {
+            // A disposal root must be ours before it authorizes removal.
+            if (hasHeldRoot || dropStatus.type() != std::filesystem::file_type::regular ||
+                RootBinds(dropping, durable) == RootBinding::unknown) return false;
+            return RemoveHeld(found, root, dropping);
+        }
+        if (!hasHeldRoot) return true;
+        const auto binding = RootBinds(heldRoot, durable);
+        if (binding == RootBinding::unknown) return false;
+        if (binding == RootBinding::mismatch)
+            return BeginDrop(root, heldRoot, dropping) && RemoveHeld(found, root, dropping);
+        const auto live = std::filesystem::symlink_status(root, ec);
+        if (live.type() != std::filesystem::file_type::not_found)
+            return !ec && RootBinds(root, durable) == RootBinding::matches;
+
+        for (const auto& [held, original] : found) {
+            const auto status = std::filesystem::symlink_status(original, ec);
+            if (status.type() != std::filesystem::file_type::not_found) return false;
+        }
+        for (int rootPass = 0; rootPass < 2; ++rootPass)
+            for (const auto& [held, original] : found) {
+                if ((original == root) != bool(rootPass)) continue;
+                if (::rename(held.c_str(), original.c_str()) != 0) return false;
+            }
+        return true;
     }
 
     // Removes recognised, unambiguous namespace entries of a closed backing.
-    static void DiscardGenerations(const std::filesystem::path& durable) {
-        SettleHeld(durable);
+    static bool DiscardGenerations(const std::filesystem::path& durable) {
+        if (!SettleHeld(durable)) return false;
         auto dir = durable.parent_path();
         if (dir.empty()) dir = ".";
         std::error_code ec;
@@ -247,7 +339,13 @@ class FileCardBacking : public CardBacking {
             if (GeneratedName(durable.filename().string(), name) && !NeighbourName(durable, name))
                 doomed.push_back(it->path());
         }
-        for (const auto& path : doomed) std::filesystem::remove(path, ec);
+        if (ec) return false;
+        bool ok = true;
+        for (const auto& path : doomed) {
+            std::filesystem::remove(path, ec);
+            if (ec) ok = false;
+        }
+        return ok;
     }
 
     std::shared_ptr<const CardSnapshot> Snapshot() override {
@@ -381,7 +479,7 @@ class FileCardBacking : public CardBacking {
             if (fd < 0) return false;
             struct stat open {}, named {};
             if (fstat(fd, &open) != 0 || stat(path.c_str(), &named) != 0) return false;
-            return open.st_dev == named.st_dev && open.st_ino == named.st_ino;
+            return frondPosix::FileMatchesPath(fd, path, open, named);
         }
     };
 
@@ -626,7 +724,7 @@ class FileCardBacking : public CardBacking {
             if (dir.empty()) dir = ".";
             tag = durable.filename().string();
             if (tag.empty()) return false;
-            if (!options.keepHeld) SettleHeld(durable);
+            if (!options.keepHeld && !SettleHeld(durable)) return false;
             payloadOffset = off;
             payloadSize = size;
             pageSize = options.pageSize;
@@ -651,9 +749,11 @@ class FileCardBacking : public CardBacking {
             working = base;
             struct stat st {};
             if (fstat(durableFd, &st) != 0) return false;
-            bindDev = uint64_t(st.st_dev);
-            bindIno = uint64_t(st.st_ino);
-            bindMtime = frondPosix::MtimeNs(st);
+            frondPosix::FileStamp stamp;
+            if (!frondPosix::ReadFileStamp(durableFd, st, stamp)) return false;
+            bindDev = stamp.dev;
+            bindIno = stamp.ino;
+            bindMtime = stamp.mtime;
             if (!bindingKey(options.identity, bindKey)) return false;
             // Strict providers retain every invalid namespace. Legacy providers discard
             // roots belonging to a replaced base file or card identity.
@@ -683,7 +783,7 @@ class FileCardBacking : public CardBacking {
                                 !NeighbourName(durablePath, it->path().filename().string(), true)) return false;
                         if (ec) return false;
                     }
-                    if (!recover) DiscardGenerations(durablePath);
+                    if (!recover && !DiscardGenerations(durablePath)) return false;
                 }
             }
             if (root->id < options.minimumRoot) return false;
@@ -752,8 +852,9 @@ class FileCardBacking : public CardBacking {
                               ioRead(rfd, buf, kRootBytes, 0);
             ::close(rfd);
             if (!read || std::memcmp(buf, "FRONDRT\0", 8) != 0 || frondSdFile::get32(buf + 8) != 2) return false;
-            if (frondSdFile::get64(buf + 20) != payloadSize || frondSdFile::get64(buf + 28) != bindDev ||
-                frondSdFile::get64(buf + 36) != bindIno || frondSdFile::get64(buf + 44) != bindMtime ||
+            const auto binding = CompareBinding(buf, {bindDev, bindIno, bindMtime});
+            if (binding == RootBinding::unknown) return false;
+            if (binding == RootBinding::mismatch || frondSdFile::get64(buf + 20) != payloadSize ||
                 frondSdFile::get64(buf + 52) != bindKey || frondSdFile::get32(buf + 60) != pageSize) {
                 boundRoot = false;
                 return false;
@@ -1178,6 +1279,7 @@ class FileCardBacking : public CardBacking {
             frondSdFile::put64(header + 40, g->overlayCount);
             frondSdFile::put64(header + 48, g->indexOffset);
             if (!ioWrite(g->fd, header, kHeaderBytes, 0) || !ioFlush(g->fd)) return false;
+            if (g->idxFd >= 0 && g->idxFd != g->fd) ::close(g->idxFd);
             g->idxFd = g->fd;
             g->idxBase = g->indexOffset;
             g->frozen = true;

@@ -489,10 +489,78 @@ static void LazyChunkCrc() {
     fs::remove_all(dir);
 }
 
+void HeldRecovery() {
+    const auto dir = GenDir();
+    const auto path = dir / "card";
+    const auto root = dir / ".gen-card-root";
+    const auto heldRoot = dir / ".held-.gen-card-root";
+    const auto dropping = FileCardBacking::DroppingRoot(heldRoot);
+    const auto base = Filled(4096, 0x11);
+    const auto patch = Filled(512, 0x22);
+    WriteAll(path, base);
+    auto open = [&] { return OpenRaw(path, base.size(), 512, 1024); };
+    auto commit = [&] {
+        auto card = open();
+        assert(card && card->Write(0, patch.size(), patch.data()) && card->Commit());
+    };
+
+    commit();
+    // A crash immediately after the root moves still allows rollback.
+    fs::rename(root, heldRoot);
+    {
+        auto card = open();
+        assert(card && fs::exists(root) && !fs::exists(heldRoot));
+        ExpectRange(*card, 0, patch);
+    }
+
+    auto held = FileCardBacking::HoldGenerations(path);
+    assert(held.ok && held.moved.size() >= 2 && !fs::exists(root));
+    const auto blocked = held.moved.back().first;
+    fs::remove(blocked);
+    fs::create_directory(blocked);
+    WriteAll(blocked / "block-removal", patch);
+    assert(!held.Drop() && fs::exists(dropping));
+    assert(!FileCardBacking::SettleHeld(path) && fs::exists(dropping));
+    fs::remove_all(blocked);
+    {
+        auto card = open();
+        assert(card && !fs::exists(root) && !fs::exists(heldRoot) && !fs::exists(dropping));
+        ExpectRange(*card, 0, base);
+    }
+
+    commit();
+    held = FileCardBacking::HoldGenerations(path);
+    assert(held.ok && held.moved.size() >= 2);
+    const auto oldGeneration = dir / ".held-.gen-card-1";
+    assert(fs::exists(oldGeneration));
+    assert(fs::remove(heldRoot));  // Old Drop could remove the root first.
+    const auto replacement = dir / "replacement";
+    WriteAll(replacement, Filled(base.size(), 0x33));
+    fs::remove(path);
+    fs::rename(replacement, path);
+    {
+        auto card = open();
+        assert(card && fs::exists(oldGeneration));
+        ExpectRange(*card, 0, Filled(512, 0x33));
+    }
+    commit();
+    {
+        auto card = open();
+        assert(card && fs::exists(oldGeneration));
+        ExpectRange(*card, 0, patch);
+    }
+    fs::remove_all(dir);
+}
+
+#ifndef _WIN32
 #include "card-crash-recovery.h"
+#endif
 
 void CardBackingGenerations() {
+#ifndef _WIN32
     RootlessCrashRecovery(GenDir());
+#endif
+    HeldRecovery();
     HistoryLimits(GenDir(), false);
     RamGenerations();
     FileSectorsAndRecords();

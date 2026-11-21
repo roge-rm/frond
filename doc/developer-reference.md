@@ -1375,6 +1375,16 @@ New manifests start with `frond-linked-sd 3`. Each row contains HAL slot (0 or 2
 `sd`, quoted absolute backing path, 32-character lowercase hex identity, decimal
 CID serial, payload bytes, protected and inserted flags (0 or 1), then the base
 file's device, inode and nanosecond modification time, followed by `sd` or `mmc` and the committed root generation ID.
+On Windows the device field contains a tagged volume serial and the inode field
+contains the Windows file index. Older Windows linked saves and interrupted
+settles with CRT identity fields cannot establish which file the changes belong
+to. Frond reports the error and keeps the recovery files.
+
+Run `make test-linked-card-lock` on Linux and `make test-linked-card-lock-wine`
+with MinGW and Wine. The tests cover linked SD reopen, cross-process lock
+contention, a same-second edit and interrupted recovery. The Wine target uses
+a private prefix under the test output directory by default.
+
 The row kind stays `sd` for the shared block container. Missing rows mean empty
 slots. SD0/chunk01d0, MS1 and SD2/chunk0201 keep their existing IDs.
 

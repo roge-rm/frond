@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fcntl.h>
+#include <filesystem>
 #include <string_view>
 #include <poll.h>
 #include <sys/socket.h>
@@ -21,8 +22,16 @@
 #endif
 
 #ifdef _WIN32
-#include <filesystem>
 #include <string>
+namespace frondWin {
+struct FileTime { uint32_t low, high; };
+struct FileInfo {
+    uint32_t attributes;
+    FileTime created, accessed, modified;
+    uint32_t volume, sizeHigh, sizeLow, links, indexHigh, indexLow;
+};
+extern "C++" int __stdcall getFileInfo(void*, FileInfo*) __asm__("GetFileInformationByHandle");
+}
 #endif
 
 namespace frondPosix {
@@ -66,14 +75,69 @@ inline int Socket(int domain, int type, int protocol) {
 #endif
 }
 
-// Modified time of a stat result in nanoseconds.
+#ifndef _WIN32
 inline uint64_t MtimeNs(const struct stat& st) {
-#if defined(_WIN32)
-    return uint64_t(st.st_mtime) * 1000000000ull;
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     return uint64_t(st.st_mtimespec.tv_sec) * 1000000000ull + uint64_t(st.st_mtimespec.tv_nsec);
 #else
     return uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
+#endif
+}
+#endif
+
+struct FileStamp {
+    uint64_t dev{}, ino{}, mtime{};
+    bool operator==(const FileStamp& other) const {
+        return dev == other.dev && ino == other.ino && mtime == other.mtime;
+    }
+};
+
+#ifdef _WIN32
+// The top word distinguishes a Windows volume serial from the old CRT device field.
+constexpr uint64_t windowsVolumeTag = 0x46524f4e00000000ull;
+inline bool HasWindowsIdentity(uint64_t dev) {
+    return (dev & 0xffffffff00000000ull) == windowsVolumeTag;
+}
+#endif
+
+inline bool ReadFileStamp([[maybe_unused]] int fd, [[maybe_unused]] const struct stat& st,
+                          FileStamp& stamp) {
+#ifdef _WIN32
+    const auto handle = _get_osfhandle(fd);
+    frondWin::FileInfo info{};
+    if (handle == -1 || !frondWin::getFileInfo(reinterpret_cast<void*>(handle), &info))
+        return false;
+    const uint64_t index = (uint64_t(info.indexHigh) << 32) | info.indexLow;
+    if (!index) return false;
+    constexpr uint64_t unixEpoch = 116444736000000000ull;  // FILETIME ticks are 100 ns
+    const uint64_t ticks = (uint64_t(info.modified.high) << 32) | info.modified.low;
+    stamp = {windowsVolumeTag | info.volume, index, (ticks - unixEpoch) * 100};
+#else
+    stamp = {uint64_t(st.st_dev), uint64_t(st.st_ino), MtimeNs(st)};
+#endif
+    return true;
+}
+
+inline bool ReadPathStamp(const std::filesystem::path& path, FileStamp& stamp) {
+    struct stat st{};
+#ifdef _WIN32
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    const bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && ReadFileStamp(fd, st, stamp);
+    ::close(fd);
+    return ok;
+#else
+    return ::lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && ReadFileStamp(-1, st, stamp);
+#endif
+}
+
+inline bool FileMatchesPath([[maybe_unused]] int fd, [[maybe_unused]] const std::filesystem::path& path,
+                            const struct stat& opened, [[maybe_unused]] const struct stat& named) {
+#ifdef _WIN32
+    FileStamp a, b;
+    return ReadFileStamp(fd, opened, a) && ReadPathStamp(path, b) && a.dev == b.dev && a.ino == b.ino;
+#else
+    return opened.st_dev == named.st_dev && opened.st_ino == named.st_ino;
 #endif
 }
 
