@@ -20,7 +20,7 @@ struct Region {
 static std::vector<Region> regions;
 static GpioChangedNotifF notifiers[121]{};
 static void* contexts[121]{};
-static bool levels[121]{}, inCallback = false, scheduled = false;
+static bool levels[121]{}, inCallback = false, scheduled = false, rxEdgeEnabled = true;
 bool memRegionAdd(ArmMem*, uint32_t address, uint32_t size, ArmMemAccessF callback, void* context) {
     regions.push_back({address, size, callback, context});
     return true;
@@ -35,6 +35,10 @@ void pxaGpioSetState(PxaGpio*, uint_fast8_t pin, bool value) {
 }
 PxaGpioState pxaGpioGetState(PxaGpio*, uint_fast8_t pin) {
     return levels[pin] ? PxaGpioStateHigh : PxaGpioStateLow;
+}
+bool pxaGpioFallingEdgeEnabled(const PxaGpio*, unsigned pin) {
+    assert(pin == 116);
+    return rxEdgeEnabled;
 }
 uint32_t paceGetAreg(uint8_t) { return 0; }
 uint32_t paceGetPC() { return 0; }
@@ -256,6 +260,22 @@ int main() {
     command(0x12);
     response();
     auto tx = arpTx();
+    transmit(tx);
+    transmit(tx);
+    radio.Poll();
+    assert(read(0x22) & 2);
+    write(0x22, 0x1f);
+    const auto first = packet();
+    // The Palm driver temporarily masks its GPIO edge after reading the first frame.
+    rxEdgeEnabled = false;
+    radio.Poll();
+    assert(read(0x20) & 2);
+    assert(!(read(0x22) & 2) && levels[116]);
+    rxEdgeEnabled = true;
+    radio.Poll();
+    assert((read(0x22) & 2) && !levels[116]);
+    assert(packet() == first);
+
     for (unsigned round = 0; round < 16; ++round) {
         // A partially submitted Ethernet packet is device state, and survives
         // normal resume even though the old host router is discarded.

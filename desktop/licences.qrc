@@ -5,6 +5,8 @@
     <file alias="zip-UNLICENSE">../licences/zip-UNLICENSE</file>
     <file alias="monocypher-LICENCE">../licences/monocypher-LICENCE</file>
     <file alias="nanopb-LICENSE">../licences/nanopb-LICENSE</file>
+    <file alias="sqlite-PUBLIC-DOMAIN">../licences/sqlite-PUBLIC-DOMAIN</file>
+    <file alias="synce-LICENSE">../licences/synce-LICENSE</file>
     <file alias="ymfm-LICENSE">../licences/ymfm-LICENSE</file>
     <file alias="dynarmic-LICENSE">../licences/dynarmic-LICENSE</file>
     <file alias="fmt-LICENSE">../licences/fmt-LICENSE</file>

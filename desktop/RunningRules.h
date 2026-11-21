@@ -26,6 +26,7 @@ struct Traits {
     bool cardInstall{false};
     // Takes the CLIÉ game controller on its connector.
     bool gamepad{false};
+    bool syncManager{false};
 };
 
 inline Traits traitsFor(frondFirmware::Device device) {
@@ -49,7 +50,7 @@ inline Traits traitsFor(frondFirmware::Device device) {
     return t;
 }
 
-enum class Id { Hold, Keyboard, Gamepad, Microphone, Network, Display, Connections, Screenshot, HideBar, FullScreen,
+enum class Id { Hold, Keyboard, Gamepad, Microphone, Network, SyncManager, Display, Connections, Screenshot, HideBar, FullScreen,
                 Save, SaveCopy, Log, Reset, HardReset, SaveStop };
 
 struct Row {
@@ -99,6 +100,7 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
                                           ready && t.microphone, false, 0});
     if (has(t.network)) out.push_back({Id::Network, QObject::tr("Network"), std::nullopt, s.network,
                                        ready && t.network && !s.network.isEmpty(), false, 0});
+    if (t.syncManager) out.push_back({Id::SyncManager, QObject::tr("Sync Manager…"), std::nullopt, {}, true, false, 0});
     out.push_back({Id::Display, QObject::tr("Display…"), std::nullopt, {}, true, false, 1});
     out.push_back({Id::Connections, QObject::tr("Connections…"), std::nullopt, {}, true, false, 1});
     out.push_back({Id::Screenshot, QObject::tr("Screenshot"), std::nullopt, {}, ready, false, 1});

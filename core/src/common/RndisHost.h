@@ -62,7 +62,7 @@ class RndisHost {
     // When the host next needs to act by itself (a response wait or a keepalive), UINT64_MAX for never.
     uint64_t NextWake() const;
 
-    // Bulk IN, one packet at a time: a packet shorter than the max packet size ends the transfer.
+    // Bulk IN, one packet at a time: deliver complete messages at a packet boundary or on a short packet.
     void BulkInPacket(const uint8_t* data, size_t size);
     // One whole bulk IN transfer: one or more messages back to back.
     void BulkInTransfer(const uint8_t* data, size_t size);

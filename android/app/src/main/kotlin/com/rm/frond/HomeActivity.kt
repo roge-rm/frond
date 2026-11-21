@@ -28,6 +28,7 @@ import com.rm.frond.ui.FirmwareScreen
 import com.rm.frond.ui.FrondTheme
 import com.rm.frond.ui.HomeScreen
 import com.rm.frond.ui.SettingsScreen
+import com.rm.frond.ui.SyncManagerScreen
 import com.rm.frond.ui.MachineSettingsScreen
 import java.io.File
 
@@ -81,6 +82,7 @@ class HomeModel(private val activity: HomeActivity) {
     var notice by mutableStateOf<String?>(null)
     var running by mutableStateOf(false)
         private set
+    var syncManagerOpen by mutableStateOf(false)
     var settingsOpen by mutableStateOf(false)
     var aboutOpen by mutableStateOf(false)
     var settings by mutableStateOf(Settings())
@@ -393,6 +395,7 @@ class HomeModel(private val activity: HomeActivity) {
         }
         firmwareOpen = state.getBoolean("firmwareOpen")
         startAfterImport = Device.byId(state.getString("startAfterImport"))
+        syncManagerOpen = state.getBoolean("syncManagerOpen")
     }
 
     fun saveState(state: Bundle) {
@@ -402,6 +405,7 @@ class HomeModel(private val activity: HomeActivity) {
         }
         state.putBoolean("firmwareOpen", firmwareOpen)
         state.putString("startAfterImport", startAfterImport?.id)
+        state.putBoolean("syncManagerOpen", syncManagerOpen)
     }
 
     fun openFirmware(thenStart: Device? = null) {
@@ -453,9 +457,11 @@ class HomeActivity : ComponentActivity() {
                         }
                     }
                     // The last one registered wins, so About closes first.
+                    BackHandler(enabled = model.syncManagerOpen) { model.syncManagerOpen = false }
                     BackHandler(enabled = model.aboutOpen) { model.aboutOpen = false }
                     when {
                         model.aboutOpen -> AboutScreen(model)
+                        model.syncManagerOpen -> SyncManagerScreen(model.sessions) { model.syncManagerOpen = false }
                         model.settingsOpen -> SettingsScreen(model)
                         model.firmwareOpen -> FirmwareScreen(model)
                         model.machineDraft != null -> MachineSettingsScreen(model)

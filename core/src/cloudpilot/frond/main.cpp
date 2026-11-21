@@ -81,6 +81,7 @@
 #include "Feature.h"
 #include "GdbStub.h"
 #include "HostLink.h"
+#include "../../common/sync/SyncManager.h"
 #include "HostTransport.h"
 #include "IrPhoneTransport.h"
 #include "ModemTransport.h"
@@ -188,6 +189,10 @@ struct Options {
     string usb{"off"};
     // The modem's HotSync link: where a call to the HotSync number goes.
     string modemSync{"off"};
+    // The sync manager: its folder, a profile over the handheld's assigned one, this machine's key
+    // and the user name a new handheld gets.
+    bool syncNetwork{false};
+    string syncFolder, syncProfile, syncMachine, syncUser;
     string sdAttach[2];
     string msAttach;
     bool cardSwap{false};
@@ -208,8 +213,9 @@ void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
-            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem] [--usb off|pty|tcp:PORT|unix:PATH]\n"
-            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH]\n"
+            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
+            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
+            "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
             "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
@@ -1278,6 +1284,17 @@ class Runner {
     }
 
     bool OpenLinks() {
+        {
+            frondSync::SyncOptions sync;
+            sync.network = options.syncNetwork;
+            sync.root = options.syncFolder;
+            sync.profile = options.syncProfile;
+            sync.machineKey = options.syncMachine;
+            sync.userName = options.syncUser;
+            sync.network = sync.network || frondSync::ConfiguredHotSyncUsesNetwork(sync);
+            frondSync::SyncManager::Get().Configure(sync);
+            frondSync::SyncManager::Get().SetListener([](const string& line) { cout << "sync: " << line << endl; });
+        }
         for (auto [link, mode, name] : {make_tuple(&serialLink, options.serial, "serial"),
                                         make_tuple(&irLink, options.irda, "infrared")}) {
             string error;
@@ -1323,9 +1340,10 @@ class Runner {
         uint16_t port;
         string path;
         if (!HostLink68k::Parse(mode, kind, port, &path)) {
-            error = "use off, pty, tcp:PORT or unix:PATH";
+            error = "use off, pty, tcp:PORT, unix:PATH or sync";
             return false;
         }
+        modemSyncLink.SetSyncTransport(int(frondSync::Transport::modem));
         if (kind != HostLink68k::Kind::off && !profile->capabilities.modem) {
             error = string(profile->displayName) + " has no modem";
             return false;
@@ -1353,7 +1371,7 @@ class Runner {
         uint16_t port;
         string path;
         if (!HostLink68k::Parse(mode, kind, port, &path)) {
-            error = "use off, pty, tcp:PORT, unix:PATH or modem";
+            error = "use off, pty, tcp:PORT, unix:PATH, sync or modem";
             return false;
         }
         serialTransport->SetModemMode(false, error);
@@ -1389,7 +1407,7 @@ class Runner {
         HostLink68k::Kind kind;
         uint16_t port;
         string path;
-        if (!HostLink68k::Parse(mode, kind, port, &path)) {
+        if (!HostLink68k::Parse(mode, kind, port, &path) || kind == HostLink68k::Kind::syncManager) {
             error = "use off, pty, tcp:PORT, unix:PATH, phone or printer";
             return false;
         }
@@ -1610,7 +1628,7 @@ class Runner {
         auto* d12=UsbCradle();
         if(!d12) { error="This device has no USB cradle.";return false; }
         UsbHostBridge::Config config;
-        if(!HostSerial::Parse(mode,config)) { error="Use off, pty, tcp:PORT or unix:PATH.";return false; }
+        if(!HostSerial::Parse(mode,config)) { error="Use off, pty, tcp:PORT, unix:PATH or sync.";return false; }
         StopUsb(config.kind!=HostSerial::Kind::off && HostSerial::Format(config)==usbCradleMode);
         usbCradleMode="off";
         usbError.clear();
@@ -1627,6 +1645,16 @@ class Runner {
         }
         usbCradleMode=HostSerial::Format(usbBridge.GetConfig());
         return true;
+    }
+    // The cradle's HotSync button, pressed and let go.
+    void PressHotSync() {
+        gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::press));
+        gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::release));
+    }
+    static string SyncState() {
+        auto& manager = frondSync::SyncManager::Get();
+        const auto profile = manager.Options().profile;
+        return manager.Status().Describe() + (profile.empty() ? "" : "; profile " + profile);
     }
     string UsbDescription() const {
         const string state=usbBridge.Describe();
@@ -2222,6 +2250,16 @@ class Runner {
         StateChanged("serial", lastSerial, SerialDescription());
         if (UsbCradle()) StateChanged("usb", lastUsb, UsbDescription());
         StateChanged("infrared", lastInfrared, InfraredDescription());
+        if (syncPress) {
+            if (usbBridge.Host() && usbBridge.Host()->GetPhase() == UsbBusHost::Phase::running) {
+                syncPress = false;
+                PressHotSync();
+            } else if (std::chrono::steady_clock::now() > syncPressBy) {
+                syncPress = false;
+                desktop->Event("sync", "failed usb: USB didn't come up.");
+            }
+        }
+        StateChanged("sync", lastSync, frondSync::SyncManager::Get().Status().Describe());
         // A save writing in the background answers when it's done; requests after it wait.
         if (pendingSave) {
             if (!saveJob.Finished()) {
@@ -2248,7 +2286,8 @@ class Runner {
                     break;
                 }
                 // Before the UI is up the command itself answers not-ready.
-                if (GuestCommand(request.command) && gSystemState.IsUIInitialized()) {
+                if ((GuestCommand(request.command) || (request.command == "sync-start" && request.argument == "network")) &&
+                    gSystemState.IsUIInitialized()) {
                     Guest([this, request] {
                         Reply result;
                         try {
@@ -2438,7 +2477,7 @@ class Runner {
         static const char* const argumentCommands[] = {
             "launch-app",  "delete-db", "db-list", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
-            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter", "battery"};
+            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter", "battery", "sync-profile", "sync-start"};
         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
         if(command=="dana-down" || command=="dana-up" || command=="dana-text") {
             const auto result=DanaInputCommand(command,argument);
@@ -2562,10 +2601,51 @@ class Runner {
             return {true, "done", "Done."};
         }
         if (command == "hotsync") {
-            // The cradle's HotSync button, pressed and let go.
-            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::press));
-            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::release));
+            PressHotSync();
             return {true, "hotsync", "HotSync button pressed."};
+        }
+        if (command == "sync-state") return {true, "sync", SyncState()};
+        if (command == "sync-profile") {
+            // The profile for the next HotSync; empty goes back to the handheld's assigned one.
+            auto& manager = frondSync::SyncManager::Get();
+            auto sync = manager.Options();
+            sync.profile = argument;
+            manager.Configure(sync);
+            return {true, "sync", SyncState()};
+        }
+        if (command == "sync-start") {
+            // Puts the cradle on the sync manager (the USB cradle where there is one, else serial)
+            // unless it already is, then presses the cradle's HotSync button.
+            if (syncPress) return {false, "busy", "A HotSync is already starting."};
+            if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
+                return {false, "busy", "A HotSync is already running."};
+            if (argument == "network") {
+                if (!deviceProfileNetworkHotSync5(*profile))
+                    return {false, "unsupported", "Network HotSync is unavailable on this device."};
+                const auto result = DesktopCommand("launch-app", "HotSync");
+                if (!result.ok) return result;
+                frondSync::SyncManager::Get().SetNetworkEnabled(true);
+                return {true, "network", "Tap Network HotSync on the device."};
+            }
+            if (!argument.empty() && argument != "local") return {false, "argument", "Use local or network."};
+            if (argument == "local") frondSync::SyncManager::Get().SetNetworkEnabled(false);
+            const bool usbSync = UsbCradle() && usbCradleMode == "sync";
+            const bool serialSync = serialLink.GetKind() == HostLink68k::Kind::syncManager && !serialTransport->ModemMode();
+            if (usbSync || (!serialSync && UsbCradle() && usbCradleMode == "off")) {
+                string error;
+                if (!StartUsbCradle("sync", error)) return {false, "usb", error};
+                syncPress = true;
+                syncPressBy = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+                return {true, "sync", "Starting a HotSync over USB."};
+            }
+            if (!serialSync) {
+                if (!profile->capabilities.serial || serialTransport->ModemMode() || serialLink.GetKind() != HostLink68k::Kind::off)
+                    return {false, "busy", "The cradle is in use. Set serial or USB to sync first."};
+                serialError.clear();
+                if (!SetSerial("sync", serialError)) return {false, "serial", serialError};
+            }
+            PressHotSync();
+            return {true, "sync", "HotSync button pressed."};
         }
         if (command == "usb-state") return {true, "usb", UsbCradle() ? UsbDescription() : string("off")};
         if (command == "usb-mode") {
@@ -2601,8 +2681,8 @@ class Runner {
                 if (!SetInfrared(argument, infraredError)) return {false, "infrared", infraredError};
                 return {true, "infrared", InfraredDescription()};
             }
-            if (!HostLink68k::Parse(argument, kind, port, &path))
-                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH or modem." : "Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
+            if (!HostLink68k::Parse(argument, kind, port, &path) || (!serial && kind == HostLink68k::Kind::syncManager))
+                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH, sync or modem." : "Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
             HostLink68k& link = serial ? serialLink : irLink;
             string& error = serial ? serialError : infraredError;
             error.clear();
@@ -2620,7 +2700,7 @@ class Runner {
             if (!profile->capabilities.modem) return {false, "unsupported", string(profile->displayName) + " has no modem."};
             string error;
             if (argument.empty()) return {true, "modem-sync", modemSyncLink.Describe()};
-            if (!SetModemSync(argument, error)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH. " + error};
+            if (!SetModemSync(argument, error)) return {false, "argument", "Use off, pty, tcp:PORT, unix:PATH or sync. " + error};
             return {true, "modem-sync", modemSyncLink.Describe()};
         }
         if (command == "irda-stats") {
@@ -3614,7 +3694,9 @@ class Runner {
     unique_ptr<PendingSave> pendingSave;
     BackgroundJob saveJob;
     bool desktopMode{false};
-    string lastSerial, lastInfrared, lastUsb, serialError, infraredError;
+    string lastSerial, lastInfrared, lastUsb, lastSync, serialError, infraredError;
+    bool syncPress{false};  // sync-start waits for the USB cradle to come up before pressing HotSync
+    std::chrono::steady_clock::time_point syncPressBy;
     HostLink68k serialLink, irLink, modemSyncLink;
     ModemTransport68k* serialTransport{nullptr};
     IrPhoneTransport68k* irTransport{nullptr};
@@ -3681,9 +3763,16 @@ bool parseOptions(int argc, char** argv, Options& options) {
             string path;
             if (!v || (!(arg == "--serial" && string(v) == "modem") &&
                        !(arg == "--irda" && (string(v) == "phone" || string(v) == "printer")) &&
-                       !HostLink68k::Parse(v, kind, port, &path)))
+                       (!HostLink68k::Parse(v, kind, port, &path) || (arg == "--irda" && kind == HostLink68k::Kind::syncManager))))
                 return false;
             (arg == "--serial" ? options.serial : options.irda) = v;
+        } else if (arg == "--sync-network") {
+            options.syncNetwork = true;
+        } else if (arg == "--sync-folder" || arg == "--sync-profile" || arg == "--sync-machine" || arg == "--sync-user") {
+            const char* v = value();
+            if (!v) return false;
+            (arg == "--sync-folder" ? options.syncFolder : arg == "--sync-profile" ? options.syncProfile
+                                    : arg == "--sync-machine" ? options.syncMachine : options.syncUser) = v;
         } else if (arg == "--modem-sync") {
             const char* v = value();
             HostLink68k::Kind kind;

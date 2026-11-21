@@ -34,6 +34,7 @@ class DesktopClient : public QObject {
     void cameraState(const QString& state);
     void serialState(const QString& state);  // pushed by the core on a change
     void usbState(const QString& state);
+    void syncState(const QString& state);
     void infraredState(const QString& state);
     void bluetoothState(const QString& state);
     // The Zodiac's rumble is on and no game controller plays it.

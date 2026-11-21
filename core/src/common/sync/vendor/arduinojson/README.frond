@@ -1,0 +1,1 @@
+ArduinoJson 6 single header (MIT, licences/arduinojson-LICENSE), from the CloudpilotEmu tree before aa2c62cc removed core/src/cloudpilot/native/json. Used by android/app/src/main/cpp/SyncJni.cpp.

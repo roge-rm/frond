@@ -19,6 +19,18 @@ std::vector<uint8_t> header(uint32_t type, uint32_t length) {
 constexpr unsigned maxAttempts = 3;
 constexpr size_t maxQueued = 64;
 constexpr size_t packetHeader = 44;
+
+bool completeMessageSequence(const std::vector<uint8_t>& data) {
+    size_t pos = 0;
+    while (data.size() - pos >= 8) {
+        const auto* message = data.data() + pos;
+        const uint32_t length = get32(message + 4);
+        if (get32(message) != RndisHost::packetMsg || length < packetHeader || length > data.size() - pos)
+            return false;
+        pos += length;
+    }
+    return pos == data.size();
+}
 }  // namespace
 
 std::vector<uint8_t> RndisHost::PacketMessage(const uint8_t* frame, size_t size) {
@@ -254,7 +266,8 @@ void RndisHost::HandleControl(const uint8_t* m, size_t size, uint64_t now) {
                 if (n < 6) return Fail("no MAC address");
                 std::memcpy(mac, info, 6);
             } else if (step == 2 && n >= 4) {
-                maxFrame = get32(info);
+                // OID_GEN_MAXIMUM_FRAME_SIZE excludes the Ethernet header.
+                maxFrame = std::min(get32(info), 1500u) + 14;
             }
             ++step;
             return Next(now);
@@ -282,8 +295,9 @@ void RndisHost::BulkInPacket(const uint8_t* data, size_t size) {
         inDiscard = size >= inPacket;
         return;
     }
-    inTransfer.insert(inTransfer.end(), data, data + size);
-    if (size < inPacket) {
+    if (size) inTransfer.insert(inTransfer.end(), data, data + size);
+    // A device can end a complete message sequence on a full packet without padding.
+    if (size < inPacket || completeMessageSequence(inTransfer)) {
         BulkInTransfer(inTransfer.data(), inTransfer.size());
         inTransfer.clear();
     }

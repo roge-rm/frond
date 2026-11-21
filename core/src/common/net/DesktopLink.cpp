@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "WifiRouter.h"
+#include "../sync/ActiveSync.h"
 
 namespace frondNet {
 
@@ -88,7 +89,9 @@ DesktopLink::Answer DesktopLink::ParseDhcp(const uint8_t* f, size_t size, const 
     return a;
 }
 
-DesktopLink::DesktopLink(const uint8_t* address, uint16_t hostPort) : hostConnectPort(hostPort) {
+DesktopLink::DesktopLink(const uint8_t* address, uint16_t hostPort,
+                         std::shared_ptr<frondSync::ActiveSyncSession> activeSync)
+    : hostConnectPort(hostPort), activeSync(std::move(activeSync)) {
     std::copy(address, address + 6, mac);
 }
 DesktopLink::~DesktopLink() = default;
@@ -110,6 +113,7 @@ void DesktopLink::Input(const uint8_t* frame, size_t size, uint64_t now) {
         retryAt = now + requestNs;
         Send(DhcpFrame(mac, 3, xid, offered, offerServer));
     } else if (state == State::request && a.type == 5 && a.yiaddr) {
+        std::copy_n(frame + 6, 6, guestMac);
         Bind(a.yiaddr, a.serverId ? a.serverId : offerServer, a.netmask ? a.netmask : 0xffffff00);
     } else if (state == State::request && a.type == 6) {
         state = State::discover;
@@ -131,10 +135,10 @@ void DesktopLink::Bind(uint32_t desktop, uint32_t handheld, uint32_t mask) {
     while (dns == address || dns == server) ++dns;
     layout.dns = dns;
     layout.dhcp = false;
-    router = std::make_unique<WifiRouter>(layout);
+    router = std::make_unique<WifiRouter>(layout, activeSync);
     state = State::bound;
     // Another Frond on this host may hold the port; the link works without it, the desktop just can't ask.
-    if (!hostConnectPort) return;
+    if (!hostConnectPort || activeSync) return;
     const int error = router->AddUdpForward(hostConnectPort, server, connectPort);
     forwarding = error == 0;
     if (error == EADDRINUSE)
@@ -145,8 +149,37 @@ void DesktopLink::Bind(uint32_t desktop, uint32_t handheld, uint32_t mask) {
                 unsigned(hostConnectPort), strerror(error));
 }
 
+void DesktopLink::ActiveSyncWakeup() {
+    // The WM5 RAPI service waits for this byte before opening its control socket.
+    std::vector<uint8_t> frame(14 + 20 + 8 + 1);
+    std::copy_n(guestMac, 6, frame.begin());
+    std::copy_n(mac, 6, frame.begin() + 6);
+    put16(frame.data() + 12, 0x0800);
+    auto* ip = frame.data() + 14;
+    ip[0] = 0x45;
+    put16(ip + 2, 29);
+    ip[8] = 64;
+    ip[9] = 17;
+    put32(ip + 12, address);
+    put32(ip + 16, server);
+    uint32_t sum = 0;
+    for (size_t offset = 0; offset < 20; offset += 2) sum += uint32_t(ip[offset]) << 8 | ip[offset + 1];
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    put16(ip + 10, ~sum & 0xffff);
+    auto* udp = ip + 20;
+    put16(udp, connectPort);
+    put16(udp + 2, connectPort);
+    put16(udp + 4, 9);
+    udp[8] = 0x7f;
+    Send(std::move(frame));
+}
+
 void DesktopLink::Poll(uint64_t now) {
     if (state == State::bound) {
+        if (activeSync && activeSync->Running() && !router->ActiveSyncControlConnected() && now >= knockAt) {
+            ActiveSyncWakeup();
+            knockAt = now + 1000000000;
+        }
         router->Poll(now);
         return;
     }

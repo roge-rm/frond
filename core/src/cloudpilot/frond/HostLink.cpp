@@ -1,5 +1,6 @@
 #include "PosixCompat.h"
 #include "HostLink.h"
+#include "../../common/sync/SyncManager.h"
 
 #ifndef _WIN32
 #include "UnixListener.h"
@@ -43,6 +44,10 @@ bool HostLink68k::Parse(const std::string& text, Kind& kind, uint16_t& port, std
         *path = text.substr(5);
         return true;
     }
+    if (text == "sync") {
+        kind = Kind::syncManager;
+        return true;
+    }
     if (text == "off" || text == "pty") {
         kind = text == "off" ? Kind::off : Kind::pty;
         return true;
@@ -61,14 +66,14 @@ bool HostLink68k::Parse(const std::string& text, Kind& kind, uint16_t& port, std
 
 #ifdef _WIN32
 // The PTY, TCP and Unix socket endpoints aren't ported to Windows.
-bool HostLink68k::Open(Kind newKind, uint16_t, std::string& error, const std::string&) {
+bool HostLink68k::OpenHost(Kind newKind, uint16_t, std::string& error, const std::string&) {
     Close();
     if (newKind == Kind::off) return true;
     error = "Host serial isn't available on Windows yet.";
     return false;
 }
 void HostLink68k::SetAsleep(bool) {}
-void HostLink68k::Close() {
+void HostLink68k::CloseHost() {
     path.clear();
     kind = Kind::off;
     endpoint.clear();
@@ -78,7 +83,7 @@ void HostLink68k::Close() {
     asleep = false;
 }
 #else
-bool HostLink68k::Open(Kind newKind, uint16_t newPort, std::string& error, const std::string& newPath) {
+bool HostLink68k::OpenHost(Kind newKind, uint16_t newPort, std::string& error, const std::string& newPath) {
     Close();
     if (newKind == Kind::off) return true;
     if (newKind == Kind::unixSocket) {
@@ -138,7 +143,7 @@ void HostLink68k::SetAsleep(bool value) {
     fd = frondUnix::Listen(path, error, socketInode);
 }
 
-void HostLink68k::Close() {
+void HostLink68k::CloseHost() {
     closeFd(client);
     closeFd(fd);
     if (kind == Kind::unixSocket) frondUnix::Remove(path, socketInode);
@@ -154,24 +159,74 @@ void HostLink68k::Close() {
 
 #endif
 
+bool HostLink68k::Open(Kind newKind, uint16_t newPort, std::string& error, const std::string& newPath) {
+    if (newKind != Kind::syncManager) return OpenHost(newKind, newPort, error, newPath);
+    Close();
+    sync = std::make_shared<frondSync::SyncEndpoint>();
+    sync->Start(frondSync::Transport(syncTransport));
+    kind = newKind;
+    endpoint = "sync manager";
+    return true;
+}
+
+void HostLink68k::Close() {
+    if (kind == Kind::syncManager) {
+        sync.reset();  // stops the sync thread
+        kind = Kind::off;
+        endpoint.clear();
+        DropReceived();
+        tx.clear();
+        return;
+    }
+    CloseHost();
+}
+
+void HostLink68k::Poll() {
+    if (kind == Kind::syncManager) PollSync();
+    else PollHost();
+}
+
+// Moves bytes between the queues and the sync manager's pipe.
+void HostLink68k::PollSync() {
+    auto* pipe = sync ? sync->Pipe() : nullptr;
+    if (!pipe) return;
+    uint8_t buffer[4096];
+    while (rx.size() < kQueueBytes) {
+        const size_t got = pipe->HostToDevice(buffer, std::min(sizeof(buffer), kQueueBytes - rx.size()));
+        if (!got) break;
+        rx.insert(rx.end(), buffer, buffer + got);
+        received += got;
+    }
+    while (!tx.empty()) {
+        const size_t count = std::min(tx.size(), sizeof(buffer));
+        std::copy(tx.begin(), tx.begin() + long(count), buffer);
+        const size_t done = pipe->DeviceToHost(buffer, count);
+        if (!done) break;
+        tx.erase(tx.begin(), tx.begin() + long(done));
+        sent += done;
+    }
+}
+
 bool HostLink68k::Connected() const {
+    if (kind == Kind::syncManager) return true;
     return kind == Kind::pty ? !hung : kind == Kind::off ? false : client >= 0;
 }
 
 std::string HostLink68k::Describe() const {
     if (kind == Kind::off) return "off";
+    if (kind == Kind::syncManager) return "sync " + frondSync::SyncManager::Get().Status().Describe();
     return std::string(kind == Kind::pty ? "pty " : kind == Kind::unixSocket ? "unix " : "tcp ") + endpoint + (Connected() ? " connected" : " waiting");
 }
 
 std::string HostLink68k::Mode() const {
-    return kind == Kind::off ? "off" : kind == Kind::pty ? "pty" : kind == Kind::unixSocket ? "unix:" + path : "tcp:" + std::to_string(port);
+    return kind == Kind::off ? "off" : kind == Kind::syncManager ? "sync" : kind == Kind::pty ? "pty" : kind == Kind::unixSocket ? "unix:" + path : "tcp:" + std::to_string(port);
 }
 
 // What the peer sent before it went is still the guest's, like its last acknowledgement.
 #ifdef _WIN32
 void HostLink68k::Disconnect() {}
 bool HostLink68k::Pump(int) { return false; }
-void HostLink68k::Poll() {}
+void HostLink68k::PollHost() {}
 #else
 void HostLink68k::Disconnect() {
     tx.clear();
@@ -210,7 +265,7 @@ bool HostLink68k::Pump(int io) {
     return true;
 }
 
-void HostLink68k::Poll() {
+void HostLink68k::PollHost() {
     if (kind == Kind::off) return;
     if (kind != Kind::pty) {
         while (true) {

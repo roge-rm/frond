@@ -21,6 +21,7 @@
 #include <QTemporaryDir>
 class ConnectionsWindow;
 class CardsWindow;
+class SyncWindow;
 class CardFilesWindow;
 class QFileSystemWatcher;
 class QDialog;
@@ -407,6 +408,14 @@ class MainWindow : public QMainWindow {
         QString in;  // the card going in, empty for none
     } cardMove;
     QPointer<CardsWindow> cardsWindow;
+    QPointer<SyncWindow> syncWindow;
+    QString syncMachineId, syncMachineError;
+    bool syncRunning{false};
+    QPushButton* syncSettingsButton{nullptr};
+    void showSyncManager();
+    bool editSyncSettings(const QString& session, QWidget* parent);
+    void startSync();
+    void showSyncStatus(const QString& state);
     QString runningMachineDir() const;
     QString runningCardName(int n = 0) const;
     void pickCard(int n = 0);

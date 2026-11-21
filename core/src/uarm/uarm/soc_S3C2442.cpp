@@ -1,4 +1,5 @@
 #include "soc_S3C2442.h"
+#include "sync/ActiveSync.h"
 
 #include <algorithm>
 #include <chrono>
@@ -8,6 +9,8 @@
 
 #include "CPCrc.h"
 #include "HostUartPort.h"
+#include "modem/PppServer.h"
+#include "net/SlirpIp.h"
 #include "audio_queue.h"
 #include "device_configuration.h"
 #include "device_profile5.h"
@@ -148,6 +151,49 @@ struct SocS3C2442::SerialPort final : HostUartPort {
     }
 };
 
+// Windows Mobile sends CLIENT on UART0 before starting PPP.
+struct SocS3C2442::SerialSync {
+    std::shared_ptr<frondSync::ActiveSyncSession> session = std::make_shared<frondSync::ActiveSyncSession>(true);
+    frondNet::SlirpIp network{session};
+    frondModem::PppServer ppp{network, {false, false}};
+    static constexpr char request[] = "CLIENT";
+    static constexpr char response[] = "CLIENTSERVER";
+
+    explicit SerialSync(SocS3C2442& soc) : soc(soc) {}
+
+    static uint_fast16_t Read(void* context) {
+        auto& self = *static_cast<SerialSync*>(context);
+        if (self.matched != sizeof(request) - 1) return hostUartNone;
+        if (self.replied < sizeof(response) - 1) return response[self.replied++];
+        uint8_t byte;
+        return self.ppp.ToModem(&byte, 1, self.soc.GetTime()) ? byte : hostUartNone;
+    }
+
+    static void Write(uint_fast16_t value, void* context) {
+        auto& self = *static_cast<SerialSync*>(context);
+        const auto now = self.soc.GetTime();
+        const uint8_t byte = uint8_t(value);
+        if (self.matched == sizeof(request) - 1) {
+            self.ppp.FromModem(&byte, 1, now);
+        } else if (byte == request[self.matched]) {
+            if (++self.matched == sizeof(request) - 1) self.ppp.Answer(now);
+        } else {
+            self.matched = byte == request[0] ? 1 : 0;
+        }
+    }
+
+    void Poll(uint64_t now) {
+        if (matched == sizeof(request) - 1 && now >= pollAt) {
+            pollAt = now + 1000000;
+            ppp.Service(now);
+        }
+    }
+
+    SocS3C2442& soc;
+    size_t matched{}, replied{};
+    uint64_t attachAt{}, pollAt{};
+};
+
 // UART2 in IrDA mode for HostInfrared.
 struct SocS3C2442::InfraredPort final : HostInfraredPort {
     explicit InfraredPort(SocS3C2442& soc) : soc(soc) {}
@@ -286,6 +332,19 @@ void SocS3C2442::HostService() {
     const uint64_t t = machine->nanoseconds();
     if (infraredPort) infraredPort->CheckMode();
     if (!serialCheckpoints && !halted) {
+        if (serialSync && !serialSync->session->Running()) StopSerialActiveSync();
+        if (serialSync && !machine->asleep()) {
+            if (serialSync->attachAt && t >= serialSync->attachAt) {
+                auto* port = SerialHostPort();
+                if (!port->Attach(SerialSync::Read, SerialSync::Write, nullptr, nullptr, serialSync.get())) {
+                    StopSerialActiveSync();
+                } else {
+                    port->SetInputs(hostUartCts | hostUartDsr | hostUartDcd);
+                    serialSync->attachAt = 0;
+                }
+            }
+            if (serialSync) serialSync->Poll(t);
+        }
         PumpUart(rx1950SerialUart, t);
         PumpUart(rx1950InfraredUart, t);
         TickUsbHost(t);
@@ -318,6 +377,7 @@ void SocS3C2442::ScheduleHost(uint64_t late) {
         if (machine->hostUartNextNs[channel] == UINT64_MAX) machine->hostUartNextNs[channel] = 0;
         next = std::min(next, due(machine->hostUartNextNs[channel]));
     }
+    if (serialSync) any = true;
     if (usbHostHooks.tick) {
         any = true;
         if (usbHostHooks.wake && !UsbHostIoPaused()) next = std::min(next, due(usbHostHooks.wake(usbHostHooks.context)));
@@ -414,8 +474,39 @@ UsbDevicePort SocS3C2442::GetUsbPort() {
     return {this, ops};
 }
 
+void SocS3C2442::StartActiveSync() {
+    StopSerialActiveSync();
+    usbDesktop.reset();
+    activeSync = std::make_shared<frondSync::ActiveSyncSession>();
+    activeSync->Start();
+}
+
+bool SocS3C2442::StartSerialActiveSync() {
+    StopSerialActiveSync();
+    auto next = std::make_unique<SerialSync>(*this);
+    if (!next->network.Valid() || halted) return false;
+    // WM5 must see the serial cable out before starting another PPP link.
+    next->attachAt = machine->nanoseconds() + 2000000000;
+    next->session->Start();
+    serialSync = std::move(next);
+    ScheduleHost(nextPoll(machine->nanoseconds()));
+    return true;
+}
+
+bool SocS3C2442::StopSerialActiveSync() {
+    if (!serialSync) return false;
+    if (serialPort && serialPort->context == serialSync.get()) serialPort->Detach();
+    serialSync->session->Stop();
+    serialSync.reset();
+    return true;
+}
+
 bool SocS3C2442::SetUsbCable(bool attached) {
     if (halted) return false;
+    if (!attached) {
+        usbDesktop.reset();
+        activeSync.reset();
+    }
     machine->setUsbVbus(attached);
     // USB power is AC to the battery driver.
     rx1950ApplyBattery(*machine, battery);
@@ -651,6 +742,7 @@ void SocS3C2442::StateChanged() {
 // the host at the same points; a peer attached since then starts at the next poll step.
 void SocS3C2442::RestartHost() {
     if (!RestoringCheckpoint()) {
+        StopSerialActiveSync();
         if (serialPort) serialPort->Replaced();
         if (infraredPort) infraredPort->Replaced();
         if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
@@ -724,7 +816,7 @@ void SocS3C2442::UsbEthernetPoll(uint64_t now, const uint8_t* mac, uint32_t link
     if (networkSimulation.Frozen()) return;
     // A new RNDIS link (a restart or a replug, maybe with another MAC) gets a new desktop end and DHCP.
     if (!usbDesktop || link != usbDesktopLink) {
-        usbDesktop = std::make_unique<frondNet::DesktopLink>(mac);
+        usbDesktop = std::make_unique<frondNet::DesktopLink>(mac, frondNet::DesktopLink::connectPort, activeSync);
         usbDesktopLink = link;
     }
     usbDesktop->Poll(now);
@@ -741,6 +833,7 @@ void SocS3C2442::Reset() {
     if (!networkSimulation.Frozen()) {
         router.reset();
         usbDesktop.reset();
+        activeSync.reset();
     }
     DisarmMicrophone();
     machine->reset();
@@ -753,6 +846,7 @@ void SocS3C2442::HardReset() {
     if (!networkSimulation.Frozen()) {
         router.reset();
         usbDesktop.reset();
+        activeSync.reset();
     }
     DisarmMicrophone();
     if (!machine->nand.eraseBlocks(rx1950UserStoreBlock, S3cNand::blocks - rx1950UserStoreBlock))
@@ -783,6 +877,7 @@ bool SocS3C2442::Load(size_t savestateSize, void* savestateData) {
     if (!networkSimulation.Frozen()) {
         router.reset();
         usbDesktop.reset();
+        activeSync.reset();
     }
     LoadCard();
     if (!RestoringCheckpoint()) DisarmMicrophone();

@@ -105,6 +105,9 @@ class SocS3C2442 : public SoC {
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
     bool SetUsbCable(bool attached);
+    void StartActiveSync();
+    bool StartSerialActiveSync();
+    bool StopSerialActiveSync();
     bool UsbCableAttached() const { return machine->usbVbus(); }
     bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
     // The desktop behind the USB cable's RNDIS link (UsbHostBridge's ethernet hooks, a DesktopLink): made at the
@@ -175,12 +178,15 @@ class SocS3C2442 : public SoC {
     // checkpoint.
     std::unique_ptr<frondNet::WifiRouter> router;
     std::unique_ptr<frondNet::DesktopLink> usbDesktop;
+    std::shared_ptr<frondSync::ActiveSyncSession> activeSync;
     uint32_t usbDesktopLink{0};  // the RNDIS link number usbDesktop was made for
     void PollNetwork();
 
     struct SerialPort;
+    struct SerialSync;
     struct InfraredPort;
     std::unique_ptr<SerialPort> serialPort;
+    std::unique_ptr<SerialSync> serialSync;
     std::unique_ptr<InfraredPort> infraredPort;
     unsigned serialCheckpoints{0};
     // Host bytes into UART0 and UART2 at their bit rates, the USB host's ticks and Wi-Fi frames from the router, on

@@ -852,7 +852,7 @@ class RunningModel(
         }
     }
 
-    // Off or link:<id>: kept in the machine's settings, then applied to the core and the link.
+    // The infrared setting is kept with the machine.
     fun changeBeam(choice: String) = device("Changing infrared beaming", "Couldn't change infrared beaming", false) { l ->
         val leftPrinter = settings.infrared == InfraredChoice.PRINTER && choice != InfraredChoice.PRINTER
         sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(infrared = choice) } }
@@ -880,12 +880,45 @@ class RunningModel(
         activity.lifecycleScope.launch { DebugLink.status.collect { debugger = it } }
     }
 
-    // Off or link:<id>: kept in the machine's settings, then applied to the core and the link.
-    fun changeSerial(choice: String) = device("Changing the serial port", "Couldn't change the serial port", false) { l ->
-        sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(serial = choice) } }
-        activity.runOnUiThread { settings = settings.copy(serial = choice) }
-        if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
-        SerialLink.apply(activity.applicationContext, l, choice, name, device.label)
+    var serialSync by mutableStateOf(false)
+        private set
+    var usbSync by mutableStateOf(false)
+        private set
+
+    fun acceptSyncRoute(port: String, state: String) {
+        if (SyncProtocol.forDevice(device) != SyncProtocol.HOT_SYNC) return
+        val attached = state == "sync" || state.startsWith("sync ")
+        if (port == "serial") serialSync = attached
+        if (port == "usb") usbSync = attached
+    }
+
+    fun readSyncPorts() {
+        if (SyncProtocol.forDevice(device) != SyncProtocol.HOT_SYNC) return
+        val l = link ?: return
+        activity.lifecycleScope.launch {
+            for ((port, supported) in listOf("serial" to device.serialPort, "usb" to device.usb)) {
+                if (!supported) continue
+                val reply = withContext(Dispatchers.IO) { l.request("$port-state", timeoutSeconds = 5) }
+                if (reply.ok) acceptSyncRoute(port, reply.message)
+            }
+        }
+    }
+
+    // The machine's serial setting, applied to the core and any external link.
+    fun changeSerial(choice: String) {
+        val attachedSync = serialSync
+        device("Changing the serial port", "Couldn't change the serial port", false) { l ->
+            sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(serial = choice) } }
+            activity.runOnUiThread { settings = settings.copy(serial = choice) }
+            if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
+            SerialLink.apply(activity.applicationContext, l, choice, name, device.label, attachedSync = attachedSync)
+        }
+    }
+
+    fun changeUsbSync() = device("Changing USB HotSync", "Couldn't change USB HotSync", false) { l ->
+        val reply = l.request("usb-mode", "sync", timeoutSeconds = 30)
+        if (reply.ok) UsbLink.stop()
+        if (reply.ok) null else reply.message
     }
 
     fun changeUsb(mode: BeamMode) = device("Changing USB HotSync", "Couldn't change USB HotSync", false) { l ->

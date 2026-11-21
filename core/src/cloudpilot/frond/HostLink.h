@@ -8,17 +8,22 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <string>
 #include <sys/types.h>
 
+namespace frondSync {
+class SyncEndpoint;
+}
+
 class HostLink68k {
    public:
-    enum class Kind { off, pty, tcp, unixSocket };
+    enum class Kind { off, pty, tcp, unixSocket, syncManager };
     // Bytes held each way. Reading from the host stops while the receive side is full; bytes
     // the guest sends with no peer, or past this, are dropped.
     static constexpr size_t kQueueBytes = 65536;
 
-    // off, pty, tcp:PORT (0 picks a free port) or unix:PATH. Without a path to fill, unix:PATH is refused.
+    // off, pty, tcp:PORT (0 picks a free port), unix:PATH or sync (the built-in sync manager). Without a path to fill, unix:PATH is refused.
     static bool Parse(const std::string& text, Kind& kind, uint16_t& port, std::string* path = nullptr);
 
     HostLink68k() = default;
@@ -31,6 +36,9 @@ class HostLink68k {
     // The socket file is removed on Close.
     bool Open(Kind kind, uint16_t port, std::string& error, const std::string& path = std::string());
     void Close();
+    // What a sync endpoint tells the sync manager it is: frondSync::Transport as a number
+    // (0 serial, 2 modem). Takes effect on the next Open.
+    void SetSyncTransport(int transport) { syncTransport = transport; }
     // Accepts a client, notices a PTY peer coming and going, moves bytes both ways.
     void Poll();
     // A Unix socket closes while the Palm sleeps and listens again on waking, as an ARM core's
@@ -58,6 +66,10 @@ class HostLink68k {
     uint64_t Sent() const { return sent; }
 
    private:
+    bool OpenHost(Kind kind, uint16_t port, std::string& error, const std::string& path);
+    void CloseHost();
+    void PollHost();
+    void PollSync();
     void Disconnect();
     bool Pump(int fd);
 
@@ -75,6 +87,8 @@ class HostLink68k {
     mutable size_t scanned{0};
     mutable uint8_t scanValue{0};
     uint64_t received{0}, sent{0};
+    std::shared_ptr<frondSync::SyncEndpoint> sync;
+    int syncTransport{0};
 };
 
 #endif

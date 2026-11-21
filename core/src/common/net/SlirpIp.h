@@ -11,11 +11,13 @@
 
 #include "IpNetwork.h"
 
+namespace frondSync { class ActiveSyncSession; }
+
 namespace frondNet {
 
 class SlirpIp : public IpNetwork {
    public:
-    SlirpIp();
+    explicit SlirpIp(std::shared_ptr<frondSync::ActiveSyncSession> activeSync = {});
     ~SlirpIp() override;
     bool Valid() const;
     void Input(const uint8_t* packet, size_t size, uint64_t now) override;
@@ -28,6 +30,7 @@ class SlirpIp : public IpNetwork {
 
    private:
     struct Impl;
+    std::shared_ptr<frondSync::ActiveSyncSession> activeSync;
     std::unique_ptr<Impl> impl;
 };
 

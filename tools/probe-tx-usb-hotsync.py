@@ -78,6 +78,14 @@ class Pilot(threading.Thread):
         tty.setraw(slave)
         client = socket.create_connection(tuple(self.endpoint.rsplit(':', 1)[0:1]) + (int(self.endpoint.rsplit(':', 1)[1]),))
 
+        # The relayed bytes both ways, for working out the framing: private, in the result folder.
+        capture = open(self.root / 'capture.log', 'w')
+        begun = time.monotonic()
+
+        def note(direction, data):
+            capture.write(f'{(time.monotonic() - begun) * 1000:.1f} {direction} {data.hex()}\n')
+            capture.flush()
+
         def pump():
             while not self.stop.is_set():
                 ready = select.select([master, client], [], [], .1)[0]
@@ -87,6 +95,7 @@ class Pilot(threading.Thread):
                     except OSError:
                         data = b''  # nobody has the PTY open between pilot-link runs
                     if data:
+                        note('h>d', data)
                         client.sendall(data)
                     else:
                         time.sleep(.01)
@@ -94,6 +103,7 @@ class Pilot(threading.Thread):
                     data = client.recv(4096)
                     if not data:
                         return
+                    note('d>h', data)
                     os.write(master, data)
 
         threading.Thread(target=pump, daemon=True).start()

@@ -484,10 +484,10 @@ bool UsbBusHost::StartTransaction() {
         return false;
     }
     inFlightEndpoint = uint8_t(0x80 | inEndpoint);
-    if (!Addressed()) return Begin(Token::bulkIn, unsigned(timeoutBits));
     unsigned size = 0;
-    const R r = u.PeekIn(inFlightEndpoint, &size);
+    const R r = Addressed() ? u.PeekIn(inFlightEndpoint, &size) : R::Timeout;
     if (r == R::Ack && size > inMps) { Restart("oversized bulk IN packet"); return false; }
+    inFlightBytes = r == R::Ack ? int(size) : -1;
     return Begin(Token::bulkIn, unsigned(r == R::Ack ? transactionBits(size) : r == R::Timeout ? timeoutBits : nakBits));
 }
 
@@ -580,8 +580,15 @@ void UsbBusHost::FinishTransaction() {
         case Token::bulkIn: {
             uint8_t data[64];
             unsigned size = 0;
-            if (addressed && u.PeekIn(inFlightEndpoint, &size) == R::Ack && (size > inMps || size > sizeof(data)))
-                return Restart("oversized bulk IN packet");
+            if (addressed && u.PeekIn(inFlightEndpoint, &size) == R::Ack) {
+                if (size > inMps || size > sizeof(data)) return Restart("oversized bulk IN packet");
+                // Data queued during a NAK needs a new transaction with time for the data packet.
+                if (int(size) > inFlightBytes) {
+                    nak();
+                    Poke();
+                    return;
+                }
+            }
             const R r = addressed ? u.EpIn(inFlightEndpoint, data, &size) : R::Timeout;
             if (r == R::Ack) {
                 bulkTimeouts = 0;

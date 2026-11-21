@@ -6,7 +6,9 @@ INCLUDE = -I.
 
 SOURCE_C = 							\
 	zip/miniz.c 					\
-	zip/zip.c
+	zip/zip.c					\
+	sync/SqliteBuild.c \
+	sync/SynceRapi.c
 
 SOURCE_CXX = 						\
 	CardImage.cpp 					\
@@ -35,7 +37,19 @@ SOURCE_CXX = 						\
 	ir/TinyTp.cpp					\
 	ir/IrComm.cpp					\
 	ir/IrPhone.cpp				\
-	ir/IrPrinter.cpp
+	ir/IrPrinter.cpp			\
+	sync/PimRecord.cpp			\
+	sync/PimSync.cpp				\
+	sync/PalmDb.cpp				\
+	sync/InstallerFiles.cpp \
+	sync/SyncStore.cpp			\
+	sync/Dlp.cpp				\
+	sync/HotSync.cpp			\
+	sync/Link.cpp				\
+	sync/SyncManager.cpp \
+	sync/ActiveSync.cpp \
+	sync/ActiveSyncFiles.cpp \
+	sync/ActiveSyncPartnership.cpp
 
 SOURCE_C_NATIVE = $(SOURCE_C)
 SOURCE_CXX_NATIVE = 				\

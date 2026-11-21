@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "net/WifiRouter.h"
+#include "sync/SyncManager.h"
 
 using frondNet::WifiRouter;
 using Bytes = std::vector<uint8_t>;
@@ -89,8 +90,9 @@ static Bytes udp(const uint8_t* to, uint32_t src, uint32_t dst, uint16_t sport, 
     std::copy(data.begin(), data.end(), t.begin() + 8);
     return ipFrame(to, 17, src, dst, t);
 }
-static Bytes tcp(const uint8_t* to, uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ack, uint8_t flags) {
-    Bytes t(20, 0);
+static Bytes tcp(const uint8_t* to, uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ack, uint8_t flags,
+                 const Bytes& data = {}) {
+    Bytes t(20 + data.size(), 0);
     put16(t, 0, sport);
     put16(t, 2, dport);
     put32(t, 4, seq);
@@ -98,6 +100,7 @@ static Bytes tcp(const uint8_t* to, uint16_t sport, uint16_t dport, uint32_t seq
     t[12] = 0x50;
     t[13] = flags;
     put16(t, 14, 65535);
+    std::copy(data.begin(), data.end(), t.begin() + 20);
     return ipFrame(to, 6, guestIp, hostIp, t);
 }
 static Bytes dhcp(uint8_t type) {
@@ -293,6 +296,67 @@ static void testWakeup(WifiRouter& router, uint64_t& now) {
     }
 }
 
+static void testBuiltInNetSync() {
+    auto& manager = frondSync::SyncManager::Get();
+    manager.SetNetworkEnabled(false);
+    {
+        WifiRouter router;
+        REQUIRE(router.Valid());
+        uint64_t now = 0;
+        testDhcpAndArp(router, now);
+        manager.SetNetworkEnabled(true);
+
+        constexpr uint16_t guestPort = 49002, syncPort = 14238;
+        constexpr uint32_t guestSeq = 0xf123;
+        auto send = [&](const Bytes& b) { router.Input(b.data(), b.size(), now); };
+        auto enterHandshake = [&](uint16_t source) {
+            auto syncReply = [&](const Bytes& f) {
+                if (!isIp(f, 6) || f.size() < 54 || get16(f, 34) != syncPort || get16(f, 36) != source) return false;
+                CHECK(get32(f, 26) == hostIp && get32(f, 30) == guestIp);
+                CHECK(checksum(f, 14, 20) == 0 && transportChecksum(f) == 0);
+                return true;
+            };
+            Bytes synAck;
+            until(router, now, [&] {
+                while (router.Receive(synAck))
+                    if (syncReply(synAck) && (synAck[47] & 0x12) == 0x12) return true;
+                send(tcp(slirpMac, source, syncPort, guestSeq, 0, 0x02));
+                return false;
+            });
+            CHECK(get32(synAck, 42) == guestSeq + 1);
+            const uint32_t serverSeq = get32(synAck, 38) + 1;
+            send(tcp(slirpMac, source, syncPort, guestSeq + 1, serverSeq, 0x10));
+            send(tcp(slirpMac, source, syncPort, guestSeq + 1, serverSeq, 0x18,
+                     {1, 0xff, 0, 0, 0, 1, 0x90}));
+            auto reply = next(router, now, [&](const Bytes& f) {
+                return syncReply(f) && get16(f, 16) > 20 + size_t(f[46] >> 4) * 4;
+            });
+            const size_t offset = 34 + size_t(reply[46] >> 4) * 4;
+            REQUIRE(get16(reply, 16) + 14u == offset + 56);
+            CHECK(reply[offset] == 1 && reply[offset + 1] == 0xff &&
+                  get32(reply, offset + 2) == 50 && reply[offset + 6] == 0x12);
+            return serverSeq + 56;
+        };
+        const auto firstReply = enterHandshake(guestPort);
+        // Send the wrong sync message and leave the TCP connection open.
+        send(tcp(slirpMac, guestPort, syncPort, guestSeq + 8, firstReply, 0x18,
+                 {1, 0xff, 0, 0, 0, 1, 0x91}));
+        until(router, now, [&] {
+            return frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::failed;
+        });
+        const auto secondReply = enterHandshake(guestPort + 1);
+        // A guest can also reconnect after resetting its side of the TCP connection.
+        send(tcp(slirpMac, guestPort + 1, syncPort, guestSeq + 8, secondReply, 0x14));
+        router.Poll(now);
+        enterHandshake(guestPort + 2);
+        manager.SetNetworkEnabled(false);
+        router.Poll(now);
+        manager.SetNetworkEnabled(true);
+        enterHandshake(guestPort + 3);
+    }
+    manager.SetNetworkEnabled(false);
+}
+
 int main() {
     WifiRouter router;
     REQUIRE(router.Valid());
@@ -301,9 +365,10 @@ int main() {
     testTcpConnect(router, now);
     testDnsQuery(router, now);
     testWakeup(router, now);
+    testBuiltInNetSync();
     if (failures) {
         fprintf(stderr, "FAIL: %d checks\n", failures);
         return 1;
     }
-    puts("PASS: shared Wi-Fi router DHCP offer and ack at 10.0.2.15, ARP for 10.0.2.2, TCP connect, DNS-format UDP, Network HotSync wakeup");
+    puts("PASS: shared Wi-Fi router DHCP offer and ack at 10.0.2.15, ARP for 10.0.2.2, TCP connect, DNS-format UDP, Network HotSync wakeup and built-in TCP handshake");
 }

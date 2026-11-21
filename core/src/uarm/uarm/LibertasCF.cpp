@@ -270,7 +270,9 @@ void LibertasCF::Poll() {
         packet.insert(packet.end(), bytes.begin() + 12, bytes.end());
         rx.push_back(std::move(packet));
     }
-    if (!rx.empty()) {
+    // Palm masks the GPIO edge while it handles a frame. Keep the next frame queued
+    // until the driver can latch its interrupt.
+    if (!rx.empty() && pxaGpioFallingEdgeEnabled(gpio, 116)) {
         cause |= 2;
         UpdateIrq();
     }

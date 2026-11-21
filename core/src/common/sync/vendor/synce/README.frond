@@ -1,0 +1,12 @@
+Selected RAPI 2 sources from SynCE Core 0.17.
+
+Source tarball:
+https://sourceforge.net/projects/synce/files/SynCE/synce-core/0.17/synce-core-0.17.tar.gz
+SHA-256: 5d7b38b0e79e844e02006faee1fdb76b3a7abc13ad9d59adb5c7f76dc33a7a39
+Licence: ../../../../../../licences/synce-LICENSE
+
+rapi_buffer.* and rapi_internal.h are from lib/rapi/support and lib/rapi.
+file_calls.c contains functions from file_access2.c, file_management2.c
+and misc2.c under lib/rapi/backend_ops_2. The remaining upstream headers
+are from lib/rapi and lib/utils. Frond compiles them with a small context
+and socket adapter over the emulated transport. No SynCE programs are built.

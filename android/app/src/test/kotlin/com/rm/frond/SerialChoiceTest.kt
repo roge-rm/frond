@@ -28,6 +28,16 @@ class SerialChoiceTest {
         assertEquals("Modem", CoreLink.Status("modem", title = "Serial").text)
     }
 
+    @Test fun localSyncIsOnlyOfferedOnSupportedSerialPorts() {
+        val choice = InfraredChoice.SYNC_MANAGER
+        val settings = MachineSettings(serial = choice)
+        assertEquals(choice, MachineSettings.from(settings.json()).serial)
+        assertEquals("off", InfraredChoice.normaliseInfrared(choice))
+        assertEquals("Sync Manager", CoreLink.Status(choice, title = "Serial").text)
+        assertEquals(listOf("off", choice), InfraredChoice.serialChoices("off", emptyList(), modem = false, sync = true).map { it.first })
+        assertEquals(listOf("off"), InfraredChoice.serialChoices("off", emptyList(), modem = false).map { it.first })
+    }
+
     @Test fun phoneChoice() {
         val s = MachineSettings(infrared = "phone")
         assertEquals("phone", s.json().getString("infrared"))

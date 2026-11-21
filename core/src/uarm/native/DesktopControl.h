@@ -2,6 +2,7 @@
 #define FROND_DESKTOP_CONTROL_H
 
 #include <algorithm>
+#include <chrono>
 #include "AttentionState.h"
 #include <cerrno>
 #include <cstdio>
@@ -22,7 +23,10 @@
 #include "HostSerial.h"
 #include "HostInfrared.h"
 #include "UsbHostBridge.h"
+#include "../../common/sync/ActiveSync.h"
+#include "../../common/sync/SyncManager.h"
 #include "soc_PXA.h"
+#include "soc_S3C2442.h"
 #include "pxa_UART.h"
 #include "native_boundary.h"
 #include "CPU.h"
@@ -71,6 +75,23 @@ class DesktopControl {
         if (state == lastSerial || (state == "off" && lastSerial.empty())) return;
         lastSerial = state;
         event("serial", state);
+    }
+    // The sync manager's state when it changes, and a HotSync press waiting for USB to come up.
+    void syncChanged(commands::Context& ctx) {
+        if (syncPress) {
+            const auto* host = ctx.usb ? ctx.usb->Host() : nullptr;
+            if (host && host->GetPhase() == UsbBusHost::Phase::running) {
+                syncPress = false;
+                if (!ctx.soc->PressHotSync()) event("sync", "failed usb: The HotSync button could not be pressed.");
+            } else if (std::chrono::steady_clock::now() > syncPressBy) {
+                syncPress = false;
+                event("sync", "failed usb: USB didn't come up.");
+            }
+        }
+        const auto state = frondSync::SyncManager::Get().Status().Describe();
+        if (state == lastSync || (state == "off" && lastSync.empty())) return;
+        lastSync = state;
+        event("sync", state);
     }
     // Same for the USB bridge.
     void usbChanged(commands::Context& ctx) {
@@ -132,7 +153,7 @@ class DesktopControl {
             case DesktopChannel::Poll::idle: break;
             case DesktopChannel::Poll::request: {
                 const auto& command = request.command;
-                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
+                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || (command == "sync-start" && request.argument == "network") || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
                 if (work) {
                     // Host calls only drop capture for their length; the user's choice stays and capture comes back.
                     if (ctx.microphone) ctx.microphone->Suspend();
@@ -191,7 +212,9 @@ class DesktopControl {
     bool lastRumbleCue{false};
     AttentionState lastAttention{};
     bool attentionSent{false};
-    std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth;
+    std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth, lastSync;
+    bool syncPress{false};
+    std::chrono::steady_clock::time_point syncPressBy;
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";
         const auto state = ctx.usb->Describe();
@@ -225,6 +248,12 @@ class DesktopControl {
     std::string SoundState(commands::Context& ctx) const {
         if (!sound || !ctx.audioDriver.Running()) return "off";
         return ctx.audioDriver.Muted() ? "muted" : "on";
+    }
+    // The sync manager's state, then the profile the next HotSync uses when one is set.
+    static std::string SyncState() {
+        auto& manager = frondSync::SyncManager::Get();
+        const auto profile = manager.Options().profile;
+        return manager.Status().Describe() + (profile.empty() ? "" : "; profile " + profile);
     }
     static std::string SerialState(commands::Context& ctx) {
         if (!ctx.serial) return "off";
@@ -455,7 +484,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && !frondPosix::IsAbsolutePath(path)) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && !path.empty()) return {false, "argument", "This command takes no argument."};
         if (command == "install" && ctx.soc->InstallsToCard()) {
             const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path);
             return {result.ok, result.code, result.message};
@@ -574,10 +603,85 @@ class DesktopControl {
                 return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
             }
             HostSerial::Config config;
-            if (!ctx.infrared || !HostSerial::Parse(path,config)) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
+            if (!ctx.infrared || !HostSerial::Parse(path,config) || config.kind==HostSerial::Kind::syncManager) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
             const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->Start(ctx.soc->InfraredHostPort(),config,ctx.infraredError):
                 ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError));
             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
+        }
+        if (command == "sync-state") return {true, "sync", SyncState()};
+        if (command == "sync-profile") {
+            // The profile for the next HotSync; empty goes back to the handheld's assigned one.
+            auto& manager = frondSync::SyncManager::Get();
+            auto options = manager.Options();
+            options.profile = path;
+            manager.Configure(options);
+            return {true, "sync", SyncState()};
+        }
+        if (command == "activesync-start") {
+            auto* device = dynamic_cast<SocS3C2442*>(ctx.soc);
+            if (!device || !ctx.usb) return {false, "unsupported", "ActiveSync is unavailable for this device."};
+            if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
+                return {false, "busy", "An ActiveSync is already running."};
+            if (path == "serial" || (path.empty() && frondSync::ConfiguredActiveSyncUsesSerial())) {
+                if (!ctx.serial || !ctx.serialPort) return {false, "unsupported", "Serial ActiveSync is unavailable."};
+                ctx.usb->Stop();
+                ctx.serial->Stop();
+                ctx.serialError.clear();
+                if (!device->StartSerialActiveSync()) return {false, "serial", "Couldn't attach the serial ActiveSync cable."};
+                return {true, "sync", "Starting ActiveSync over serial."};
+            }
+            if (!path.empty() && path != "usb") return {false, "argument", "Use usb or serial."};
+            ctx.usbError.clear();
+            if (!ctx.usb->StartCable(ctx.soc, ctx.usbError)) return {false, "usb", ctx.usbError};
+            device->StartActiveSync();
+            return {true, "sync", "Starting ActiveSync over USB."};
+        }
+        if (command == "sync-start") {
+            if (UsbHostBridge::NetworkLink(ctx.soc)) return {false, "unsupported", "Use activesync-start on Windows Mobile."};
+            // Puts the HotSync port on the sync manager (USB where the device has it, else serial)
+            // unless one already is, then presses HotSync as the cradle button does.
+            using Kind = HostSerial::Kind;
+            const bool usbSync = ctx.usb && ctx.usb->GetConfig().kind == Kind::syncManager;
+            const bool serialSync = ctx.serial && ctx.serial->GetConfig().kind == Kind::syncManager;
+            if (syncPress) return {false, "busy", "A HotSync is already starting."};
+            if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
+                return {false, "busy", "A HotSync is already running."};
+            if (path == "network") {
+                const auto& profile = *deviceProfile5(ctx.soc->GetDeviceType());
+                if (!deviceProfileNetworkHotSync5(profile))
+                    return {false, "unsupported", "Network HotSync is unavailable on this device."};
+                if (profile.deviceType == deviceTypeTX &&
+                    std::string_view(ctx.soc->networkSimulation.GetModeName()) != "wireless")
+                    return {false, "network", "Choose Virtual Wi-Fi in Network first."};
+                const auto result = dispatch(ctx, "launch-app", "HotSync", job);
+                if (!result.ok) return result;
+                frondSync::SyncManager::Get().SetNetworkEnabled(true);
+                return {true, "network", "Tap Network HotSync on the device."};
+            }
+            if (!path.empty() && path != "local") return {false, "argument", "Use local or network."};
+            if (path == "local") frondSync::SyncManager::Get().SetNetworkEnabled(false);
+            const HostSerial::Config config{Kind::syncManager, 0, {}};
+            const bool usbFree = caps.usb && ctx.usb && !UsbHostBridge::NetworkLink(ctx.soc) &&
+                                 ctx.usb->GetConfig().kind == Kind::off;
+            if (usbSync || (!serialSync && usbFree)) {
+                ctx.usbError.clear();
+                if (!ctx.usb->Start(ctx.soc, config, ctx.usbError)) return {false, "usb", ctx.usbError};
+                // Wait for enumeration after plugging in the cable for this sync.
+                syncPress = true;
+                syncPressBy = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+                return {true, "sync", "Starting a HotSync over USB."};
+            }
+            if (!serialSync) {
+                if (!caps.serial || !ctx.serial || ctx.serial->GetConfig().kind != Kind::off)
+                    return {false, "busy", "Serial and USB are in use. Set one of them to sync first."};
+                ctx.serialError.clear();
+                if (!(ctx.serialPort ? ctx.serial->Start(ctx.serialPort, config, ctx.serialError)
+                                     : ctx.serial->Start(ctx.serialUart, config, ctx.serialError, ctx.serialRoute)))
+                    return {false, "serial", ctx.serialError};
+            }
+            if (!ctx.soc->PressHotSync())
+                return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
+            return {true, "sync", "HotSync button pressed."};
         }
         if (command == "hotsync") {
             if (!ctx.soc->PressHotSync())
@@ -664,7 +768,12 @@ class DesktopControl {
         if (command == "serial-state") return {true, "serial", SerialState(ctx)};
         if (command == "serial-mode") {
             HostSerial::Config config;
-            if (!ctx.serial || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH."};
+            if (!ctx.serial || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty, tcp:PORT, unix:PATH or sync."};
+            if (auto* device = dynamic_cast<SocS3C2442*>(ctx.soc)) {
+                if (config.kind == HostSerial::Kind::syncManager)
+                    return {false, "argument", "Use activesync-start serial."};
+                device->StopSerialActiveSync();
+            }
             // A new endpoint detaches the old one first; queued bytes are dropped.
             ctx.serialError.clear();
             if (!(ctx.serialPort ? ctx.serial->Start(ctx.serialPort, config, ctx.serialError)
@@ -678,7 +787,7 @@ class DesktopControl {
             // The rx1950's USB is a network link: on or off, no endpoint.
             const bool network = UsbHostBridge::NetworkLink(ctx.soc);
             if (!ctx.usb || (network && path != "on" && path != "off") || (!network && !HostSerial::Parse(path, config)))
-                return {false, "argument", network ? "Use on or off." : "Use off, pty, tcp:PORT or unix:PATH."};
+                return {false, "argument", network ? "Use on or off." : "Use off, pty, tcp:PORT, unix:PATH or sync."};
             // A new endpoint unplugs the cable first; queued bytes are dropped.
             ctx.usbError.clear();
             if (path == "on" ? !ctx.usb->StartCable(ctx.soc, ctx.usbError) : !ctx.usb->Start(ctx.soc, config, ctx.usbError))
