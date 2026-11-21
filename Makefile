@@ -4,6 +4,8 @@ BUILD_JOBS ?= 4
 # desktop build and the test binaries. out/ holds the binaries you run. The rest of build/ is
 # evidence and results, so OBJ_ROOT and out/ can each be a link to a faster disk.
 OBJ_ROOT ?= build/out
+# A link left pointing at a wiped folder stops the build here.
+$(foreach l,$(OBJ_ROOT) out,$(if $(shell test -L '$(l)' && test ! -e '$(l)' && echo x),$(error $(l) is a link to a missing folder ($(shell readlink '$(l)')): recreate that folder, or remove the link)))
 $(shell mkdir -p $(OBJ_ROOT))
 # The core sub-makes put each folder's objects in FROND_CORE_OBJ/<folder>/.
 CORE_OBJ_FLAGS = FROND_CORE_OBJ=$(abspath $(OBJ_ROOT))/core

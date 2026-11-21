@@ -1302,6 +1302,11 @@ QString Hub::radioProgram() {
         const QFileInfo info(candidate);
         if (info.isFile() && info.isExecutable()) return info.canonicalFilePath();
     }
+#ifdef FROND_SOURCE_ROOT
+    // Development fallback: the checkout's own build, whether run from a link or a test binary.
+    const QFileInfo dev(QStringLiteral(FROND_SOURCE_ROOT "/build/bluetooth-provider/emulator/btvirt"));
+    if (dev.isFile() && dev.isExecutable()) return dev.canonicalFilePath();
+#endif
     return {};
 }
 
@@ -1317,6 +1322,11 @@ QString Hub::phoneProgram() {
         const QFileInfo info(candidate);
         if (info.isFile() && info.isExecutable()) return info.canonicalFilePath();
     }
+#ifdef FROND_SOURCE_ROOT
+    // Development fallback: the checkout's own build, whether run from a link or a test binary.
+    const QFileInfo dev(QStringLiteral(FROND_SOURCE_ROOT "/build/bluetooth-opp-peer/bluetooth-opp-peer"));
+    if (dev.isFile() && dev.isExecutable()) return dev.canonicalFilePath();
+#endif
     return {};
 }
 

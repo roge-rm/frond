@@ -853,6 +853,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `FROND_CORE` | Core binary for `tests/smoke.py` and similar, such as `build/out/frond-jit`. |
 | `FROND_DEVICE_IMAGES` | Firmware folder (laid out as `Palm/` with the device images) for `tests/smoke.py` and `tests/zire72-rom.py`. No default; those tests skip without it. |
 | `FROND_EMULATOR_CMD` | Command that launches the core in `tools/qualify-peripherals.py`, such as `heavy emulator`. Default `emulator`. |
+| `FROND_OBJ` | Set by the Makefile to the absolute `OBJ_ROOT` (default `build/out`, where the rebuildable output goes) for the test scripts. |
 | `FROND_GDB` | ARM-capable GDB for the debugger tests. Otherwise `gdb-multiarch` is used if found. |
 | `FROND_GDBSTUB_TARGET` | Test target binary for `tests/gdbstub.py`. Default `build/out/test-gdbstub-target`. |
 | `FROND_TX_DEBUG_CONFIG` | JSON config handed to the debugger probe script by `tests/pace-debug-tx.py`. |

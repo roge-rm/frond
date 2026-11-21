@@ -128,6 +128,9 @@ prune)
                 $(find "$HOME/.worktrees/frond" -maxdepth 1 -name 'commit-build-*' -mmin +60 2>/dev/null) \
                 $(find /mnt/scratch/frond -maxdepth 1 -name 'core-commit-build-*' -mmin +60 2>/dev/null); do
             if lsof +D "$d" >/dev/null 2>&1; then echo "in use, kept: $d"; continue; fi
+            # A build still running holds its lock.
+            lk="$store/.out-${d##*commit-build-}.lock"
+            if [ -e "$lk" ] && ! flock -n "$lk" true 2>/dev/null; then echo "build running, kept: $d"; continue; fi
             echo "remove $d"
             [ $dry = 1 ] || { git worktree remove --force "$d" 2>/dev/null || rm -rf "$d"; }
         done
