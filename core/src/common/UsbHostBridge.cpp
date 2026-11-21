@@ -209,6 +209,8 @@ std::string UsbHostBridge::Describe() const {
     if (impl->cableOnly)
         return std::string("on ") + UsbBusHost::PhaseName(impl->host->GetPhase()) +
                (impl->host->Rndis() ? impl->rndis.Up() ? " rndis up" : " rndis starting" : "");
+    if (impl->config.kind == HostSerial::Kind::syncManager)
+        return std::string("sync ") + UsbBusHost::PhaseName(impl->host->GetPhase());
     return std::string(impl->config.kind == HostSerial::Kind::pty ? "pty " : impl->config.kind == HostSerial::Kind::unixSocket ? "unix " : "tcp ") + impl->link.Endpoint() +
            (impl->link.Connected() ? " connected " : " waiting ") + UsbBusHost::PhaseName(impl->host->GetPhase()) +
            (impl->host->Rndis() ? impl->rndis.Up() ? " rndis up" : " rndis starting" : "");

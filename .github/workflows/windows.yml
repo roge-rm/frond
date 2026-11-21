@@ -36,6 +36,7 @@ jobs:
             make
             git
             python
+            mingw-w64-i686-gcc
           pacboy: >-
             toolchain:p
             cmake:p
@@ -67,6 +68,11 @@ jobs:
             -DFROND_PREPARED_SOURCE="$PWD/core" 2>&1 | tee -a build.log
           cmake --build build/desktop --target frond-desktop -- -k 0 2>&1 | tee -a build.log
 
+      - name: Build the 32-bit installer shims
+        if: inputs.build_run == ''
+        run: |
+          PATH="/mingw32/bin:$PATH" make installer-shims WINDOWS_SHIM_OUT=build/desktop/installer-shims/x86
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: inputs.build_run == ''
         with:
@@ -75,6 +81,7 @@ jobs:
             out/frond.exe
             out/frond-68k.exe
             build/desktop/frond-desktop.exe
+            build/desktop/installer-shims/
           if-no-files-found: warn
 
       - uses: actions/download-artifact@v4

@@ -26,6 +26,7 @@ import com.rm.frond.BeamMode
 import com.rm.frond.BluetoothChoice
 import com.rm.frond.BluetoothLink
 import com.rm.frond.InfraredChoice
+import com.rm.frond.SyncProtocol
 import com.rm.frond.LinkStore
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
@@ -66,6 +67,8 @@ private fun RelayDialog(
     relay: NetRelay,
     current: BeamMode,
     onDismiss: () -> Unit,
+    syncAttached: Boolean = false,
+    useSync: (() -> Unit)? = null,
     onChoose: (BeamMode) -> Unit,
 ) {
     val context = LocalContext.current
@@ -75,7 +78,11 @@ private fun RelayDialog(
         title = title,
         labels = labels,
         defaultPort = relay.defaultPort,
-        choice = if (current == BeamMode.Off) "off" else start.encode().substringBefore(':'),
+        choice = when {
+            syncAttached -> "sync"
+            current == BeamMode.Off -> "off"
+            else -> start.encode().substringBefore(':')
+        },
         port = (start as? BeamMode.Listen)?.port,
         address = (last as? BeamMode.Connect ?: start as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) },
         addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value,
@@ -88,6 +95,7 @@ private fun RelayDialog(
             }
         },
         onChoose = onChoose,
+        useSync = useSync,
     )
 }
 
@@ -105,6 +113,7 @@ private fun <T> LinkDialog(
     onDismiss: () -> Unit,
     toMode: (choice: String, port: String, address: String) -> T?,
     onChoose: (T) -> Unit,
+    useSync: (() -> Unit)? = null,
 ) {
     var picked by remember { mutableStateOf(choice) }
     var portText by remember { mutableStateOf((port ?: defaultPort).toString()) }
@@ -115,7 +124,9 @@ private fun <T> LinkDialog(
         title = { Text(title) },
         text = {
             Column {
-                for ((id, label) in listOf("off", "listen", "connect").zip(labels)) {
+                val options = listOf("off", "listen", "connect").zip(labels)
+                val choices = if (useSync != null) options + ("sync" to "Sync Manager") else options
+                for ((id, label) in choices) {
                     ListItem(
                         headlineContent = { Text(label) },
                         leadingContent = { RadioButton(selected = picked == id, onClick = null) },
@@ -151,7 +162,11 @@ private fun <T> LinkDialog(
                 }
             }
         },
-        confirmButton = { TextButton(enabled = mode != null, onClick = { mode?.let(onChoose) }) { Text("OK") } },
+        confirmButton = {
+            TextButton(enabled = mode != null, onClick = {
+                if (picked == "sync") useSync?.invoke() else mode?.let(onChoose)
+            }) { Text("OK") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
@@ -239,16 +254,24 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             }
         }
         LinkKind.SERIAL -> {
-            val current = model.serial.choice
-            val choices = remember { InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem) }
+            val sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC
+            val current = if (model.serialSync) InfraredChoice.SYNC_MANAGER else model.serial.choice
+            val choices = remember(current, sync) {
+                InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem, sync)
+            }
             ConnectionChoiceDialog("Serial port", current, onDismiss, choices) { onDismiss(); model.changeSerial(it) }
         }
         LinkKind.USB -> if (model.device.usbNetwork)
             ConnectionChoiceDialog("USB", if (model.usbCable) "on" else "off", onDismiss, listOf("off" to "Off", "on" to "On")) {
                 onDismiss(); model.changeUsbCable(it == "on")
             }
-        else RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
-            model.usb.mode, onDismiss) { onDismiss(); model.changeUsb(it) }
+        else {
+            val sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC
+            RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
+                model.usb.mode, onDismiss, syncAttached = model.usbSync,
+                useSync = if (sync) ({ onDismiss(); model.changeUsbSync() }) else null,
+            ) { onDismiss(); model.changeUsb(it) }
+        }
         LinkKind.BLUETOOTH -> {
             val current = model.bluetooth.choice
             val choices = remember { BluetoothChoice.choices(current, LinkStore.choices(InfraredChoice.folder(context))) }

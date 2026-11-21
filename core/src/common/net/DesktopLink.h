@@ -18,6 +18,8 @@
 #include <memory>
 #include <vector>
 
+namespace frondSync { class ActiveSyncSession; }
+
 namespace frondNet {
 
 class WifiRouter;
@@ -31,7 +33,8 @@ class DesktopLink {
     // mac: the desktop's MAC address. An RNDIS device gives it as its permanent address (OID_802_3_PERMANENT_ADDRESS)
     // and WM5's DHCP server only answers it. Frames from slirp go out from it too. hostConnectPort: the host's
     // UDP port on 127.0.0.1 that goes to the handheld's connectPort once bound (0 for none).
-    explicit DesktopLink(const uint8_t* mac, uint16_t hostConnectPort = connectPort);
+    explicit DesktopLink(const uint8_t* mac, uint16_t hostConnectPort = connectPort,
+                         std::shared_ptr<frondSync::ActiveSyncSession> activeSync = {});
     ~DesktopLink();
     // One Ethernet frame from the handheld.
     void Input(const uint8_t* frame, size_t size, uint64_t now);
@@ -58,6 +61,7 @@ class DesktopLink {
     enum class State { discover, request, bound };
     void Send(std::vector<uint8_t> frame);
     void Bind(uint32_t desktop, uint32_t handheld, uint32_t mask);
+    void ActiveSyncWakeup();
     State state{State::discover};
     uint32_t xid{0x46726e64}, offered{0}, offerServer{0}, address{0}, server{0}, netmask{0};
     uint64_t retryAt{0};
@@ -65,7 +69,9 @@ class DesktopLink {
     bool forwarding{false};
     std::deque<std::vector<uint8_t>> outgoing;
     std::unique_ptr<WifiRouter> router;
-    uint8_t mac[6]{};
+    std::shared_ptr<frondSync::ActiveSyncSession> activeSync;
+    uint8_t mac[6]{}, guestMac[6]{};
+    uint64_t knockAt{0};
 };
 
 }  // namespace frondNet

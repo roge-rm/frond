@@ -406,6 +406,7 @@ object InfraredChoice {
     const val OFF = "off"
 
     const val MODEM = "modem"
+    const val SYNC_MANAGER = "sync"
 
     const val PHONE = "phone"
 
@@ -419,8 +420,12 @@ object InfraredChoice {
     // The infrared port's saved value: the same, phone or printer.
     fun normaliseInfrared(value: String?): String = if (value == PHONE || value == PRINTER) value else normalise(value)
 
-    // The serial port's saved value: the same, or modem.
-    fun normaliseSerial(value: String?): String = if (value == MODEM) MODEM else normalise(value)
+    // The serial port can also go to the modem or Sync Manager.
+    fun normaliseSerial(value: String?): String = when (value) {
+        MODEM -> MODEM
+        SYNC_MANAGER -> SYNC_MANAGER
+        else -> normalise(value)
+    }
 
     // The picker's rows as (value, label): Off, then the paired connections by name, then the current
     // value as Unknown connection if it names one that's gone.
@@ -430,9 +435,11 @@ object InfraredChoice {
         if (linkId(current) != null && none { it.first == current }) add(current to "Unknown connection")
     }
 
-    // The serial port's rows: the same, with Modem after Off on a device that has one.
-    fun serialChoices(current: String, paired: List<Pair<String, String>>, modem: Boolean): List<Pair<String, String>> =
-        choices(current, paired).toMutableList().also { if (modem) it.add(1, MODEM to "Modem") }
+    fun serialChoices(current: String, paired: List<Pair<String, String>>, modem: Boolean, sync: Boolean = false): List<Pair<String, String>> =
+        choices(current, paired).toMutableList().also {
+            if (modem) it.add(1, MODEM to "Modem")
+            if (sync) it.add(1, SYNC_MANAGER to "Sync Manager")
+        }
 
     // The infrared rows: the same, with Mobile phone after Off on a device that has an infrared phone, then Printer.
     fun infraredChoices(current: String, paired: List<Pair<String, String>>, phone: Boolean, printer: Boolean = true): List<Pair<String, String>> =

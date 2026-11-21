@@ -19,6 +19,15 @@ class RunningMenuTest {
     }
 
     // The rx1950 (Windows CE) has its own hard reset, a clean boot, so the row is there and on.
+    @Test fun syncManagerFollowsNetworkOnSupportedDevices() {
+        val tx = ids(Device.TX)
+        assertEquals(tx.indexOf(RunningMenu.Id.NETWORK) + 1, tx.indexOf(RunningMenu.Id.SYNC_MANAGER))
+        assertEquals(SyncProtocol.HOT_SYNC, SyncProtocol.forDevice(Device.E2))
+        val rx1950 = Device.entries.first { it.rx1950 }
+        assertEquals("activesync-start", SyncProtocol.forDevice(rx1950)?.startCommand)
+        assertTrue(RunningMenu.Id.SYNC_MANAGER in ids(rx1950))
+    }
+
     @Test fun windowsCeHardReset() {
         val rx1950 = Device.entries.first { it.rx1950 }
         assertFalse(rx1950.palmOs)

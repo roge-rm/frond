@@ -194,7 +194,7 @@ android {
                     "-DCMAKE_C_COMPILER_LAUNCHER=$ccache;prefix_command=",
                     "-DCMAKE_CXX_COMPILER_LAUNCHER=$ccache;prefix_command=",
                 )
-                if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "frondlink", "jit-differential", "benchmark-replay")
+                if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "frondlink", "frondsync", "jit-differential", "benchmark-replay")
             }
         }
     }

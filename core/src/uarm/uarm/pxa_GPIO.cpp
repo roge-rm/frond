@@ -445,6 +445,10 @@ bool pxaGpioPeekLevel(const PxaGpio* gpio, uint32_t pa, uint32_t* value) {
     return true;
 }
 
+bool pxaGpioFallingEdgeEnabled(const PxaGpio* gpio, unsigned pin) {
+    return pin < gpio->nGpios && (gpio->fallDet[pin / 32] & (1u << (pin % 32)));
+}
+
 unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin) {
     return pin < gpio->nGpios ? (gpio->AFRs[pin / 16] >> (2 * (pin % 16))) & 3 : 0;
 }

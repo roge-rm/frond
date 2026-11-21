@@ -143,6 +143,7 @@ class UsbBusHost {
     // Running: the OUT packet being sent and which direction goes next.
     uint8_t outPacket[64]{};
     unsigned outSize{0}, outFlightSize{0};
+    int inFlightBytes{-1};  // bulk IN bytes reserved on the bus, -1 for a handshake without data
     bool outPending{false}, preferOut{false}, clearHalt{false};
     uint8_t haltedEndpoint{0};
     unsigned bulkTimeouts{0};

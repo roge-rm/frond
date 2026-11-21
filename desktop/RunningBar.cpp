@@ -87,14 +87,14 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     machineMenu->setObjectName("machineMenu");
     static const std::pair<Id, const char*> names[] = {
         {Id::Hold, "machineHold"}, {Id::Keyboard, "machineKeyboard"}, {Id::Gamepad, "machineGamepad"}, {Id::Microphone, "machineMicrophone"},
-        {Id::Network, "machineNetwork"}, {Id::Display, "machineDisplay"}, {Id::Connections, "machineConnections"},
+        {Id::Network, "machineNetwork"}, {Id::SyncManager, "machineSyncManager"}, {Id::Display, "machineDisplay"}, {Id::Connections, "machineConnections"},
         {Id::Screenshot, "machineScreenshot"}, {Id::HideBar, "machineHideBar"}, {Id::FullScreen, "machineFullScreen"},
         {Id::Save, "machineSave"}, {Id::SaveCopy, "machineSaveCopy"}, {Id::Log, "machineLog"},
         {Id::Reset, "machineReset"}, {Id::HardReset, "machineHardReset"}, {Id::SaveStop, "machineSaveStop"}};
     int group = 0;
     // Every row is made here; apply() shows the ones a device has.
     runningRules::Traits all;
-    all.holdPresent = all.holdSupported = all.keyboard = all.microphone = all.network = all.gamepad = true;
+    all.holdPresent = all.holdSupported = all.keyboard = all.microphone = all.network = all.gamepad = all.syncManager = true;
     for (const auto& row : runningRules::rows(all, {})) {
         if (row.group != group) { machineMenu->addSeparator(); group = row.group; }
         QAction* action;
@@ -154,6 +154,9 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     keyboardAction->setVisible(false);
     applicationsAction = button("apps", "barApplications", tr("Applications (Ctrl+1)"), Button::Applications);
     cardAction = button("card-out", "barCard", tr("Storage (Ctrl+2)"), Button::Card);
+    syncAction = button({}, "barSync", tr("HotSync"), Button::Sync);
+    static_cast<QToolButton*>(widgetForAction(syncAction))->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    syncAction->setVisible(false);
     soundAction = button("sound-on", "barSound", tr("Sound"), Button::Sound);
     soundAction->setCheckable(true);
     powerAction = button("power", "barPower", tr("Power"), Button::Power);
@@ -190,6 +193,13 @@ void RunningBar::setOpenPanel(int index) {
     cardAction->setCheckable(true);
     applicationsAction->setChecked(index == 0);
     cardAction->setChecked(index == 1);
+}
+
+void RunningBar::setSyncButton(const QString& label, bool enabled) {
+    syncAction->setText(label);
+    syncAction->setToolTip(label);
+    syncAction->setVisible(!label.isEmpty());
+    syncAction->setEnabled(enabled);
 }
 
 void RunningBar::setForceStop(bool on) { forceAction->setVisible(on); }

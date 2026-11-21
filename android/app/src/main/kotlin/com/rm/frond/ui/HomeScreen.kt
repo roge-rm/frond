@@ -118,6 +118,10 @@ fun HomeScreen(model: HomeModel) {
                                 menu = false
                                 model.openConnections()
                             })
+                            DropdownMenuItem(text = { Text("Sync Manager") }, onClick = {
+                                menu = false
+                                model.syncManagerOpen = true
+                            })
                             DropdownMenuItem(text = { Text("Firmware") }, onClick = {
                                 menu = false
                                 model.openFirmware()

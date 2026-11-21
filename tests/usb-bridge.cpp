@@ -671,6 +671,31 @@ static void testRequestCadence() {
     puts("PASS: bounded MPS request cadence, short/full/ZLP, masked guest real NAK, poke independence, OUT progress and backpressure/throughput");
 }
 
+static void testBulkInReadyDuringNak() {
+    Bench b;
+    b.guest.enable();
+    b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull, "cnys"));
+    b.guest.silent = true;
+
+    // Start polling empty endpoint 6, then queue data before the NAK interval ends.
+    const auto next = b.log.size();
+    for (unsigned i = 0; b.log.size() == next && i < 2000; ++i) b.run(1000);
+    assert(b.log.size() == next + 1);
+    const auto [start, end] = b.log.back();
+    assert(end - start == 4500 && b.now < end);
+    for (unsigned i = 0; i < 64; ++i) wr8(0x318, uint8_t(i));
+    b.host.Tick(end);
+    assert(b.host.GetCounters().bytesIn == 0);
+    b.now = (end + 999) / 1000 * 1000;
+    b.run(4000000);
+    assert(b.toHost.size() == 64);
+    for (unsigned i = 0; i < 64; ++i) assert(b.toHost[i] == i);
+    const auto [dataStart, dataEnd] = b.log[next + 1];
+    assert(dataStart >= end && dataEnd - dataStart == 50167);
+    puts("PASS: bulk IN data queued during a NAK waits for a full data transaction");
+}
+
 static void testCooperativeOutCredit() {
     Bench b;
     b.outCredit=false;
@@ -702,6 +727,7 @@ static void testCooperativeOutCredit() {
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    testBulkInReadyDuringNak();
     testCooperativeOutCredit();
     testRequestCadence();
     testControlNoResponseRetry();

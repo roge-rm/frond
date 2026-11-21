@@ -31,6 +31,7 @@
 #include "HostSerial.h"
 #include "HostInfrared.h"
 #include "UsbHostBridge.h"
+#include "../../common/sync/SyncManager.h"
 #include "Logging.h"
 #include "MainLoop.h"
 #include "InputReplay.h"
@@ -115,6 +116,8 @@ struct Options {
     optional<string> serial;
     optional<string> infrared;
     optional<string> usb;
+    bool syncNetwork{false};
+    optional<string> syncFolder, syncProfile, syncMachine, syncUser;  // --sync-*
     optional<string> bluetooth;
     bool cardSwap;                  // the frontend changed the card files while the machine was off
     optional<string> cardIdentity;  // the card put in: 64 hex digits
@@ -470,21 +473,32 @@ bool gFastEngineMissing = false;
         }
         HostSerial::Config serialConfig;
         if (options.serial && !HostSerial::Parse(*options.serial, serialConfig)) {
-            cerr << "--serial must be off, pty, tcp:PORT (PORT 0..65535) or unix:PATH" << endl;
+            cerr << "--serial must be off, pty, tcp:PORT (PORT 0..65535), unix:PATH or sync" << endl;
             return false;
         }
         HostSerial::Config infraredConfig;
         const bool infraredPhone = options.infrared && *options.infrared == "phone";
         const bool infraredPrinter = options.infrared && *options.infrared == "printer";
-        if (options.infrared && !infraredPhone && !infraredPrinter && !HostSerial::Parse(*options.infrared,infraredConfig)) {
+        if (options.infrared && !infraredPhone && !infraredPrinter && (!HostSerial::Parse(*options.infrared,infraredConfig) || infraredConfig.kind==HostSerial::Kind::syncManager)) {
             cerr << "--irda must be off, pty, tcp:PORT, unix:PATH, phone or printer" << endl; return false;
         }
         HostSerial::Config usbConfig;
         // on: the cable in with no endpoint, for a device whose USB is a network link (the rx1950's RNDIS).
         const bool usbCable = options.usb && *options.usb == "on";
         if (options.usb && !usbCable && !HostSerial::Parse(*options.usb, usbConfig)) {
-            cerr << "--usb must be off, on, pty, tcp:PORT (PORT 0..65535) or unix:PATH" << endl;
+            cerr << "--usb must be off, on, pty, tcp:PORT (PORT 0..65535), unix:PATH or sync" << endl;
             return false;
+        }
+        {
+            frondSync::SyncOptions sync;
+            sync.network = options.syncNetwork;
+            sync.root = options.syncFolder.value_or("");
+            sync.profile = options.syncProfile.value_or("");
+            sync.machineKey = options.syncMachine.value_or("");
+            sync.userName = options.syncUser.value_or("");
+            sync.network = sync.network || frondSync::ConfiguredHotSyncUsesNetwork(sync);
+            frondSync::SyncManager::Get().Configure(sync);
+            frondSync::SyncManager::Get().SetListener([](const std::string& line) { cout << "sync: " << line << endl; });
         }
         if (options.audioPeriod < 64 || options.audioPeriod > 8192) {
             cerr << "--audio-period must be 64..8192 frames" << endl;
@@ -1500,7 +1514,7 @@ bool gFastEngineMissing = false;
                     }
                 }
 
-                if (desktop) { desktop->microphoneChanged(commandContext); desktop->cameraChanged(commandContext); desktop->serialChanged(commandContext); }
+                if (desktop) { desktop->microphoneChanged(commandContext); desktop->cameraChanged(commandContext); desktop->serialChanged(commandContext); desktop->syncChanged(commandContext); }
                 if (desktop) desktop->usbChanged(commandContext);
                 if (desktop) desktop->infraredChanged(commandContext);
                 if (desktop) desktop->bluetoothChanged(commandContext);
@@ -1925,8 +1939,9 @@ int main(int argc, char** argv) {
 
     program.add_argument("--serial")
         .help("connect the TX serial port to a host PTY (pty), a TCP listener on 127.0.0.1 "
-              "(tcp:PORT) or a Unix socket (unix:PATH, in a 0700 folder you own), one client at a time; default off")
-        .metavar("<off|pty|tcp:PORT|unix:PATH>");
+              "(tcp:PORT), a Unix socket (unix:PATH, in a 0700 folder you own), one client at a time, or the "
+              "built-in sync manager (sync); default off")
+        .metavar("<off|pty|tcp:PORT|unix:PATH|sync>");
 
     program.add_argument("--bluetooth")
         .help("connect the virtual Bluetooth radio to a local H4 controller Unix socket; default off")
@@ -1940,7 +1955,15 @@ int main(int argc, char** argv) {
         .help("connect the TX USB HotSync port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
               "(tcp:PORT, one client at a time) through a built-in USB host; on puts the rx1950's cable in, "
               "its RNDIS link going to the host network; default off")
-        .metavar("<off|on|pty|tcp:PORT|unix:PATH>");
+        .metavar("<off|on|pty|tcp:PORT|unix:PATH|sync>");
+
+    program.add_argument("--sync-network").help("route Network HotSync to the built-in sync manager").default_value(false).implicit_value(true);
+    program.add_argument("--sync-folder")
+        .help("the sync manager's folder of profiles and backups; default the user's data folder")
+        .metavar("<folder>");
+    program.add_argument("--sync-profile").help("sync with this profile instead of the handheld's assigned one").metavar("<name>");
+    program.add_argument("--sync-machine").help("this machine's key in the sync manager, to remember its profile").metavar("<key>");
+    program.add_argument("--sync-user").help("the user name a new handheld gets on its first HotSync").metavar("<name>");
 
     program.add_argument("--script").help("execute script on startup").metavar("<script file>");
 
@@ -1992,6 +2015,11 @@ int main(int argc, char** argv) {
                        .serial = program.present("--serial"),
                        .infrared = program.present("--irda"),
                        .usb = program.present("--usb"),
+                       .syncNetwork = program.get<bool>("--sync-network"),
+                       .syncFolder = program.present("--sync-folder"),
+                       .syncProfile = program.present("--sync-profile"),
+                       .syncMachine = program.present("--sync-machine"),
+                       .syncUser = program.present("--sync-user"),
                        .bluetooth = program.present("--bluetooth"),
                        .cardSwap = program.get<bool>("--card-swap"),
                        .cardIdentity = program.present("--card-identity"),

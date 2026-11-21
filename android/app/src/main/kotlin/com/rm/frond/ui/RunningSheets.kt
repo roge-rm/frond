@@ -91,7 +91,7 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
                     Sheet.APPLICATIONS -> ApplicationsSheet(model, actions)
                     Sheet.CARD -> CardSheet(model, actions)
                     Sheet.DISPLAY -> DisplaySheet(model, state, actions)
-                    Sheet.CONNECTIONS -> ConnectionsSheet(model, actions)
+                    Sheet.CONNECTIONS -> ConnectionsSheet(model, state, actions)
                 }
             }
         }
@@ -314,14 +314,16 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
 }
 
 @Composable
-private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
+private fun ConnectionsSheet(model: RunningModel, state: RunningBarState, actions: RunningBarActions) {
     DisposableEffect(Unit) {
         model.startBluetoothRefresh()
         model.loadUsbCable()
+        model.readSyncPorts()
         onDispose { model.stopBluetoothRefresh() }
     }
     var choosing by remember { mutableStateOf<LinkKind?>(null) }
     val device = model.device
+    if (state.syncProtocol != null) SheetAction("Sync settings") { actions.closeSheet(); state.syncSettings = true }
     val debuggerShown = model.debugger.phase != NetRelay.Phase.OFF || model.debugger.error != null
     // Prints waiting for a choice come first, one row each, so the prints notice's Show lands on them.
     val ready = listOfNotNull(model.printer?.jobs, model.irPrinter).filter { it.held != null }
@@ -346,9 +348,9 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
                 )
             }
             ConnRow.BLUETOOTH -> ConnItem("Bluetooth", device.bluetooth, if (device.bluetooth) bluetoothText(model.bluetooth, model.radio) else null) { choosing = LinkKind.BLUETOOTH }
-            ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) model.serial.text else null) { choosing = LinkKind.SERIAL }
+            ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) (if (model.serialSync) "Sync Manager" else model.serial.text) else null) { choosing = LinkKind.SERIAL }
             ConnRow.USB -> if (device.usbNetwork) ConnItem("USB", device.usb, if (device.usb) (if (model.usbCable) "On" else "Off") else null) { choosing = LinkKind.USB }
-                else ConnItem("USB HotSync", device.usb, if (device.usb) relayText(model.usb) else null) { choosing = LinkKind.USB }
+                else ConnItem("USB HotSync", device.usb, if (device.usb) (if (model.usbSync) "Sync Manager" else relayText(model.usb)) else null) { choosing = LinkKind.USB }
             ConnRow.USB_RETRY -> SheetAction("Connect again") { UsbLink.retry() }
             ConnRow.USB_PORT -> model.printer?.let { PrinterRow(it, device) } ?: ConnItem("USB port", false, null) { }
             ConnRow.WIFI_MODULE -> model.printer?.let { WifiModuleRow(it) } ?: ConnItem("Wi-Fi", false, null) { }

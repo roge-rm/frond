@@ -162,6 +162,7 @@ inline QString speedForCore(const Preferences& prefs, bool m68k) {
     return m68k && name == QLatin1String("8x") ? QStringLiteral("uncapped") : name;
 }
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
+inline QString syncIdPath(const QString& path) { return path + ".sync-id"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
     QFile file(preferencesPath(path));
     if (!file.open(QIODevice::ReadOnly)) return false;
@@ -647,11 +648,12 @@ inline bool removeStaleWork(const QString& frond) {
     QDir folder(dir);
     const QStringList markers{work.fileName(), QFileInfo(markerPath(frond)).fileName(),
                               QFileInfo(preferencesPath(frond)).fileName(), QFileInfo(frond).fileName() + ".lock",
-                              QFileInfo(corePath(frond)).fileName()};
+                              QFileInfo(corePath(frond)).fileName(), QFileInfo(syncIdPath(frond)).fileName()};
     for (const auto& entry : folder.entryInfoList(QDir::Files | QDir::Hidden | QDir::System))
         if (!markers.contains(entry.fileName()) && entry.lastModified() > work.lastModified()) return false;
     QFile::remove(markerPath(frond));
     QFile::remove(preferencesPath(frond));
+    QFile::remove(syncIdPath(frond));
     QFile::remove(work.absoluteFilePath());
     for (const auto& entry : folder.entryInfoList(QDir::Files | QDir::Hidden | QDir::System))
         if (machineFileName(entry.fileName())) QFile::remove(entry.absoluteFilePath());
@@ -690,6 +692,7 @@ inline void migrateLoose(const QString& folder) {
         moveInto(loose, dest + '/' + stem + ".frond");
         moveInto(markerPath(loose), dest + '/' + stem + ".frond.new");
         moveInto(preferencesPath(loose), dest + '/' + stem + ".frond.settings.json");
+        moveInto(syncIdPath(loose), dest + '/' + stem + ".frond.sync-id");
         moveInto(loose + ".lock", dest + '/' + stem + ".frond.lock");
     }
 }
@@ -1049,7 +1052,7 @@ inline QString rename(const QString& folder, const Info& info, const QString& wa
     }
     const auto renamed = [&](const QString& file) {
         for (const auto& suffix : {QString(), QStringLiteral(".new"), QStringLiteral(".settings.json"), QStringLiteral(".work"),
-                                   QStringLiteral(".core")})
+                                   QStringLiteral(".core"), QStringLiteral(".sync-id")})
             if (file == oldFrond + suffix) return newFrond + suffix;
         return file;
     };
@@ -1104,7 +1107,7 @@ inline QString remove(const Info& info, const CopyProgress& progress = {}) {
         if (!QDir().rmdir(dir) && QFileInfo::exists(dir)) return QStringLiteral("Couldn't delete the session.");
         return {};
     }
-    for (const auto& path : {info.path, markerPath(info.path), preferencesPath(info.path)})
+    for (const auto& path : {info.path, markerPath(info.path), preferencesPath(info.path), syncIdPath(info.path)})
         if (QFileInfo::exists(path) && !QFile::remove(path)) return QStringLiteral("Couldn't delete the session.");
     return {};
 }

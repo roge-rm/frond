@@ -478,9 +478,29 @@ Modem and phone by device:
 
 Plugs the device's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
 
+### Sync Manager
+
+Open a Palm OS machine that has a **HotSync** button in the top bar. Click it to sync to its assigned profile. Frond asks for a profile the first time. In a stopped machine's **Edit settings**, or in **Connections** while it runs, open **Sync settings** to change the profile or choose a direction for each kind of data. An overwrite applies on the next successful sync of that kind.
+
+Open **Sync Manager** from **…** on Android or from **…** or **File** on the desktop. Select a profile to view or edit its contacts, calendar, tasks and memos, manage queued installs and see which databases were backed up. Profiles can be shared by several machines. To restore after a hard reset, choose the backup device, queue a restore to the reset machine and HotSync again. A queued restore can replace databases on the target device.
+
+Use Frond CSV to keep all fields and data when exporting records. Contacts also support vCard, calendar and tasks support iCalendar, and you can import or export a memo as a UTF-8 text file. iCalendar supports single-day appointments and tasks without repeats or alarms. Records with repeats or alarms can be exported as CSV.
+
+**Connections** can route a Palm OS serial or USB link to **Sync Manager** so you can start HotSync from the handheld. USB and serial HotSync can still go to a PTY or TCP port for external tools.
+
+#### Queue applications from an installer
+
+In Sync Manager, open **Install queue** and choose **Queue files…** on desktop or **Queue install** on Android. Pick a Palm database, a Windows Mobile CAB, a ZIP or a Windows installer with an embedded CAB. For an archive or installer, choose the files for your device. Some Windows installers contain CABs for several processors. The rx1950 uses ARM. The desktop can also find files with 7-Zip if it is installed. On Linux and macOS, 7-Zip together with unshield can open InstallShield cabinets inside a Windows installer or a ZIP containing one.
+
+On desktop, **Run Windows installer…** opens an EXE or MSI that expects Palm Desktop or ActiveSync. Choose which one it expects and finish its setup, then pick the files it hands over. On Linux this needs Wine and the Windows shims beside Frond. A source build can put the shims there with `make installer-shims` and the MinGW-w64 C++ compiler. **Queue files…** can also read some additional installer formats if 7-Zip is installed.
+
 ### ActiveSync
 
-The rx1950 syncs with ActiveSync's desktop side. On Linux that's SynCE (`synce-core`: `dccm` and tools like `pls`, `pcp` and `pstatus`). `dccm` runs as root, as SynCE installs it, since it listens on port 990. Frond doesn't make the udev event SynCE waits for, so tell `dccm` about the device yourself:
+On the rx1950, click **ActiveSync** in the top bar to connect to the assigned profile. It uses USB by default. Choose **Serial** under **Connection** in the machine’s sync settings to use the serial cable. Use **Sync Manager** to queue a Windows Mobile CAB. ActiveSync sends one CAB at a time to the installer on the device, where you can finish the installation. Contacts, calendar, tasks and notes on Windows Mobile aren't synced yet.
+
+For file exchange from the command line, run `frond-sync files PROFILE` to make and print the profile’s Files folder. ActiveSync copies new files between it and `My Documents\Frond Sync` on the device. Same-name files with different contents stay on both sides and are counted in the sync log.
+
+For external file tools on Linux, you can use SynCE (`synce-core`: `dccm` and tools like `pls`, `pcp` and `pstatus`). With the built-in ActiveSync idle, use **Connections** to switch USB off and on for SynCE. `dccm` runs as root, as SynCE installs it, since it listens on port 990. Frond doesn't make the udev event SynCE waits for, so tell `dccm` about the device yourself:
 
 ```
 dbus-send --system --print-reply --dest=org.synce.dccm /org/synce/dccm/DeviceManagerControl \
@@ -571,7 +591,7 @@ The 68k Palms, from the Palm IIIx to the m520, the Dana and the CLIÉ T415, run 
 
 The AlphaSmart Dana has the wide screen, the built-in keyboard, sound, infrared beaming, two SD or MMC slots and a USB port for a printer or a USB Wi-Fi adapter, on Linux and Android. The Dana Wireless has the same, with Wi-Fi built in instead of the adapter. See [Dana screen and keyboard](#dana-screen-and-keyboard), [Dana USB port](#dana-usb-port) and [Dana Wireless](#dana-wireless). Its USB computer link is there through the native localhost debug path, and the app's USB computer controls stay greyed out. Peer to Peer (ad hoc) Wi-Fi finds nobody. On Android a Dana session with cards in it can't be copied or imported yet, but each card can still be exported.
 
-The HP iPAQ rx1950 runs Windows Mobile 5, with sound, the microphone and an SD card. Its Wi-Fi joins Frond's access point in the Virtual Wi-Fi network mode, and infrared beams files to another rx1950 or a Palm OS device. It syncs with SynCE's ActiveSync tools over USB or the serial cable on Linux, see [ActiveSync](#activesync). It has no Bluetooth, same as the real one. The installed program list isn't done yet.
+The HP iPAQ rx1950 runs Windows Mobile 5, with sound, the microphone and an SD card. Its Wi-Fi joins Frond's access point in the Virtual Wi-Fi network mode, and infrared beams files to another rx1950 or a Palm OS device. It connects to Sync Manager over USB or the serial cable. On Linux, it can also use SynCE. See [ActiveSync](#activesync). It has no Bluetooth, same as the real one. The installed program list isn't done yet.
 
 Microphone (Zire 72, TG50 and rx1950) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or the Machine menu (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 

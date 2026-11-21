@@ -99,7 +99,7 @@ data class MachineSettings(
     val barMode: BarMode = BarMode.AUTO_HIDE,
     // Infrared: off, phone (the core's own mobile phone), printer (an IrDA printer), or link:<id> for a connection (InfraredChoice). Applied at every start.
     val infrared: String = InfraredChoice.OFF,
-    // Serial: the same values, or modem on a device with a snap-on modem. The LAN serial options are gone.
+    // Serial: off, a connection, a snap-on modem or Sync Manager.
     val serial: String = InfraredChoice.OFF,
     // Bluetooth: off, radio (This Frond's radio) or link:<id> (BluetoothChoice). Applied at every start.
     val bluetooth: String = BluetoothChoice.OFF,

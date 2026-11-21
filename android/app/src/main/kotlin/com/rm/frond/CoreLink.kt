@@ -27,6 +27,7 @@ open class CoreLink(
         val text: String get() = when {
             error != null -> "Off. $error"
             choice == InfraredChoice.MODEM && error == null -> "Modem"
+            choice == InfraredChoice.SYNC_MANAGER -> "Sync Manager"
             choice == InfraredChoice.PHONE && error == null -> "Mobile phone"
             choice == InfraredChoice.PRINTER && error == null && title == "Infrared" -> "Printer"
             !active && InfraredChoice.linkId(choice) != null -> "$title: Unknown connection"
@@ -48,11 +49,13 @@ open class CoreLink(
 
     // Sets the core's port and the link for choice. Blocks on the control link, so never on the main
     // thread. Returns an error to show, or null.
-    fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String): String? {
+    fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String,
+              attachedSync: Boolean = false): String? {
         synchronized(lock) {
             // The modem, the phone and the printer are the core's own: no link, no socket.
             val own = when {
                 choice == InfraredChoice.MODEM && modeCommand == "serial-mode" -> "modem"
+                choice == InfraredChoice.SYNC_MANAGER && modeCommand == "serial-mode" -> "sync"
                 choice == InfraredChoice.PHONE && modeCommand == "irda-mode" -> "phone"
                 choice == InfraredChoice.PRINTER && modeCommand == "irda-mode" -> "printer"
                 else -> null
@@ -66,7 +69,8 @@ open class CoreLink(
             val id = InfraredChoice.active(choice, LinkStore.choices(InfraredChoice.folder(context)))
             if (id == null) {
                 detach()
-                val wasOn = state.value.active || state.value.choice == InfraredChoice.MODEM || state.value.choice == InfraredChoice.PHONE || state.value.choice == InfraredChoice.PRINTER
+                val wasOn = attachedSync || state.value.active || state.value.choice in
+                    listOf(InfraredChoice.MODEM, InfraredChoice.PHONE, InfraredChoice.PRINTER, InfraredChoice.SYNC_MANAGER)
                 state.value = Status(choice, title = title)
                 if (wasOn) {
                     val reply = control.request(modeCommand, "off", timeoutSeconds = 30)

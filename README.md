@@ -154,7 +154,7 @@ On Linux use File → Firmware… or Add device, on Android import the firmware 
 - Modem and phones: the 68k Palms have a snap-on modem, and most ARM Palm OS devices dial through a mobile phone over infrared or Bluetooth, onto the internet. See [Dial-up modem](doc/using-frond.md#dial-up-modem).
 - Printing: every device with infrared prints to "Frond Printer", and the Danas to a USB printer, as a PDF or a raw file. See [Printing over infrared](doc/using-frond.md#printing-over-infrared).
 - Low-latency audio: less delay between a tap and the sound, for music apps like SunVox. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
-- HotSync and ActiveSync: Palm OS devices HotSync with pilot-link over serial, USB or the modem, and the rx1950 syncs with SynCE. See [USB HotSync](doc/using-frond.md#usb-hotsync) and [ActiveSync](doc/using-frond.md#activesync).
+- HotSync and ActiveSync: [Sync Manager](doc/using-frond.md#sync-manager) syncs contacts, calendar, tasks and memos on supported Palm OS devices. [External HotSync](doc/using-frond.md#usb-hotsync) and [ActiveSync](doc/using-frond.md#activesync) can use pilot-link and SynCE.
 
 ## For developers
 

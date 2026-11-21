@@ -11,6 +11,8 @@
 #include <set>
 #include <vector>
 
+#include "ActiveSyncForward.h"
+#include "NetSyncForward.h"
 #include "NetSyncWakeup.h"
 
 namespace frondNet {
@@ -52,15 +54,20 @@ struct WifiRouter::Impl {
     uint64_t now{};
     Slirp* slirp{};
     SlirpCb callbacks{};
+    NetSyncForward netSync;
+    ActiveSyncForward activeSync;
     std::deque<std::vector<uint8_t>> incoming;
     std::vector<pollfd> descriptors;
     std::set<Timer*> timers;
-    explicit Impl(const RouterLayout& layout) {
+    explicit Impl(const RouterLayout& layout, std::shared_ptr<frondSync::ActiveSyncSession> active = {}) {
         callbacks.send_packet = [](const void* bytes, size_t size, void* context) -> slirp_ssize_t {
             auto& self = *static_cast<Impl*>(context);
-            if (size >= 14 && size <= 1518 && self.incoming.size() < queueLimit)
+            if (size >= 14 && size <= 1518 && self.incoming.size() < queueLimit) {
                 self.incoming.emplace_back(static_cast<const uint8_t*>(bytes),
                                            static_cast<const uint8_t*>(bytes) + size);
+                self.netSync.Output(self.incoming.back());
+                self.activeSync.Output(self.incoming.back());
+            }
             return size;
         };
         callbacks.guest_error = [](const char* message, void*) {
@@ -99,6 +106,8 @@ struct WifiRouter::Impl {
         config.if_mtu = 1500;
         config.if_mru = 1500;
         slirp = slirp_new(&config, &callbacks, this);
+        if (active) activeSync.Configure(slirp, layout.host, layout.network, layout.netmask, layout.dhcpStart, layout.dns, std::move(active));
+        else if (layout.host == RouterLayout{}.host) netSync.Configure(slirp, layout.host, layout.network);
     }
     ~Impl() {
         if (slirp) slirp_cleanup(slirp);
@@ -128,7 +137,10 @@ struct WifiRouter::Impl {
 };
 WifiRouter::WifiRouter() : impl(std::make_unique<Impl>(RouterLayout{})) {}
 WifiRouter::WifiRouter(const RouterLayout& layout) : impl(std::make_unique<Impl>(layout)) {}
+WifiRouter::WifiRouter(const RouterLayout& layout, std::shared_ptr<frondSync::ActiveSyncSession> activeSync)
+    : impl(std::make_unique<Impl>(layout, std::move(activeSync))) {}
 WifiRouter::~WifiRouter() = default;
+bool WifiRouter::ActiveSyncControlConnected() const { return impl->activeSync.ControlConnected(); }
 bool WifiRouter::Valid() const { return impl->slirp; }
 void WifiRouter::Input(const uint8_t* data, size_t size, uint64_t now) {
     if (!Valid() || size < 14 || size > 1518) return;
@@ -137,7 +149,13 @@ void WifiRouter::Input(const uint8_t* data, size_t size, uint64_t now) {
         if (impl->incoming.size() < queueLimit) impl->incoming.push_back(std::move(answer));
         return;
     }
-    slirp_input(impl->slirp, data, size);
+    if (!impl->netSync.Enabled() && !impl->activeSync.Enabled()) {
+        slirp_input(impl->slirp, data, size);
+        return;
+    }
+    std::vector<uint8_t> frame(data, data + size);
+    if (!impl->netSync.Input(frame) || (impl->activeSync.Enabled() && !impl->activeSync.Input(frame))) return;
+    slirp_input(impl->slirp, frame.data(), frame.size());
 }
 void WifiRouter::Poll(uint64_t now) {
     if (!Valid()) return;
@@ -156,6 +174,8 @@ void WifiRouter::Poll(uint64_t now) {
     slirp_pollfds_fill(impl->slirp, &timeout, Impl::Add, impl.get());
     const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
     slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
+    impl->netSync.Poll();
+    impl->activeSync.Poll();
 }
 int WifiRouter::AddUdpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort) {
     if (!Valid()) return EINVAL;

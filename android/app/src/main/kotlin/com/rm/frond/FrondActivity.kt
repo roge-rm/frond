@@ -30,6 +30,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import kotlinx.coroutines.launch
 import org.libsdl.app.SDLActivity
 import java.io.File
 
@@ -230,6 +231,8 @@ open class FrondActivity : SDLActivity() {
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
+            if (name == "sync") runOnUiThread { syncState(state) }
+            if (name == "serial" || name == "usb") runOnUiThread { menuModel?.acceptSyncRoute(name, state) }
             if (name == "microphone") {
                 Log.i(TAG, "microphone: $state")
                 // The core turns capture off and on by itself too, around a TG50 sleep.
@@ -292,10 +295,13 @@ open class FrondActivity : SDLActivity() {
         val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
         val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
-        val serialLink = (InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort) || serialModem
+        val serialSync = machineSettings.serial == InfraredChoice.SYNC_MANAGER &&
+            launchDevice().serialPort && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
+        val serialWired = InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort
+        val serialLink = serialWired || serialModem || serialSync
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
-            if ((infraredLink && !infraredPhone && !infraredPrinter) || (serialLink && !serialModem) || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
+            if ((infraredLink && !infraredPhone && !infraredPrinter) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
             link.whenConnected {
                 Thread({
                     val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label
@@ -351,6 +357,9 @@ open class FrondActivity : SDLActivity() {
             tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
+        }
+        Sessions.forPath(this, session)?.takeIf { it.device?.let { device -> SyncProtocol.forDevice(device) } != null }?.let {
+            arguments += listOf("--sync-folder", SyncNative.root(this).path, "--sync-machine", it.id)
         }
         arguments += listOf("--battery", battery.launchSpec())
         arguments += listOf("--window-background", BACKGROUND_HEX)
@@ -1025,6 +1034,8 @@ open class FrondActivity : SDLActivity() {
         bar.soundKey = RunningBar.soundKey(device)
         bar.sound = sound
         bar.powerKey = RunningBar.powerKey(device)
+        bar.syncMachine = session?.id
+        bar.syncProtocol = session?.let { SyncProtocol.forDevice(device) }
         val owner = BarOwner().also { it.create() }
         barOwner = owner
         val results = BarResults(this)
@@ -1055,6 +1066,7 @@ open class FrondActivity : SDLActivity() {
                         keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) }, autoHide = { setBarShown(false, remember = false) },
                         openMenu = { openMenu() }, menuRow = { menuRow(it) },
                         openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
+                        startSync = ::startSync, syncMachines = { Sessions.list(this@FrondActivity) },
                     ))
                 }
             }
@@ -1096,11 +1108,61 @@ open class FrondActivity : SDLActivity() {
             RunningMenu.Id.GAMEPAD -> model.changeGamepad(model.gamepad != "attached")
             RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
             RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openSheet(RunningSheets.menuSheet(id))
+            RunningMenu.Id.SYNC_MANAGER -> bar.syncManager = true
             RunningMenu.Id.SCREENSHOT -> takeScreenshot()
             RunningMenu.Id.HIDE_BAR -> setBarShown(false)
             RunningMenu.Id.SAVE_COPY -> saveCopy(model)
             RunningMenu.Id.LOG -> model.showLog()
             RunningMenu.Id.RESET, RunningMenu.Id.HARD_RESET, RunningMenu.Id.NETWORK -> Unit
+        }
+    }
+
+    private fun startSync() {
+        val protocol = bar.syncProtocol ?: return
+        val machine = bar.syncMachine ?: return
+        val scope = barOwner?.lifecycleScope ?: return
+        if (bar.syncStarting || bar.syncRunning || menuModel?.busy != null || leaving) return
+        bar.syncStarting = true
+        val networkHotSync = protocol == SyncProtocol.HOT_SYNC && (menuModel?.device ?: launchDevice()).supportsNetworkHotSync()
+        scope.launch {
+            try {
+                val reply = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val assigned = SyncNative.call(this@FrondActivity, "profiles", "device" to SyncNative.deviceKey(machine))
+                        .optLong("assigned")
+                    if (assigned == 0L) null
+                    else if (networkHotSync) {
+                        val connection = SyncNative.call(this@FrondActivity, "hotsync-transport",
+                            "profile" to assigned, "device" to SyncNative.deviceKey(machine)).getString("connection")
+                        link.request(protocol.startCommand, connection, timeoutSeconds = 10)
+                    } else link.request(protocol.startCommand, timeoutSeconds = 10)
+                }
+                if (reply == null) bar.syncAssignment = true
+                else if (!reply.ok || reply.code == "network") menuModel?.note = reply.message
+                else if (bar.syncStatus == null) bar.syncStatus = "Starting ${protocol.label}"
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                menuModel?.note = e.message ?: "Couldn't start ${protocol.label}."
+            } finally {
+                bar.syncStarting = false
+            }
+        }
+    }
+
+    private fun syncState(raw: String) {
+        val state = raw.substringBefore("; profile ")
+        val label = bar.syncProtocol?.label ?: return
+        bar.syncRunning = state.startsWith("syncing ")
+        bar.syncStatus = when {
+            bar.syncRunning -> state.removePrefix("syncing ")
+            state.startsWith("waiting ") && bar.syncStatus != null -> "Waiting for $label"
+            else -> null
+        }
+        if (state.startsWith("done ") || state.startsWith("failed ")) {
+            val result = if (state.startsWith("done ")) "$label complete" else "$label failed"
+            menuModel?.note = "$result. ${state.substringAfter(": ", "")}".trim()
+            bar.syncRefresh++
+            if (state.startsWith("done ") && bar.sheet == RunningSheets.Sheet.APPLICATIONS) menuModel?.loadApps()
         }
     }
 

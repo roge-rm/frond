@@ -211,6 +211,11 @@ target_include_directories(frondcard PRIVATE "${UARM}/native" "${ZODIAC_ROM}")
 target_compile_options(frondcard PRIVATE -O2 -g -Wno-unused-parameter)
 target_link_libraries(frondcard PRIVATE frondcore log z)
 
+# The home and emulator processes open the same sync profile files without loading SDL.
+add_library(frondsync SHARED SyncJni.cpp)
+target_include_directories(frondsync PRIVATE "${CLOUDPILOT}/native/json")
+target_link_libraries(frondsync PRIVATE frondcommon)
+
 # The link library (link/: pairing, Noise KK, records, mux) for Connections as libfrondlink.so,
 # loaded by LinkNative.kt in the home and emulator processes. Same sources as the desktop's.
 set(LINK "${FROND_REPO}/link")

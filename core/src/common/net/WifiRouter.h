@@ -12,6 +12,8 @@
 #include <memory>
 #include <vector>
 
+namespace frondSync { class ActiveSyncSession; }
+
 namespace frondNet {
 
 // The virtual network's addresses, host byte order. The default is the 10.0.2.x layout every Frond network uses.
@@ -24,7 +26,9 @@ class WifiRouter {
    public:
     WifiRouter();
     explicit WifiRouter(const RouterLayout& layout);
+    WifiRouter(const RouterLayout& layout, std::shared_ptr<frondSync::ActiveSyncSession> activeSync);
     ~WifiRouter();
+    bool ActiveSyncControlConnected() const;
     bool Valid() const;
     // One Ethernet frame from the guest, 14 to 1518 bytes.
     void Input(const uint8_t*, size_t, uint64_t now);

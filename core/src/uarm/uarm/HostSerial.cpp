@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +33,8 @@
 #ifndef FROND_BYTE_LINK_ONLY
 #include "pxa_UART.h"
 #endif
+#include "../../common/sync/SyncManager.h"
+#include "../../common/sync/SyncStream.h"
 
 // Tests only: runs on the worker after a host write, before the sent bytes leave the queue.
 void (*hostSerialAfterWriteHook)() = nullptr;
@@ -40,6 +44,7 @@ namespace {
 // descriptors other than the eventfd; only the emulator thread touches the UART.
 struct Shared {
     std::mutex mutex;
+    std::condition_variable queueChanged;
     std::deque<uint8_t> rx, tx;  // host to guest, guest to host
     std::atomic<size_t> rxSize{0}, txSize{0};
     std::atomic<bool> connected{false}, stop{false};
@@ -62,8 +67,19 @@ struct Shared {
         rxDiscarded += rx.size();rx.clear();rxSize=0;++receiveGeneration;
     }
     void Wake() {
+        if (wake < 0) {
+            queueChanged.notify_one();
+            return;
+        }
         const uint64_t one = 1;
         (void)!write(wakeWrite >= 0 ? wakeWrite : wake, &one, sizeof(one));
+    }
+    void Stop() {
+        {
+            std::lock_guard lock(mutex);
+            stop = true;
+        }
+        Wake();
     }
     void Disconnect() {
         std::lock_guard lock(mutex);
@@ -78,11 +94,7 @@ void closeFd(int& fd) {
     fd = -1;
 }
 
-#ifdef _WIN32
-// The host serial endpoints (PTY, TCP, Unix socket) aren't ported to Windows.
-void ptyWorker(std::shared_ptr<Shared>, int) {}
-void tcpWorker(std::shared_ptr<Shared>, int) {}
-#else
+#ifndef _WIN32
 bool nonblocking(int fd) {
     const int flags = fcntl(fd, F_GETFL);
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 &&
@@ -217,6 +229,68 @@ void tcpWorker(std::shared_ptr<Shared> s, int listener) {
     closeFd(client);
 }
 #endif
+
+// The sync manager's side of the queues: it reads what the guest sent and queues its answers
+// for the guest. A closed receive window drops answers as pump does.
+class SharedStream final : public frondSync::SyncStream {
+   public:
+    explicit SharedStream(Shared& s) : s(s) {}
+    long Read(uint8_t* out, size_t max, int timeoutMs) override {
+        std::unique_lock lock(s.mutex);
+        s.queueChanged.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return s.stop || !s.tx.empty(); });
+        if (s.stop) return -1;
+        const size_t n = std::min(max, s.tx.size());
+        std::copy_n(s.tx.begin(), n, out);
+        s.tx.erase(s.tx.begin(), s.tx.begin() + n);
+        s.txSize = s.tx.size();
+        s.sent += n;
+        return long(n);
+    }
+    bool Write(const uint8_t* data, size_t size) override {
+        std::unique_lock lock(s.mutex);
+        while (size) {
+            s.queueChanged.wait_for(lock, std::chrono::milliseconds(10), [&] {
+                return s.stop || (s.scopedReceive && !s.receiveEnabled) || s.rx.size() < HostSerial::queueBytes;
+            });
+            if (s.stop) return false;
+            if (s.scopedReceive && !s.receiveEnabled) {
+                s.rxDiscarded += size;
+                s.received += size;
+                return true;
+            }
+            const size_t n = std::min(size, HostSerial::queueBytes - s.rx.size());
+            s.rx.insert(s.rx.end(), data, data + n);
+            s.rxSize = s.rx.size();
+            s.received += n;
+            data += n;
+            size -= n;
+        }
+        return true;
+    }
+    void Abort() override { s.Stop(); }
+
+   private:
+    Shared& s;
+};
+
+void syncWorker(std::shared_ptr<Shared> s, frondSync::Transport transport) {
+    SharedStream stream(*s);
+    auto& manager = frondSync::SyncManager::Get();
+    manager.EndpointOpened(transport);
+    manager.Serve(stream, transport, s->stop);
+    manager.EndpointClosed(transport);
+}
+
+std::thread startWorker(std::shared_ptr<Shared> shared, HostSerial::Kind kind, int fd, bool usb) {
+    if (kind == HostSerial::Kind::syncManager)
+        return std::thread(syncWorker, shared, usb ? frondSync::Transport::usb : frondSync::Transport::serial);
+#ifndef _WIN32
+    if (kind == HostSerial::Kind::pty) return std::thread(ptyWorker, shared, fd);
+    return std::thread(tcpWorker, shared, fd);
+#else
+    return {};
+#endif
+}
 }  // namespace
 
 #ifndef FROND_BYTE_LINK_ONLY
@@ -310,7 +384,7 @@ struct HostSerial::Impl {
     }
     void CloseEndpoint() {
         if (!shared) return;
-        shared->stop=true;shared->Wake();
+        shared->Stop();
         if(worker.joinable())worker.join();
         closeFd(fd);closeFd(shared->wake);closeFd(shared->wakeWrite);shared.reset();
 #ifndef _WIN32
@@ -375,6 +449,10 @@ bool HostSerial::Parse(const std::string& text, Config& config) {
         config = {Kind::pty, 0};
         return true;
     }
+    if (text == "sync") {
+        config = {Kind::syncManager, 0, {}};
+        return true;
+    }
     if (text.rfind("unix:", 0) == 0) {
         if (text.size() < 6 || text.find('\0') != std::string::npos) return false;
         config = {Kind::unixSocket, 0, text.substr(5)};
@@ -399,6 +477,8 @@ std::string HostSerial::Format(const Config& config) {
             return "tcp:" + std::to_string(config.port);
         case Kind::unixSocket:
             return "unix:" + config.path;
+        case Kind::syncManager:
+            return "sync";
         default:
             return "off";
     }
@@ -411,13 +491,13 @@ HostSerial::~HostSerial() { Stop(); }
 
 namespace {
 #ifdef _WIN32
-bool openEndpoint(const HostSerial::Config&, Shared&, int&, std::string&, uint16_t&, ino_t&, std::string& error) {
+bool openHostEndpoint(const HostSerial::Config&, Shared&, int&, std::string&, uint16_t&, ino_t&, std::string& error) {
     error = "Host serial isn't available on Windows yet.";
     return false;
 }
 #else
 // Opens a PTY master, a 127.0.0.1 listener or a Unix socket listener and the worker's eventfd.
-bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std::string& endpoint,
+bool openHostEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std::string& endpoint,
                   uint16_t& port, ino_t& inode, std::string& error) {
 #ifdef __linux__
     shared.wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -475,6 +555,18 @@ bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std
     return true;
 }
 #endif
+
+bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std::string& endpoint,
+                  uint16_t& port, ino_t& inode, std::string& error) {
+    if (config.kind != HostSerial::Kind::syncManager)
+        return openHostEndpoint(config, shared, fd, endpoint, port, inode, error);
+    fd = -1;
+    port = 0;
+    inode = 0;
+    endpoint = "sync manager";
+    shared.connected = true;
+    return true;
+}
 }  // namespace
 
 #ifndef FROND_BYTE_LINK_ONLY
@@ -521,7 +613,7 @@ bool HostSerial::Start(HostUartPort* uart, const Config& config, std::string& er
     impl->lastInputs = -1;
     impl->ctsOpen = true;
     impl->consumed = impl->receivedAtService = 0;
-    impl->worker = config.kind == Kind::pty ? std::thread(ptyWorker, shared, fd) : std::thread(tcpWorker, shared, fd);
+    impl->worker = startWorker(shared, config.kind, fd, false);
     return true;
 }
 
@@ -548,7 +640,7 @@ void HostSerial::Service() {
                 Stop();impl->error=error;return;
             }
             impl->shared=shared;impl->restart=false;
-            impl->worker=impl->config.kind==Kind::pty?std::thread(ptyWorker,shared,impl->fd):std::thread(tcpWorker,shared,impl->fd);
+            impl->worker=startWorker(shared,impl->config.kind,impl->fd,false);
         }
         Impl::ModeChanged(impl.get());
         if(!impl->route.enabled(impl->route.context))return;
@@ -591,6 +683,7 @@ std::string HostSerial::Endpoint() const { return impl->endpoint; }
 std::string HostSerial::Describe() const {
     if (!impl->shared) return impl->restart ? Format(impl->config)+" suspended" :
         impl->error.empty()?"off":"off error: "+impl->error;
+    if (impl->config.kind == Kind::syncManager) return "sync " + frondSync::SyncManager::Get().Status().Describe();
     return std::string(impl->config.kind == Kind::pty ? "pty " : impl->config.kind == Kind::unixSocket ? "unix " : "tcp ") +
            impl->endpoint +
            (Connected() ? " connected" : " waiting");
@@ -633,8 +726,7 @@ bool HostByteLink::Open(const HostSerial::Config& config, std::string& error, bo
     impl->shared = shared;
     impl->fd = fd;
     impl->endpoint = endpoint;
-    impl->worker = config.kind == HostSerial::Kind::pty ? std::thread(ptyWorker, shared, fd)
-                                                       : std::thread(tcpWorker, shared, fd);
+    impl->worker = startWorker(shared, config.kind, fd, true);
     return true;
 }
 
@@ -650,12 +742,11 @@ void HostByteLink::SetReceiveWindow(bool enabled,uint64_t tag) {
 
 void HostByteLink::Close() {
     if (!impl->shared) return;
-    impl->shared->stop = true;
-    impl->shared->Wake();
+    impl->shared->Stop();
     if (impl->worker.joinable()) impl->worker.join();
     closeFd(impl->fd);
-    close(impl->shared->wake);
-    if (impl->shared->wakeWrite >= 0) close(impl->shared->wakeWrite);
+    closeFd(impl->shared->wake);
+    closeFd(impl->shared->wakeWrite);
     impl->shared.reset();
 #ifndef _WIN32
     if (impl->config.kind == HostSerial::Kind::unixSocket) frondUnix::Remove(impl->config.path, impl->socketInode);

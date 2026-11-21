@@ -2,7 +2,7 @@ package com.rm.frond
 
 // The rows of the running bar's menu for a device, and their states. A 68k device lists only the hardware it has, the others grey out what isn't done yet.
 object RunningMenu {
-    enum class Id { HOLD, KEYBOARD, GAMEPAD, MICROPHONE, NETWORK, DISPLAY, CONNECTIONS, SCREENSHOT, HIDE_BAR, SAVE_COPY, LOG, RESET, HARD_RESET }
+    enum class Id { HOLD, KEYBOARD, GAMEPAD, MICROPHONE, NETWORK, SYNC_MANAGER, DISPLAY, CONNECTIONS, SCREENSHOT, HIDE_BAR, SAVE_COPY, LOG, RESET, HARD_RESET }
 
     // value is the state shown at the row's end; group sets where the dividers go.
     data class Row(
@@ -37,6 +37,7 @@ object RunningMenu {
         if (device.clieGamepad) rows += gamepadRow(s)
         if (has(device.microphone)) rows += Row(Id.MICROPHONE, "Microphone", microphoneValue(s.microphone), enabled = device.microphone)
         if (has(device.network)) rows += Row(Id.NETWORK, "Network", s.network?.label, enabled = device.network && s.network != null)
+        if (SyncProtocol.forDevice(device) != null) rows += Row(Id.SYNC_MANAGER, "Sync Manager…", group = 1)
         rows += Row(Id.DISPLAY, "Display…", group = 1)
         rows += Row(Id.CONNECTIONS, "Connections…", group = 1)
         rows += Row(Id.SCREENSHOT, "Screenshot", group = 1)

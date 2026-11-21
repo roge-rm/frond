@@ -104,7 +104,7 @@ static void messageTests() {
 static void bringUpTests() {
     uint64_t now = 0;
     RndisHost h = up(now);
-    assert(!std::memcmp(h.Mac(), mac, 6) && h.MaxFrame() == 1500);
+    assert(!std::memcmp(h.Mac(), mac, 6) && h.MaxFrame() == 1514);
     auto messages = h.TakeMessages();
     assert(messages.size() == 2 && messages[1].find("up, MAC 80:00:60:0f:e8:00") != std::string::npos);
 
@@ -212,6 +212,13 @@ static void bulkTests() {
     assert(get32(&stream[0]) == 1 && get32(&stream[4]) == 128 && stream[44] == 0xa5);
     assert(get32(&stream[128 + 4]) == 144 && get32(&stream[128 + 12]) == 100 && stream[128 + 44] == 0x5a);
     assert(!h.OutPending());
+    Bytes fullFrame(1514, 0x5a);
+    h.FrameToDevice(fullFrame.data(), fullFrame.size());
+    assert(h.OutPending());
+    size_t fullSize = 0;
+    while (h.BulkOutPacket(packet, sizeof(packet), size)) fullSize += size;
+    assert(fullSize == 44 + fullFrame.size());
+
     // Frames too short or too long are dropped.
     Bytes tiny(10), huge(1515);
     h.FrameToDevice(tiny.data(), tiny.size());
@@ -228,14 +235,16 @@ static void bulkTests() {
     for (size_t pos = 0; pos < transfer.size(); pos += 64)
         h.BulkInPacket(transfer.data() + pos, std::min<size_t>(64, transfer.size() - pos));
     assert(got.size() == 2 && got[0] == a && got[1] == b);
-    // A transfer of exactly 128 bytes ends with a zero-length packet.
+    // WM5 sends a 128-byte RNDIS reply in two full packets without a short one.
     Bytes c(84, 3);
     const Bytes full = RndisHost::PacketMessage(c.data(), c.size());
     h.BulkInPacket(full.data(), 64);
-    h.BulkInPacket(full.data() + 64, 64);
     assert(got.size() == 2);
-    h.BulkInPacket(nullptr, 0);
+    h.BulkInPacket(full.data() + 64, 64);
     assert(got.size() == 3 && got[2] == c);
+    const uint8_t padding = 0;
+    h.BulkInPacket(&padding, 1);
+    assert(got.size() == 3);
     // A bad message stops the transfer; a transfer longer than INIT allowed is dropped to its short packet.
     Bytes bad = full;
     bad[0] = 9;

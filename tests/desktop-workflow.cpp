@@ -46,6 +46,10 @@
 #include "LinkCommon.h"
 #include "ConnectionsWindow.h"
 #include "CardsWindow.h"
+#include "SyncWindow.h"
+#include "SyncFiles.h"
+#include <QDialogButtonBox>
+#include <QTableWidget>
 #include "CardFilesWindow.h"
 #include <QTreeWidget>
 #include <QRadioButton>
@@ -3270,7 +3274,7 @@ for line in s.makefile('rb'):
         QVERIFY(!window.findChild<RunningBar*>("runningBar")->isVisible());
         QStringList items;
         for (auto* action : window.menuBar()->actions().first()->menu()->actions()) if (!action->isSeparator()) items << action->text();
-        QCOMPARE(items, QStringList({"&Import session…", "C&ards…", "&Pairing…", "&Firmware…", "&Settings…", "&Quit"}));
+        QCOMPARE(items, QStringList({"&Import session…", "C&ards…", "Sync Manager…", "&Pairing…", "&Firmware…", "&Settings…", "&Quit"}));
         auto* list = window.findChild<QListWidget*>("sessionList");
         emit list->itemActivated(list->item(0));
         auto* sd = window.findChild<QLabel*>("sdState");
@@ -3380,6 +3384,10 @@ for line in s.makefile('rb'):
         pad=b'attached waiting' if text==b'on' else b'detached'
     if cmd in (b'gamepad',b'gamepad-state'): message=padstate()
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'sync-start':
+        s.sendall(b'0\tevent\tsync\t'+b'syncing usb backup 1/2 Memo'.hex().encode()+b'\n')
+        time.sleep(0.3)
+        s.sendall(b'0\tevent\tsync\t'+b'done usb: Backup complete'.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY").replace("DEVICE", device));
         core.close();
@@ -3754,6 +3762,200 @@ for line in s.makefile('rb'):
         QVERIFY(!menu->isVisible());
     }
     // The Machine menu and the bar: each row sends its command to the core.
+    void activeSyncProfileSettings() {
+        frondSync::SyncLibrary library;
+        frondSync::ProfileInfo profile;
+        std::string problem;
+        QString error;
+        QVERIFY(frondDesktopSync::openLibrary(library, error));
+        QVERIFY(library.CreateProfile("ActiveSync profile", profile, problem));
+        QWidget parent;
+        const auto act = [&](const QString& expected, bool enable) {
+            QTimer::singleShot(0, &parent, [&] {
+                auto* dialog = parent.findChild<QDialog*>("syncSettings");
+                auto* buttons = dialog->findChild<QDialogButtonBox*>();
+                auto* profiles = dialog->findChild<QComboBox*>("syncAssignment");
+                auto* pair = dialog->findChild<QPushButton*>("syncPairDevice");
+                auto* files = dialog->findChild<QCheckBox*>("syncEnableFiles");
+                profiles->setCurrentIndex(profiles->findText("ActiveSync profile"));
+                const bool ready = pair && pair->isEnabled() && pair->text() == expected && files;
+                if (ready) {
+                    pair->click();
+                    if (enable) files->setChecked(true);
+                }
+                buttons->button(ready ? QDialogButtonBox::Save : QDialogButtonBox::Cancel)->click();
+                QVERIFY(ready);
+            });
+            return frondDesktopSync::editMachine(&parent, "active-test", frondDesktopSync::Protocol::activeSync, false);
+        };
+        const auto path = library.ProfilePath(profile);
+        const auto device = frondSync::MachineDeviceKey("active-test");
+        frondSync::SyncProfile storage;
+        QVERIFY(act("Pair on next sync", true));
+        QVERIFY(storage.Open(path, problem));
+        QCOMPARE(QString::fromStdString(storage.ActiveSyncPairing(device)), QString("requested"));
+        QVERIFY(!frondSync::ActiveSyncFilesFolder(path).empty());
+        QVERIFY(act("Cancel request", false));
+        QVERIFY(storage.ActiveSyncPairing(device).empty());
+        storage.Close();
+        QVERIFY(library.DeleteProfile(profile.id, problem));
+    }
+
+    void syncManagerWorkflow() {
+        QSettings().clear();
+        QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Sync", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        frondSync::SyncLibrary library;
+        QString error;
+        QVERIFY2(frondDesktopSync::openLibrary(library, error), qPrintable(error));
+        frondSync::ProfileInfo profile;
+        std::string problem;
+        QVERIFY(library.CreateProfile("Work", profile, problem));
+        frondSync::SyncProfile backups;
+        QVERIFY(backups.Open(library.ProfilePath(profile), problem));
+        frondSync::PalmDb database;
+        database.name = "MemoDB";
+        frondSync::Bytes contents;
+        QVERIFY(database.Write(contents, &problem));
+        QVERIFY(backups.StoreBackup("machine:old", database, contents, problem));
+        backups.Close();
+        MainWindow window(files.filePath("core"));
+        window.show();
+        window.openSession(managedSession("Sync"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        auto* sync = bar->findChild<QAction*>("barSync");
+        QVERIFY(sync);
+        QTRY_VERIFY_WITH_TIMEOUT(sync->isVisible() && sync->isEnabled(), 5000);
+        QCOMPARE(sync->text(), QString("HotSync"));
+        auto* menu = bar->findChild<QAction*>("machineSyncManager");
+        QVERIFY(menu && menu->isVisible());
+        QCOMPARE(bar->menu()->actions().indexOf(menu), bar->menu()->actions().indexOf(window.findChild<QAction*>("machineNetwork")) + 1);
+        menu->trigger();
+        auto* manager = window.findChild<SyncWindow*>();
+        QVERIFY(manager && manager->isVisible());
+        QCOMPARE(manager->findChild<QComboBox*>("syncProfiles")->currentText(), QString("Work"));
+        QCOMPARE(manager->findChild<QTableWidget*>("syncBackups")->rowCount(), 1);
+        auto* kind = manager->findChild<QComboBox*>("syncRecordKind");
+        kind->setCurrentIndex(int(frondSync::PimKind::memos));
+        QTimer::singleShot(0, manager, [] {
+            auto* editor = QApplication::activeModalWidget();
+            QVERIFY(editor);
+            auto* memo = editor->findChild<QPlainTextEdit*>("text");
+            QVERIFY(memo);
+            memo->setPlainText("Test memo");
+            editor->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+        });
+        manager->findChild<QPushButton*>("recordNew")->click();
+        auto* records = manager->findChild<QTableWidget*>("syncRecords");
+        QCOMPARE(records->rowCount(), 1);
+        QCOMPARE(records->item(0, 0)->text(), QString("Test memo"));
+        manager->close();
+
+        auto readSent = [&] {
+            QFile file(files.filePath("sent"));
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray{};
+        };
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = window.findChild<QDialog*>("syncSettings");
+            QVERIFY(dialog && dialog->isVisible());
+            auto* buttons = dialog->findChild<QDialogButtonBox*>();
+            buttons->button(QDialogButtonBox::Cancel)->click();
+        });
+        sync->trigger();
+        QVERIFY(!readSent().contains("sync-start"));
+
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = window.findChild<QDialog*>("syncSettings");
+            QVERIFY(dialog && dialog->isVisible());
+            auto* choice = dialog->findChild<QComboBox*>("syncAssignment");
+            choice->setCurrentIndex(choice->findText("Work"));
+            auto* connection = dialog->findChild<QComboBox*>("syncConnection");
+            QVERIFY(connection && connection->isEnabled());
+            connection->setCurrentIndex(connection->findText("Network"));
+            auto* buttons = dialog->findChild<QDialogButtonBox*>();
+            buttons->button(QDialogButtonBox::Save)->click();
+        });
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("sync-start network"), 3000);
+        auto* label = bar->findChild<QLabel*>("barStatus");
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("HotSync: usb backup"), 3000);
+        QVERIFY(!sync->isEnabled());
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("HotSync complete:"), 3000);
+        QVERIFY(sync->isEnabled());
+
+        QFile ids(frondSessions::syncIdPath(managedSession("Sync")));
+        QVERIFY(ids.open(QIODevice::ReadOnly));
+        const auto machine = ids.readAll().trimmed();
+        QVERIFY(!machine.isEmpty());
+        ids.close();
+        QFile arguments(files.filePath("args"));
+        QVERIFY(arguments.open(QIODevice::ReadOnly));
+        QVERIFY(arguments.readAll().contains("--sync-machine\n" + machine));
+        const auto assignment = library.FindAssignment(frondSync::MachineDeviceKey(machine.toStdString()));
+        QVERIFY(assignment && assignment->profileId == profile.id);
+        window.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+
+        const auto session = frondSessions::describe(managedSession("Sync"));
+        QVERIFY(frondSessions::rename(managedFolder(), session, "Renamed").isEmpty());
+        QFile renamed(frondSessions::syncIdPath(managedSession("Renamed")));
+        QVERIFY(renamed.open(QIODevice::ReadOnly));
+        QCOMPARE(renamed.readAll().trimmed(), machine);
+        QVERIFY(!QFileInfo::exists(ids.fileName()));
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    void syncManagerFiles() {
+        QTemporaryDir directory;
+        QString error;
+        using namespace frondSync;
+        PimRecord contact;
+        contact.kind = PimKind::contacts;
+        contact.fields = {{"firstName", "François"}, {"lastName", "Field; Sr."}, {"phone1", "a@example.invalid"},
+                          {"phoneLabel1", "4"}, {"note", "A line, a \"quote\" and a line break\nNext line"}};
+        contact.category = "Clients, local";
+        contact.secret = true;
+        contact.extras["palm-garnet.test"] = {0, 255, 42};
+        std::vector<PimRecord> imported;
+        const auto csv = directory.filePath("contacts.csv");
+        QVERIFY2(frondSyncFiles::write(csv, contact.kind, {contact}, error), qPrintable(error));
+        QVERIFY2(frondSyncFiles::read(csv, contact.kind, imported, error), qPrintable(error));
+        QCOMPARE(imported.size(), size_t(1));
+        QVERIFY(imported[0].fields == contact.fields && imported[0].extras == contact.extras);
+        QCOMPARE(imported[0].category, contact.category);
+        QVERIFY(imported[0].secret);
+
+        const auto vcard = directory.filePath("contacts.vcf");
+        QVERIFY2(frondSyncFiles::write(vcard, contact.kind, {contact}, error), qPrintable(error));
+        QVERIFY2(frondSyncFiles::read(vcard, contact.kind, imported, error), qPrintable(error));
+        QCOMPARE(imported.size(), size_t(1));
+        QVERIFY(imported.front().fields == contact.fields);
+        QCOMPARE(imported.front().category, contact.category);
+        QVERIFY(imported.front().secret);
+
+        PimRecord calendar;
+        calendar.kind = PimKind::calendar;
+        calendar.fields = {{"date", "2026-11-20"}, {"startTime", "09:30"}, {"endTime", "10:45"},
+                           {"summary", "Appointment"}, {"location", "Somewhere, else"}};
+        const auto ics = directory.filePath("calendar.ics");
+        QVERIFY2(frondSyncFiles::write(ics, calendar.kind, {calendar}, error), qPrintable(error));
+        QVERIFY2(frondSyncFiles::read(ics, calendar.kind, imported, error), qPrintable(error));
+        QCOMPARE(imported.size(), size_t(1));
+        QVERIFY(imported.front().fields == calendar.fields);
+
+        PimRecord memo;
+        memo.kind = PimKind::memos;
+        memo.fields["text"] = "A memo.\nSecond line.\n";
+        const auto txt = directory.filePath("memo.txt");
+        QVERIFY2(frondSyncFiles::write(txt, memo.kind, {memo}, error), qPrintable(error));
+        QVERIFY2(frondSyncFiles::read(txt, memo.kind, imported, error), qPrintable(error));
+        QCOMPARE(imported.size(), size_t(1));
+        QVERIFY(imported.front().fields == memo.fields);
+    }
     void runningMenu() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();
@@ -7801,7 +8003,7 @@ for line in s.makefile('rb'):
     // The Licences text lists every desktop component with its notice.
     void licencesNotices() {
         const QString text = thirdPartyNotices();
-        for (const char* name : {"argparse", "Monocypher", "Dynarmic", "Zydis", "xbyak", "BlueZ", "Permission is hereby granted"})
+        for (const char* name : {"argparse", "Monocypher", "Dynarmic", "Zydis", "xbyak", "BlueZ", "Permission is hereby granted", "SQLite is in the public domain."})
             QVERIFY2(text.contains(name), name);
         QVERIFY(!text.contains("SDL2_image"));
         QVERIFY(text.size() > 10000);

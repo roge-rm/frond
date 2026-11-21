@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -61,6 +62,9 @@ import com.rm.frond.RunningBar
 import com.rm.frond.RunningMenu
 import com.rm.frond.RunningSheets
 import com.rm.frond.SdCard
+import com.rm.frond.Session
+import com.rm.frond.SyncProtocol
+import com.rm.frond.supportsNetworkHotSync
 
 // What the bar shows. The activity owns one and changes it on the UI thread.
 class RunningBarState {
@@ -83,6 +87,15 @@ class RunningBarState {
     var dialog by mutableStateOf<RunningMenu.Id?>(null)
     // The sheet open over the Palm, if any.
     var sheet by mutableStateOf<RunningSheets.Sheet?>(null)
+    internal var syncProtocol by mutableStateOf<SyncProtocol?>(null)
+    internal var syncMachine by mutableStateOf<String?>(null)
+    internal var syncStatus by mutableStateOf<String?>(null)
+    internal var syncStarting by mutableStateOf(false)
+    internal var syncRunning by mutableStateOf(false)
+    internal var syncRefresh by mutableStateOf(0)
+    internal var syncManager by mutableStateOf(false)
+    internal var syncSettings by mutableStateOf(false)
+    internal var syncAssignment by mutableStateOf(false)
 }
 
 class RunningBarActions(
@@ -98,6 +111,8 @@ class RunningBarActions(
     val openSheet: (RunningSheets.Sheet) -> Unit,
     val closeSheet: () -> Unit,
     val filesOpen: (Boolean) -> Unit,
+    val startSync: () -> Unit,
+    val syncMachines: () -> List<Session>,
 )
 
 @Composable
@@ -106,7 +121,7 @@ fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
         // The view is the whole screen while a sheet is open, so its scrim catches every touch.
         val menuOpen = state.menuOpen
         val sheetOpen = state.sheet != null
-        val dialogOpen = state.dialog != null || state.model?.let { it.busy != null || it.path != null || it.log != null } == true
+        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment || state.model?.let { it.busy != null || it.path != null || it.log != null } == true
         if (RunningBar.autoHides(state.mode, state.shown, menuOpen, sheetOpen, dialogOpen)) {
             LaunchedEffect(state.touches, menuOpen, sheetOpen, dialogOpen) {
                 delay(RunningBar.AUTO_HIDE_MS)
@@ -146,7 +161,8 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
             BarButton(actions.back, button) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
             Column(Modifier.weight(1f)) {
                 Text(state.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(state.subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                Text(state.syncStatus ?: state.subtitle, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             val device = state.device
             if (state.keyboardKey) BarButton(actions.keyboard, button) { Icon(painterResource(R.drawable.ic_keyboard), contentDescription = "Keyboard") }
@@ -163,6 +179,11 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
                     Icon(painterResource(cardIconRes(icon)), contentDescription = "Storage")
                 }
                 else -> Unit
+            }
+            state.syncProtocol?.let { protocol ->
+                IconButton(actions.startSync, Modifier.size(button), enabled = !state.syncStarting && !state.syncRunning && state.model?.busy == null) {
+                    Icon(Icons.Filled.Refresh, contentDescription = protocol.label)
+                }
             }
             if (state.soundKey) BarButton(actions.toggleSound, button) {
                 Icon(painterResource(if (state.sound) R.drawable.ic_volume_up else R.drawable.ic_volume_off), contentDescription = if (state.sound) "Mute" else "Unmute")
@@ -215,6 +236,17 @@ private fun Menu(state: RunningBarState, actions: RunningBarActions) {
 private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
     val device = state.device ?: return
     val model = state.model ?: return
+    if (state.syncManager) {
+        val machines = remember { actions.syncMachines() }
+        Dialog({ state.syncManager = false }, DialogProperties(usePlatformDefaultWidth = false)) {
+            Surface(Modifier.fillMaxSize()) { SyncManagerScreen(machines, refresh = state.syncRefresh) { state.syncManager = false } }
+        }
+    }
+    state.syncMachine?.let { machine ->
+        if (state.syncAssignment) SyncDeviceDialog(machine, onClose = { state.syncAssignment = false }, start = actions.startSync, protocol = state.syncProtocol)
+        if (state.syncSettings) SyncDeviceDialog(machine, onClose = { state.syncSettings = false },
+            protocol = state.syncProtocol, networkHotSync = model.device.supportsNetworkHotSync())
+    }
     BusyDialog(model)
     AlertBox(model)
     CardPickerDialogs(model)

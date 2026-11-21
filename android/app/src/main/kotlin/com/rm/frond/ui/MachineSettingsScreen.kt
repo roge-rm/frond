@@ -12,7 +12,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -20,6 +24,8 @@ import com.rm.frond.Device
 import com.rm.frond.HomeModel
 import com.rm.frond.BluetoothChoice
 import com.rm.frond.InfraredChoice
+import com.rm.frond.SyncProtocol
+import com.rm.frond.supportsNetworkHotSync
 import com.rm.frond.LinkStore
 import com.rm.frond.MachineRows
 
@@ -29,6 +35,10 @@ fun MachineSettingsScreen(model: HomeModel) {
     val draft = model.machineDraft ?: return
     val context = LocalContext.current
     val editing = draft.sessionId != null
+    var syncOpen by rememberSaveable { mutableStateOf(false) }
+    val syncId = draft.sessionId?.takeIf { SyncProtocol.forDevice(draft.device) != null }
+    if (syncOpen && syncId != null) SyncDeviceDialog(syncId, onClose = { syncOpen = false },
+        protocol = SyncProtocol.forDevice(draft.device), networkHotSync = draft.device.supportsNetworkHotSync())
     val ready = model.firmwareReady[draft.device] == true
     model.alert?.let { (title, text) ->
         AlertDialog(onDismissRequest = { model.alert = null }, title = { Text(title) }, text = { Text(text) },
@@ -91,12 +101,14 @@ fun MachineSettingsScreen(model: HomeModel) {
             }
             if (draft.device.serialPort) {
                 val choices = remember(draft.device, draft.settings.serial) {
-                    InfraredChoice.serialChoices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)), draft.device.modem)
+                    InfraredChoice.serialChoices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)),
+                        draft.device.modem, SyncProtocol.forDevice(draft.device) == SyncProtocol.HOT_SYNC)
                 }
                 Choice("Serial port", draft.settings.serial, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(serial = it))
                 }
             }
+            if (syncId != null) TextButton(onClick = { syncOpen = true }) { Text("Sync settings") }
             if (draft.device.bluetooth) {
                 val choices = remember(draft.device, draft.settings.bluetooth) {
                     BluetoothChoice.choices(draft.settings.bluetooth, LinkStore.choices(InfraredChoice.folder(context)))

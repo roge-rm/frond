@@ -1,5 +1,7 @@
 #include "SlirpIp.h"
 
+#include "ActiveSyncForward.h"
+#include "NetSyncForward.h"
 #include "NetSyncWakeup.h"
 
 #include <arpa/inet.h>
@@ -62,6 +64,8 @@ struct SlirpIp::Impl {
     uint64_t now{};
     Slirp* slirp{};
     SlirpCb callbacks{};
+    NetSyncForward netSync;
+    ActiveSyncForward activeSync;
     bool announced{false};
     std::deque<std::vector<uint8_t>> incoming;
     // ARP replies for slirp, fed in from Poll rather than from inside slirp's callback.
@@ -69,9 +73,18 @@ struct SlirpIp::Impl {
     std::vector<pollfd> descriptors;
     std::set<Timer*> timers;
 
-    Impl() {
+    explicit Impl(const std::shared_ptr<frondSync::ActiveSyncSession>& active) {
         callbacks.send_packet = [](const void* bytes, size_t size, void* context) -> slirp_ssize_t {
-            static_cast<Impl*>(context)->Output(static_cast<const uint8_t*>(bytes), size);
+            auto& self = *static_cast<Impl*>(context);
+            const auto* frame = static_cast<const uint8_t*>(bytes);
+            if (self.netSync.Enabled() || self.activeSync.Enabled()) {
+                std::vector<uint8_t> copy(frame, frame + size);
+                if (self.activeSync.Enabled()) self.activeSync.Output(copy);
+                else self.netSync.Output(copy);
+                self.Output(copy.data(), copy.size());
+            } else {
+                self.Output(frame, size);
+            }
             return slirp_ssize_t(size);
         };
         callbacks.guest_error = [](const char* message, void*) {
@@ -110,6 +123,8 @@ struct SlirpIp::Impl {
         config.if_mtu = 1500;
         config.if_mru = 1500;
         slirp = slirp_new(&config, &callbacks, this);
+        if (active) activeSync.Configure(slirp, hostAddress, 0x0a000200, 0xffffff00, guestAddress, dnsAddress, active);
+        else netSync.Configure(slirp, hostAddress, 0x0a000200);
     }
     ~Impl() {
         if (slirp) slirp_cleanup(slirp);
@@ -157,7 +172,8 @@ struct SlirpIp::Impl {
     }
 };
 
-SlirpIp::SlirpIp() : impl(std::make_unique<Impl>()) {}
+SlirpIp::SlirpIp(std::shared_ptr<frondSync::ActiveSyncSession> active)
+    : activeSync(std::move(active)), impl(std::make_unique<Impl>(activeSync)) {}
 SlirpIp::~SlirpIp() = default;
 
 bool SlirpIp::Valid() const { return impl->slirp; }
@@ -179,6 +195,7 @@ void SlirpIp::Input(const uint8_t* packet, size_t size, uint64_t now) {
     std::copy(guestMac, guestMac + 6, frame.begin() + 6);
     Put16(&frame[12], 0x0800);
     std::copy(packet, packet + size, frame.begin() + 14);
+    if (activeSync ? !impl->activeSync.Input(frame) : !impl->netSync.Input(frame)) return;
     impl->Feed(frame);
 }
 
@@ -203,12 +220,14 @@ void SlirpIp::Poll(uint64_t now) {
     slirp_pollfds_fill(impl->slirp, &timeout, Impl::Add, impl.get());
     const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
     slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
+    impl->netSync.Poll();
+    impl->activeSync.Poll();
 }
 
 void SlirpIp::Reset() {
     const uint64_t now = impl->now;
     impl.reset();
-    impl = std::make_unique<Impl>();
+    impl = std::make_unique<Impl>(activeSync);
     impl->now = now;
 }
 

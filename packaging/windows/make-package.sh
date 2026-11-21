@@ -12,6 +12,9 @@ rm -rf "$DIR"
 mkdir -p "$DIR"
 cp build/desktop/frond-desktop.exe "$DIR/frond-desktop.exe"
 cp out/frond.exe out/frond-68k.exe "$DIR/"
+if [ -d build/desktop/installer-shims ]; then
+    cp -R build/desktop/installer-shims "$DIR/"
+fi
 strip "$DIR/frond.exe" "$DIR/frond-68k.exe" "$DIR/frond-desktop.exe" || true
 cp LICENSE README.md "$DIR/" 2>/dev/null || true
 [ -d licences ] && cp -R licences "$DIR/licences"

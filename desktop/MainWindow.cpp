@@ -13,6 +13,7 @@
 #include "ConnectionsWindow.h"
 #include "LinkCommon.h"
 #include "CardsWindow.h"
+#include "SyncWindow.h"
 #include "RunningRules.h"
 #include "RunningPanels.h"
 #include <QCursor>
@@ -469,6 +470,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     serial->addItem(tr("Off"), "off");
     serial->addItem(tr("Terminal (PTY)"), "pty");
     serial->addItem(tr("Wait for a peer"), "tcp");
+    serial->addItem(tr("Sync Manager"), "sync");
     serialPort = new QSpinBox(root);
     serialPort->setObjectName("serialPort");
     serialPort->setRange(1, 65535);
@@ -498,6 +500,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usb->addItem(tr("On"), "on");
     usb->addItem(tr("Terminal (PTY)"), "pty");
     usb->addItem(tr("Wait for a peer"), "tcp");
+    usb->addItem(tr("Sync Manager"), "sync");
     usb->setToolTip(tr("Plugs the Palm into a host that moves its HotSync bytes to a PTY or TCP port, for pilot-link and the like."));
     usbPort = new QSpinBox(root);
     usbPort->setObjectName("usbPort");
@@ -558,6 +561,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     bluetoothState = new QLabel(root); bluetoothState->setObjectName("bluetoothState");
     bluetoothState->setWordWrap(true); bluetoothState->setTextInteractionFlags(Qt::TextSelectableByMouse);
     grid->addWidget(bluetoothState, 12, 1, 1, 2);
+    syncSettingsButton = new QPushButton(tr("Sync settings…"), root);
+    syncSettingsButton->setObjectName("runningSyncSettings");
+    grid->addWidget(syncSettingsButton, 13, 0, 1, 3);
+    connect(syncSettingsButton, &QPushButton::clicked, this, [this] { editSyncSettings(sessionPath, this); });
     grid->setColumnStretch(1, 1);
     grid->setColumnMinimumWidth(2, 110);
     for (auto* c : {static_cast<QWidget*>(network), static_cast<QWidget*>(serial), static_cast<QWidget*>(usb), static_cast<QWidget*>(irda),
@@ -784,6 +791,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     importAction = file->addAction(tr("&Import session…"), this, &MainWindow::importSessionDialog);
     importAction->setShortcut(QKeySequence::Open);
     file->addAction(tr("C&ards…"), this, [this] { showCards(); })->setObjectName("cardsAction");
+    file->addAction(tr("Sync Manager…"), this, &MainWindow::showSyncManager)->setObjectName("syncManagerAction");
     file->addAction(tr("&Pairing…"), this, &MainWindow::showConnections)->setObjectName("connectionsAction");
     file->addAction(tr("&Firmware…"), this, [this] { showFirmware(); });
     file->addAction(tr("&Settings…"), this, [this] { settingsDialog->exec(); });
@@ -859,6 +867,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         else send("device-state");
     });
     connect(&client, &DesktopClient::finished, this, [this] {
+        syncMachineId.clear(); syncMachineError.clear(); syncRunning = false;
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
@@ -897,6 +906,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::cameraState, this, [this](const QString& state) { showCamera(state); refresh(); });
     connect(&client, &DesktopClient::serialState, this, [this](const QString& state) { showSerial(state); });
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
+    connect(&client, &DesktopClient::syncState, this, &MainWindow::showSyncStatus);
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
     connect(&client, &DesktopClient::rumbleState, this, [this](bool on) { palmHolder->setRumble(on); });
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
@@ -936,6 +946,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (internalListWanted) listInternal();
             if (appsStale) listApps();
         });
+        if (command == "sync-start" || command == "activesync-start") {
+            if (stopping) { save(); return; }
+            if (ok) { if (!syncRunning) notify(message, 0); }
+            else { log->appendPlainText(command + ": " + message); notify(message, 8000); }
+            return;
+        }
         if (command == "db-list") { databasesReply(ok, code, message); return; }
         if (command == "wifi-module-state") {
             if (ok) printerPanel->setModuleReadout(frondPrint::moduleReadout(message, printerPanel->moduleOn()));
@@ -1481,22 +1497,31 @@ void MainWindow::refresh() {
     network->setEnabled(enabled && caps.network);
     keyboard->setEnabled(enabled && infraredKeyboard && irda->currentData()=="off");
     const bool editable = !busy && !stopping && (!running || enabled);
+    const auto protocol = frondDesktopSync::protocol(currentDevice());
+    const bool syncAvailable = frondDesktopSync::available(protocol);
+    syncSettingsButton->setVisible(syncAvailable);
+    syncSettingsButton->setEnabled(enabled && !syncRunning);
+    const auto offerMode = [](QComboBox* combo, const char* data, bool on) {
+        const int row = combo->findData(data);
+        if (auto* model = qobject_cast<QStandardItemModel*>(combo->model()))
+            if (auto* item = model->item(row)) item->setEnabled(on);
+        if (auto* view = qobject_cast<QListView*>(combo->view())) view->setRowHidden(row, !on);
+    };
+    const bool hotSyncAvailable = syncAvailable && protocol == frondDesktopSync::Protocol::hotSync;
+    offerMode(serial, "sync", hotSyncAvailable);
+    if (!hotSyncAvailable && serial->currentData() == "sync") serial->setCurrentIndex(serial->findData("off"));
     serial->setEnabled(editable && caps.serial);
     serialPort->setEnabled(caps.serial && serial->currentData() == "tcp"); serialPort->setReadOnly(!editable);
     if (!frondFirmware::serialAbsent(currentDevice())) serialPort->setVisible(!serial->currentData().toString().startsWith("link:"));
     // Windows CE's USB is a network link (RNDIS): on or off, no endpoint.
     const bool usbNetwork = frondFirmware::usbNetwork(currentDevice());
     // Rows the device doesn't take are hidden in the list and disabled, so the wheel and arrow keys skip them too.
-    const auto offer = [&](const char* data, bool on) {
-        const int row = usb->findData(data);
-        if (auto* model = qobject_cast<QStandardItemModel*>(usb->model()))
-            if (auto* item = model->item(row)) item->setEnabled(on);
-        if (auto* view = qobject_cast<QListView*>(usb->view())) view->setRowHidden(row, !on);
-    };
-    offer("on", usbNetwork);
-    offer("pty", !usbNetwork);
-    offer("tcp", !usbNetwork);
-    if ((usb->currentData() == "on") != usbNetwork && usb->currentData() != "off") usb->setCurrentIndex(usb->findData("off"));
+    offerMode(usb, "on", usbNetwork);
+    offerMode(usb, "pty", !usbNetwork);
+    offerMode(usb, "tcp", !usbNetwork);
+    offerMode(usb, "sync", hotSyncAvailable);
+    if (((usb->currentData() == "on") != usbNetwork || (usb->currentData() == "sync" && !hotSyncAvailable)) &&
+         usb->currentData() != "off") usb->setCurrentIndex(usb->findData("off"));
     usbLabel->setText(usbNetwork ? tr("USB") : tr("USB HotSync"));
     if (usbNetwork) usbPort->setVisible(false);
     usb->setEnabled(editable && caps.usb);
@@ -1515,7 +1540,8 @@ void MainWindow::refresh() {
     storageHeading->setText(second ? tr("Card 1") : memoryStick ? tr("Memory Stick") : tr("SD card"));
     panels->setTitle(1, tr("Storage"));
     internalButton->setEnabled(enabled && !internalFiles);
-    const auto traits = runningRules::traitsFor(currentDevice());
+    auto traits = runningRules::traitsFor(currentDevice());
+    traits.syncManager = protocol != frondDesktopSync::Protocol::none;
     const bool guest = traits.guestServices;
     appsPanel->setEnabled(enabled && (guest || traits.cardInstall));
     appsPanel->setInstallOnly(!guest);
@@ -1623,6 +1649,9 @@ void MainWindow::refresh() {
     runningBar->apply(traits, state, iconSecond ? runningRules::cardIcon(true, true, true, card2Inserted)
                                                 : runningRules::cardIcon(supported, known, cardPresent, cardInserted),
                       caps.sound && runningPreferences.audio, modes);
+    const auto syncLabel = protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
+                           protocol == frondDesktopSync::Protocol::activeSync ? tr("ActiveSync") : QString();
+    runningBar->setSyncButton(syncLabel, syncAvailable && !syncRunning && enabled);
     if (fullScreenOn) showOverlayBar(overlayBarShown);
     else runningBar->setVisible(running && runningBar->barShown());
 }
@@ -2017,6 +2046,7 @@ void MainWindow::barChosen(runningRules::Id id) {
         case Id::HardReset: hardResetButton->click(); break;
         case Id::SaveStop: stopButton->click(); break;
         case Id::FullScreen: toggleFullScreen(); break;
+        case Id::SyncManager: showSyncManager(); break;
         case Id::Network: break;
     }
 }
@@ -2051,6 +2081,7 @@ void MainWindow::barPressed(RunningBar::Button button) {
         case RunningBar::Button::Stop: stopButton->click(); break;
         case RunningBar::Button::Applications: togglePanel(0); break;
         case RunningBar::Button::Card: togglePanel(1); break;
+        case RunningBar::Button::Sync: startSync(); break;
         case RunningBar::Button::Sound: soundToggle->click(); break;
         case RunningBar::Button::Power: replay(runningRules::powerReplay(), "power"); break;
         case RunningBar::Button::ForceStop: forceButton->click(); break;
@@ -2246,6 +2277,13 @@ void MainWindow::editSession(const QString& path) {
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
     MachineSettingsDialog dialog(device, prefs, this);
+    if (frondDesktopSync::available(frondDesktopSync::protocol(device))) {
+        auto* sync = new QPushButton(tr("Sync settings…"), &dialog);
+        sync->setObjectName("machineSyncSettings");
+        auto* layout = qobject_cast<QVBoxLayout*>(dialog.layout());
+        layout->insertWidget(layout->count() - 1, sync, 0, Qt::AlignLeft);
+        connect(sync, &QPushButton::clicked, &dialog, [this, path, &dialog] { editSyncSettings(path, &dialog); });
+    }
     if (dialog.exec() != QDialog::Accepted) return;
     // The dialog doesn't edit the game controller; the file's current value stays, whatever the
     // dialog was opened with.
@@ -2588,6 +2626,15 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     danaView.configure(dana, runningPreferences.danaView, devicePixelRatioF());
     if (dana) arguments << "--dana-view" << frondDana::argument(runningPreferences.danaView, devicePixelRatioF());
     loadSerialSettings(); loadUsbSettings(); loadIrdaSettings(); loadBluetoothSettings();
+    syncMachineId.clear(); syncMachineError.clear(); syncRunning = false;
+    if (frondDesktopSync::available(frondDesktopSync::protocol(startDevice))) {
+        syncMachineId = frondDesktopSync::machineId(target, syncMachineError);
+        if (!syncMachineId.isEmpty()) arguments << "--sync-machine" << syncMachineId;
+    }
+    if (syncMachineId.isEmpty()) {
+        if (serial->currentData() == "sync") serial->setCurrentIndex(serial->findData("off"));
+        if (usb->currentData() == "sync") usb->setCurrentIndex(usb->findData("off"));
+    }
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     // A PTY for Modem Sync calls to the HotSync number, there whenever the modem is picked.
     if (caps.modem) arguments << "--modem-sync" << "pty";
@@ -2863,6 +2910,85 @@ void MainWindow::showConnections() {
     connectionsWindow->activateWindow();
 }
 
+void MainWindow::showSyncManager() {
+    if (!syncWindow) syncWindow = new SyncWindow(this);
+    syncWindow->machineNames.clear();
+    for (int i = 0; i < sessionList->count(); ++i) {
+        const auto path = sessionList->item(i)->data(Qt::UserRole).toString();
+        const auto id = frondDesktopSync::readMachineId(path);
+        if (!id.isEmpty())
+            syncWindow->machineNames.insert(QString::fromStdString(frondSync::MachineDeviceKey(id.toStdString())),
+                                            QFileInfo(path).completeBaseName());
+    }
+    syncWindow->show();
+    syncWindow->refresh();
+    syncWindow->raise();
+    syncWindow->activateWindow();
+}
+
+bool MainWindow::editSyncSettings(const QString& session, QWidget* parent) {
+    QString error;
+    const auto id = client.running() ? syncMachineId : frondDesktopSync::machineId(session, error);
+    if (id.isEmpty()) {
+        QMessageBox::warning(parent, tr("Sync settings"), error.isEmpty() ? syncMachineError : error);
+        return false;
+    }
+    const auto device = client.running() ? runningDevice : frondFirmware::deviceFromId(infoFor(session).device);
+    if (!frondDesktopSync::editMachine(parent, id, frondDesktopSync::protocol(device),
+                                       deviceProfileNetworkHotSync5(frondFirmware::profile(device)))) return false;
+    if (syncWindow) syncWindow->refresh();
+    return true;
+}
+
+void MainWindow::startSync() {
+    if (!client.available() || busy || stopping || syncRunning || exchangeStage != ExchangeStage::None ||
+        !frondDesktopSync::available(frondDesktopSync::protocol(runningDevice))) return;
+    if (syncMachineId.isEmpty()) return failure(syncMachineError);
+    frondSync::SyncLibrary library;
+    QString error;
+    if (!frondDesktopSync::openLibrary(library, error)) return failure(error);
+    const auto key = frondSync::MachineDeviceKey(syncMachineId.toStdString());
+    auto assignment = library.FindAssignment(key);
+    if (!assignment) {
+        const auto startedSession = sessionPath;
+        if (!editSyncSettings(startedSession, this)) return;
+        if (!client.available() || busy || stopping || sessionPath != startedSession) return;
+        assignment = library.FindAssignment(key);
+        if (!assignment) return;
+    }
+    if (frondDesktopSync::protocol(runningDevice) == frondDesktopSync::Protocol::activeSync) {
+        send("activesync-start");
+        return;
+    }
+    QString connection;
+    if (deviceProfileNetworkHotSync5(frondFirmware::profile(runningDevice))) {
+        const auto selected = library.FindProfile(assignment->profileId);
+        frondSync::SyncProfile profile;
+        std::string problem;
+        if (!selected) return failure(tr("This profile is unavailable."));
+        if (!profile.Open(library.ProfilePath(*selected), problem)) return failure(QString::fromStdString(problem));
+        connection = profile.HotSyncUsesNetwork(key) ? "network" : "local";
+    }
+    send("sync-start", connection);
+}
+
+void MainWindow::showSyncStatus(const QString& state) {
+    const bool wasRunning = syncRunning;
+    syncRunning = state.startsWith("syncing ");
+    if (wasRunning != syncRunning) refresh();
+    const bool active = frondDesktopSync::protocol(runningDevice) == frondDesktopSync::Protocol::activeSync;
+    const auto label = active ? tr("ActiveSync") : tr("HotSync");
+    if (syncRunning) notify(tr("%1: %2").arg(label, state.mid(8)), 0);
+    else if (state.startsWith("done ") || state.startsWith("failed ")) {
+        const bool failed = state.startsWith("failed ");
+        const auto details = state.section(": ", 1);
+        notify(failed ? tr("%1 failed: %2").arg(label, details) : tr("%1 complete: %2").arg(label, details), 10000);
+        log->appendPlainText(tr("%1: %2").arg(label, state));
+        if (!failed && panels->current() == 0) { appsStale = true; listApps(); }
+        if (syncWindow && !QApplication::activeModalWidget()) syncWindow->refresh();
+    } else if (state == "off" && wasRunning) notify({}, 0);
+}
+
 QString MainWindow::serialChoice() const {
     const auto mode = serial->currentData().toString();
     return mode == "tcp" ? "tcp:" + QString::number(serialPort->value()) : mode;
@@ -2923,6 +3049,7 @@ void MainWindow::showSerial(const QString& state) {
     }
     if (state.isEmpty()) serialState->clear();
     else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
+    else if (parts[0] == "sync") serialState->setText(tr("Serial: Sync Manager"));
     else if (parts[0] == "modem" && parts.size() > 1) {
         // "modem STATE [SPEED]; hotsync pty /dev/pts/N connected|waiting" with a HotSync link.
         const auto modem = state.section("; ", 0, 0).split(' ');
@@ -2962,6 +3089,7 @@ void MainWindow::showUsb(const QString& state) {
     }
     if (state.isEmpty()) usbState->clear();
     else if (parts[0] == "off") usbState->setText(parts.size() > 1 ? tr("USB: off, %1").arg(state.mid(4)) : QString());
+    else if (parts[0] == "sync") usbState->setText(tr("USB: Sync Manager"));
     else if (parts[0] == "on")
         usbState->setText(state.endsWith(" rndis up") ? tr("USB: network up") : parts.size() > 1 && parts[1] == "running"
                           ? tr("USB: %1 enumerated").arg(deviceLabel()) : tr("USB: cable in"));

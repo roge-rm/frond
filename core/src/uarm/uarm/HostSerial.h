@@ -10,14 +10,15 @@
 #include "SerialHostRoute.h"
 struct PxaUart;
 
-// Connects a board's serial UART (HostUartPort) to a host PTY, a TCP listener on 127.0.0.1 or a Unix socket listener. A worker
+// Connects a board's serial UART (HostUartPort) to a host PTY, a TCP listener on 127.0.0.1, a Unix socket listener
+// or the built-in sync manager (sync), which answers a HotSync on its own worker. A worker
 // thread owns the descriptors and moves bytes through two bounded queues; it never
 // touches the UART. Every method runs on the emulator thread. Nothing here is
 // session state: a load or reset detaches, and Service attaches again once the UART
 // is idle.
 class HostSerial {
    public:
-    enum class Kind { off, pty, tcp, unixSocket };
+    enum class Kind { off, pty, tcp, unixSocket, syncManager };
     struct Config {
         Kind kind{Kind::off};
         uint16_t port{0};  // TCP only; 0 picks a free port
@@ -30,7 +31,7 @@ class HostSerial {
     // the receive queue is full; CTS drops while the send queue is half full.
     static constexpr size_t queueBytes = 4096;
 
-    static bool Parse(const std::string& text, Config& config);  // off, pty, tcp:PORT, unix:PATH
+    static bool Parse(const std::string& text, Config& config);  // off, pty, tcp:PORT, unix:PATH, sync
     static std::string Format(const Config& config);
 
     HostSerial();
