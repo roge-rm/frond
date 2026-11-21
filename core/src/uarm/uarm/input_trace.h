@@ -66,6 +66,15 @@ inline void setGuestClock(uint64_t (*ticks)(void*), void* context) {
     state().guestContext = context;
 }
 
+// Forgets the clock if it is the one registered for this context.
+inline void clearGuestClock(void* context) {
+    if (!on) return;
+    std::lock_guard<std::mutex> lock(state().mutex);
+    if (state().guestContext != context) return;
+    state().guestTicks = nullptr;
+    state().guestContext = nullptr;
+}
+
 // Caller holds the mutex.
 // The guest clock is read only on the guest thread (guest true).
 inline void lineLocked(const char* stage, bool guestThread, const char* format, ...) __attribute__((format(printf, 3, 4)));

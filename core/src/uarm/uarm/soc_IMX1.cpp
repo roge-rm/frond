@@ -54,7 +54,7 @@ namespace {
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
         // cradleHeld keeps the release after a load or reset off D22 once the host's cradle button is down again.
-        MachinePort(Imx1Machine* machine, bool cradleHeld) : machine(machine), cradleHeld(cradleHeld) {}
+        MachinePort(Imx1Machine* machine, bool cradleHeld, int* traceStick) : machine(machine), cradleHeld(cradleHeld), traceStick(traceStick) {}
         bool setControl(unsigned control, bool down) override {
             const bool set = imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, false) == Imx1BootstrapAccess::ok &&
                              imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
@@ -94,17 +94,17 @@ namespace {
             const bool set = imx1MachineSetZodiacStick(machine, x, y, false) == Imx1BootstrapAccess::ok &&
                              imx1MachineSetZodiacStick(machine, x, y, true) == Imx1BootstrapAccess::ok;
             if (inputTrace::on && set) {
-                static int lastX = 0, lastY = 0;
                 uint32_t width = 0, height = 0;
                 const uint32_t* frame = imx1MachinePeekFrame(machine, width, height);
-                inputTrace::applyStick(x, y, lastX == 0 && lastY == 0, frame, size_t(width) * height);
-                lastX = x;
-                lastY = y;
+                inputTrace::applyStick(x, y, traceStick[0] == 0 && traceStick[1] == 0, frame, size_t(width) * height);
+                traceStick[0] = x;
+                traceStick[1] = y;
             }
             return set;
         }
         Imx1Machine* machine;
         bool cradleHeld;
+        int* traceStick; // the last stick position sent, for the input trace
     };
 
     // Previews then commits one set of GPIO input pins.
@@ -276,7 +276,10 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     }
 };
 
-SocIMX1::~SocIMX1() { paceReleaseExternalMemory(this); }
+SocIMX1::~SocIMX1() {
+    inputTrace::clearGuestClock(machine);
+    paceReleaseExternalMemory(this);
+}
 
 HostUartPort* SocIMX1::SerialHostPort() {
     if (!serialPort) serialPort = std::make_unique<SerialPort>(*this);
@@ -815,13 +818,13 @@ void SocIMX1::PushStick() {
 void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
     const int control = zodiacControlFor(key);
     if (control < 0 || halted) return;
-    MachinePort port(machine, cradleDown);
+    MachinePort port(machine, cradleDown, traceStick);
     input.jam(port, unsigned(control), durationMsec);
 }
 
 // Hands queued host input to the machine. An input the machine refuses just now stays queued.
 void SocIMX1::PumpInput() {
-    MachinePort port(machine, cradleDown);
+    MachinePort port(machine, cradleDown, traceStick);
     input.hostTime(uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count()));
     input.pump(port);
