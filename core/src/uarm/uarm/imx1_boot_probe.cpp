@@ -87,6 +87,9 @@ uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0,
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
 uint64_t uartPollSkips = 0, uartPollRounds = 0;  // for tests
 uint64_t jitChargedWrites = 0;  // for tests
+// Fast blocks: set by jitChargedWrite around its access when the write's wait clocks pass with no change. access then
+// commits the write at once, with no preview and no cs5Wait, and jitChargedWrite defers the clocks (deferredHclk).
+bool leanSubmit = false;
 bool scanPollSkip = true, fifoWaitSkip = true, uartPollSkip = true;
 // Fast blocks: a vertical wait read (200adb08, 200adb14) that saw the value its loop waits on ends the JIT run, so
 // the next run starts on the load and skipScanPoll can pass the rounds (scanHalted). scanHaltOff stops that until
@@ -772,6 +775,16 @@ struct Probe {
     // Whether this lean run can answer CS5 accesses, worked out at its first one, with the wait clocks and the cost
     // of each. The span has to hold the instructions and the wait clocks together, counted in CPU cycles rounded up
     // and one more, which also covers the work the clocks add.
+    // CPU cycles, rounded up and one more, that hold this many wait clocks and the work they add, as leanCs5Ready
+    // counts them.
+    uint64_t leanClockCost(uint32_t clocks) const {
+        const auto bus = peripherals.busReferencePeriod();
+        const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
+        const __uint128_t time = __uint128_t(clocks) * bus.numerator * cpuPeriod.denominator;
+        const __uint128_t unit = __uint128_t(bus.denominator) * cpuPeriod.numerator;
+        const uint64_t cycles = uint64_t(time / unit + (time % unit != 0)) + 1;
+        return std::max<uint64_t>(cycles, clocks);
+    }
     __attribute__((noinline)) bool leanCs5Ready() {
         if (leanCs5.checked) return leanCs5.usable;
         leanCs5.checked = true;
@@ -958,15 +971,42 @@ struct Probe {
         graphicsSampledPin = 32;
         graphicsSampleOffset = 0;
         uint32_t datum = value;
+        // Where the write's wait clocks pass with no change (as cs5Wait's quiet path would find), the write is taken
+        // at once and its clocks are charged after it, as the lean path does for ring words: the batch starts that
+        // many clocks earlier. The span after it has to hold their cost.
+        uint32_t clocks = 0;
+        leanSubmit = !peripherals.systemPllBusStallPending() && quietWriteClocks(clocks) &&
+                     !graphicsFrame.scanDue(cs5Configuration, peripherals.eimState()) &&
+                     acceptGraphics(cs5Configuration, false) == Imx1BootstrapAccess::ok;
+        const bool lean = leanSubmit;
         const bool ok = access(this, pa, uint_fast8_t(size), true, &datum);
+        leanSubmit = false;
         t = saved;
         if (!ok) return false;
         ++jitChargedWrites;
         // A batch start leaves its busy level for the next advance, which would end the quiet span at once; it
         // takes it now, so the run goes on to the batch's completion.
         cs5Configuration.takeBusyLevel();
+        uint64_t cost = 0;
+        if (lean && clocks) {
+            deferredHclk += clocks;
+            result.cs5WaitClocks += clocks;
+            work += clocks;
+            cost = leanClockCost(clocks);
+        }
         updateInterrupts();
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        if (cost) {
+            if (quietCycles > cost) quietCycles -= cost;
+            else {
+                // A change comes within the clocks: they are charged now, as cs5Wait would have.
+                if (chargeDeferred()) {
+                    cs5Configuration.takeBusyLevel();
+                    updateInterrupts();
+                    quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+                }
+            }
+        }
         cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
         if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
             jitHalt = true;
@@ -1594,11 +1634,14 @@ struct Probe {
             const auto transfer = p.peripherals.eimState().cs5Transfer(address,size,write,
                 (p.result.trace.cpsr & 31) == ARM_SR_MODE_USR);
             status = transfer == Imx1EimAccess::width ? Imx1BootstrapAccess::width :
-                transfer != Imx1EimAccess::ok ? Imx1BootstrapAccess::sideEffect : deviceAccess(true,previewValue);
-            if (status == Imx1BootstrapAccess::ok) status = p.cs5Wait(waitClocks);
-            // Recreate the candidate after elapsed events, retaining current clocks,
-            // display, memory-controller progress and read-side-effect state.
-            if (status == Imx1BootstrapAccess::ok) status = deviceAccess(false,value);
+                transfer != Imx1EimAccess::ok ? Imx1BootstrapAccess::sideEffect :
+                leanSubmit ? deviceAccess(false,value) : deviceAccess(true,previewValue);
+            if (status == Imx1BootstrapAccess::ok && !leanSubmit) {
+                status = p.cs5Wait(waitClocks);
+                // Recreate the candidate after elapsed events, retaining current clocks,
+                // display, memory-controller progress and read-side-effect state.
+                if (status == Imx1BootstrapAccess::ok) status = deviceAccess(false,value);
+            }
         } else {
             status = graphicsMemoryAccess ? p.graphicsMemory->access(p.cs5Configuration, p.peripherals.eimState(),
                 address, size, write, value) : diagnosticCs5Configuration ? p.cs5Configuration.access(p.peripherals.eimState(),
