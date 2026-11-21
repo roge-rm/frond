@@ -1,11 +1,3 @@
 src/uarm-bin
-src/test/test
-src/uarm_web*
-
-node_modules
-*.log
 
 cp-uarm
-test/test
-
-!assets/*.js
