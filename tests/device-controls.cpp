@@ -2335,6 +2335,21 @@ static void clieGamepadJog(const char* directory) {
     }
 }
 
+static void zodiacRightStick() {
+    GamepadRightHeld held;
+    GamepadState pad;
+    auto down=[&](int rightY) {pad.rightY=int16_t(rightY);return (zodiacGamepadInput(pad,&held).keys&deviceKeyBit(keyIdHard1))!=0;};
+    assert(!down(16384));
+    assert(down(16385));
+    assert(down(12000) && down(11500));
+    assert(!down(11000));
+    assert(!down(12000));
+    assert(down(20000) && !down(0));
+    // Without held state the press point alone decides.
+    pad.rightY=12000;
+    assert(!(zodiacGamepadInput(pad).keys&deviceKeyBit(keyIdHard1)));
+}
+
 static void clieGamepad() {
     const auto& p=deviceControls(DeviceArt::tg50,true);
     const auto& plain=deviceControls(DeviceArt::tg50,false);
@@ -3107,5 +3122,6 @@ int main(int argc,char** argv) {
     tg50LiveDisplay();
     zodiacControls();
     clieGamepad();
+    zodiacRightStick();
     SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx, m125 and TG50 hit areas, the IIIe, IIIxe, IIIc, V, Vx, m100, m105, m130, m500, c500, m505 and m520 art, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys; iPAQ 210, rx1950 and h4350 bars and h4350 keyboard hiding; T415 art, jog tab and silkscreen; TG50 game controller art");
 }

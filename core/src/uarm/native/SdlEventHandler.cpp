@@ -622,7 +622,7 @@ void SdlEventHandler::UpdateGamepad() {
     const bool clie = soc->GamepadAttached();
     if (shownControls->style != DeviceControlStyle::zodiac && !clie && !padKeys) return;
     if (!padFocused) return;
-    const GamepadInput input = shownControls->style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads())
+    const GamepadInput input = shownControls->style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads(), &rightHeld)
                                : clie ? clieGamepadInput(CombinedPads()) : GamepadInput{};
     for (unsigned key = 1; key < keyIdCount; ++key) {
         const DeviceKeyMask bit = deviceKeyBit(KeyId(key));

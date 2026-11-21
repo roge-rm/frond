@@ -27,18 +27,32 @@ struct GamepadInput {
 // sticks don't come back to zero. Past it the travel starts from nothing, so small pushes still count.
 constexpr float gamepadStickRest = 0.12f;
 
+// POLICY, host input only: the right stick presses an Action key past half travel and lets it go
+// at about a third, so it doesn't flicker near the press point.
+constexpr int gamepadRightPress = 16384, gamepadRightRelease = 11469;
+
+// Which Action keys the right stick holds, one bit per direction: the caller keeps it between calls.
+struct GamepadRightHeld {
+    bool down{false}, right{false}, left{false}, up{false};
+};
+
 // The Zodiac from a controller. The left stick is the analogue stick over its whole range and its
 // click the stick's press. A, B, X and Y are the Action keys by place (bottom, right, left, top), and so
 // is the right stick pushed past half travel that way, for games that take the Action keys as a second
 // stick. The shoulders are the triggers, Start and Guide are Home and Back is Function. The d-pad pushes
 // the stick to full travel on its axis and wins over the left stick there.
-inline GamepadInput zodiacGamepadInput(const GamepadState& pad) {
+inline GamepadInput zodiacGamepadInput(const GamepadState& pad, GamepadRightHeld* rightHeld = nullptr) {
     GamepadInput input;
     auto hold = [&](bool down, KeyId key) { if (down) input.keys |= deviceKeyBit(key); };
-    hold(pad.a || pad.rightY > 16384, keyIdHard1);
-    hold(pad.b || pad.rightX > 16384, keyIdHard2);
-    hold(pad.x || pad.rightX < -16384, keyIdHard3);
-    hold(pad.y || pad.rightY < -16384, keyIdHard4);
+    GamepadRightHeld none, &held = rightHeld ? *rightHeld : none;
+    auto past = [](bool& state, int travel) {
+        state = travel > gamepadRightPress || (state && travel > gamepadRightRelease);
+        return state;
+    };
+    hold(pad.a || past(held.down, pad.rightY), keyIdHard1);
+    hold(pad.b || past(held.right, pad.rightX), keyIdHard2);
+    hold(pad.x || past(held.left, -int(pad.rightX)), keyIdHard3);
+    hold(pad.y || past(held.up, -int(pad.rightY)), keyIdHard4);
     hold(pad.leftShoulder, keyIdTriggerLeft);
     hold(pad.rightShoulder, keyIdTriggerRight);
     hold(pad.leftStick, keyIdStickPress);
