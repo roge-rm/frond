@@ -586,6 +586,7 @@ identity='00'*32
 # Slot 2 holds its card file unless start-card2-out says the core left it out (changed while off).
 card2='inserted' if (src.parent/'sd2.frondsd').exists() and not flag('start-card2-out') else 'none'
 identity2='00'*32
+cradle='detached'
 for line in s.makefile('rb'):
     i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
@@ -599,6 +600,9 @@ for line in s.makefile('rb'):
     elif cmd=='sd-state': message=card
     elif cmd=='network-state': message='disabled'
     elif cmd=='keyboard-state': message='detached'
+    elif cmd=='cradle-setting': message=cradle
+    # The USB cable keeps the effective cradle attached when the manual cradle is off.
+    elif cmd=='cradle': cradle=arg; message='attached'
     elif cmd=='sd2-state': message=card2
     elif cmd in ('sd2-create','sd2-reinsert'): card2='inserted'
     elif cmd=='sd2-eject': card2='ejected'
@@ -2330,6 +2334,34 @@ for line in s.makefile('rb'):
             QVERIFY(fastDialog.controls->values().fastEngine);
         }
     }
+    void zodiacCradle() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "tapwave-zodiac-2");
+        const auto session = cardsMachine("Zodiac", false, "tapwave-zodiac-2") + "/Zodiac.frond";
+        MainWindow window(core);
+        window.show();
+        window.openSession(session, true);
+        auto* cradle = window.findChild<QCheckBox*>("cradleAttached");
+        QVERIFY(cradle);
+        QTRY_VERIFY_WITH_TIMEOUT(cradle->isEnabled(), 10000);
+        window.findChild<PanelHost*>("panelHost")->open(3);
+        QTRY_VERIFY(cradle->isVisible());
+        QVERIFY(!cradle->isChecked());
+        cradle->click();
+        QTRY_VERIFY_WITH_TIMEOUT(cradle->isEnabled() && cradle->isChecked(), 10000);
+        cradle->click();
+        QTRY_VERIFY_WITH_TIMEOUT(cradle->isEnabled() && !cradle->isChecked(), 10000);
+        QFile trace(files.filePath("commands"));
+        QVERIFY(trace.open(QIODevice::ReadOnly));
+        const auto commands = trace.readAll();
+        QVERIFY(commands.contains("cradle\tattached\ncradle-setting\t\n"));
+        QVERIFY(commands.contains("cradle\tdetached\ncradle-setting\t\n"));
+        window.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+    }
+
     // The Zodiac's second SD slot: a Card 2 row like the first slot's, a library card picked for it
     // going in with sd2-put-in, Eject, Insert and back to the drawer; a slot-2 card the core left
     // out at start goes in once it runs. A one-slot device has no Card 2 row.

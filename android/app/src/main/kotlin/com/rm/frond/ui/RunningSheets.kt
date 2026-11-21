@@ -318,6 +318,7 @@ private fun ConnectionsSheet(model: RunningModel, state: RunningBarState, action
     DisposableEffect(Unit) {
         model.startBluetoothRefresh()
         model.loadUsbCable()
+        model.readCradle()
         model.readSyncPorts()
         onDispose { model.stopBluetoothRefresh() }
     }
@@ -355,6 +356,9 @@ private fun ConnectionsSheet(model: RunningModel, state: RunningBarState, action
             ConnRow.USB_PORT -> model.printer?.let { PrinterRow(it, device) } ?: ConnItem("USB port", false, null) { }
             ConnRow.WIFI_MODULE -> model.printer?.let { WifiModuleRow(it) } ?: ConnItem("Wi-Fi", false, null) { }
             ConnRow.DEBUGGER -> ConnItem("Debugger", true, debuggerText(model.debugger)) { }
+            ConnRow.CRADLE -> MachineSwitchRow("Cradle attached", model.cradleAttached == true, true,
+                enabled = model.cradleAttached != null && model.busy == null && !model.waitingForGdb,
+                onChange = model::changeCradle)
             ConnRow.HOTSYNC -> SheetAction("HotSync") { actions.closeSheet(); model.hotSync() }
         }
     }

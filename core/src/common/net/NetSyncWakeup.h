@@ -16,6 +16,7 @@
 namespace frondNet {
 
 constexpr uint16_t netSyncWakeupPort = 14237;
+constexpr uint32_t zodiacWakeupAddress = 0x0202000a;  // 10.0.2.2 in Zodiac's UDP byte order.
 
 namespace netSyncDetail {
 
@@ -39,25 +40,33 @@ inline uint16_t Checksum(const uint8_t* data, size_t size, uint32_t sum = 0) {
 
 }  // namespace netSyncDetail
 
-// The answer to a wakeup sent to 10.0.2.2, as an IPv4 packet, or an empty packet when the
-// IPv4 packet given isn't one.
-inline std::vector<uint8_t> NetSyncWakeupAnswer(const uint8_t* packet, size_t size) {
+// Answer a wakeup for the virtual host. The Zodiac DUN peer can also answer the
+// byte-swapped wakeup address. Zodiac uses the normal address for the TCP connection.
+inline std::vector<uint8_t> NetSyncWakeupAnswer(const uint8_t* packet, size_t size, bool zodiacWakeup = false) {
     using namespace netSyncDetail;
     if (size < 20) return {};
     const size_t header = size_t(packet[0] & 0x0f) * 4;
-    if (packet[9] != 17 || header < 20 || size < header + 8 + 4 || Get32(packet + 16) != hostAddress ||
+    if (packet[9] != 17 || header < 20 || size < header + 8 + 4 ||
         (Get16(packet + 6) & 0x3fff) != 0 || Get16(packet + header + 2) != netSyncWakeupPort)
         return {};
     const uint8_t* udp = packet + header;
     const size_t length = std::min<size_t>(Get16(udp + 4), size - header);
-    if (length < 8 + 4 || Get16(udp + 8) != 0xfade || udp[10] != 1) return {};
+    if (length < 8 + 4 || udp[10] != 1) return {};
+    // Zodiac's Network HotSync sends the signature in little-endian order.
+    const uint16_t signature = Get16(udp + 8);
+    if (signature != 0xfade && signature != 0xdefa) return {};
+    const uint32_t destination = Get32(packet + 16);
     const size_t payload = length - 8;
+    if (destination != hostAddress &&
+        (!zodiacWakeup || signature != 0xdefa || destination != zodiacWakeupAddress ||
+         payload < 8 || Get32(udp + 12) != destination))
+        return {};
     std::vector<uint8_t> out(20 + 8 + payload, 0);
     out[0] = 0x45;
     Put16(&out[2], uint16_t(out.size()));
     out[8] = 64;
     out[9] = 17;
-    Put32(&out[12], hostAddress);
+    Put32(&out[12], destination);
     std::copy(packet + 12, packet + 16, out.begin() + 16);
     Put16(&out[10], Checksum(out.data(), 20));
     uint8_t* reply = &out[20];

@@ -465,6 +465,14 @@ Devices with Bluetooth can use Mobile phone in the Bluetooth list on Linux. It's
 
 The status reads "Bluetooth: This Frond's radio, Mobile phone: idle", then "dialling" and "online at 33600" during a call. The Debian package includes the phone; a source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built. Android doesn't have it yet.
 
+For Zodiac Network HotSync over Bluetooth dial-up, start the phone peer on the virtual radio with a Sync Manager folder:
+
+```sh
+build/bluetooth-opp-peer/bluetooth-opp-peer RADIO-SOCKET --dun --sync-folder PROFILE-FOLDER
+```
+
+Add `--sync-profile NAME` to choose a profile. On the Zodiac, set the Primary PC address to `10.0.2.2` in HotSync. Select **Modem**, then **Network** in **Modem Sync Prefs**, choose the Bluetooth dial-up service and start HotSync. A large database can hit the reply timeout during backup.
+
 Modem and phone by device:
 
 | | Modem on serial | Mobile phone on infrared | Mobile phone on Bluetooth |
@@ -585,7 +593,7 @@ The Zire 72 has no serial port, same as the real one. Its Camera shows a test pa
 
 The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its early Palm OS 5 has no standard Palm SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on it.
 
-The Tapwave Zodiac plays sound and takes two SD cards, see [Zodiac and 68k Palm cards](#zodiac-and-68k-palm-cards). It has infrared beaming, Bluetooth (tested with sending files and InkStorm multiplayer) and HotSync over USB or the serial cradle, each to a PTY or TCP port. Dial-up and HotSync over Bluetooth aren't done yet.
+The Tapwave Zodiac plays sound and takes two SD cards, see [Zodiac and 68k Palm cards](#zodiac-and-68k-palm-cards). It has infrared beaming, Bluetooth (tested with sending files and InkStorm multiplayer) and HotSync over USB or the serial cradle, each to a PTY or TCP port. In Connections, turn on **Cradle attached** to dock the Zodiac, then use **HotSync** to press the cradle button. A connected virtual USB cable also docks the Zodiac. Bluetooth dial-up and Network HotSync use the [virtual mobile phone](#mobile-phone-over-bluetooth).
 
 The 68k Palms, from the Palm IIIx to the m520, the Dana and the CLIÉ T415, run in their own runner, `frond-68k`, on Linux and Android. They have a backlight, serial with the cradle's HotSync button, infrared and, on the grey ones, the screen contrast. Serial HotSync is tested with pilot-link on a 68k Palm (install, fetch, backup). Networking is PPP over the serial port or the dial-up modem, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). They have no Fast engine and no Bluetooth or Wi-Fi, as on the real ones, and their USB HotSync isn't done yet. The m125, m130, m500, c500, m505, m515 and m520 have an SD or MMC slot, the others have no card. The IIIc, m130, m505, m515 and m520 have colour screens, the rest are grey. The grey ones show the backlight as a green panel. The debugger works with prc-tools' gdb, see [68k Palms](developer-reference.md#68k-palms-frond-68k).
 

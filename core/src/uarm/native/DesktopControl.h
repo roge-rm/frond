@@ -745,6 +745,8 @@ class DesktopControl {
                 return {false, "unsupported", "This device has no cradle button that can be pressed."};
             return {true, "cradle-button", ctx.soc->CradleButtonDown() ? "down" : "up"};
         }
+        if (command == "cradle-setting")
+            return {true, "cradle", !ctx.soc->CradleSupported() ? "unavailable" : ctx.soc->CradleSetting() ? "attached" : "detached"};
         if (command == "cradle-state")
             return {true, "cradle", !ctx.soc->CradleSupported() ? "unavailable" : ctx.soc->CradleAttached() ? "attached" : "detached"};
         if (command == "cradle") {

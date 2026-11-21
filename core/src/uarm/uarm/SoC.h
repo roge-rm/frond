@@ -76,6 +76,7 @@ class SoC {
     // The cradle on the connector, a host setting like the headphones. Runs on the SoC's thread.
     virtual bool CradleSupported() const { return false; }
     virtual bool CradleAttached() const { return false; }
+    virtual bool CradleSetting() const { return false; }
     virtual bool SetCradle(bool) { return false; }
     // A short press of the HotSync button, let go by itself. False without one or while one is held.
     virtual bool PressHotSync() { return false; }

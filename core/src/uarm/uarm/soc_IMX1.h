@@ -147,6 +147,7 @@ class SocIMX1 : public SoC {
     // It's in while the user put it in or the USB bridge's cable is in; each takes out only its own.
     bool CradleSupported() const override { return true; }
     bool CradleAttached() const override { return cradle || usbCable; }
+    bool CradleSetting() const override { return cradle; }
     bool SetCradle(bool attached) override;
     // The USB bridge's cable, which comes in through the cradle.
     bool UsbCableAttached() const { return usbCable; }
@@ -310,8 +311,9 @@ class SocIMX1 : public SoC {
     bool SetCradleInputs(bool& setting, bool attached);
     int traceStick[2]{0, 0};
     bool headphones{false}, cradleDown{false}, cradle{false}, usbCable{false};
-    // CLK32 ticks until a PressHotSync lets go of D22, 0 with none going.
+    // Minimum D22 hold in guest ticks, with a release queued by button-up or HotSync.
     uint64_t hotSyncTicks{0};
+    bool cradleReleasePending{false};
     UsbHostHooks usbHostHooks{};
     void TickUsbHost();
     bool UsbHostEventPending();

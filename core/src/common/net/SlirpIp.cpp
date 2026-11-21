@@ -65,6 +65,7 @@ struct SlirpIp::Impl {
     Slirp* slirp{};
     SlirpCb callbacks{};
     NetSyncForward netSync;
+    bool zodiacWakeup{false};
     ActiveSyncForward activeSync;
     bool announced{false};
     std::deque<std::vector<uint8_t>> incoming;
@@ -178,10 +179,12 @@ SlirpIp::~SlirpIp() = default;
 
 bool SlirpIp::Valid() const { return impl->slirp; }
 
+void SlirpIp::EnableZodiacNetSyncWakeup() { impl->zodiacWakeup = true; }
+
 void SlirpIp::Input(const uint8_t* packet, size_t size, uint64_t now) {
     if (!Valid() || size < 20 || size > 1500 || (packet[0] >> 4) != 4) return;
     impl->now = now;
-    if (auto answer = NetSyncWakeupAnswer(packet, size); !answer.empty()) {
+    if (auto answer = NetSyncWakeupAnswer(packet, size, impl->zodiacWakeup); !answer.empty()) {
         if (impl->incoming.size() < queueLimit) impl->incoming.push_back(std::move(answer));
         return;
     }
@@ -226,9 +229,11 @@ void SlirpIp::Poll(uint64_t now) {
 
 void SlirpIp::Reset() {
     const uint64_t now = impl->now;
+    const bool zodiacWakeup = impl->zodiacWakeup;
     impl.reset();
     impl = std::make_unique<Impl>(activeSync);
     impl->now = now;
+    impl->zodiacWakeup = zodiacWakeup;
 }
 
 size_t SlirpIp::Queued() const { return impl->incoming.size(); }

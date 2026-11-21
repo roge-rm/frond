@@ -349,7 +349,7 @@ static void spp_tests(void){spp_mode=true;selftest=true;struct selection s={.lo=
 static void dun_tests(void){
  dun_mode=true;selftest=true;struct selection s={.lo={0},.hi={0xffff},.n=1};struct bytes r=record(&s);
  assert(has_uuid(r.b,r.n,0x1103,0)&&has_uuid(r.b,r.n,0x1201,0)&&!has_uuid(r.b,r.n,0x1105,0)&&!has_uuid(r.b,r.n,8,0)&&find_channel(r.b,r.n,0)==CHANNEL);
- dun=frond_dun_create();assert(dun);assert(!strcmp(frond_dun_state(dun),"off"));
+ dun=frond_dun_create(NULL,NULL);assert(dun);assert(!strcmp(frond_dun_state(dun),"off"));
  dun_open=true;frond_dun_open(dun,monotonic_ns());dun_flush();assert(!strcmp(dun_state,"idle"));
  const char at[]="AT\r";dun_data(at,3,NULL);add(&dun_sent,"",1);assert(strstr((char*)dun_sent.b,"OK"));dun_sent.n=0;
  const char dial[]="ATDT*99#\r";dun_data(dial,sizeof(dial)-1,NULL);assert(!strcmp(dun_state,"dialling"));
@@ -367,10 +367,25 @@ int main(int argc,char**argv){
  if(argc==2&&!strcmp(argv[1],"--selftest-spp")){spp_tests();return 0;}
  if(argc==2&&!strcmp(argv[1],"--selftest-dun")){dun_tests();return 0;}
  if(argc==2&&!strcmp(argv[1],"--selftest")){tests();return 0;}assert(argc>=3);
- /* SOCKET OUTPUT [options] for OPP and SPP; SOCKET --dun [--pin PIN] for the phone and SOCKET --dun-dial ADDRESS for its test client. */
+ /* SOCKET OUTPUT [options] for OPP and SPP; SOCKET --dun [--pin PIN] [--sync-folder DIR [--sync-profile NAME]]
+    for the phone; SOCKET --dun-dial ADDRESS for its test client. */
+ const char *sync_folder=NULL, *sync_profile=NULL;
  int first=3;if(!strncmp(argv[2],"--",2))first=2;else output_path=argv[2];
- for(int at=first;at<argc;++at){if(!strcmp(argv[at],"--spp-echo")){spp_mode=true;continue;}if(!strcmp(argv[at],"--dun")){dun_mode=true;continue;}if(!strcmp(argv[at],"--disc-hangup")){dun_disc_hangup=true;continue;}if(!strcmp(argv[at],"--hold-put")){hold_put=true;continue;}if(!strcmp(argv[at],"--pin")){assert(++at<argc && strlen(argv[at])>=1 && strlen(argv[at])<=16);pin_code=argv[at];continue;}if(!strcmp(argv[at],"--gate")){assert(++at<argc);gate_path=argv[at];assert(access(gate_path,F_OK)!=0);continue;}bool spp_arg=!strcmp(argv[at],"--spp-push"),dun_arg=!strcmp(argv[at],"--dun-dial");assert((!strcmp(argv[at],"--push")||spp_arg||dun_arg) && ++at<argc && strlen(argv[at])==12);spp_mode|=spp_arg;dun_mode|=dun_arg;push_mode=true;for(unsigned i=0;i<6;++i){unsigned value;assert(sscanf(argv[at]+2*i,"%2x",&value)==1);remote_address[i]=value;}}assert(!hold_put||!push_mode);assert(!dun_disc_hangup||(dun_mode&&push_mode));assert(!gate_path||push_mode);assert(dun_mode!=!!output_path&&!(dun_mode&&spp_mode));if(output_path)assert(access(output_path,F_OK)!=0);
- if(dun_mode&&!push_mode){dun=frond_dun_create();if(!dun){fprintf(stderr,"slirp did not start\n");return 2;}}
+ for(int at=first;at<argc;++at){
+  if(!strcmp(argv[at],"--sync-folder")||!strcmp(argv[at],"--sync-profile")){
+   const char* option=argv[at++];
+   if(at>=argc || !argv[at][0] || !strncmp(argv[at],"--",2)){
+    fprintf(stderr,"%s needs a value\n",option);return 2;
+   }
+   if(!strcmp(option,"--sync-folder"))sync_folder=argv[at];else sync_profile=argv[at];
+   continue;
+  }
+  if(!strcmp(argv[at],"--spp-echo")){spp_mode=true;continue;}if(!strcmp(argv[at],"--dun")){dun_mode=true;continue;}if(!strcmp(argv[at],"--disc-hangup")){dun_disc_hangup=true;continue;}if(!strcmp(argv[at],"--hold-put")){hold_put=true;continue;}if(!strcmp(argv[at],"--pin")){assert(++at<argc && strlen(argv[at])>=1 && strlen(argv[at])<=16);pin_code=argv[at];continue;}if(!strcmp(argv[at],"--gate")){assert(++at<argc);gate_path=argv[at];assert(access(gate_path,F_OK)!=0);continue;}bool spp_arg=!strcmp(argv[at],"--spp-push"),dun_arg=!strcmp(argv[at],"--dun-dial");assert((!strcmp(argv[at],"--push")||spp_arg||dun_arg) && ++at<argc && strlen(argv[at])==12);spp_mode|=spp_arg;dun_mode|=dun_arg;push_mode=true;for(unsigned i=0;i<6;++i){unsigned value;assert(sscanf(argv[at]+2*i,"%2x",&value)==1);remote_address[i]=value;}}
+ if((sync_profile&&!sync_folder)||(sync_folder&&(!dun_mode||push_mode))){
+  fputs("--sync-folder is for the DUN phone and is required with --sync-profile\n",stderr);return 2;
+ }
+ assert(!hold_put||!push_mode);assert(!dun_disc_hangup||(dun_mode&&push_mode));assert(!gate_path||push_mode);assert(dun_mode!=!!output_path&&!(dun_mode&&spp_mode));if(output_path)assert(access(output_path,F_OK)!=0);
+ if(dun_mode&&!push_mode){dun=frond_dun_create(sync_folder,sync_profile);if(!dun){fprintf(stderr,"slirp did not start\n");return 2;}}
  sk=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);assert(sk>=0);struct sockaddr_un a={.sun_family=AF_UNIX};assert(strlen(argv[1])<sizeof(a.sun_path));strcpy(a.sun_path,argv[1]);
  /* The phone may start beside a btvirt that hasn't made its socket yet. */
  for(int tries=dun_mode&&!push_mode?50:1;connect(sk,(void*)&a,sizeof(a));){assert(--tries>0);usleep(100000);}

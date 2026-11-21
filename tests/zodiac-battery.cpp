@@ -138,7 +138,7 @@ void machine() {
     assert(soc->PressHotSync());
     load(*soc, atMaximum);
     assert(!soc->CradleButtonDown() && !soc->CradleInputLow() && soc->PressHotSync());
-    assert(soc->SetCradleButton(false));
+    load(*soc, atMaximum);
     assert(!soc->PowerSleeping());
 
     // The cradle: A11 and A1 high and the ID sample 0 while attached, put back after a load and a reset.
@@ -148,7 +148,14 @@ void machine() {
     assert(soc->SetCradle(false) && save(*soc) == detached);
     assert(soc->SetCradle(true) && soc->CradleAttached() && soc->AccessoryPinsHigh() && soc->AccessorySample() == 0);
     const auto attached = save(*soc);
-    assert(attached != detached);
+    assert(attached != detached && soc->CradleSetting());
+    // A short host hold stays down until the guest has time to see it.
+    assert(soc->SetCradleButton(true) && soc->SetCradleButton(false));
+    assert(soc->CradleButtonDown() && soc->CradleInputLow());
+    const uint64_t shortPress = soc->GetTime();
+    for (int i = 0; i < 2000 && soc->CradleButtonDown(); ++i) soc->Run(100000, 1000000);
+    assert(soc->GetTime() - shortPress >= 499000000);
+    assert(!soc->CradleButtonDown() && !soc->CradleInputLow());
     load(*soc, atMaximum);
     assert(soc->AccessoryPinsHigh() && soc->AccessorySample() == 0);
     soc->Reset();
@@ -195,7 +202,9 @@ void machine() {
         assert(soc->SetCradle(false) && !soc->CradleAttached() && !soc->AccessoryPinsHigh());
         assert(usb.Start(soc, {HostSerial::Kind::pty, 0, {}}, error));
         run(usb);
-        assert(soc->UsbCableAttached() && cradleIn());
+        assert(soc->UsbCableAttached() && cradleIn() && !soc->CradleSetting());
+        assert(soc->SetCradle(true) && soc->CradleSetting() && cradleIn());
+        assert(soc->SetCradle(false) && !soc->CradleSetting() && cradleIn());
         usb.Stop();
         assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
     }
