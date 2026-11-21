@@ -200,6 +200,8 @@ class SocIMX1 : public SoC {
     uint64_t CrossRefusals() const { return imx1MachineCrossRefusals(machine); }
     // Ring submits taken with the board behind the chip (imx1MachineLagSubmits).
     uint64_t LagSubmits() const { return imx1MachineLagSubmits(machine); }
+    // Span boundaries taken with the board behind the chip (imx1MachineLagBoundaries).
+    uint64_t LagBoundaries() const { return imx1MachineLagBoundaries(machine); }
     // The guest time of the last of them in ns, on GetTime's clock, for tests.
     uint64_t YmfLastReadyReadNs() const;
     // The RAM and graphics memory hashed, for comparing where two runs end.
