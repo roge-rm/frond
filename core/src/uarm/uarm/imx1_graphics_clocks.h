@@ -97,7 +97,7 @@ class Imx1GraphicsClocks {
     struct Rate { uint64_t numerator = 0, denominator = 1; };
     static constexpr uint64_t timeHz = 200000000, referenceHz = 16000000;
     static constexpr uint32_t testPrescaler = 4;
-    static bool owns(uint32_t address) { return address >= 0x16010080 && address <= 0x160100b0 && !(address & 3); }
+    static constexpr bool owns(uint32_t address) { return address >= 0x16010080 && address <= 0x160100b0 && !(address & 3); }
     void reset() { *this = {}; }
     static constexpr uint32_t stateVersion = 1;
     template <class A> void state(A& a) {

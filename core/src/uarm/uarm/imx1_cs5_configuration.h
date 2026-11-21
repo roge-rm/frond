@@ -313,6 +313,25 @@ class Imx1Cs5Configuration {
     // The OS maps SDRAM at 40000000-473fffff for applications and their data. The ROM runs at 20000000 and the
     // exception vectors at 0, so only code in that RAM drives the chip as a player.
     static bool playerPc(uint32_t pc) { return pc >= 0x40000000 && pc < 0x47400000; }
+    // Whether access takes this write to the engine alone: the ring submit word (220) outside the USB driver, the
+    // board set-up code and player code. With the acquisition source the probe sets first, the engine is then all
+    // a refused write has to put back (engineUndo).
+    bool engineSubmitWrite(uint32_t pc, uint32_t address) const {
+        static_assert(Imx1GraphicsEngine::owns(0x16010220) && !Imx1GraphicsDisplay::owns(0x16010220) &&
+                      !Imx1GraphicsSd::owns(0x16010220) && !Imx1GraphicsAcquisition::owns(0x16010220) &&
+                      !Imx1GraphicsInterrupts::owns(0x16010220) && !Imx1GraphicsClocks::owns(0x16010220));
+        return address == 0x16010220 && virtualProfile() && !Imx1GraphicsUsb::driverPc(pc) &&
+               !(pc >= 0x20086952 && pc <= 0x20086a60) && !playerPc(pc);
+    }
+    struct EngineUndo {
+        Imx1GraphicsEngine engine;
+        Imx1GraphicsAcquisition acquisition;
+    };
+    EngineUndo engineUndo() const { return {engine, acquisition}; }
+    void undoEngine(const EngineUndo& undo) {
+        engine = undo.engine;
+        acquisition = undo.acquisition;
+    }
     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;

@@ -15,7 +15,7 @@
 // since access and advance also run on copies that can be dropped.
 class Imx1GraphicsSd {
    public:
-    static bool owns(uint32_t address) {
+    static constexpr bool owns(uint32_t address) {
         return address == 0x1601090c || address == 0x16010910 ||
                (address >= 0x16202000 && address < 0x16202200);
     }

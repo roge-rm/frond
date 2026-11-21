@@ -9,7 +9,7 @@
 // Virtual cold state has no work, a disabled ring and no configured clip bounds.
 class Imx1GraphicsEngine {
    public:
-    static bool owns(uint32_t address) {
+    static constexpr bool owns(uint32_t address) {
         return address == 0x160113e8 || address == 0x16010144 || address == 0x160110a8 ||
                address == 0x160104dc || address == 0x16010214 || address == 0x16010220 || address == 0x1601021c ||
                address == 0x16010008 || address == 0x16010230 || address == 0x16010210 || address == 0x16011280 || address == 0x16010140;

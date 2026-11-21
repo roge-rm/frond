@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <optional>
 #include <memory>
 #include <string>
 #include "twglue_log.h"
@@ -1823,14 +1824,24 @@ struct Probe {
                 return status;
             }
             // A preview works on a copy. A commit works on the chip in place and puts the copy back unless
-            // the result is taken (accept), as it would have dropped a refused candidate.
-            Imx1Cs5Configuration saved = p.cs5Configuration;
-            auto& candidate = preview ? saved : p.cs5Configuration;
+            // the result is taken (accept), as it would have dropped a refused candidate. A commit that only
+            // reaches the engine (a ring submit) keeps just the engine and the acquisition source.
+            const bool engineOnly = !preview && write && p.cs5Configuration.engineSubmitWrite(p.result.trace.pc, address);
+            std::optional<Imx1Cs5Configuration> saved;
+            Imx1Cs5Configuration::EngineUndo engineSaved{};
+            if (engineOnly) engineSaved = p.cs5Configuration.engineUndo();
+            else saved.emplace(p.cs5Configuration);
+            auto& candidate = preview ? *saved : p.cs5Configuration;
             bool kept = preview;
             struct Restore {
-                bool& kept; Imx1Cs5Configuration& chip; const Imx1Cs5Configuration& saved;
-                ~Restore() { if (!kept) chip = saved; }
-            } restore{kept, p.cs5Configuration, saved};
+                bool& kept; Imx1Cs5Configuration& chip; const std::optional<Imx1Cs5Configuration>& saved;
+                const Imx1Cs5Configuration::EngineUndo& engineSaved;
+                ~Restore() {
+                    if (kept) return;
+                    if (saved) chip = *saved;
+                    else chip.undoEngine(engineSaved);
+                }
+            } restore{kept, p.cs5Configuration, saved, engineSaved};
             // acceptGraphics(candidate, !preview), with the commit already in place.
             auto accept = [&] {
                 if (preview) return p.acceptGraphics(candidate, false);

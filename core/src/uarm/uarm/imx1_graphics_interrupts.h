@@ -7,7 +7,7 @@
 class Imx1GraphicsInterrupts {
    public:
     static constexpr uint32_t nativeMask = 0x02000051, displayMask = 1;
-    static bool owns(uint32_t address) { return address == 0x16010200 || address == 0x16010204; }
+    static constexpr bool owns(uint32_t address) { return address == 0x16010200 || address == 0x16010204; }
     void reset() { *this = {}; }
     uint32_t enableValue() const { return enabled; }
     uint32_t pendingValue() const { return pending; }

@@ -17,7 +17,7 @@ class Imx1GraphicsDisplay {
         uint32_t bankOffset = 0;
     };
     static constexpr uint32_t pixelCycles = 16, latchCycles = 32;
-    static bool owns(uint32_t address) {
+    static constexpr bool owns(uint32_t address) {
         if (address < 0x16010000) return false;
         const uint32_t offset = address - 0x16010000;
         if (offset == 0x4d8 || offset == 0x54c || offset == 0x4f0) return true;
