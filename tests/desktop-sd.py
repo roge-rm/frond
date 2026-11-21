@@ -13,11 +13,12 @@ import tempfile
 import time
 
 from sd_results import ControlError, ProbeTimeout, wait_for_probe as probe_results
+OBJ = Path(os.environ.get('FROND_OBJ') or Path(__file__).resolve().parents[1] / 'build/out')
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core', type=Path, default=Path('out/frond'))
 p.add_argument('--skip-reset', action='store_true', help='Check file exchange and persistence without the separate TX reset check')
-p.add_argument('--exchange-driver', type=Path, default=Path('build/desktop/sd-exchange-driver'))
+p.add_argument('--exchange-driver', type=Path, default=OBJ / 'desktop/sd-exchange-driver')
 p.add_argument('--session', type=Path, required=True)
 p.add_argument('--probe', type=Path, default=Path('build/sd-probe/FrondSDProbe.prc'))
 p.add_argument('--output', type=Path, required=True)

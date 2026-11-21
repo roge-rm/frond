@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Real helper readback and identity transfers on the timed virtual CS5 bus."""
 from pathlib import Path
+import os
 import importlib.util
 import re
 import struct
 import subprocess
+OBJ = Path(os.environ.get('FROND_OBJ') or Path(__file__).resolve().parents[1] / 'build/out')
 spec = importlib.util.spec_from_file_location('graphics', Path(__file__).with_name('zodiac-virtual-graphics.py'))
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
@@ -182,7 +184,7 @@ def check(rom, word, branch, path, bootstrap, profile, expected):
             at+=0x44
     word(at,0xe7f000f0);path.write_bytes(rom)
     for engine in ('exact','fast'):
-        p=subprocess.run(['build/test-zodiac-live-controls',str(path),engine],capture_output=True,text=True,timeout=30)
+        p=subprocess.run([str(OBJ / 'test-zodiac-live-controls'),str(path),engine],capture_output=True,text=True,timeout=30)
         assert p.returncode==0,(engine,p.stdout,p.stderr)
         print(p.stdout.strip())
 g.main(check)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs build/test-storage-ms: its self test, then blank classic sticks of every size formatted and
+"""Runs build/out/test-storage-ms: its self test, then blank classic sticks of every size formatted and
 filled through Files (4, 8, 16, 32, 64 and 128 MB), read back with mtools from the logical image
 LogicalMsMedia gives: the TG50's partition, FAT12 or FAT16, a hidden read-only MEMSTICK.IND and
 every file. Needs a UTF-8 locale for mtools to show the non-ASCII name."""
@@ -13,6 +13,7 @@ import tempfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 ENV = dict(os.environ, LC_ALL='C.UTF-8')
 # Partition start and FAT type the TG50 writes for each size.
 FORMAT = {4: (27, 12), 8: (25, 12), 16: (25, 12), 32: (19, 12), 64: (39, 12), 128: (33, 16)}
@@ -41,7 +42,7 @@ def listing(target):
 
 
 def main():
-    binary = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'build/test-storage-ms')
+    binary = Path(sys.argv[1] if len(sys.argv) > 1 else OBJ / 'test-storage-ms')
     with tempfile.TemporaryDirectory(prefix='storage-ms-') as work:
         out = Path(work)
         subprocess.run([str(binary), 'selftest'], check=True, env=dict(ENV, TMPDIR=work))

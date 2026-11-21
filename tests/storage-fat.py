@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs build/test-storage-fat: its self test, then FAT12 cards it formats and fills (4, 8, 16
+"""Runs build/out/test-storage-fat: its self test, then FAT12 cards it formats and fills (4, 8, 16
 and 64 MiB, raw and as card files) and images mtools made (a 16 MiB SD card with a partition, a 4 MiB
 superfloppy), read back with mtools; files mtools adds are read back by the library; FAT32 is
 refused. Needs a UTF-8 locale for mtools to show the non-ASCII name."""
@@ -13,6 +13,7 @@ import tempfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 ENV = dict(os.environ, LC_ALL='C.UTF-8')
 
 
@@ -79,7 +80,7 @@ def check(binary, image, base, label):
 
 
 def main():
-    binary = Path(sys.argv[1] if len(sys.argv) > 1 else ROOT / 'build/test-storage-fat')
+    binary = Path(sys.argv[1] if len(sys.argv) > 1 else OBJ / 'test-storage-fat')
     with tempfile.TemporaryDirectory(prefix='storage-fat-') as work:
         out = Path(work)
         subprocess.run([str(binary), 'selftest'], check=True, env=dict(ENV, TMPDIR=work))

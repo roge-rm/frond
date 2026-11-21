@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Firmware-free retained RTC scenario parsing and propagation checks."""
 from pathlib import Path
+import os
 import struct
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / 'build/zodiac-boot-probe'
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE = OBJ / 'zodiac-boot-probe'
 
 
 def main():

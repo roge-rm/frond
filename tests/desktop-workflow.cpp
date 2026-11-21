@@ -361,10 +361,10 @@ static void cardsReset() {
     QDir(cardsLibrary()).removeRecursively();
     QDir().mkpath(cardsSessions());
 }
-// The ARM core built beside the desktop: out/frond from build/desktop.
+// The ARM core in the checkout's out/.
 static QString cardsCore() {
     const auto env = qEnvironmentVariable("FROND_TEST_CORE");
-    return env.isEmpty() ? QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../out/frond") : env;
+    return env.isEmpty() ? QDir::cleanPath(QStringLiteral(FROND_TEST_OUT "/frond")) : env;
 }
 static bool cardTool(const QStringList& args) {
     QProcess p;
@@ -2070,7 +2070,7 @@ for line in s.makefile('rb'):
         const bool launcher = !qEnvironmentVariableIsEmpty("FROND_ZODIAC_STATE");
         // Only the developer build of the core takes FROND_ZODIAC_STATE (make out/frond-zodiac-developer).
         const auto core = launcher && qEnvironmentVariableIsEmpty("FROND_TEST_CORE")
-            ? QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../out/frond-zodiac-developer") : cardsCore();
+            ? QDir::cleanPath(QStringLiteral(FROND_TEST_OUT "/frond-zodiac-developer")) : cardsCore();
         // The Palm's own window, wherever it is, and a view position in it as xdotool arguments. The
         // screen is as tall as the window, with the controls at its sides.
         QString palm;

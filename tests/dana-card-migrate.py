@@ -5,11 +5,12 @@ stick. The desktop's move (test-desktop-dana-cards migrateFixture) takes each ca
 folder with its changes, and each old save then loads with its cards in place; the cards also go
 back in by path with the argument the desktop gives.
 
-Needs FROND_DEVICE_IMAGES, out/frond, out/frond-68k and build/desktop/test-desktop-dana-cards.
+Needs FROND_DEVICE_IMAGES, out/frond, out/frond-68k and build/out/desktop/test-desktop-dana-cards.
 Evidence goes in build/dana-card-migrate/<time>/."""
 import json, os, subprocess, sys, time
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot
 
@@ -22,7 +23,7 @@ if not images or not all((Path(images) / rom).is_file() for _, rom, _, _ in DEVI
     sys.exit(0)
 palm_boot.CORE_68K = ROOT / 'out' / 'frond-68k'
 frond = ROOT / 'out' / 'frond'
-fixture = ROOT / 'build' / 'desktop' / 'test-desktop-dana-cards'
+fixture = OBJ / 'desktop' / 'test-desktop-dana-cards'
 work = ROOT / 'build' / 'dana-card-migrate' / time.strftime('%Y%m%d-%H%M%S')
 old, sessions = work / 'Frond' / 'dana-cards', work / 'sessions'
 old.mkdir(mode=0o700, parents=True)

@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / 'build/zodiac-boot-probe'
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE = OBJ / 'zodiac-boot-probe'
 FLAG = '--graphics-virtual-a4-source-over'
 PROFILE = '--graphics-profile=virtual5744-compatible-8mib'
 BOOT = '--bootstrap-peripherals'

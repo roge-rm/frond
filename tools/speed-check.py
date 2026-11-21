@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure emulation speed with build/benchmark-replay (fixed guest time).
+"""Measure emulation speed with build/out/benchmark-replay (fixed guest time).
 
 Workloads: the Bike or Die 2 level-one replay and FrondBench. Writes a text
 report to stdout and JSON to build/speed-check/<timestamp>/. A workload whose
@@ -10,7 +10,7 @@ session isn't given is skipped.
                                     core before patch 0414 (T|X touch on the ROM's default calibration)
   SPEED_MIPS                        guest clock in MHz, or original for the device's own, default 100
   SPEED_BENCH                       another benchmark-replay binary (default: the clean-tree commit build
-                                    from tools/commit-build.sh when it exists, else build/benchmark-replay)
+                                    from tools/commit-build.sh when it exists, else build/out/benchmark-replay)
   SPEED_68K                         another frond-68k binary for the 68k recipes (default: the one next to
                                     the benchmark-replay in use, else out/frond-68k)
   SPEED_HOST                        an ssh destination (user@host) to run on instead of here, in ~/frond-speed/
@@ -51,6 +51,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 
 
 def commit_build():
@@ -68,7 +69,7 @@ def commit_build():
 
 
 COMMIT_BUILD = commit_build()
-BENCH = Path(os.environ.get('SPEED_BENCH') or (COMMIT_BUILD / 'benchmark-replay' if COMMIT_BUILD else ROOT / 'build/benchmark-replay')).absolute()
+BENCH = Path(os.environ.get('SPEED_BENCH') or (COMMIT_BUILD / 'benchmark-replay' if COMMIT_BUILD else OBJ / 'benchmark-replay')).absolute()
 FIXTURES = ROOT / 'tests/fixtures'
 HOST = os.environ.get('SPEED_HOST', '')
 KEY = os.environ.get('SPEED_SSH_KEY', '')
@@ -156,7 +157,7 @@ def main():
     mips = os.environ.get('SPEED_MIPS', '100')
     host = HOST
     if not BENCH.exists():
-        sys.exit('build/benchmark-replay is missing: make benchmark-replay')
+        sys.exit(f'{OBJ / "benchmark-replay"} is missing: make benchmark-replay')
     stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     base = ROOT / 'build/speed-check' / stamp
     base.mkdir(parents=True)
@@ -397,7 +398,7 @@ def rounds(r, path, engine, n, base, against, asynchronous):
 
 def counts_main(args):
     if not BENCH.exists():
-        sys.exit('build/benchmark-replay is missing: make benchmark-replay')
+        sys.exit(f'{OBJ / "benchmark-replay"} is missing: make benchmark-replay')
     against = Path(args.against).absolute() if args.against else None
     if against and not against.exists():
         sys.exit(f'{against} is missing')

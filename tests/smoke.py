@@ -6,7 +6,7 @@
 
 Sessions, firmware copies and everything made here stay private under build/smoke/. A device without a
 ready session or firmware is skipped with the command that makes it. A new device is an entry in SMOKE.
-FROND_CORE picks another core binary, like build/frond-jit (make frond-jit) for the Fast engine.
+FROND_CORE picks another core binary, like build/out/frond-jit (make frond-jit) for the Fast engine.
 FROND_DEVICE_IMAGES is the firmware folder (the deviceimages/palm layout, with Palm/TX/ and so on below it); the
 firmware steps are skipped without it. Sessions made before the folder layout (build/smoke/DEVICE.session) still load.
 """

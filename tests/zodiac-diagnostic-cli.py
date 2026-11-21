@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Private end-stop capture, CLI errors and WFI capture without time advance."""
 from pathlib import Path
+import os
 import json
 import struct
 import subprocess
 import tempfile
+OBJ = Path(os.environ.get('FROND_OBJ') or Path(__file__).resolve().parents[1] / 'build/out')
 
 with tempfile.TemporaryDirectory(prefix='zodiac-diagnostic-', dir='build') as work:
     root = Path(work)
@@ -18,7 +20,7 @@ with tempfile.TemporaryDirectory(prefix='zodiac-diagnostic-', dir='build') as wo
     struct.pack_into('<I', image, 0, 0xea00003e)
     struct.pack_into('<II', image, 0x100, 0xee070f90, 0xe7f000f0)
     rom.write_bytes(image)
-    base = ['build/zodiac-boot-probe', str(rom), 'physical', '4', 'exact', '--bootstrap-peripherals']
+    base = [str(OBJ / 'zodiac-boot-probe'), str(rom), 'physical', '4', 'exact', '--bootstrap-peripherals']
     def invoke(*flags):
         return subprocess.run(base + list(flags), capture_output=True, text=True, timeout=15)
     plain = invoke()

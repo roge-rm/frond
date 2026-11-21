@@ -253,7 +253,7 @@ class DanaCardsTest : public QObject {
     // dana-cards/ cards linked from a save move into the machine folder with their saved changes,
     // once, and never over a file; a card with an unfinished write stays where it is.
     void moveFromDanaCards() {
-        const auto tool=QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../out/frond");
+        const auto tool=QDir::cleanPath(QStringLiteral(FROND_TEST_OUT "/frond"));
         if (!QFileInfo(tool).isExecutable()) QSKIP("needs out/frond");
         QTemporaryDir root; const auto sessions=root.filePath("sessions"), dir=sessions+"/Dana", old=root.filePath("Frond/dana-cards");
         QVERIFY(QDir().mkpath(dir)); QVERIFY(QDir().mkpath(old));
@@ -294,7 +294,7 @@ class DanaCardsTest : public QObject {
         QCOMPARE(frondCards::entries(root.filePath("cards")).size(),2);
     }
     void unlinkedToDrawer() {
-        const auto tool=QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../out/frond");
+        const auto tool=QDir::cleanPath(QStringLiteral(FROND_TEST_OUT "/frond"));
         if (!QFileInfo(tool).isExecutable()) QSKIP("needs out/frond");
         QTemporaryDir root; const auto sessions=root.filePath("sessions"), dir=sessions+"/Dana", old=root.filePath("Frond/dana-cards");
         const auto library=root.filePath("cards");
@@ -334,7 +334,7 @@ class DanaCardsTest : public QObject {
     void unlinkedMoveCutOff() {
         // A move into the drawer cut off after some saved changes went: reconcile keeps the entry
         // and the next start-up finishes the move into it, generations and all.
-        const auto tool=QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../out/frond");
+        const auto tool=QDir::cleanPath(QStringLiteral(FROND_TEST_OUT "/frond"));
         if (!QFileInfo(tool).isExecutable()) QSKIP("needs out/frond");
         QTemporaryDir root; const auto sessions=root.filePath("sessions"), old=root.filePath("Frond/dana-cards");
         const auto library=root.filePath("cards");
@@ -361,7 +361,7 @@ class DanaCardsTest : public QObject {
         // Two saves link one dana-cards card. The first to open moves it in; the second loads with
         // that slot swapped (empty) instead of being refused, and a save outside the sessions
         // folder linking it gets --card-swap too.
-        const auto tool=QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../out/frond");
+        const auto tool=QDir::cleanPath(QStringLiteral(FROND_TEST_OUT "/frond"));
         if (!QFileInfo(tool).isExecutable()) QSKIP("needs out/frond");
         QTemporaryDir root; const auto sessions=root.filePath("sessions"), old=root.filePath("Frond/dana-cards");
         const auto a=sessions+"/Dana", b=sessions+"/Dana 2";
@@ -404,7 +404,7 @@ class DanaCardsTest : public QObject {
     void migrateFixture() {
         const auto spec=qEnvironmentVariable("FROND_MIGRATE").split('|');
         if (spec.size()!=3) QSKIP("run by tests/dana-card-migrate.py");
-        const auto tool=QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../out/frond");
+        const auto tool=QDir::cleanPath(QStringLiteral(FROND_TEST_OUT "/frond"));
         const int moved=frondCards::moveLinkedIn(spec[0],spec[1],spec[2],tool);
         QVERIFY(moved>0);
         QVERIFY(frondCards::reconcile(spec[0]).isEmpty());

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 with tempfile.TemporaryDirectory(prefix='zodiac-asp-pen-', dir=ROOT/'build') as work:
     rom = bytearray(0x7d0000)
     def word(at, value): struct.pack_into('<I', rom, at, value)
@@ -87,7 +88,7 @@ with tempfile.TemporaryDirectory(prefix='zodiac-asp-pen-', dir=ROOT/'build') as 
         for lo, hi in [(0x96cd0, 0x96d50), (0x96d50, 0x96dd0), (0x96dd0, 0x96dec)]:
             rom[lo:hi] = source[lo:hi]
     path = Path(work)/'generated.rom'; path.write_bytes(rom)
-    result = subprocess.run([str(ROOT/'build/zodiac-asp-pen-probe'), str(path)],
+    result = subprocess.run([str(OBJ / 'zodiac-asp-pen-probe'), str(path)],
                             capture_output=True, text=True, timeout=30)
     output = result.stdout+result.stderr
     if evidence := os.environ.get('FROND_ZODIAC_ASP_EVIDENCE'): Path(evidence).write_text(output)

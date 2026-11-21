@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Synthetic native reset-helper addresses and explicit diagnostic CLI input."""
 from pathlib import Path
+import os
 import re
 import struct
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / 'build/zodiac-boot-probe'
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE = OBJ / 'zodiac-boot-probe'
 
 def main():
     with tempfile.TemporaryDirectory(prefix='zodiac-cs5-reset-', dir=ROOT / 'build') as work:

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Focused validation of the bounded diagnostic idle option."""
 from pathlib import Path
+import os
 import struct
 import subprocess
+OBJ = Path(os.environ.get('FROND_OBJ') or Path(__file__).resolve().parents[1] / 'build/out')
 
 rom = Path('build/zodiac-idle-wake-cli.rom')
 image = bytearray(0x7d0000)
@@ -14,7 +16,7 @@ struct.pack_into('<I', image, 0x2006c, len(image) - 0x20000)
 struct.pack_into('<I', image, 0, 0xea00003e)
 struct.pack_into('<II', image, 0x100, 0xee070f90, 0xe7f000f0)
 rom.write_bytes(image)
-base = ['build/zodiac-boot-probe', str(rom), 'physical', '4', 'exact']
+base = [str(OBJ / 'zodiac-boot-probe'), str(rom), 'physical', '4', 'exact']
 try:
     for value in ('', '0', '-1', '+1', '512000001', '4294967296', '999999999999999999999999999', '1x', '0x10', ' 1'):
         p = subprocess.run(base + ['--bootstrap-peripherals', '--idle-hclk-budget=' + value], capture_output=True, text=True)

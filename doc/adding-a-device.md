@@ -217,7 +217,7 @@ The Fast engine is a JIT (Dynarmic). A new board runs in it when these hold:
 - Instructions the JIT can't run, the PCs of hooks and watched sites go to the interpreter (`cpuJitPlain`). A new hook that changes instructions needs the same rule.
 - `capabilities.backgroundPanel` (the TG50) keeps the machine running without drawing while the device menu is open in the background, with its audio output fenced. `capabilities.microphone` also fences the microphone and audio output during checkpointed guest work. Other boards leave both off. `capabilities.modem` (the IIIx) lets `--serial modem` put the core's snap-on Hayes modem on the serial port. `capabilities.irPhone` lets `--irda phone` put the core's mobile phone on the IR port.
 - Run `make test-jit-differential` after any CPU change. It compares the JIT with the interpreter on random machine states and blocks. `make test-jit-overshoot` checks how far a run can pass its cycle budget.
-- Smoke the device in Fast (`FROND_CORE=build/frond-jit tests/smoke.py run DEVICE`, see Smoke and setup).
+- Smoke the device in Fast (`FROND_CORE=build/out/frond-jit tests/smoke.py run DEVICE`, see Smoke and setup).
 
 ### Speed skips (every ARM device)
 
@@ -330,7 +330,7 @@ Add `--nand nand.bin` where needed, `--sha256 HASH` to pin the image, `--resets`
 
 Memory-failure diagnostics fail the check unless the image's guest recovery was seen first. `--expected-faults expected.json` needs `--sha256`, `--launcher`, `--resets` and `device-session-probe`. The file has `device`, `nor_sha256` and `phases` (`boot`, `setup`, `reload`, `rollback`, `reset-soft`, `reset-hard`), each a list of exact `access`, `size`, hexadecimal `va` and `pc`, integer `fsr` and positive `count`. Extra, missing or unparseable faults fail.
 
-For the quick check after shared changes, add an entry to `SMOKE` in `tests/smoke.py`: the firmware files, the `setup` function, an `app` to launch with `taps` and the screen `area` they change, and optionally `media`, `audio` and a one-time `reminder`. `make smoke-sessions` makes the sessions and `make smoke` runs per device: app and tap, save and reload, supported card media and sound. `FROND_CORE` picks another core binary (`build/frond-jit` for the Fast engine) and `FROND_DEVICE_IMAGES` another firmware folder. See [testing.md](testing.md) for the rest.
+For the quick check after shared changes, add an entry to `SMOKE` in `tests/smoke.py`: the firmware files, the `setup` function, an `app` to launch with `taps` and the screen `area` they change, and optionally `media`, `audio` and a one-time `reminder`. `make smoke-sessions` makes the sessions and `make smoke` runs per device: app and tap, save and reload, supported card media and sound. `FROND_CORE` picks another core binary (`build/out/frond-jit` for the Fast engine) and `FROND_DEVICE_IMAGES` another firmware folder. See [testing.md](testing.md) for the rest.
 
 Keep firmware, sessions, installed Palm applications, raw PCM and captures out of git. Public tests build synthetic headers, geometry and sessions.
 

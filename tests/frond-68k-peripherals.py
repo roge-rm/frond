@@ -28,6 +28,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 import boot_fixture  # noqa: E402
@@ -41,7 +42,7 @@ T415_ROM = 'Sony/CLIE-T400/Sony-Clie-T400.rom'
 # The device under test; main() sets it from each ROM's name.
 DEVICE = 'palm-iiix'
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
-FRONDBENCH = ROOT / 'build/frondbench/FrondBench.prc'
+FRONDBENCH = OBJ / 'frondbench/FrondBench.prc'
 PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k', 'ppp68k': 'FrondPPP68k'}
 
 

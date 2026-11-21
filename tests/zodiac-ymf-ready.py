@@ -35,7 +35,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BENCH = Path(os.environ.get('SPEED_BENCH') or ROOT / 'build/benchmark-replay')
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+BENCH = Path(os.environ.get('SPEED_BENCH') or OBJ / 'benchmark-replay')
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--rom', type=Path,

@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 PAYLOAD_SHA256 = 'f3d193f0b904a2bbaaa972f2ef80bdeb19266e8340dbcb3626c26f2f98c4327c'
 # Preferences' panel list to Bluetooth, Radio On; the probe's Send, the peer in Discovery Results, OK.
 STEPS = ('tap 220 15 1500; tap 250 15 1500; tap 213 56 1500; tap 200 76 4000; shot radio; install {prc}; '
@@ -311,7 +312,7 @@ def dun(args, engine):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--test', type=Path, default=ROOT / 'build/test-zodiac-bluetooth')
+    parser.add_argument('--test', type=Path, default=OBJ / 'test-zodiac-bluetooth')
     parser.add_argument('--btvirt', type=Path, default=ROOT / 'build/bluetooth-provider/emulator/btvirt')
     parser.add_argument('--peer', type=Path, default=ROOT / 'build/bluetooth-opp-peer/bluetooth-opp-peer')
     parser.add_argument('--probe', type=Path, default=ROOT / 'build/bluetooth-probe/FrondBluetoothProbe.prc')

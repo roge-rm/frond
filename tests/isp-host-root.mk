@@ -1,5 +1,6 @@
+FROND_TEST_OBJ ?= $(FROND_TEST_ROOT)/build/out
 # Included after cloudpilot's Makefile, with FROND_68K=1.
-ISP_ROOT_TEST ?= $(FROND_TEST_ROOT)/build/test-isp-host-root
+ISP_ROOT_TEST ?= $(FROND_TEST_OBJ)/test-isp-host-root
 $(ISP_ROOT_TEST).o: $(FROND_TEST_ROOT)/tests/isp-host-root.cpp emulator/hardware/EmRegsISPDana.h
 	$(CXX_NATIVE) $(STD_CXX) $(CXXFLAGS_COMMON) $(CXXFLAGS_NATIVE) $(INCLUDE) -c -o $@ $<
 $(ISP_ROOT_TEST): $(filter-out $(BUILDDIR_NATIVE)/frond/main.o,$(OBJECTS_NATIVE)) $(ISP_ROOT_TEST).o

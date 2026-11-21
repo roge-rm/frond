@@ -2,12 +2,14 @@
 """Firmware-free private I2C image parsing and endpoint attachment checks."""
 
 from pathlib import Path
+import os
 import struct
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / 'build/zodiac-boot-probe'
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
+PROBE = OBJ / 'zodiac-boot-probe'
 
 
 def main():

@@ -13,6 +13,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
+OBJ = Path(os.environ.get('FROND_OBJ') or ROOT / 'build/out')
 GDB = os.environ.get('FROND_GDB') or shutil.which('gdb-multiarch')
 
 
@@ -94,7 +95,7 @@ class Rsp:
 class Debugger(unittest.TestCase):
     def setUp(self):
         self.log = tempfile.TemporaryFile()
-        self.target = subprocess.Popen([os.environ.get('FROND_GDBSTUB_TARGET', str(ROOT / 'build/test-gdbstub-target'))] + getattr(self, 'target_args', []),
+        self.target = subprocess.Popen([os.environ.get('FROND_GDBSTUB_TARGET', str(OBJ / 'test-gdbstub-target'))] + getattr(self, 'target_args', []),
                                        stdout=self.log, stderr=self.log)
         self.addCleanup(self.cleanup_target)
         deadline = time.monotonic() + 5
