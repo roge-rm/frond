@@ -233,7 +233,6 @@ object Sessions {
     // says. Blocks; run it off the main thread. Returns an error message or null (COPY_CANCELLED when
     // cancelled). The copy is deleted if it fails.
     fun duplicate(context: Context, s: Session, cancelled: () -> Boolean = { false }, choice: CardChoice = CardChoice.COPY): String? {
-        if (DanaSession.independent(s.file)) return "Android can't duplicate a session with independent cards yet."
         val device = s.device
         if (s.old || device == null) return "This session was saved by an older Frond."
         val id = UUID.randomUUID().toString()
@@ -302,12 +301,28 @@ object Sessions {
 
     // Packs the machine's files, its card and slot.json. Its card is moved in first.
     fun export(context: Context, s: Session, to: Uri): String? {
-        if (DanaSession.wrapped(s.file)) return refuseOutput(context, to, "Android can't export a session with independent cards yet. Export each card separately.")
+        val sessions = folder(context)
+        val open = { context.contentResolver.openOutputStream(to, "wt") }
+        val delete = { refuseOutput(context, to, "Couldn't export the session."); Unit }
         val lock = Cards.tryRunLock(s.folder)
-        lock.use { Cards.reconcile(folder(context), if (lock != null) s.folder else null) }
-        return exportPackable(s.folder,
-            { context.contentResolver.openOutputStream(to, "wt") },
-            { try { android.provider.DocumentsContract.deleteDocument(context.contentResolver, to) } catch (_: Exception) {} })
+        if (!DanaSession.wrapped(s.file)) {
+            lock.use { Cards.reconcile(sessions, if (lock != null) s.folder else null) }
+            return exportPackable(s.folder, open, delete)
+        }
+        if (lock == null) return refuseOutput(context, to, "Stop ${s.name} first.")
+        lock.use {
+            var staging: File? = null
+            try {
+                val dir = java.nio.file.Files.createTempDirectory(context.cacheDir.toPath(), "session-export-").toFile()
+                staging = dir
+                DanaSession.stage(s.file, dir, packed = false, library = Cards.libraryFor(sessions))?.let { return refuseOutput(context, to, it) }
+                return exportPackable(dir, open, delete, linked = true)
+            } catch (_: IOException) {
+                return refuseOutput(context, to, "Couldn't export the session.")
+            } finally {
+                staging?.deleteRecursively()
+            }
+        }
     }
 
     // Saves the running Palm to a picked document, like the desktop's Save a Copy. The core saves to
@@ -446,8 +461,8 @@ object Sessions {
                     target.outputStream().use { peek.copyTo(it, 1 shl 20) }
                 }
             }
-            val frond = sessionFile(staged) ?: return "That isn't a Frond session."
-            if (DanaSession.wrapped(frond)) return "Importing a session with independent cards requires its portable folder, which Android can't import yet."
+            var frond = sessionFile(staged) ?: return "That isn't a Frond session."
+            val linked = DanaSession.wrapped(frond)
             val header = header(frond) ?: Header(0L, 0L, null)
             val device = Device.byId(header.device)
             val error = when {
@@ -458,26 +473,32 @@ object Sessions {
                 else -> null
             }
             if (error != null) return error
-            if (header.version >= 7L) {
+            val files = if (linked) {
+                val converted = File(staged, "converted").also { it.mkdir() }
+                DanaSession.stage(frond, converted, packed = true)?.let { return it }
+                frond = File(converted, "session.frond")
+                converted
+            } else staged
+            if (!linked && header.version >= 7L) {
                 checkImportedSiblings(staged, frond, Cards.readSlot(staged).swap || Cards.readSlot(staged, 1).swap)?.let { return it }
             }
             if (frond != File(dest, "session.frond") && !frond.renameTo(File(dest, "session.frond")))
                 return "Couldn't save the session."
             for (sibling in listOf("sd.frondsd", "sd2.frondsd", "ms.frondms", "ms.frondmsp", NAND_FILE, "slot.json", "slot2.json")) {
-                File(staged, sibling).takeIf { it.isFile }?.renameTo(File(dest, sibling))
+                val source = File(files, sibling)
+                if (source.isFile && !source.renameTo(File(dest, sibling))) return "Couldn't save the session."
             }
             File(dest, "session.frond.settings.json").takeIf { it.isFile }?.delete()
             val name = freeName(context, displayName(context, from)?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: device!!.label)
             // The packed card becomes a new card in Cards.
-            Cards.adoptImportedCard(folder(context), dest, "$name card")?.let { return it }
+            Cards.adoptImportedCard(folder(context), dest, "$name card", preserveLinkedKey = linked)?.let { return it }
             write(context, Session(id, name, device!!, System.currentTimeMillis(), 0L, dest))
             return null
         } catch (e: Exception) {
-            dest.deleteRecursively()
             return "Couldn't save the session."
         } finally {
-            File(dest, ".import.part").deleteRecursively()
-            if (!data(context, id).isFile) dest.deleteRecursively()
+            if (!meta(context, id).isFile) dropDuplicate(folder(context), dest)
+            else staged.deleteRecursively()
             activeImports.remove(id)
         }
     }
@@ -793,17 +814,17 @@ internal fun moveRecoveryCards(from: File, frond: File, dest: File): Boolean {
 
 // Zips `dir` to the stream `open` gives. On any failure `delete` removes the target, which a
 // damaged journal leaves half written. Returns an error message or null.
-internal fun exportPackable(dir: File?, open: () -> java.io.OutputStream?, delete: () -> Unit): String? = try {
+internal fun exportPackable(dir: File?, open: () -> java.io.OutputStream?, delete: () -> Unit, linked: Boolean = false): String? = try {
     if (dir == null) throw IOException("no folder")
-    (open() ?: throw IOException("no stream")).use { zipPackable(dir, it) }
+    (open() ?: throw IOException("no stream")).use { zipPackable(dir, it, linked) }
     null
 } catch (e: Exception) {
     delete()
     "Couldn't export the session."
 }
 
-internal fun zipPackable(dir: File, output: java.io.OutputStream) {
-    if (sessionFile(dir)?.let { DanaSession.wrapped(it) } == true)
+internal fun zipPackable(dir: File, output: java.io.OutputStream, linked: Boolean = false) {
+    if (!linked && sessionFile(dir)?.let { DanaSession.wrapped(it) } == true)
         throw IOException("Independent-card sessions require a native portable folder export.")
     val settles = listOf(sdSettleOf(dir), sdSettleOf(dir, nand = true), sdSettleOf(dir, second = true))
     ZipOutputStream(output).use { zip ->
@@ -856,7 +877,7 @@ internal fun unzipPackable(input: java.io.InputStream, dest: File, nandMax: Long
                 if (!part.renameTo(File(dest, NAND_FILE))) throw IOException("Couldn't unpack the NAND.")
                 continue
             }
-            if (entry.isDirectory || !packableName(name)) continue
+            if (entry.isDirectory || !(packableName(name) || name == "sd0.frondsd")) continue
             File(dest, name).outputStream().use { zip.copyTo(it, 1 shl 20) }
         }
     }
@@ -964,8 +985,25 @@ enum class CardChoice { LINK, COPY, NONE }
 // that had a card loads with swap. Source machine held. `dest` is removed on failure.
 internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled: () -> Boolean, wanted: CardChoice): String? {
     val frond = sessionFile(from)
-    if (frond?.let { DanaSession.independent(it) } == true)
-        return "Android can't duplicate a session with independent cards yet."
+    if (frond?.let { DanaSession.independent(it) } == true) {
+        if (wanted == CardChoice.LINK) return "Open the session once to move its cards into Cards."
+        if (!dest.mkdir()) return "Couldn't duplicate the session."
+        var complete = false
+        try {
+            if (!File(dest, COPY_PART).createNewFile()) return "Couldn't duplicate the session."
+            DanaSession.stage(frond, dest, packed = false, includeCards = wanted == CardChoice.COPY,
+                cancelled = cancelled, library = Cards.libraryFor(sessions))
+                ?.let { return it }
+            Cards.adoptImportedCard(sessions, dest, "${Cards.machineName(from)} card", preserveLinkedKey = true)
+                ?.let { return it }
+            complete = true
+            return null
+        } catch (_: IOException) {
+            return "Couldn't duplicate the session."
+        } finally {
+            if (!complete) dropDuplicate(sessions, dest)
+        }
+    }
     val failed = "Couldn't duplicate the session."
     val library = Cards.libraryFor(sessions)
     Cards.reconcile(sessions, from)?.let { return it }

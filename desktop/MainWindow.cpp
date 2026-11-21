@@ -2707,7 +2707,13 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         if (m68k)
             frondCards::moveLinkedIn(sessionFolder(), machine,
                                      QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/dana-cards"));
-        arguments << frondCards::takeAtStart(sessionFolder(), machine, &linkedHolder, nullptr, m68k);
+        QString cardRecoveryError;
+        arguments << frondCards::takeAtStart(sessionFolder(), machine, &linkedHolder, nullptr, m68k, &cardRecoveryError);
+        if (!cardRecoveryError.isEmpty()) {
+            sessionLock.reset();
+            firstStartPending = false;
+            return failure(cardRecoveryError);
+        }
         for (int n = 0; n < frondCards::slotCount; ++n) {
             const auto slot = frondCards::readSlot(machine, n);
             if (slot.link.isEmpty() || !frondCards::cardFileIn(machine, n).isEmpty()) continue;

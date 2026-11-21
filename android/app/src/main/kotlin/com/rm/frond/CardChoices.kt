@@ -249,6 +249,8 @@ object CardChoices {
     // before), Link, Copy and No card when it holds one, Link and No card when its linked card is
     // elsewhere. Link comes first.
     fun duplicateChoices(sessions: File, dir: File): List<CardChoice> {
+        if (sessionFile(dir)?.let { DanaSession.independent(it) } == true)
+            return listOf(CardChoice.COPY, CardChoice.NONE)
         val library = Cards.libraryFor(sessions)
         var holdsAll = true
         var any = false

@@ -374,7 +374,7 @@ object Cards {
     // protection from the descriptor when it describes this card. With `freshIdentity` (a copy of a
     // card another entry has), or when another card has that serial, the card gets a new serial and
     // the slot swap, so the core loads it as a different card. Library lock held.
-    fun moveIn(library: File, dir: File, file: String, slot: Slot, name: String?, freshIdentity: Boolean = false, n: Int = 0): Card? {
+    fun moveIn(library: File, dir: File, file: String, slot: Slot, name: String?, freshIdentity: Boolean = false, n: Int = 0, preserveLinkedKey: Boolean = false): Card? {
         val d = describedCard(descriptorsOf(sessionFile(dir)).second, file)
         val logical = cardHeader(File(dir, file))?.second ?: 0L
         var fresh = freshIdentity
@@ -387,7 +387,7 @@ object Cards {
         // A frond-68k save's row for this slot gives the key its saved changes are bound to.
         linkedRowFor(sessionFile(dir), n)?.takeIf { it.stick == (card.kind != "sd") }?.let { row ->
             card = card.copy(writeProtected = row.writeProtected, type = if (card.kind == "sd") row.protocol else "sd",
-                key = if (freshIdentity) null else row.key.takeIf { validKey(it) })
+                key = if (freshIdentity && !preserveLinkedKey) null else row.key.takeIf { validKey(it) })
         }
         val to = entryDir(library, id)
         if (!to.mkdirs() || !writeCard(to, card)) {
@@ -1376,7 +1376,7 @@ object Cards {
     // An imported machine's packed card becomes a new library card, named from slot.json or
     // `fallbackName`, with its own serial (the machine it came from may still have the card);
     // links aren't carried over.
-    fun adoptImportedCard(sessions: File, dir: File, fallbackName: String): String? {
+    fun adoptImportedCard(sessions: File, dir: File, fallbackName: String, preserveLinkedKey: Boolean = false): String? {
         val library = libraryFor(sessions)
         return LibraryLock(library).use { lock ->
             if (!lock.ok) return BUSY
@@ -1388,7 +1388,7 @@ object Cards {
                     continue
                 }
                 val name = slot.name ?: if (n == 0) fallbackName else "$fallbackName 2"
-                if (moveIn(library, dir, file, slot.copy(present = true, link = null), name, freshIdentity = true, n = n) == null)
+                if (moveIn(library, dir, file, slot.copy(present = true, link = null), name, freshIdentity = true, n = n, preserveLinkedKey = preserveLinkedKey) == null)
                     return "Couldn't save the session."
             }
             null

@@ -77,6 +77,25 @@ int main(int argc, char** argv) {
         cards.Install(RuntimeCards::Pair{});
     }
     assert(generations(old, card.filename().string()) > 0);
+    // Export the committed bytes without consuming the source or its history.
+    {
+        const auto copy = root / "copy.frondsd";
+        const auto original = generations(old, card.filename().string());
+        struct stat st{};
+        assert(::stat(card.c_str(), &st) == 0);
+        const auto stamp = std::to_string(uint64_t(st.st_dev)) + ' ' + std::to_string(uint64_t(st.st_ino)) + ' ' +
+                           std::to_string(frondPosix::MtimeNs(st));
+        const auto args = "copy-linked " + card.string() + " " + copy.string() + " " + key + " ";
+        assert(run(args + "\"0 0 0\" 1 " + std::to_string(size) + " sd").rfind("error unsettled", 0) == 0);
+        assert(!std::filesystem::exists(copy));
+        const auto descriptor = "\"" + stamp + "\" 1 " + std::to_string(size) + " sd";
+        assert(run(args + descriptor) == "ok copied");
+        assert(run(args + descriptor).rfind("error exists", 0) == 0);
+        assert(generations(old, card.filename().string()) == original);
+        std::ifstream in(copy, std::ios::binary);
+        in.seekg(frondSdFile::headerBytes + (1 << 20));
+        assert(in.read(reinterpret_cast<char*>(got), sizeof got) && !memcmp(got, written, sizeof got));
+    }
     // A Files change or a held generation left beside it stops the move.
     {
         const auto held = old / (".held-.gen-" + card.filename().string() + "-root");
@@ -166,7 +185,7 @@ int main(int argc, char** argv) {
     usleep(20000);
     { std::ofstream(other / ".settling-sd.frondsd") << stamp(drawer) << '\n'; }
     assert(generations(other, "sd.frondsd") > 0);
-    assert(run("settle-linked " + drawer.string() + " " + key) == "ok settled 0");
+    assert(run("recover-linked " + drawer.string()) == "ok recovered");
     assert(generations(other, "sd.frondsd") == 0 && !std::filesystem::exists(other / ".settling-sd.frondsd"));
     // A mark left after the generations went, then a machine took the card and wrote new ones:
     // those are newer than the mark and stay (the card stays unsettled), and the mark goes.

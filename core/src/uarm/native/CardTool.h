@@ -465,15 +465,20 @@ inline bool finishSettle(const std::filesystem::path& card) {
         if (written) std::filesystem::remove(temp, ec);
         return true;
     }
-    if (written) std::filesystem::remove(temp, ec);
-    else {
+    if (written) {
+        std::filesystem::remove(temp, ec);
+        if (ec) return false;
+    } else {
         std::string stamp;
         std::getline(std::ifstream(mark), stamp);
         const uint64_t markedAt = changedAt(mark);
         bool stale = !stamp.empty() && stamp == fileStamp(card) && markedAt;
         for (const auto& path : linkedGenerations(card))
             if (changedAt(path) > markedAt) stale = false;
-        if (stale) FileCardBacking::DiscardGenerations(card);
+        if (stale) {
+            FileCardBacking::DiscardGenerations(card);
+            if (!linkedGenerations(card).empty()) return false;
+        }
     }
     if (!frondStorage::syncDir(dir)) return false;
     std::filesystem::remove(mark, ec);
@@ -524,6 +529,12 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
         if (!ok && (writeError == ENOSPC || writeError == EDQUOT))
             return fail("space", "Not enough free space to write the card's changes.");
         return fail("write", "Couldn't write the card file.");
+    }
+    // Hold both inodes across the rename so another opener can't see the new base with the old history.
+    CardLock replacement(temp);
+    if (replacement.fd < 0) {
+        std::filesystem::remove(temp, ec);
+        return fail("busy", "Couldn't lock the settled card.");
     }
     // The mark, then the swap: see finishSettle.
     {
@@ -589,6 +600,54 @@ inline bool moveNoReplace(const std::filesystem::path& from, const std::filesyst
     struct stat st{};
     if (::lstat(to.c_str(), &st) == 0 || errno != ENOENT) return false;
     return ::rename(from.c_str(), to.c_str()) == 0;
+}
+
+// Copy the committed card contents without changing the old session's backing or history.
+inline Result copyLinked(const std::filesystem::path& source, const std::filesystem::path& dest,
+                         const std::string& key, const std::string& stamp, uint64_t history,
+                         uint64_t size, bool classic, const Progress& progress) {
+    CardLock lock(source);
+    if (lock.fd < 0) return fail("read", "Couldn't lock the session's card file.");
+    struct stat held{}, named{};
+    if (::fstat(lock.fd, &held) != 0 || ::lstat(source.c_str(), &named) != 0 ||
+        held.st_dev != named.st_dev || held.st_ino != named.st_ino || !S_ISREG(held.st_mode) ||
+        fileStamp(source) != stamp || linkedUnsettled(source))
+        return fail("unsettled", "The session's card file changed or has an unfinished write.");
+    std::error_code ec;
+    if (std::filesystem::exists(dest, ec) || ec)
+        return fail("exists", "The destination must be a new file.");
+    frondSdFile::Info info;
+    std::vector<uint32_t> table;
+    if (frondMachine::readSdHeader(source, info, &table) != frondMachine::SiblingStatus::ok ||
+        info.nand || info.classic != classic || (classic ? info.stored() : info.payloadBytes) != size ||
+        (info.version == frondSdFile::versionV1 && frondMachine::checkSdPayload(source, info, table) != frondMachine::SiblingStatus::ok))
+        return fail("image", "The session's card file doesn't match.");
+    FileCardOptions options;
+    options.rejectInvalidRoot = true;
+    options.requireRoot = true;
+    options.keepHeld = true;
+    options.minimumRoot = history;
+    options.identity = key;
+    options.chunkCrcs = std::move(table);
+    auto backing = FileCardBacking::Open(source, size, frondSdFile::headerBytes, options);
+    if (!backing) return fail("unsettled", "The card's saved changes can't be read.");
+    Run run{progress};
+    auto read = [&](uint64_t off, uint64_t count, uint8_t* out) {
+        return backing->Read(off, count, out) && run.report(off + count, size);
+    };
+    std::array<uint8_t, frondMachine::identityBytes> identity{};
+    identity[0] = 1;
+    const auto shape = classic ? frondSession::msShape(size) : frondSession::StoredShape{};
+    std::string pattern = (folderOf(dest) / ".linked-copy-XXXXXX").string();
+    if (!::mkdtemp(pattern.data())) return fail("write", "Couldn't create a folder for the card copy.");
+    const auto staging = std::filesystem::path(pattern) / "card";
+    Result result = {true, "", "copied"};
+    if (!frondSession::writeSdFromReader(staging, size, read, identity, 1, shape))
+        result = fail(run.cancelled ? "cancelled" : "write", "Couldn't copy the session's card.");
+    else if (!moveNoReplace(staging, dest))
+        result = fail("write", "Couldn't publish the card copy. The destination must be a new file.");
+    std::filesystem::remove_all(pattern, ec);
+    return result;
 }
 
 // Moves a linked card file and its generations to TO, under TO's name, never replacing a file. The
@@ -702,6 +761,20 @@ inline Result run(const std::vector<std::string>& args, const Progress& progress
         result = settleCard(args[1]);
     } else if (args.size() == 3 && args[0] == "settle-linked") {
         result = settleLinked(args[1], args[2]);
+    } else if (args.size() == 2 && args[0] == "recover-linked") {
+        CardLock lock(args[1]);
+        if (lock.fd < 0) return fail("busy", "Couldn't lock the session's card file.");
+        if (!finishSettle(args[1])) return fail("write", "Couldn't finish writing the card's saved changes.");
+        result = {true, "", "recovered"};
+    } else if (args.size() == 8 && args[0] == "copy-linked") {
+        const auto number = [](const std::string& text, uint64_t& out) {
+            if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) return false;
+            try { out = std::stoull(text); return true; } catch (const std::exception&) { return false; }
+        };
+        uint64_t history, size;
+        if (!number(args[5], history) || !number(args[6], size) || (args[7] != "sd" && args[7] != "ms"))
+            return fail("usage", "Invalid linked card descriptor.");
+        result = copyLinked(args[1], args[2], args[3], args[4], history, size, args[7] == "ms", progress);
     } else if (args.size() == 3 && args[0] == "move-linked") {
         result = moveLinked(args[1], args[2]);
     } else if (args.size() == 2 && args[0] == "verify") {

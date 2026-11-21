@@ -510,37 +510,34 @@ inline QString toMachine(const QString& library, const QString& id, const QStrin
 // success or when there are none.
 inline QString settleGenerations(const QString& library, const QString& dir, int n) {
     const auto file = cardFileIn(dir, n);
-    if (file.isEmpty() || !hasGenerations(dir, file)) return {};
+    if (file.isEmpty()) return {};
+    const bool cutOff = QFileInfo::exists(dir + QStringLiteral("/.settling-") + file);
+    if (!cutOff && !hasGenerations(dir, file)) return {};
     const auto frond = frondSessions::sessionFrondIn(dir);
     const bool linked = linkedSession(frond);
-    if (!linked && QFileInfo(frond).isFile()) return {};
+    if (!cutOff && !linked && QFileInfo(frond).isFile()) return {};
     auto slot = readSlot(dir, n);
     Card card;
     QString key;
     if (!slot.card.isEmpty() && readCard(entryDir(library, slot.card), &card)) key = card.key;
     LinkedRow row;
     if (!validKey(key) && linked && linkedRowFor(frond, n, &row)) key = row.key;
-    if (!validKey(key)) return linked ? QStringLiteral("The card's saved changes can't be read.") : QString();
+    const auto unreadable = QStringLiteral("The card's saved changes can't be read.");
+    if (!cutOff && !validKey(key)) return linked ? unreadable : QString();
     if (!slot.swap) {
         slot.present = true;
         slot.swap = true;
         if (!writeSlot(dir, slot, n)) return QStringLiteral("Couldn't write the card's saved changes.");
     }
+    // After the rename the old generations can be removed without a key.
+    if (cutOff) {
+        const auto recovered = runCardTool(cardTool(), {QStringLiteral("recover-linked"), dir + '/' + file});
+        if (!recovered.ok) return recovered.message;
+        if (!hasGenerations(dir, file)) return {};
+        if (!validKey(key)) return unreadable;
+    }
     const auto r = runCardTool(cardTool(), {QStringLiteral("settle-linked"), dir + '/' + file, key});
     return r.ok ? QString() : r.message;
-}
-
-// A settle-linked cut off beside slot n's card (its .settling-<file> mark is there) is finished
-// before frond-68k sees the card, so the card isn't left out of its slot. Machine lock held.
-inline void finishCutOffSettle(const QString& library, const QString& dir, int n) {
-    const auto file = cardFileIn(dir, n);
-    if (file.isEmpty() || !QFileInfo::exists(dir + QStringLiteral("/.settling-") + file)) return;
-    if (hasGenerations(dir, file) && settleGenerations(library, dir, n).isEmpty()) return;
-    // No saved changes left: the tool only clears the mark, and the key isn't used.
-    Card card;
-    const auto slot = readSlot(dir, n);
-    QString key = !slot.card.isEmpty() && readCard(entryDir(library, slot.card), &card) && validKey(card.key) ? card.key : QString(32, '0');
-    runCardTool(cardTool(), {QStringLiteral("settle-linked"), dir + '/' + file, key});
 }
 
 // Hidden copy folders in the library: cards/.new-<id>, locked by cards/.new-<id>.lock while a copy
@@ -870,13 +867,23 @@ inline QString startAttachArgument(const QString& sessions, const QString& dir, 
 // if it is in the drawer. Returns the flags for the core; `heldBy` gets, per slot, the holder's
 // name when another machine has the linked card.
 inline QStringList takeAtStart(const QString& sessions, const QString& dir, QString* heldBy = nullptr, QString* heldBy2 = nullptr,
-                               bool m68k = false) {
+                               bool m68k = false, QString* error = nullptr) {
     const auto library = libraryFor(sessions);
+    if (error) error->clear();
+    if (m68k) {
+        for (int n = 0; n < slotCount; ++n) {
+            const auto file = cardFileIn(dir, n);
+            if (file.isEmpty() || !QFileInfo::exists(dir + QStringLiteral("/.settling-") + file)) continue;
+            const auto recovery = settleGenerations(library, dir, n);
+            if (!recovery.isEmpty()) {
+                if (error) *error = recovery;
+                return {};
+            }
+        }
+    }
     // The machine lock is held, so its cards can be settled even if the library is busy.
     for (int n = 0; n < slotCount; ++n)
         if (const auto file = cardFileIn(dir, n); !file.isEmpty()) frondCardFile::settle(dir + '/' + file);
-    if (m68k)
-        for (int n = 0; n < slotCount; ++n) finishCutOffSettle(library, dir, n);
     LibraryLock lock(library);
     if (lock.ok) {
         reconcileLocked(sessions, dir);

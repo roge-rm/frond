@@ -377,7 +377,10 @@ class DanaCardsTest : public QObject {
         // A settle mark a crash left beside the card is cleared at start, the card left in its slot.
         { QFile mark(a+"/.settling-sd.frondsd"); QVERIFY(mark.open(QIODevice::WriteOnly)); mark.write("1 2 3\n"); }
         qputenv("FROND_CARD_TOOL",tool.toUtf8());
-        frondCards::takeAtStart(sessions,a,nullptr,nullptr,true);
+        QString recoveryError;
+        QCOMPARE(frondCards::takeAtStart(sessions,a,nullptr,nullptr,true,&recoveryError), QStringList({"--card-swap"}));
+        QVERIFY(recoveryError.isEmpty());
+        QVERIFY(!frondCards::startAttachArgument(sessions,a,0).isEmpty());
         qunsetenv("FROND_CARD_TOOL");
         QVERIFY(!QFileInfo::exists(a+"/.settling-sd.frondsd")); QVERIFY(QFileInfo::exists(a+"/sd.frondsd"));
         QCOMPARE(frondCards::moveLinkedIn(sessions,b,old,tool),0);

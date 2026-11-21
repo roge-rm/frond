@@ -87,6 +87,80 @@ class DanaCardsTest {
         assertNotNull(duplicateMachine(tmp.root,from,dest,{ false },CardChoice.COPY)); assertFalse(dest.exists())
         try { zipPackable(from,ByteArrayOutputStream()); fail() } catch (_: java.io.IOException) {}
     }
+    @Test fun legacyCardsAreCopiedAndTravelWithTheSession() {
+        val first = File(old, "first.frondsd")
+        first.writeBytes(CardFile.encodeV2(ByteArray(32 shl 20) { 0x37 }, 1))
+        val from = machine("Dana", rows = row(0, first, key, protect = 1, insert = 0))
+        val secondCard = Cards.Card("other", "Second", "sd", Cards.now(), from.name,
+            32L shl 20, Cards.newIdentity(), false, key = second)
+        val entry = Cards.entryDir(library, secondCard.id)
+        assertTrue(entry.mkdirs() && Cards.writeCard(entry, secondCard))
+        first.copyTo(File(from, "sd2.frondsd"))
+        assertTrue(Cards.writeSlot(from, Cards.Slot(present = true, card = secondCard.id, swap = true), 1))
+        val copy = File(sessions, "Dana copy")
+        assertEquals(listOf(CardChoice.COPY, CardChoice.NONE), CardChoices.duplicateChoices(sessions, from))
+        assertNull(duplicateMachine(sessions, from, copy, { false }, CardChoice.COPY))
+        assertTrue(first.isFile)
+        assertEquals(key, Cards.readCard(Cards.entryDir(library, Cards.readSlot(copy).card!!))!!.key)
+        assertTrue(Cards.startAttachArgument(sessions, copy, 0)!!.endsWith(" protected sd ejected"))
+        assertTrue(File(copy, "sd2.frondsd").isFile)
+
+        val archive = tmp.newFolder()
+        assertNull(DanaSession.stage(sessionFile(from)!!, archive, packed = false, library = library))
+        val zipped = ByteArrayOutputStream()
+        zipPackable(archive, zipped, linked = true)
+        first.delete()
+        val unpacked = tmp.newFolder()
+        assertTrue(unzipPackable(zipped.toByteArray().inputStream(), unpacked))
+        val imported = tmp.newFolder()
+        assertNull(DanaSession.stage(sessionFile(unpacked)!!, imported, packed = true))
+        assertEquals(32L shl 20, Cards.cardHeader(File(imported, "sd.frondsd"))!!.second)
+        assertEquals(32L shl 20, Cards.cardHeader(File(imported, "sd2.frondsd"))!!.second)
+        assertTrue(Cards.readSlot(imported).swap)
+        assertFalse(Cards.linkedRowFor(sessionFile(imported), 0)!!.inserted)
+    }
+
+    @Test fun portableArchiveRequiresItsOwnCardAndChecksum() {
+        val source = tmp.newFolder()
+        val target = tmp.newFolder()
+        val sd = File(source, "sd0.frondsd")
+        sd.writeBytes(CardFile.encodeV2(ByteArray(32 shl 20), 1))
+        val crc = le32(CardFile.header(sd)!!, 24)
+        val good = portable.substringBefore("2 sd").replace("123 sd", "$crc sd")
+        val save = fixture(good, portable = true, into = File(source, "machine.frond"))
+        assertNull(DanaSession.stage(save, target, packed = true))
+        sd.delete()
+        assertNotNull(DanaSession.stage(save, tmp.newFolder(), packed = true))
+    }
+
+    @Test fun classicStickArchiveUsesNominalCapacity() {
+        val source = tmp.newFolder()
+        val payload = 494 * 8192
+        val side = 2 * 8192 + 9 * 512 * 16 + 4 * 512 + 16 * 8192
+        val chunk = 1 shl 20
+        val stored = (payload + chunk - 1) / chunk * chunk + side
+        val bytes = ByteArray(stored)
+        val table = ByteArrayOutputStream()
+        for (start in 0 until stored step chunk) {
+            val crc = CRC32().also { it.update(bytes, start, minOf(chunk, stored - start)) }.value
+            table.write(le(crc, 4))
+        }
+        val card = File(source, "ms.frondms")
+        val header = "FRONDMS\u0000".toByteArray() + le(2, 4) + le(512, 4) + le(payload.toLong(), 8) +
+            le(0, 4) + le(1, 8) + le(64L + stored, 8) + le(chunk.toLong(), 4) + le(side.toLong(), 8) + ByteArray(8)
+        val checksum = CRC32().also { it.update(header); it.update(table.toByteArray()) }.value
+        card.outputStream().use { out ->
+            out.write(header.copyOfRange(0, 24) + le(checksum, 4) + header.copyOfRange(28, 64))
+            out.write(bytes)
+            table.writeTo(out)
+        }
+        val manifest = "frond-linked-sd 3\n1 ms \"/frond-archive/ms.frondms\" $key 305419896 $stored 1 0 0 0 0 sd 0\n"
+        val save = fixture(manifest, name = "sony-clie-t415", into = File(source, "session.frond"))
+        val target = tmp.newFolder()
+        assertNull(DanaSession.stage(save, target, packed = true))
+        assertEquals(4L shl 20, Cards.cardHeader(File(target, "ms.frondms"))!!.second)
+    }
+
     // A Dana whose save links the cards in its own folder duplicates; each slot the save lists loads
     // empty in the copy and its own card goes in by path, card 1 still ejected.
     @Test fun duplicateDanaWithCardsInItsFolder() {
@@ -154,6 +228,12 @@ class DanaCardsTest {
                 for (g in from.parentFile.listFiles { f -> f.name.startsWith(".gen-${from.name}-") }.orEmpty())
                     g.renameTo(File(to.parentFile, ".gen-${to.name}-" + g.name.removePrefix(".gen-${from.name}-")))
                 from.renameTo(to); "ok moved"
+            }
+            "copy-linked" -> {
+                val from = File(args[1])
+                if (!from.isFile) return "error read Missing card."
+                from.copyTo(File(args[2]))
+                "ok copied"
             }
             "settle-linked" -> {
                 val card = File(args[1])
