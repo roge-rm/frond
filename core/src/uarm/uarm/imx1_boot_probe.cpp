@@ -223,6 +223,15 @@ struct Probe {
             return false;
         }
     } codeHooks;
+    // quietWriteClocks' last count, with what it depends on. Host side, not saved.
+    struct QuietWriteMemo {
+        Imx1Cs5Mode mode;
+        Imx1PllRatio bus;
+        uint64_t numerator, denominator;
+        uint32_t clocks;
+        bool ok, known;
+    };
+    mutable QuietWriteMemo quietWriteMemo{};
     // Passes through the wait loop. A host count for tests, the skip makes fewer of them than idle periods.
     uint64_t idleAdvances = 0;
     bool boundReached() {
@@ -313,10 +322,12 @@ struct Probe {
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
     // graphicsGpu, graphicsDma, graphicsUndo and the lean read rates, left out of the saved layout's size, and
-    // mmcsdCardId, saved in a section of its own, slot 2's card part, saved in its SD2 section, and the pc stop.
+    // mmcsdCardId, saved in a section of its own, slot 2's card part, saved in its SD2 section, the pc stop, the code
+    // hooks and the quietWriteClocks memo.
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
                                            sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
-                                           Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks);
+                                           Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks) +
+                                           sizeof(QuietWriteMemo);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -887,7 +898,7 @@ struct Probe {
             return false;
         const auto rate = cs5Configuration.clockState().systemRate();
         // The count below depends only on the mode, the bus period and the system rate; the last one is kept.
-        static thread_local struct { Imx1Cs5Mode mode; Imx1PllRatio bus; uint64_t numerator, denominator; uint32_t clocks; bool ok, known; } last{};
+        auto& last = quietWriteMemo;
         if (last.known && last.mode == mode && last.bus.numerator == busPeriod.numerator &&
             last.bus.denominator == busPeriod.denominator && last.numerator == rate.numerator &&
             last.denominator == rate.denominator) {
