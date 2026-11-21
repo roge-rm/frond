@@ -8,6 +8,29 @@
 #include <sys/stat.h>
 
 namespace fs = std::filesystem;
+#ifdef _WIN32
+int main(int argc, char** argv) {
+    assert(argc == 2);
+    const auto folder = fs::absolute(argv[1]);
+    fs::create_directories(folder);
+    const auto path = folder / "job.raw";
+    const auto contents = [&] {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    { std::ofstream out(path, std::ios::binary); out << "original"; }
+    RawPrintFile file(path.string());
+    const uint8_t bytes[] = {0, 10, 13, 26};
+    using Publication = RawPrintJob::Publication;
+    assert(RawPrintFile::Output(&file, bytes, sizeof(bytes)) == Publication::rejected);
+    assert(contents() == "original");
+    fs::remove(path);
+    assert(RawPrintFile::Output(&file, bytes, sizeof(bytes)) == Publication::published);
+    assert(contents() == std::string(reinterpret_cast<const char*>(bytes), sizeof(bytes)));
+    fs::remove(path);
+    assert(fs::is_empty(folder));
+}
+#else
 static bool failCleanup=false, failWrite=false;
 static unsigned writes=0, cleanupCalls=0;
 extern "C" ssize_t __real_write(int, const void*, size_t);
@@ -120,3 +143,5 @@ int main(int argc,char** argv) {
     }
     std::cout<<"PASS rename when links are refused; search-only parent; partial write, refused publication and close failure retain private staging with uncertain state and path; directory flush failure after cleanup is rejected with the path; no callback replay\n";
 }
+
+#endif

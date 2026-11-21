@@ -198,6 +198,8 @@ struct LinkedRow {
     int n{0};  // the library slot: 0 for card 1 or the stick, 1 for card 2
     bool stick{false}, writeProtected{false}, inserted{true};
     QString path, key, protocol;
+    quint64 bytes{0};
+    bool detached{false};
 };
 inline QList<LinkedRow> linkedRows(const QString& frond) {
     QList<LinkedRow> rows;
@@ -225,6 +227,8 @@ inline QList<LinkedRow> linkedRows(const QString& frond) {
         }
         row.path = path;
         row.key = f[3];
+        row.bytes = f[5].toULongLong();
+        row.detached = f[8] == "0" && f[9] == "0" && f[10] == "0" && f[12] == "0";
         row.writeProtected = f[6] == "1";
         row.inserted = f[7] != "0";
         row.protocol = f[11] == "mmc" ? QStringLiteral("mmc") : QStringLiteral("sd");
@@ -363,7 +367,7 @@ struct Machine {
 // card another entry has) the card gets a new serial and the slot swap, so the core loads it as
 // a different card: two cards with one serial would look unchanged to each other's machines.
 inline bool moveIn(const QString& library, const QString& dir, const QString& file, Slot slot, const QString& name, Card* made = nullptr,
-                   bool freshIdentity = false, int n = 0) {
+                   bool freshIdentity = false, int n = 0, bool preserveLinkedKey = false) {
     Card card;
     card.id = newId();
     card.kind = kindOfFile(file);
@@ -384,7 +388,7 @@ inline bool moveIn(const QString& library, const QString& dir, const QString& fi
     if (linkedRowFor(frondSessions::sessionFrondIn(dir), n, &row) && row.stick == (card.kind != "sd")) {
         card.writeProtected = row.writeProtected;
         if (card.kind == "sd") card.type = row.protocol;
-        if (!freshIdentity) card.key = row.key;
+        if (!freshIdentity || preserveLinkedKey) card.key = row.key;
     }
     card.name = freeCardName(library, name.isEmpty() ? QFileInfo(dir).fileName() + (n ? " card 2" : " card") : name);
     const auto to = entryDir(library, card.id);

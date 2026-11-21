@@ -16,6 +16,7 @@
 #include <QLockFile>
 #include <QString>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <algorithm>
 #include <filesystem>
 #include <functional>
@@ -31,6 +32,7 @@
 #include <unistd.h>
 #include "FirmwareInput.h"
 #include "storage/Packed.h"
+#include "zip/miniz.h"
 #include "DanaView.h"
 #include "DanaSession.h"
 
@@ -923,8 +925,8 @@ inline bool copyChunked(const QString& from, const QString& to, qint64* done, qi
 // source unless a save journal has to be applied to a copy first. `progress` gets the bytes copied
 // and packed as one count; false from it stops the copy with cancelledText().
 inline QString copyPackable(const QString& fromDir, const QString& toDir, const QString& newName,
-                            const CopyProgress& progress = {}, bool packNandFile = false) {
-    if (frondDanaSession::inspect(sessionFrondIn(fromDir)).wrapped)
+                            const CopyProgress& progress = {}, bool packNandFile = false, bool checkedArchive = false) {
+    if (!checkedArchive && frondDanaSession::inspect(sessionFrondIn(fromDir)).wrapped)
         return QStringLiteral("This session has independent cards. Open it and export a portable folder.");
     const QString failed = QStringLiteral("Couldn't save the session.");
     if (!QDir().mkpath(toDir)) return failed;
@@ -1323,35 +1325,83 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
 // After an import's files are copied in: a packed card becomes a new library card, named from
 // slot.json or "<machine> card", with its own serial (the machine it came from may still have
 // the card); links aren't carried over.
-inline QString adoptImportedCard(const QString& folder, const QString& dir) {
+inline QString adoptImportedCard(const QString& folder, const QString& dir, bool preserveLinkedKey = false) {
     const auto library = frondCards::libraryFor(folder);
     frondCards::LibraryLock lock(library);
     if (!lock.ok) return frondCards::busyMessage();
+    QStringList made;
+    const auto fail = [&] {
+        for (const auto& id : made) QDir(frondCards::entryDir(library, id)).removeRecursively();
+        return QStringLiteral("Couldn't save the session.");
+    };
     for (int n = 0; n < frondCards::slotCount; ++n) {
         auto slot = frondCards::readSlot(dir, n);
         const auto file = frondCards::cardFileIn(dir, n);
         if (file.isEmpty()) {
             if (!slot.present) continue;
             slot.card.clear(); slot.link.clear();
-            if (!frondCards::writeSlot(dir, slot, n)) return QStringLiteral("Couldn't save the session.");
+            if (!frondCards::writeSlot(dir, slot, n)) return fail();
             continue;
         }
         slot.present = true;
         slot.link.clear();
-        if (!frondCards::moveIn(library, dir, file, slot, slot.name, nullptr, true, n)) return QStringLiteral("Couldn't save the session.");
+        frondCards::Card card;
+        if (!frondCards::moveIn(library, dir, file, slot, slot.name, &card, true, n, preserveLinkedKey)) return fail();
+        made << card.id;
     }
     return {};
 }
 
+// Android writes a linked wrapper with detached paths and ordinary card siblings. Only
+// the siblings in this archive are eligible to attach when the imported machine starts.
+inline QString checkAndroidCards(const QString& dir, const QString& frond, const frondDanaSession::Header& header,
+                                 const CopyProgress& progress) {
+    const auto mismatch = QStringLiteral("That archive's card files don't match the session.");
+    if (header.portable || !header.valid) return mismatch;
+    const auto* profile = deviceProfileNamed5(header.device.toLatin1().constData());
+    if (!profile) return mismatch;
+    QSet<QString> expected;
+    const auto rows = frondCards::linkedRows(frond);
+    if (rows.isEmpty()) return mismatch;
+    for (const auto& row : rows) {
+        const QString name = row.stick ? "ms.frondms" : row.n ? "sd2.frondsd" : "sd.frondsd";
+        const auto slotId = row.n ? DeviceCardSlot5::sd2 : DeviceCardSlot5::sd0;
+        const auto family = row.protocol == "mmc" ? DeviceCardFamily5::legacyMmc : DeviceCardFamily5::sdsc;
+        if (!row.detached || row.path != "/frond-archive/" + name || !frondCards::readSlot(dir, row.n).swap ||
+            (row.stick ? !deviceProfileLinkedStick5(*profile) :
+             !deviceProfileCardSizeValid5(profile->deviceType, slotId, family, row.bytes))) return mismatch;
+        expected.insert(name);
+        const auto path = dir + '/' + name;
+        if (!QFileInfo::exists(path)) continue;  // A swapped slot can be empty.
+        frondSdFile::Info info;
+        const auto verified = frondStorage::verify(std::filesystem::u8path(path.toUtf8().constData()), info, progress);
+        if (verified.code == "cancelled") return cancelledText();
+        if (!verified.ok || info.version != frondSdFile::versionV2 || info.nand || info.classic != row.stick ||
+            info.stored() != row.bytes) return mismatch;
+        if (row.stick) {
+            qint64 bytes = 0;
+            if (!frondCards::cardHeader(path, nullptr, &bytes) ||
+                !deviceProfileMsSizeValid5(profile->deviceType, bytes >> 20)) return mismatch;
+        }
+    }
+    for (const auto* name : {"sd.frondsd", "sd2.frondsd", "ms.frondms", "ms.frondmsp", "nand.frondnand", "nand.frondnand.gz"})
+        if (QFileInfo::exists(dir + '/' + name) && !expected.contains(name)) return mismatch;
+    return {};
+}
+
 inline QString importFolder(const QString& folder, const QString& from, QString* newName = nullptr,
-                            const std::function<bool(qint64, qint64)>& progress = {}) {
+                            const std::function<bool(qint64, qint64)>& progress = {}, const QString& archiveName = {}) {
     const auto frond = sessionFrondIn(from);
-    if (frondDanaSession::inspect(frond).wrapped)
+    const auto wrapped = frondDanaSession::inspect(frond);
+    if (wrapped.wrapped && archiveName.isEmpty())
         return QStringLiteral("Importing an independent-card session isn't available yet. Keep its complete portable folder.");
     const auto header = readHeader(frond);
     if (const auto error = importError(header); !error.isEmpty()) return error;
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
-    auto base = cleanName(QFileInfo(from).fileName());
+    if (wrapped.wrapped) {
+        if (const auto error = checkAndroidCards(from, frond, wrapped, progress); !error.isEmpty()) return error;
+    }
+    auto base = cleanName(archiveName.isEmpty() ? QFileInfo(from).fileName() : archiveName);
     if (base.isEmpty()) base = frondFirmware::deviceName(frondFirmware::deviceFromId(header.device));
     const auto name = reserve(folder, base, header.device);
     if (name.isEmpty()) return QStringLiteral("Couldn't save the session.");
@@ -1367,7 +1417,7 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
     const CopyProgress unpackWatch = [&](qint64 done, qint64 total) {
         return !progress || progress(copied + done, copied + total);
     };
-    if (const auto error = copyPackable(from, dest, name, copyWatch); !error.isEmpty()) {
+    if (const auto error = copyPackable(from, dest, name, copyWatch, false, wrapped.wrapped); !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
     }
@@ -1380,7 +1430,7 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         QDir(dest).removeRecursively();
         return error;
     }
-    if (const auto error = adoptImportedCard(folder, dest); !error.isEmpty()) {
+    if (const auto error = adoptImportedCard(folder, dest, wrapped.wrapped); !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
     }
@@ -1388,11 +1438,60 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
     return {};
 }
 
+inline QString importArchive(const QString& folder, const QString& from, QString* newName, const CopyProgress& progress) {
+    const auto invalid = QStringLiteral("Couldn't read that Frond session archive.");
+    if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
+    QTemporaryDir staged(QFileInfo(folder).absolutePath() + "/.import-XXXXXX");
+    if (!staged.isValid()) return QStringLiteral("Couldn't save the session.");
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_file(&zip, QFile::encodeName(from).constData(), 0)) return invalid;
+    struct Archive { mz_zip_archive& zip; ~Archive() { mz_zip_reader_end(&zip); } } close{zip};
+    int sessions = 0;
+    const auto count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count; ++i) {
+        mz_zip_archive_file_stat entry{};
+        if (!mz_zip_reader_file_stat(&zip, i, &entry)) return invalid;
+        if (mz_zip_reader_is_file_a_directory(&zip, i)) continue;
+        const auto name = QString::fromUtf8(entry.m_filename);
+        if (name != "session.frond" && name != "sd.frondsd" && name != "sd2.frondsd" &&
+            name != "ms.frondms" && name != "ms.frondmsp" && name != "nand.frondnand" &&
+            name != "slot.json" && name != "slot2.json" && name != "session.frond.settings.json") return invalid;
+        if (name == "session.frond" && ++sessions > 1) return invalid;
+        const quint64 limit = name.endsWith(".frond") ? 512ull << 20
+                            : name.endsWith(".json") ? 1ull << 20
+                            : (2048ull << 20) + (1ull << 20);
+        if (entry.m_uncomp_size > limit) return invalid;
+        QFile file(staged.filePath(name));
+        if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) return invalid;
+        struct Write {
+            QFile& file;
+            const CopyProgress& progress;
+            qint64 size;
+            bool cancelled = false;
+        } write{file, progress, qint64(entry.m_uncomp_size)};
+        const auto append = [](void* context, mz_uint64 offset, const void* bytes, size_t size) -> size_t {
+            auto& state = *static_cast<Write*>(context);
+            const auto limit = mz_uint64(state.size);
+            if (offset > limit || size > limit - offset) return 0;
+            if (state.progress && !state.progress(qint64(offset + size), state.size)) {
+                state.cancelled = true;
+                return 0;
+            }
+            return state.file.write(static_cast<const char*>(bytes), qint64(size)) == qint64(size) ? size : 0;
+        };
+        if (!mz_zip_reader_extract_to_callback(&zip, i, append, &write, 0) || !file.flush() || file.size() != write.size)
+            return write.cancelled ? cancelledText() : invalid;
+    }
+    if (sessions != 1) return invalid;
+    return importFolder(folder, staged.path(), newName, progress, QFileInfo(from).completeBaseName());
+}
+
 // Copies a session file or machine folder in as a new session. Returns an error message, or empty and the new name.
 // `progress` follows the card copies and the NAND unpack; false stops it and gives cancelledText().
 inline QString importFile(const QString& folder, const QString& from, QString* newName = nullptr,
                           const std::function<bool(qint64, qint64)>& progress = {}) {
     if (QFileInfo(from).isDir()) return importFolder(folder, from, newName, progress);
+    if (QFileInfo(from).suffix().compare("zip", Qt::CaseInsensitive) == 0) return importArchive(folder, from, newName, progress);
     if (frondDanaSession::inspect(from).wrapped)
         return QStringLiteral("Importing an independent-card session isn't available yet. Keep its complete portable folder.");
     const auto header = readHeader(from);

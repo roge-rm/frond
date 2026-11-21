@@ -9,6 +9,7 @@
 #include <string>
 #ifdef _WIN32
 #include <random>
+#include <stdio.h>
 #endif
 
 // POSIX native output. Each finish needs a caller-chosen unique absolute destination.
@@ -44,7 +45,7 @@ class RawPrintFile {
     struct Staging { int& dir; const std::string& name; ~Staging() { if(dir>=0) unlinkat(dir,name.c_str(),0); } };
 #endif
 #ifdef _WIN32
-    // A private staging file in the same folder, renamed into place; rename won't replace a file.
+    // A private staging file in the same folder, published without replacing an existing file.
     RawPrintJob::Publication publish(const uint8_t* bytes,size_t size) {
         using P=RawPrintJob::Publication;
         error="Invalid absolute output path.";
@@ -58,7 +59,7 @@ class RawPrintFile {
         std::string temporary=".frond-print-";
         for(auto c:random) {temporary+="0123456789abcdef"[c>>4];temporary+="0123456789abcdef"[c&15];}
         const std::string stagingPath=path.substr(0,slash+1)+temporary;
-        int fd=open(stagingPath.c_str(),O_WRONLY|O_CREAT|O_EXCL,0600);
+        int fd=open(stagingPath.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_BINARY,0600);
         if(fd<0) {error="Cannot create private output.";return P::rejected;}
         bool ok=fault!=Fault::write;
         for(size_t offset=0;ok && offset<size;) {
@@ -68,7 +69,7 @@ class RawPrintFile {
         if(fsync(fd)!=0 || fault==Fault::flush) ok=false;
         if(close(fd)!=0 || fault==Fault::close) ok=false;
         if(!ok) {error="Output write, flush or close failed.";unlink(stagingPath.c_str());return P::rejected;}
-        if(fault==Fault::publish || rename(stagingPath.c_str(),path.c_str())!=0) {
+        if(fault==Fault::publish || !MoveFileExA_(stagingPath.c_str(),path.c_str(),8 /* MOVEFILE_WRITE_THROUGH */)) {
             error="Output publication refused; choose a new destination.";
             if(unlink(stagingPath.c_str())!=0) {error+=" Private staging file remains at "+stagingPath+". Do not retry automatically.";return P::uncertain;}
             return P::rejected;

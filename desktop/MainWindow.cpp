@@ -2456,7 +2456,7 @@ QString MainWindow::importSession(const QString& path) {
 }
 void MainWindow::importSessionDialog() {
     if (client.running()) return;
-    const auto path = QFileDialog::getOpenFileName(this, tr("Import session"), {}, tr("Frond sessions (*.frond *.session);;All files (*)"));
+    const auto path = QFileDialog::getOpenFileName(this, tr("Import session"), {}, tr("Frond sessions (*.frond *.session *.zip);;All files (*)"));
     if (path.isEmpty()) return;
     const auto error = importSession(path);
     if (error == frondSessions::cancelledText()) return;

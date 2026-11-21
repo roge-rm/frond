@@ -184,6 +184,57 @@ class SessionStoreTest : public QObject {
     QTemporaryDir directory{QDir::currentPath() + "/build/session-store-XXXXXX"};
     QString folder() const { return directory.filePath("sessions"); }
  private slots:
+    void androidCardArchive() {
+        QTemporaryDir root;
+        const auto folder = root.filePath("sessions");
+        const auto zipPath = root.filePath("Dana.zip");
+        const QByteArray manifest =
+            "frond-linked-sd 3\n"
+            "0 sd \"/frond-archive/sd.frondsd\" 12345678000000000000000000000000 305419896 33554432 1 0 0 0 0 sd 0\n"
+            "2 sd \"/frond-archive/sd2.frondsd\" 23456789000000000000000000000000 591751049 33554432 0 1 0 0 0 mmc 0\n";
+        const auto machine = header(9, "alphasmart-dana");
+        QByteArray wrapped = "FRONDLINKSD1\n";
+        put32(wrapped, manifest.size());
+        put32(wrapped, frondDanaSession::hash(machine));
+        put32(wrapped, frondDanaSession::hash(manifest));
+        wrapped += manifest + machine;
+        QByteArray payload(32 << 20, 'x');
+        frondSdFile::ChunkCrcs crcs;
+        crcs.add(reinterpret_cast<const uint8_t*>(payload.constData()), payload.size());
+        QByteArray card(64, '\0');
+        frondSdFile::makeHeaderV2(reinterpret_cast<uint8_t*>(card.data()), payload.size(), 1, crcs.table());
+        card += payload;
+        for (auto crc : crcs.table()) put32(card, crc);
+        mz_zip_archive zip{};
+        QVERIFY(mz_zip_writer_init_file(&zip, QFile::encodeName(zipPath).constData(), 0));
+        auto add = [&](const char* name, const QByteArray& data) {
+            return mz_zip_writer_add_mem(&zip, name, data.constData(), data.size(), MZ_BEST_SPEED);
+        };
+        QVERIFY(add("session.frond", wrapped));
+        QVERIFY(add("sd.frondsd", card));
+        QVERIFY(add("sd2.frondsd", card));
+        QVERIFY(add("slot.json", R"({"version":1,"swap":true,"link":"other"})"));
+        QVERIFY(add("slot2.json", R"({"version":1,"swap":true})"));
+        QVERIFY(mz_zip_writer_finalize_archive(&zip));
+        QVERIFY(mz_zip_writer_end(&zip));
+        QString name;
+        QCOMPARE(importFile(folder, zipPath, &name), QString());
+        QCOMPARE(name, QString("Dana"));
+        const auto dir = machineDir(folder, name);
+        QCOMPARE(frondCards::launchArguments(folder, dir, true), QStringList({"--card-swap"}));
+        QVERIFY(frondCards::readSlot(dir, 0).link.isEmpty());
+        QVERIFY(frondCards::startAttachArgument(folder, dir, 0).endsWith(" protected sd ejected"));
+        QVERIFY(frondCards::startAttachArgument(folder, dir, 1).endsWith(" writable mmc"));
+
+        const auto bad = root.filePath("Bad.zip");
+        QVERIFY(mz_zip_writer_init_file(&zip, QFile::encodeName(bad).constData(), 0));
+        QVERIFY(add("../session.frond", wrapped));
+        QVERIFY(mz_zip_writer_finalize_archive(&zip));
+        QVERIFY(mz_zip_writer_end(&zip));
+        QVERIFY(!importFile(folder, bad).isEmpty());
+        QVERIFY(!QFileInfo::exists(machineDir(folder, "Bad")));
+    }
+
     void initTestCase() { QVERIFY(directory.isValid()); QVERIFY(QDir().mkpath(folder())); }
     void cleanup() { QDir(folder()).removeRecursively(); QDir().mkpath(folder()); }
 
