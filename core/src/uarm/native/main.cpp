@@ -1591,11 +1591,11 @@ bool gFastEngineMissing = false;
             // pause and resume (which come as semaphores, not events) and checks AAudio.
             // On Android the filter gets touches and window events without a pump, so the
             // pump runs only after a window or app event and every 100 ms. X11 events only
-            // come in while SDL pumps, so the desktop pumps every 8 ms.
+            // come in while SDL pumps, so the desktop pumps every 2 ms (about 1% of a core).
 #ifdef __ANDROID__
             constexpr uint64_t pumpUsec = 100000;
 #else
-            constexpr uint64_t pumpUsec = 8000;
+            constexpr uint64_t pumpUsec = 2000;
 #endif
             uint64_t lastPump = 0;
             while (!link.Finished()) {
