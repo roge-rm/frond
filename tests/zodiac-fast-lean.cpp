@@ -12,8 +12,8 @@
 // ends as an Exact run does. Graphics memory loads of every width, the identity read and GPIO, AITC and ASP status
 // reads on the lean path give Exact's values. Fast blocks answer those reads and board writes in generated code,
 // take an IRQ such a write lets in within a block, answer CGM, timer and DMA register reads and watchdog and DISR
-// writes there, pass the ROM's timer delay loops (ARM and Thumb) at once and run exception returns and line-end
-// Thumb BL pairs.
+// writes there, pass the ROM's timer delay loops (ARM and Thumb) and its pen routine's ASP FIFO wait at once and run
+// exception returns and line-end Thumb BL pairs.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -1794,7 +1794,12 @@ void uartPolls() {
     const auto& e = exact.run.result;
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[8] == 0x41 + 48);
     same(plain, fast);
-    same(exact, fast);
+    // Fast passes a cycle before some graphics changes as a stall with no instruction (spanBoundary), where Exact
+    // runs part of a poll round, so it retires a few fewer instructions (99 of 70278 here) with Exact's registers,
+    // timer sum and ticks.
+    sameResult(exact, fast);
+    assert(exact.cheap.time.ticks == fast.cheap.time.ticks && fast.cheap.status == exact.cheap.status);
+    assert(fast.cheap.retired <= exact.cheap.retired && fast.cheap.retired * 100 >= exact.cheap.retired * 99);
     sameExact(exactPlain, exact);
     assert(n >= 40 && r >= 10000);
     assert(en >= 40 && er >= 10000);
@@ -1915,10 +1920,13 @@ void delayShort() {
     std::fflush(stdout);
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[1] >= 120 &&
            e.registers[1] <= 124);
-    // Generated code sees the timer at block ends, so a wait may end a count or two after Exact's, not more, and
-    // the 20 waits together no fewer counts than Exact's and at most 5 more.
+    // Generated code sees the timer at block ends, so a wait may end a count or two after Exact's. A span that
+    // ends one cycle before a graphics change passes that cycle as a stall with no instruction (spanBoundary), which
+    // can move a read past the 120th count and add one more round of the loop, up to 7 counts. So one wait may end
+    // up to 7 counts after Exact's, and the 20 waits together no fewer counts than Exact's and at most 5 + 7 more.
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[1] >= 120 &&
-           f.registers[8] <= e.registers[8] + 2 && f.registers[9] <= e.registers[9] + 5 && f.registers[9] >= e.registers[9]);
+           f.registers[8] <= e.registers[8] + 7 && f.registers[9] <= e.registers[9] + 5 + 7 &&
+           f.registers[9] >= e.registers[9]);
     assert(fast.cheap.retired * 4 <= exact.cheap.retired * 5);
 }
 
@@ -2247,6 +2255,81 @@ void aliasOps(Alias kind, bool blocks) {
     }
 }
 
+// The ROM pen routine's calibration round (20096d50): the ASP reset, CLKDIV 99, PSMPLRG 3814 and the calibration mode,
+// PADE last, then its Thumb wait for the three samples (aspPollCode in imx1_boot_probe.cpp) and the three FIFO reads.
+// delay moves the start against the board's clocks.
+std::vector<uint32_t> aspPollGuest(uint32_t delay) {
+    GraphicsGuest g;
+    // A 256 by 200 frame, so the display changes state seldom and quiet spans hold many rounds.
+    g.setup(); g.display(0xc80100, 0x960014); g.clocks();
+    g.spin(1 + delay);
+    g.store(0x00215010, 0x02800000);                      // ACNTLCR: SWRST
+    g.store(0x0021502c, 99);                              // CLKDIV
+    g.store(0x00215014, 0x3814);                          // PSMPLRG
+    g.store(0x00215010, 0x03040201);
+    g.store(0x00215010, 0x0744d201);                      // calibration, auto sampling
+    // The wait where the ROM has it, then bx r5 back.
+    g.word(0x96d90, 0x46c0 | 0x6b43u << 16);              // nop; ldr r3, [r0, #52]
+    g.word(0x96d94, 0x071b | 0x0f1bu << 16);              // lsls r3, #28; lsrs r3, #28
+    g.word(0x96d98, 0x2b03 | 0xd3fau << 16);              // cmp r3, #3; bcc 20096d92
+    g.word(0x96d9c, 0x4728 | 0x46c0u << 16);              // bx r5; nop
+    std::vector<uint32_t> words;
+    load(words, 0, 0x00215000); load(words, 1, 0x0600d203); load(words, 12, 0x20096d93);
+    words.push_back(0xe3a03000);                          // mov r3, #0
+    words.push_back(0xe5801010);                          // str r1, [r0, #16]: PADE
+    words.push_back(0xe28f5000);                          // add r5, pc, #0: the word after the bx
+    words.push_back(0xe12fff1c);                          // bx r12: the wait, in Thumb
+    words.push_back(0xe5904000);                          // ldr r4, [r0]
+    words.push_back(0xe5905000);                          // ldr r5, [r0]
+    words.push_back(0xe5906000);                          // ldr r6, [r0]
+    words.push_back(0xe5907034);                          // ldr r7, [r0, #0x34]: FIFO_PTR
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return g.words;
+}
+Outcome aspPollRun(const std::vector<uint32_t>& words, bool fast) {
+    auto o = graphicsOptions(false);
+    o.ramMiB = 32;
+    o.aspPenInputs.referenceKnown = true;
+    o.aspPenInputs.reference = {0x1111, 0x2222, 0x3333};
+    Imx1ProbeResult error{};
+    Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
+                                       Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
+    assert(m);
+    if (fast) assert(imx1MachineSetFastEngine(m, true) && imx1MachineFastEngine(m));
+    return finish(m);
+}
+// Fast with the skip passes most rounds of the wait at once and ends as Fast without it does, with the same pc and
+// retired count at the same time, and with Exact's samples and registers.
+void aspPolls() {
+    // On for this test, then back to what FROND_ASP_POLL_SKIP set, read as the core reads it.
+    const char* env = std::getenv("FROND_ASP_POLL_SKIP");
+    const bool was = !(env && *env && !std::strcmp(env, "0"));
+    imx1SetAspPollSkip(true);
+    uint64_t skips = 0, rounds = 0;
+    for (uint32_t delay = 0; delay < 40; delay += 7) {
+        const auto words = aspPollGuest(delay);
+        const uint64_t s = imx1MachineAspPollSkips(nullptr), r = imx1MachineAspPollRounds(nullptr);
+        const auto exact = aspPollRun(words, false);
+        assert(imx1MachineAspPollSkips(nullptr) == s);
+        const auto fast = aspPollRun(words, true);
+        skips += imx1MachineAspPollSkips(nullptr) - s;
+        rounds += imx1MachineAspPollRounds(nullptr) - r;
+        imx1SetAspPollSkip(false);
+        const auto plain = aspPollRun(words, true);
+        imx1SetAspPollSkip(true);
+        if (!delay) { print("asp polls exact", exact); print("asp polls fast", fast); print("asp polls no skip", plain); }
+        const auto& e = exact.run.result;
+        assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[3] == 3 && e.registers[4] == 0x1111 &&
+               e.registers[5] == 0x2222 && e.registers[6] == 0x3333 && (e.registers[7] & 15) >= 3);
+        same(plain, fast);
+        sameResult(exact, fast);
+    }
+    std::printf("asp polls: %llu skips of %llu rounds\n", (unsigned long long)skips, (unsigned long long)rounds);
+    std::fflush(stdout);
+    imx1SetAspPollSkip(was);
+    assert(skips >= 6 && rounds >= 10000);
+}
 void jitLong() {
     imx1SetFastBlocksDefault(true);
     cpuSetJitSync(true);
@@ -2270,6 +2353,7 @@ void jitLong() {
     uartPolls();
     uartPollIrqs();
     uartPollStates();
+    aspPolls();
     jitDomain();
     jitReturns();
     jitSwi();

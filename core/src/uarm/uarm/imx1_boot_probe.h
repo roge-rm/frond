@@ -246,6 +246,12 @@ void imx1SetScanPollSkip(bool skip);
 uint64_t imx1MachineUartPollSkips(const Imx1Machine*);
 uint64_t imx1MachineUartPollRounds(const Imx1Machine*);
 void imx1SetUartPollSkip(bool skip);
+// The pen routine's ASP FIFO wait rounds Fast blocks passed at once, since the process started: the times, the rounds
+// and their CPU cycles. On unless FROND_ASP_POLL_SKIP=0; imx1SetAspPollSkip(false) turns it off, for tests.
+uint64_t imx1MachineAspPollSkips(const Imx1Machine*);
+uint64_t imx1MachineAspPollRounds(const Imx1Machine*);
+uint64_t imx1MachineAspPollCycles(const Imx1Machine*);
+void imx1SetAspPollSkip(bool skip);
 // Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
 // ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
 // Execution thread, between runs; false inside a bounded run or after stop.

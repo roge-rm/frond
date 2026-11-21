@@ -189,6 +189,10 @@ class SocIMX1 : public SoC {
     uint64_t JitRuns() const { return imx1MachineJitRuns(machine); }
     uint64_t DelaySkips() const { return imx1MachineDelaySkips(machine); }
     uint64_t DelayHaltSkips() const { return imx1MachineDelayHaltSkips(machine); }
+    // The pen routine's ASP FIFO wait: skips, rounds and CPU cycles passed (imx1MachineAspPollSkips).
+    uint64_t AspPollSkips() const { return imx1MachineAspPollSkips(machine); }
+    uint64_t AspPollRounds() const { return imx1MachineAspPollRounds(machine); }
+    uint64_t AspPollCycles() const { return imx1MachineAspPollCycles(machine); }
     uint64_t YmfReadyReads() const { return imx1MachineYmfReadyReads(machine); }
     // The guest time of the last of them in ns, on GetTime's clock, for tests.
     uint64_t YmfLastReadyReadNs() const;
