@@ -159,11 +159,25 @@ DWORD Run(const fs::path& installer, HANDLE job) {
     Handle child(process.hProcess), thread(process.hThread);
     if (!AssignProcessToJobObject(job, child.handle)) {
         const auto error = GetLastError();
-        TerminateProcess(child.handle, error);
+        if (TerminateProcess(child.handle, error)) WaitForSingleObject(child.handle, 1000);
         return error;
     }
-    if (ResumeThread(thread.handle) == DWORD(-1) || WaitForSingleObject(child.handle, INFINITE) != WAIT_OBJECT_0)
-        return GetLastError();
+    // Only honour a stop once the suspended process belongs to the job.
+    const auto stop = Environment(L"FROND_INSTALL_WINE") == L"1" ? UserDirectory().parent_path() / L"stop" : fs::path{};
+    const auto cancel = [&]() {
+        if (stop.empty() || GetFileAttributesW(stop.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+        TerminateJobObject(job, ERROR_CANCELLED);
+        WaitForSingleObject(child.handle, 1000);
+        return true;
+    };
+    if (cancel()) return ERROR_CANCELLED;
+    if (ResumeThread(thread.handle) == DWORD(-1)) return GetLastError();
+    for (;;) {
+        const auto state = WaitForSingleObject(child.handle, stop.empty() ? INFINITE : 100);
+        if (state == WAIT_OBJECT_0) break;
+        if (state != WAIT_TIMEOUT) return GetLastError();
+        if (cancel()) return ERROR_CANCELLED;
+    }
 
     DWORD code{};
     if (!GetExitCodeProcess(child.handle, &code)) return GetLastError();
@@ -174,7 +188,10 @@ DWORD Run(const fs::path& installer, HANDLE job) {
     do {
         if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), nullptr))
             return GetLastError();
-        if (accounting.ActiveProcesses) Sleep(100);
+        if (accounting.ActiveProcesses) {
+            if (cancel()) return ERROR_CANCELLED;
+            Sleep(100);
+        }
     } while (accounting.ActiveProcesses);
     return code;
 }
