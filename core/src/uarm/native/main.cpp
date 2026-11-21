@@ -1245,6 +1245,7 @@ bool gFastEngineMissing = false;
             const uint64_t renderStart = zodiacSpeed ? timestampUsec() : 0;
             sdlRenderer->Render(draw.pixels, draw.firstDirtyLine, draw.lastDirtyLine, draw.lcdEnabled,
                                 draw.buttons, draw.stick);
+            if (draw.pixels) inputTrace::presented();
             if (zodiacSpeed) zodiacSpeed->Drawn(draw.pixels != nullptr, timestampUsec() - renderStart);
         };
 
@@ -1295,6 +1296,7 @@ bool gFastEngineMissing = false;
                     if (!input.layout) {
                         if (input.event.type == SDL_AUDIODEVICEREMOVED && input.event.adevice.iscapture)
                             microphone.Removed(input.event.adevice.which);
+                        traceInputEvent("take", true, input.event);
                         sdlEventHandler.HandleEvent(input.event);
                         continue;
                     }
@@ -1363,6 +1365,7 @@ bool gFastEngineMissing = false;
                 serial.Service();
                 usb.Service();
                 infrared.Service();
+                inputTrace::note("cycle", true, "start");
                 if (zodiacSpeed) {
                     const uint64_t cycleStart = timestampUsec();
                     mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
@@ -1370,6 +1373,7 @@ bool gFastEngineMissing = false;
                 } else {
                     mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
                 }
+                inputTrace::note("cycle", true, "end");
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.
                 if (sdInsertPending || msInsertPending) {
                     const uint64_t time = soc->GetTime();
@@ -1413,6 +1417,7 @@ bool gFastEngineMissing = false;
                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
                         link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
+                        if (frame) inputTrace::published();
                         soc->ResetPendingFrame();
                     }
                     if (zodiacSpeed && frame) zodiacSpeed->HandedOver(timestampUsec() - handoffStart);

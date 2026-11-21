@@ -1,4 +1,5 @@
 #include "soc_IMX1.h"
+#include "input_trace.h"
 
 #include "syscall_dispatch.h"
 
@@ -55,8 +56,15 @@ namespace {
         // cradleHeld keeps the release after a load or reset off D22 once the host's cradle button is down again.
         MachinePort(Imx1Machine* machine, bool cradleHeld) : machine(machine), cradleHeld(cradleHeld) {}
         bool setControl(unsigned control, bool down) override {
-            return imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, false) == Imx1BootstrapAccess::ok &&
-                   imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
+            const bool set = imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, false) == Imx1BootstrapAccess::ok &&
+                             imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
+            if (inputTrace::on && set && control < unsigned(Imx1ZodiacControl::count)) {
+                uint32_t width = 0, height = 0;
+                const uint32_t* frame = imx1MachinePeekFrame(machine, width, height);
+                const auto& pin = imx1ZodiacControlPins[control];
+                inputTrace::applyControl(control, down, pin.port, pin.pin, frame, size_t(width) * height);
+            }
+            return set;
         }
         bool releaseControls() override {
             const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD | (cradleHeld ? 0 : cradlePinD)};
@@ -67,7 +75,15 @@ namespace {
             return imx1MachineReplacePenInputs(machine, pen, false) == Imx1BootstrapAccess::ok &&
                    imx1MachineReplacePenInputs(machine, pen, true) == Imx1BootstrapAccess::ok;
         }
-        bool setPen(bool down, int x, int y) override { return replacePen(zodiacPenInputs(down, x, y)); }
+        bool setPen(bool down, int x, int y) override {
+            const bool set = replacePen(zodiacPenInputs(down, x, y));
+            if (inputTrace::on && set) {
+                uint32_t width = 0, height = 0;
+                const uint32_t* frame = imx1MachinePeekFrame(machine, width, height);
+                inputTrace::applyPen(down, x, y, frame, size_t(width) * height);
+            }
+            return set;
+        }
         bool liftPen() override {
             auto pen = imx1MachinePenInputs(machine);
             if (!pen.contactKnown || !pen.contactDown) return true;
@@ -75,8 +91,17 @@ namespace {
             return replacePen(pen);
         }
         bool setStick(int x, int y) override {
-            return imx1MachineSetZodiacStick(machine, x, y, false) == Imx1BootstrapAccess::ok &&
-                   imx1MachineSetZodiacStick(machine, x, y, true) == Imx1BootstrapAccess::ok;
+            const bool set = imx1MachineSetZodiacStick(machine, x, y, false) == Imx1BootstrapAccess::ok &&
+                             imx1MachineSetZodiacStick(machine, x, y, true) == Imx1BootstrapAccess::ok;
+            if (inputTrace::on && set) {
+                static int lastX = 0, lastY = 0;
+                uint32_t width = 0, height = 0;
+                const uint32_t* frame = imx1MachinePeekFrame(machine, width, height);
+                inputTrace::applyStick(x, y, lastX == 0 && lastY == 0, frame, size_t(width) * height);
+                lastX = x;
+                lastY = y;
+            }
+            return set;
         }
         Imx1Machine* machine;
         bool cradleHeld;
@@ -295,6 +320,8 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
         return nullptr;
     }
     imx1MachineEnableYmf768(soc->machine);
+    inputTrace::setGuestClock([](void* m) { return imx1MachineGetStatus(static_cast<Imx1Machine*>(m)).time.ticks; },
+                              soc->machine);
     // Aborts and undefined instructions go to the guest's own handlers, as on a real Zodiac.
     // FROND_ZODIAC_STOP_ON_EXCEPTION stops the machine on them instead, for debugging.
     imx1MachineSetGuestExceptions(soc->machine, !std::getenv("FROND_ZODIAC_STOP_ON_EXCEPTION"));

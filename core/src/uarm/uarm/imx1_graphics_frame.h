@@ -1,6 +1,7 @@
 #ifndef FROND_IMX1_GRAPHICS_FRAME_H
 #define FROND_IMX1_GRAPHICS_FRAME_H
 
+#include "input_trace.h"
 #include <algorithm>
 #include <vector>
 #include "imx1_graphics_memory.h"
@@ -177,6 +178,7 @@ class Imx1GraphicsFrame {
             else { firstRow = first; lastRow = last; }
             pending = true;
             ++generation;
+            if (inputTrace::on) inputTrace::guestFrame(pixels.data(), pixels.size());
         }
         memory.acknowledgeDirty(candidate.bank, Imx1GraphicsMemory::Consumer::scanout, dirty.generation);
         surface = candidate;

@@ -16,8 +16,37 @@
 #include <vector>
 
 #include "DeviceControls.h"
+#include "input_trace.h"
 #include "Rotation.h"
 #include "WindowLayout.h"
+
+// Input trace (input_trace.h): an input event at one stage.
+inline void traceInputEvent(const char* stage, bool guestThread, const SDL_Event& event) {
+    if (!inputTrace::on) return;
+    switch (event.type) {
+        case SDL_KEYDOWN: case SDL_KEYUP:
+            if (event.key.repeat) return;
+            inputTrace::hostEvent(stage, guestThread, event.type == SDL_KEYDOWN ? "key-down" : "key-up",
+                                  int(event.key.keysym.sym), int(event.key.keysym.scancode), event.key.timestamp);
+            return;
+        case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP:
+            inputTrace::hostEvent(stage, guestThread, event.type == SDL_CONTROLLERBUTTONDOWN ? "button-down" : "button-up",
+                                  int(event.cbutton.button), int(event.cbutton.which), event.cbutton.timestamp);
+            return;
+        case SDL_CONTROLLERAXISMOTION:
+            inputTrace::hostEvent(stage, guestThread, "axis", int(event.caxis.axis), int(event.caxis.value), event.caxis.timestamp);
+            return;
+        case SDL_FINGERDOWN: case SDL_FINGERUP:
+            inputTrace::hostEvent(stage, guestThread, event.type == SDL_FINGERDOWN ? "finger-down" : "finger-up",
+                                  int(event.tfinger.x * 10000), int(event.tfinger.y * 10000), event.tfinger.timestamp);
+            return;
+        case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
+            inputTrace::hostEvent(stage, guestThread, event.type == SDL_MOUSEBUTTONDOWN ? "mouse-down" : "mouse-up",
+                                  event.button.x, event.button.y, event.button.timestamp);
+            return;
+        default: return;
+    }
+}
 
 // Decides whether a draw is due, the same way for the one-thread renderer and the
 // guest thread: a new frame, a forced redraw, a change of LCD power, pressed
@@ -135,6 +164,7 @@ class RenderLink {
     // it can lay out, redraw or pump.
     static int SDLCALL Filter(void* userdata, SDL_Event* event) {
         auto& link = *static_cast<RenderLink*>(userdata);
+        traceInputEvent("host", false, *event);
         if (link.beforeEvent) link.beforeEvent(*event);
         std::lock_guard<std::mutex> lock(link.mutex);
         link.ReleaseHeld();
