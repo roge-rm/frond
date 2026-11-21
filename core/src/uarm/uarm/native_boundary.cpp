@@ -1,5 +1,4 @@
 #include "native_boundary.h"
-#ifndef __EMSCRIPTEN__
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -441,4 +440,3 @@ void Session::Close() {
     cpuClearNativeRuntime(impl->cpu);
 }
 }
-#endif

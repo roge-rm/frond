@@ -220,9 +220,7 @@ void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va)
 void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
 bool cpuRestoreInstructionFetchState(ArmCpu*, const uint32_t*);
 
-#ifndef __EMSCRIPTEN__
 uint32_t cpuCyclesInProgress(const ArmCpu* cpu);
-#endif
 
 // Take one unmasked interrupt at this boundary, without fetching or executing an instruction.
 bool cpuProcessPendingInterrupts(struct ArmCpu* cpu);
@@ -292,7 +290,6 @@ uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles);
 uint32_t cpuCycleAnyKind(struct ArmCpu *cpu, uint32_t cycles);
 
 uint32_t cpuCyclePure(struct ArmCpu *cpu);
-#ifndef __EMSCRIPTEN__
 // Tagged addresses: bit 0 selects Thumb. Hooks run only during injected execution.
 using NativeCallback = void (*)(ArmCpu*, void*);
 bool cpuRegisterNativeCallback(ArmCpu*, uint32_t address, NativeCallback, void* context);
@@ -310,7 +307,6 @@ bool cpuNativeBuffer(ArmCpu*, uint32_t address, void* data, uint32_t size, bool 
 bool cpuNativeRamRange(ArmCpu*, uint32_t address, uint32_t size);
 // Temporary host-owned bootstrap stack, accepted only over unmapped virtual pages.
 bool cpuSetNativeScratch(ArmCpu*, uint32_t base, void* data, uint32_t size);
-#endif
 
 
 using M68kTrapHandler = std::function<bool(struct ArmCpu *, uint32_t address)>;

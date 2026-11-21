@@ -1,6 +1,5 @@
 #ifndef FROND_ZODIAC_NATIVE_H
 #define FROND_ZODIAC_NATIVE_H
-#ifndef __EMSCRIPTEN__
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -44,5 +43,4 @@ class Session {
     std::unique_ptr<Impl> impl;
 };
 }  // namespace ZodiacNative
-#endif
 #endif

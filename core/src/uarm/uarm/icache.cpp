@@ -610,18 +610,10 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
         for (size_t i = 0; i < sizeof(data); i += 8) {
             const uint64_t d = *(uint64_t*)(data + i);
             if ((uint32_t)d != *(uint32_t*)(line->data + i))
-#ifdef __EMSCRIPTEN__
-                *((uint32_t*)(line->decoded + (i >> 1))) = 0;
-#else
                 *((uint64_t*)(line->decoded + (i >> 1))) = 0;
-#endif
 
             if ((d >> 32) != *(uint32_t*)(line->data + i + 4))
-#ifdef __EMSCRIPTEN__
-                *((uint32_t*)(line->decoded + (i >> 1) + 2)) = 0;
-#else
                 *((uint64_t*)(line->decoded + (i >> 1) + 2)) = 0;
-#endif
 
             *(uint64_t*)(line->data + i) = d;
         }
@@ -644,11 +636,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
                 line->decoded[iInst] = (decoded << DECODED_BITS_SHIFT) | DECODED_BITS_ARM;
                 line->cost[iInst] = icachePrvCost<4>(ic, instr);
             } else {
-#ifdef __EMSCRIPTEN__
-                decoded = line->decoded[iInst] & ~DECODED_BITS;
-#else
                 decoded = ((int32_t)line->decoded[iInst]) >> DECODED_BITS_SHIFT;
-#endif
             }
 
             break;
@@ -667,11 +655,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
                 line->translatedThumbInstructions[iInst] = instr;
                 line->cost[iInst] = icachePrvCost<2>(ic, instrThumb);
             } else {
-#ifdef __EMSCRIPTEN__
-                decoded = line->decoded[iInst] & ~DECODED_BITS;
-#else
                 decoded = ((int32_t)line->decoded[iInst]) >> DECODED_BITS_SHIFT;
-#endif
                 instr = line->translatedThumbInstructions[iInst];
             }
 

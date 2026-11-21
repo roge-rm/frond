@@ -57,9 +57,7 @@ struct ZodiacPaceSites {
 };
 bool paceDiscoverZodiac(ZodiacPaceSites* sites, uint32_t romBase, const void* rom, size_t size);
 
-#ifndef __EMSCRIPTEN__
 bool pacePatchOriginalTg50EntryForDiagnostic(PacePatch* patch, uint32_t romBase,
                                             const void* original, void* shadow, size_t size);
-#endif
 
 #endif  // _PACE_PATCH_H_

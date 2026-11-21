@@ -1,5 +1,4 @@
 #include "LibertasCF.h"
-#ifndef __EMSCRIPTEN__
 
 #include <algorithm>
 #include <cstdio>
@@ -427,4 +426,3 @@ void LibertasCF::Load(SavestateLoader<ChunkType>& loader) {
         loader.NotifyError();
     }
 }
-#endif

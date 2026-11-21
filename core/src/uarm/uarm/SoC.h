@@ -39,10 +39,8 @@ struct PatchContext;
 
 class SoC {
    public:
-#ifndef __EMSCRIPTEN__
     NetworkSimulation networkSimulation;
     std::unique_ptr<LibertasCF> wirelessDevice;
-#endif
     class InputCheckpoint;
     virtual void SetAudioOutputFenced(bool) {}
     bool RestoringCheckpoint() const { return restoringCheckpoint; }
@@ -145,9 +143,7 @@ class SoC {
     }
     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
                                   uint64_t cyclesPerSecond) = 0;
-#ifndef __EMSCRIPTEN__
     virtual bool RunToNativePc(uint32_t, uint32_t, uint64_t, uint64_t) { return false; }
-#endif
     virtual bool ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
 
     void AccountInjectedCycles(uint64_t cycles, uint64_t cyclesPerSecond) {

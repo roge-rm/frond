@@ -1,6 +1,6 @@
 #include "PosixCompat.h"
 #include "HostNetwork.h"
-#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+#if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/tcp.h>

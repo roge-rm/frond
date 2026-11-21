@@ -1,6 +1,5 @@
 #ifndef FROND_USB_HOST_BRIDGE_H
 #define FROND_USB_HOST_BRIDGE_H
-#ifndef __EMSCRIPTEN__
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -72,5 +71,4 @@ class UsbHostBridge {
     struct Impl;
     std::unique_ptr<Impl> impl;
 };
-#endif
 #endif

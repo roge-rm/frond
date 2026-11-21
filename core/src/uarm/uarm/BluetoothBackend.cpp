@@ -1,4 +1,4 @@
-#if defined(__EMSCRIPTEN__) || defined(_WIN32)
+#if defined(_WIN32)
 #define FROND_NO_UNIX_BT 1  // Unix socket controllers only
 #endif
 #include "PosixCompat.h"

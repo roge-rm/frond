@@ -1,6 +1,5 @@
 #ifndef FROND_LIBERTAS_CF_H
 #define FROND_LIBERTAS_CF_H
-#ifndef __EMSCRIPTEN__
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -111,5 +110,4 @@ class LibertasCF {
     }
     static void Power(void*, uint32_t, bool, bool);
 };
-#endif
 #endif

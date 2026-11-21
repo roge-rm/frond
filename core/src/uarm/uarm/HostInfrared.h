@@ -1,6 +1,5 @@
 #ifndef FROND_HOST_INFRARED_H
 #define FROND_HOST_INFRARED_H
-#ifndef __EMSCRIPTEN__
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -58,5 +57,4 @@ class HostInfrared {
     struct Impl;
     std::unique_ptr<Impl> impl;
 };
-#endif
 #endif

@@ -14,9 +14,7 @@ class SocGeneric : public SoC {
 
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles, uint64_t cyclesPerSecond) override;
-#ifndef __EMSCRIPTEN__
     bool RunToNativePc(uint32_t first, uint32_t second, uint64_t maxCycles, uint64_t cyclesPerSecond) override;
-#endif
     bool ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
 
     void Reset() override;

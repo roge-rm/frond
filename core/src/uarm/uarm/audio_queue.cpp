@@ -7,9 +7,7 @@
 #include <memory>
 #include <algorithm>
 
-#ifndef __EMSCRIPTEN__
     #define AUDIO_QUEUE_THREADSAFE
-#endif
 
 #ifdef AUDIO_QUEUE_THREADSAFE
     #include <mutex>

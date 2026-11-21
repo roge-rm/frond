@@ -109,10 +109,8 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     // XScale cost model: the table, region and data cache charges; PwrClk sets the clocks.
     cpuSetCostModel(cpu, true, uint8_t(socRev == 2 ? cost::Core::pxa27x : cost::Core::pxa25x), true);
 
-#ifndef __EMSCRIPTEN__
     cpuSetDebugSoc(cpu,this);
     cpuSetM68kSyscallHandler(cpu, NetworkSimulation::Dispatch, &networkSimulation);
-#endif
     patchDispatchSetCpu(patchDispatch, cpu);
 
     syscallDispatch = initSyscallDispatch(this);
@@ -180,14 +178,12 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
 
     gpio = pxaGpioInit(mem, ic, socRev);
     tmr = pxaTimrInit(mem, ic);
-#ifndef __EMSCRIPTEN__
     // The OS timer runs in batches up to its next match, synchronised on register access,
     // so the CPU runs longer stretches between scheduler updates. Every PXA device does this.
     pxaTimrEnableBatching(tmr, TimerElapsedCB, TimerRescheduleCB, this);
     cpuSetDelayTimer(cpu, kPxaTimrOscrPa, OscrPeekCB, this);
     // GPIO levels change only at scheduler events, for the Fast poll skip.
     cpuSetPollPeek(cpu, GpioPeekCB, this);
-#endif
     rtc = pxaRtcInit(mem, ic);
     ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
     stUart = pxaUartInit(mem, rescheduleCb, ic, PXA_STUART_BASE, PXA_I_STUART, socRev == 2);
@@ -392,11 +388,7 @@ uint32_t SocPXA::DispatchTicks(uint32_t clientType, uint32_t batchedTicks) {
         case SCHEDULER_TASK_TIMER:
             pxaTimrTick(tmr, batchedTicks);
 
-#ifndef __EMSCRIPTEN__
             return pxaTimrNextBatch(tmr, sleeping ? UINT32_MAX : 32);
-#else
-            return sleeping ? pxaTimrTicksToNextInterrupt(tmr) : 1;
-#endif
 
         case SCHEDULER_TASK_RTC:
             pxaRtcTick(rtc);
@@ -1211,7 +1203,6 @@ void SocPXA::RescheduleCB(void *ctx, uint32_t task) {
     }
 }
 
-#ifndef __EMSCRIPTEN__
 // OS timer ticks elapsed in this batch with that many cycles in progress.
 uint32_t SocPXA::TimerElapsedAt(uint32_t cycles) const {
     if (PowerSleeping() && sleeping) return 0;
@@ -1236,7 +1227,6 @@ void SocPXA::TimerRescheduleCB(void* ctx) {
     self->scheduler->RescheduleTask(SCHEDULER_TASK_TIMER, pxaTimrNextBatch(self->tmr));
     cpuSetSlowPath(self->cpu, SLOW_PATH_REASON_RESCHEDULE);
 }
-#endif
 
 uint64_t SocPXA::GetTimeCB(void *ctx) {
     return reinterpret_cast<SocPXA *>(ctx)->scheduler->GetTime();

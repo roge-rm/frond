@@ -6,9 +6,7 @@
 
 #include "cputil.h"
 
-#ifndef __EMSCRIPTEN__
 static void* diagnosticOriginalShadow = nullptr;
-#endif
 
 static const uint8_t paceStartPattern[] = {
         0xF1, 0x4F, 0x2D, 0xE9, 0x00, 0x00, 0x9D, 0xE5, 0x44, 0xA0, 0x90, 0xE5, 0x48, 0x40, 0x90,
@@ -301,9 +299,7 @@ bool tg50PaceShadowMatches(const uint8_t* code, const uint8_t* data, size_t offs
 bool pacePatchInitTg50(PacePatch* patch, uint32_t romBase, const void* original,
                       void* shadow, size_t size) {
     if (!patch) return false;
-#ifndef __EMSCRIPTEN__
     if (shadow == diagnosticOriginalShadow && diagnosticOriginalShadow) return false;
-#endif
     *patch = {};
     PacePatch candidate{};
     if (!shadow || shadow == original ||
@@ -391,7 +387,6 @@ bool paceDiscoverZodiac(ZodiacPaceSites* sites, uint32_t romBase, const void* ro
     return false;
 }
 
-#ifndef __EMSCRIPTEN__
 bool pacePatchOriginalTg50EntryForDiagnostic(PacePatch* patch, uint32_t romBase,
                                             const void* original, void* shadow, size_t size) {
     if (!std::getenv("FROND_TG50_ORIGINAL_PACE_DIAGNOSTIC") || !patch ||
@@ -410,4 +405,3 @@ bool pacePatchOriginalTg50EntryForDiagnostic(PacePatch* patch, uint32_t romBase,
     diagnosticOriginalShadow = shadow;
     return true;
 }
-#endif

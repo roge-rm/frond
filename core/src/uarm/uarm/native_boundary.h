@@ -1,6 +1,5 @@
 #ifndef FROND_NATIVE_BOUNDARY_H
 #define FROND_NATIVE_BOUNDARY_H
-#ifndef __EMSCRIPTEN__
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -45,5 +44,4 @@ class Session {
     std::unique_ptr<Impl> impl;
 };
 }
-#endif
 #endif

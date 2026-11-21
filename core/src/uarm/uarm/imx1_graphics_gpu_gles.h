@@ -6,7 +6,7 @@
 // The GLES 3 backend over EGL, for the Linux desktop and Android alike. libEGL and libGLESv2 are opened at run
 // time, so nothing links against them and a host without them just has no GPU. It draws on a thread of its own
 // that owns the context, so it never meets a front end's own GL context on the emulation thread.
-#if __has_include(<EGL/egl.h>) && __has_include(<GLES3/gl3.h>) && !defined(__EMSCRIPTEN__)
+#if __has_include(<EGL/egl.h>) && __has_include(<GLES3/gl3.h>)
 #define FROND_IMX1_GPU_GLES 1
 #include <EGL/egl.h>
 #include <EGL/eglext.h>

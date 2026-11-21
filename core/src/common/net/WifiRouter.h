@@ -6,7 +6,6 @@
 // Answers the Network HotSync wakeup to 10.0.2.2 itself, like SlirpIp. Single-threaded; time
 // is guest nanoseconds. Built into libcommon-net.a so only the cores link libslirp.
 
-#ifndef __EMSCRIPTEN__
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -43,5 +42,4 @@ class WifiRouter {
 
 }  // namespace frondNet
 
-#endif
 #endif

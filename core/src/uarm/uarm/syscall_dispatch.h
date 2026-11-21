@@ -10,7 +10,6 @@
 // Filesystem calls may wait for an original OS task awakened by timer interrupts.
 #define SC_EXECUTE_TIMERS 2
 
-#ifndef __EMSCRIPTEN__
 #include <stdexcept>
 // Native read-only operations can roll back the complete guest on timeout.
 class InjectedCallError : public std::runtime_error {
@@ -23,7 +22,6 @@ void syscallDispatchValidateCommit(struct SyscallDispatch* sd);
 bool syscallDispatchRecoveryActive(struct SyscallDispatch* sd);
 void syscallDispatchBeginFileTransfer(struct SyscallDispatch* sd, uint32_t bytes);
 void syscallDispatchFileProgress(struct SyscallDispatch* sd, uint32_t bytes);
-#endif
 
 struct SyscallDispatch;
 struct ArmCpu;

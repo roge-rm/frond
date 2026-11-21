@@ -1,5 +1,4 @@
 #include "WifiRouter.h"
-#ifndef __EMSCRIPTEN__
 #include <arpa/inet.h>
 #include <libslirp.h>
 #include <poll.h>
@@ -175,4 +174,3 @@ bool WifiRouter::Receive(std::vector<uint8_t>& bytes) {
 }
 
 }  // namespace frondNet
-#endif
