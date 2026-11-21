@@ -199,6 +199,8 @@ endif
 
 include ../Makefile.common
 
+# Without FROND_68K there is nothing to link; keep clean from becoming the default goal.
+.DEFAULT_GOAL := bin
 bin: $(BINARY_NATIVE)
 
 .PHONY: bin clean
