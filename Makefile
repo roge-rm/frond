@@ -15,6 +15,7 @@ CLOUDPILOT_OBJ = $(OBJ_ROOT)/core/cloudpilot/.build-frond
 # The desktop's CMake build, on the resolved path: moc writes includes relative to it, and those
 # go wrong through a link.
 DESKTOP_BUILD = $(realpath $(OBJ_ROOT))/desktop
+DESKTOP_DEV_PATHS ?= ON
 # Test scripts find the test binaries and probes here.
 export FROND_OBJ = $(abspath $(OBJ_ROOT))
 # libcommon-net.a: the core's .o files include HostInfrared's phone (SlirpIp).
@@ -524,16 +525,18 @@ benchmark-menu: out/frond
 
 .PHONY: desktop test-desktop deb
 desktop: out/frond
-	cmake -S desktop -B $(DESKTOP_BUILD) -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFROND_PREPARED_SOURCE=$(CURDIR)/core
+	cmake -S desktop -B $(DESKTOP_BUILD) -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFROND_PREPARED_SOURCE=$(CURDIR)/core -DFROND_DEV_PATHS=$(DESKTOP_DEV_PATHS)
 	+cmake --build $(DESKTOP_BUILD) --target frond-desktop --parallel $(BUILD_JOBS)
 	cp $(DESKTOP_BUILD)/frond-desktop out/frond-desktop.new
 	mv -f out/frond-desktop.new out/frond-desktop
 
 test-desktop: desktop
-	cmake -S desktop -B $(DESKTOP_BUILD) -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFROND_PREPARED_SOURCE=$(CURDIR)/core -DBUILD_TESTING=ON
+	cmake -S desktop -B $(DESKTOP_BUILD) -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFROND_PREPARED_SOURCE=$(CURDIR)/core -DBUILD_TESTING=ON -DFROND_DEV_PATHS=$(DESKTOP_DEV_PATHS)
 	+cmake --build $(DESKTOP_BUILD) --parallel $(BUILD_JOBS)
 	ctest --test-dir $(DESKTOP_BUILD) --output-on-failure
 
+# Packages leave out the checkout lookup for btvirt and the phone peer.
+deb: DESKTOP_DEV_PATHS := OFF
 deb: desktop out/frond-68k build/bluetooth-provider/emulator/btvirt bluetooth-opp-peer
 	python3 tools/package-deb.py
 
