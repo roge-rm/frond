@@ -1527,7 +1527,7 @@ bool gFastEngineMissing = false;
 
                 performance.ReportWork(mainLoop.GetTimesliceSizeUsec());
                 const auto delay = mainLoop.GetSuggestedDelayUsec(timestampUsec());
-                if (delay > 10) usleep(delay);
+                if (delay > 10) link.WaitForInput(delay);
             }
         };
 

@@ -160,8 +160,8 @@ class RenderLink {
     // SDL event filter, installed by InstallFilter. SDL runs it on the thread that pushes
     // the event: Android's UI thread for touches, the SDL thread inside its event pump
     // otherwise. Every event goes straight to the guest thread's queue and is dropped from
-    // SDL's own. Input doesn't wake the SDL thread; window, app and render events do, so
-    // it can lay out, redraw or pump.
+    // SDL's own, and wakes the guest thread if it sleeps (WaitForInput). Input doesn't wake
+    // the SDL thread; window, app and render events do, so it can lay out, redraw or pump.
     static int SDLCALL Filter(void* userdata, SDL_Event* event) {
         auto& link = *static_cast<RenderLink*>(userdata);
         traceInputEvent("host", false, *event);
@@ -186,6 +186,14 @@ class RenderLink {
         out.clear();
         std::lock_guard<std::mutex> lock(mutex);
         out.swap(inputs);
+        inputWoken = false;
+    }
+    // Guest thread: sleeps for usec, or less when the filter queues an event, so input reaches
+    // the guest without waiting out the rest of the timeslice.
+    void WaitForInput(uint64_t usec) {
+        std::unique_lock<std::mutex> lock(mutex);
+        inputWake.wait_for(lock, std::chrono::microseconds(usec), [&] { return inputWoken; });
+        inputWoken = false;
     }
 
     // Guest thread: one draw. frame is the SoC's whole LCD frame or null.
@@ -376,6 +384,8 @@ class RenderLink {
     // thread has to act on.
     void Take(const SDL_Event& event) {
         inputs.push_back(Input{false, event, {}, std::nullopt, {}});
+        inputWoken = true;
+        inputWake.notify_one();
         auto& n = notices;
         switch (event.type) {
             case SDL_WINDOWEVENT:
@@ -416,6 +426,9 @@ class RenderLink {
     std::mutex mutex;
     std::condition_variable wake, done;
     bool woken{false};
+    // The guest thread's wait in WaitForInput, ended by Take.
+    std::condition_variable inputWake;
+    bool inputWoken{false};
 
     // Frames. back and staleLines belong to the guest thread; middle, front and pending
     // are shared under the mutex.
