@@ -371,6 +371,16 @@ class S3c2442Machine {
     uint32_t lastWake = 0;
     uint64_t batchAdvanced = 0;
     uint32_t leanAdvanced = 0;  // of the running lean call, by leanRead
+    // Cycles runFast's translated and lean runs have retired but not yet applied with advance(). With no event
+    // due in the span, applying them in one go gives the same state, so it waits for anything that reads the
+    // blocks' time: the interpreter, a delay skip, a WTCNT read and the end of the span.
+    uint64_t fastOwed = 0;
+    void settleFast() {
+        if (!fastOwed) return;
+        const uint64_t n = fastOwed;
+        fastOwed = 0;
+        advance(n);
+    }
     bool sfrAccessed = false;  // since the Fast span started
     bool fastOn = false;
     uint64_t jitRetiredCount = 0, leanRetiredCount = 0, stepRetiredCount = 0;

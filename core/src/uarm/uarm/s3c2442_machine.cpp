@@ -1137,12 +1137,13 @@ void S3c2442Machine::runFast(uint64_t n) {
             if (instructions) {
                 retiredCount += instructions;
                 jitRetiredCount += instructions;
-                advance(instructions);
+                fastOwed += instructions;
                 left -= std::min<uint64_t>(left, instructions);
                 if (stop == arm920JitBudget || stop == arm920JitHalt) continue;
             }
             // Stopped at a WTCNT read: a delay loop's passes go at once where they can.
             if (stop == arm920JitExit && left > slack) {
+                settleFast();
                 if (const uint64_t skipped = skipDelay(left)) {
                     left -= skipped;
                     continue;
@@ -1163,7 +1164,7 @@ void S3c2442Machine::runFast(uint64_t n) {
             if (ran) {
                 retiredCount += ran;
                 leanRetiredCount += ran;
-                advance(ran - std::min(ran, leanAdvanced));
+                fastOwed += ran - std::min(ran, leanAdvanced);
                 left -= std::min<uint64_t>(left, ran);
                 blPending = blNext != ~0u;
                 if (ran == count) continue;
@@ -1172,11 +1173,13 @@ void S3c2442Machine::runFast(uint64_t n) {
         }
         // A BL suffix after a lean prefix, or an instruction neither the JIT nor the lean path runs.
         blPending = false;
+        settleFast();
         const uint32_t ran = step(1);
         stepRetiredCount += ran;
         left -= std::min<uint64_t>(left, ran ? ran : 1);
         if (sfrAccessed) break;
     }
+    settleFast();
 }
 
 // Fast: the WTCNT delay loops the rx1950's software busy-waits in. Each pass reads WTCNT (counting down) and
@@ -1310,6 +1313,7 @@ bool S3c2442Machine::leanRead(void* context, uint32_t pa, uint32_t size, uint32_
             *value = size == 4 ? got : (got >> ((pa & 3) * 8)) & ((1u << (8 * size)) - 1);
         }
     } else if (pa == 0x53000008 && size == 4 && !cpuArm920LeanInJit(m.cpuCore)) {
+        m.settleFast();
         if (ran > m.leanAdvanced) {
             m.advance(ran - m.leanAdvanced);
             m.leanAdvanced = ran;
