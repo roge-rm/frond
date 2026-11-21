@@ -195,6 +195,9 @@ class SocIMX1 : public SoC {
     uint64_t AspPollRounds() const { return imx1MachineAspPollRounds(machine); }
     uint64_t AspPollCycles() const { return imx1MachineAspPollCycles(machine); }
     uint64_t YmfReadyReads() const { return imx1MachineYmfReadyReads(machine); }
+    // Fast spans past graphics completions and the accesses refused for them (imx1MachineCrossSpans).
+    uint64_t CrossSpans() const { return imx1MachineCrossSpans(machine); }
+    uint64_t CrossRefusals() const { return imx1MachineCrossRefusals(machine); }
     // The guest time of the last of them in ns, on GetTime's clock, for tests.
     uint64_t YmfLastReadyReadNs() const;
     // The RAM and graphics memory hashed, for comparing where two runs end.

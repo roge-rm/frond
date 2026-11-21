@@ -102,6 +102,28 @@ class Imx1Cs5Configuration {
         if (ticks == UINT64_MAX) return UINT64_MAX;
         return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, numerator * 390625, denominator * 64, ticks);
     }
+    // Fast: idleQuietSteps with the engine's bound at the completion of its last queued batch, not its first.
+    // front is idleQuietSteps; the two differ only when batches complete before the bound. Only with the clocks
+    // programmed and no SD or acquisition work due, as graphicsCommitted runs card work before completions.
+    uint64_t idleQuietStepsThrough(uint64_t numerator, uint64_t denominator, uint64_t& front) const {
+        front = idleQuietSteps(numerator, denominator);
+        if (front == UINT64_MAX || front <= 1 || !clocks.programmed() || engine.idleQuietTicks() == UINT64_MAX ||
+            acquisition.deadlineRemaining() || sd.idleQuietTicks() != UINT64_MAX)
+            return front;
+        uint64_t ticks = clocks.nextEvent() ? clocks.nextEvent() : UINT64_MAX;
+        ticks = std::min(ticks, engine.idleQuietTicksThrough());
+        ticks = std::min(ticks, display.idleQuietTicks());
+        if (ticks <= engine.idleQuietTicks()) return front;
+        return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, numerator * 390625, denominator * 64, ticks);
+    }
+    // quietCpuCycles with idleQuietStepsThrough; front is quietCpuCycles.
+    uint64_t quietCpuCyclesThrough(Imx1PllRatio period, uint64_t& front) const {
+        if (controller.delayRunning() || !clocks.programmed()) return front = quietCpuCycles(period);
+        uint64_t frontSteps;
+        const uint64_t steps = idleQuietStepsThrough(period.numerator, period.denominator, frontSteps);
+        front = frontSteps == UINT64_MAX ? UINT64_MAX : frontSteps - 1;
+        return steps == UINT64_MAX ? UINT64_MAX : steps - 1;
+    }
     // CPU cycles of this period that advanceCpuCycles can take in one call or in any split with the same
     // result, as no graphics model changes state within them. 0 when a change is due or can't be worked out.
     uint64_t quietCpuCycles(Imx1PllRatio period) const {

@@ -253,6 +253,11 @@ uint64_t imx1MachineAspPollSkips(const Imx1Machine*);
 uint64_t imx1MachineAspPollRounds(const Imx1Machine*);
 uint64_t imx1MachineAspPollCycles(const Imx1Machine*);
 void imx1SetAspPollSkip(bool skip);
+// Fast spans that ran past queued graphics batches' completions, and the lean accesses that refused for them, since
+// the process started. On unless FROND_ZODIAC_CROSS=0; imx1SetCrossCompletions(false) turns it off, for tests.
+uint64_t imx1MachineCrossSpans(const Imx1Machine*);
+uint64_t imx1MachineCrossRefusals(const Imx1Machine*);
+void imx1SetCrossCompletions(bool on);
 // Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
 // ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
 // Execution thread, between runs; false inside a bounded run or after stop.

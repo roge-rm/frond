@@ -109,6 +109,19 @@ bool aspPollSkip = [] {
     return !(v && *v && !std::strcmp(v, "0"));
 }();
 bool aspHalted = false, aspHaltOff = false;
+// Fast blocks: a quiet span can run past queued graphics batches' completions to the last one's (spanCrosses), where
+// the run reads nothing those completions change: the ring and status registers, graphics memory and the option word.
+// The fills, the read pointer and the option word are then applied at the span's charge, in order, and the batches'
+// timing is the same (the engine works through its ticks whether or not a completion has been taken). An access that
+// could see them (leanGraphicsRead, leanRegisterRead but the scan status, a graphics memory write outside the ring
+// view, the FIFO wait skip) is refused, which ends the run for the step to take after a charge, and stops crossing
+// (crossBlocked) until the next ring submit. FROND_ZODIAC_CROSS=0 turns it off, for measuring.
+bool crossCompletions = [] {
+    const char* v = std::getenv("FROND_ZODIAC_CROSS");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+bool spanCrosses = false, crossBlocked = false;
+uint64_t crossSpans = 0, crossRefusals = 0;  // for tests and traces
 uint64_t aspPollSkips = 0, aspPollRounds = 0, aspPollCycles = 0;  // for tests and traces
 // The loop at 20096d92 (Thumb): ldr r3, [r0, #52] (FIFO_PTR); lsls r3, #28; lsrs r3, #28; cmp r3, #3; bcc back.
 // It waits for the write pointer to reach 3, the calibration round's three samples. Its load is a marked access pc.
@@ -404,11 +417,26 @@ struct Probe {
     // CPU cycles from now that can be charged later in one piece. Worked out only after the interrupt
     // lines and the clock boundary have been looked at in the state it starts from.
     // withGraphics false leaves the graphics models out, for spanBoundary.
-    uint64_t quietCpuCycles(uint32_t mode, bool withGraphics = true) const {
+    // cross: Fast's span may run past queued batches' completions (crossCompletions); sets spanCrosses for the result.
+    uint64_t quietCpuCycles(uint32_t mode, bool withGraphics = true, bool cross = false) const {
+        if (cross) spanCrosses = false;
         if (options.idleStepped) return 0;
         const auto cpuPeriod = peripherals.cpuReferencePeriod(mode);
-        uint64_t cycles = withGraphics ? cs5Configuration.quietCpuCycles(cpuPeriod) : UINT64_MAX;
+        uint64_t front = UINT64_MAX;
+        cross = cross && withGraphics && crossAllowed();
+        uint64_t cycles = !withGraphics ? UINT64_MAX : cross ? cs5Configuration.quietCpuCyclesThrough(cpuPeriod, front) :
+                                                                cs5Configuration.quietCpuCycles(cpuPeriod);
         if (!cycles) return 0;
+        if (cross && cycles > front) {
+            const uint64_t through = quietCpuCycles(mode, false);
+            const uint64_t bounded = std::min(cycles, through);
+            if (bounded > front) {
+                spanCrosses = true;
+                ++crossSpans;
+                return bounded;
+            }
+            return std::min(front, through);
+        }
         // The board counts its quiet time in HCLK periods, the last of which is the one with the change.
         // One more is left out for the part of a System PLL clock an asynchronous charge can carry over.
         const uint64_t hclk = std::min<uint64_t>(peripherals.idleQuietHclk(), uint64_t(1) << 30);
@@ -453,6 +481,21 @@ struct Probe {
         if (cycles && !peripherals.referenceChargeSupported(cycles * cpuPeriod.numerator, cpuPeriod.denominator)) return 0;
         return cycles;
     }
+    bool crossAllowed() const {
+        if (!crossCompletions || crossBlocked || batchSubmitBoard || keepSubmitSpan || !fastEngine || !fastJit || !graphicsMemory ||
+            graphicsMemory->gpuResidency() || options.cs5ConfigurationObserver || options.busObserver ||
+            !cs5Configuration.virtualProfile())
+            return false;
+        // A player's batches carry overlay words for the display; those complete one at a time.
+        return cs5Configuration.engineState().otherSubmission() != Imx1GraphicsEngine::player;
+    }
+    // Refuses a lean access while the span runs past completions, and stops crossing until the next submit.
+    bool crossRefused() const {
+        if (!spanCrosses) return false;
+        crossBlocked = true;
+        ++crossRefusals;
+        return true;
+    }
     // Charges the waiting cycles. Anything that reads or changes the board, the graphics chip or the
     // time calls this first. A refusal is kept in graphicsWireStatus for the next clock boundary.
     void flushSubmitBoard() {
@@ -477,6 +520,7 @@ struct Probe {
             if (graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
         }
         quietCycles = 0;
+        spanCrosses = false;
         linesPending = false;
         if (!deferredCycles && !deferredHclk) return true;
         const uint32_t cycles = uint32_t(deferredCycles);
@@ -550,7 +594,7 @@ struct Probe {
         cs5Configuration.takeBusyLevel();
         if (clockBoundary()) return -1;
         updateInterrupts();
-        uint64_t span = quietCpuCycles(mode);
+        uint64_t span = quietCpuCycles(mode, true, true);
         if (span < leanMinimumSpan && !cs5Configuration.quietCpuCycles(period) && cs5Configuration.changeDue(period) &&
             quietCpuCycles(mode, false)) {
             // The graphics change is due in the next cycle and nothing else is: it passes as the step would charge it.
@@ -564,7 +608,7 @@ struct Probe {
             peripherals.advanceCpuCycles(1, mode, options.assumeMpllSettled);
             if (clockBoundary()) return -1;
             updateInterrupts();
-            span = quietCpuCycles(mode);
+            span = quietCpuCycles(mode, true, true);
         }
         quietCycles = span;
         return span >= leanMinimumSpan ? 1 : 0;
@@ -910,6 +954,8 @@ struct Probe {
             Imx1GraphicsMemory::owns(pa) || options.cs5ConfigurationObserver || failed || quietCycles <= ran ||
             cs5Configuration.engineState().completed())
             return false;
+        // The scan status follows the display's timing alone, which a completion doesn't change.
+        if (pa != 0x1601054c && crossRefused()) return false;
         if (!leanCs5Ready() || left < leanCs5.cost) return false;
         const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
         if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok || !leanRegisterReady())
@@ -966,6 +1012,14 @@ struct Probe {
             p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)
             return false;
         if (!p.leanCs5Ready() || left < leanCs5.cost) return false;
+        // Past a completion only ring words: the batches were decoded at their submits, and the producer writes only
+        // words a read pointer read before showed free, which stay free.
+        if (spanCrosses) {
+            if (!leanCs5.ringChecked && size == 4 && pa >= 0x16080000 && pa < 0x160c0000) p.leanRingCheck();
+            if (!(leanCs5.ringUsable && pa - leanCs5.ringLow < leanCs5.ringSpan && size == 4 && !(pa & 3)) &&
+                p.crossRefused())
+                return false;
+        }
         const bool user = (cpuGetRegExternal(p.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
         uint32_t datum = value;
         if (p.peripherals.eimState().cs5Transfer(pa, size, true, user) != Imx1EimAccess::ok || !p.leanMemoryReady() ||
@@ -1059,6 +1113,7 @@ struct Probe {
         t = saved;
         if (!ok) return false;
         ++jitChargedWrites;
+        crossBlocked = false;
         // A batch start leaves its busy level for the next advance, which would end the quiet span at once; it
         // takes it now, so the run goes on to the batch's completion.
         cs5Configuration.takeBusyLevel();
@@ -1077,10 +1132,11 @@ struct Probe {
             quietCycles = remaining;
         } else if (keepBoard && lean && remaining > cost) {
             quietCycles = std::min(remaining, cs5Configuration.quietCpuCycles(peripherals.cpuReferencePeriod(quietMode)));
+            spanCrosses = false;
         } else {
             flushSubmitBoard();
             updateInterrupts();
-            quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+            quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, true) : 0;
         }
         if (cost) {
             if (quietCycles > cost) quietCycles -= cost;
@@ -1090,7 +1146,7 @@ struct Probe {
                 if (chargeDeferred()) {
                     cs5Configuration.takeBusyLevel();
                     updateInterrupts();
-                    quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+                    quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, true) : 0;
                 }
             }
         }
@@ -1127,6 +1183,7 @@ struct Probe {
         if (!write) value = datum;
         updateInterrupts();
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        spanCrosses = false;
         cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
         if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
             jitHalt = true;
@@ -1152,6 +1209,7 @@ struct Probe {
         ++jitBoardWrites;
         updateInterrupts();
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        spanCrosses = false;
         if (quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
             jitHalt = true;
             cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
@@ -1512,7 +1570,7 @@ struct Probe {
     // Returns whether rounds passed.
     bool skipFifoWait() {
         const uint32_t* r = cpuGetRegisters(cpu);
-        if (!fifoWaitSkip || r[15] != 0x2008492c || r[14] != 0x200b9018 || r[0] != 1 || r[6] != 1 || r[5] > r[11] ||
+        if (spanCrosses || !fifoWaitSkip || r[15] != 0x2008492c || r[14] != 0x200b9018 || r[0] != 1 || r[6] != 1 || r[5] > r[11] ||
             !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu))
             return false;
         static constexpr uint32_t caller[] = {0xe1a00006u, 0xeb000e28u, 0xe594101cu, 0xe5940014u, 0xe0010198u,
@@ -1612,6 +1670,7 @@ struct Probe {
                                                     uint32_t& value, uint32_t& cost) {
         if (!cs5Configuration.virtualProfile() || options.cs5ConfigurationObserver || failed || quietCycles <= ran)
             return false;
+        if (crossRefused()) return false;
         if (!leanCs5Ready() || left < leanCs5.cost) return false;
         const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
         if (peripherals.eimState().cs5Transfer(pa, size, false, user) != Imx1EimAccess::ok || !leanMemoryReady() ||
@@ -2319,6 +2378,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
             if (!deferredCycles && !deferredHclk) {
                 quietMode = cpuArm920ClockMode(p->cpu);
                 quietCycles = p->quietCpuCycles(quietMode);
+                spanCrosses = false;
             }
         }
         const auto pc = cpuGetRegisters(p->cpu)[15];
@@ -2488,6 +2548,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
             if (span > cycles && p->boundaryStatus() == Imx1BootstrapAccess::ok) {
                 deferredCycles = cycles;
                 quietCycles = span - cycles;
+                spanCrosses = false;
                 linesPending = true;
                 return true;
             }
@@ -2766,6 +2827,9 @@ uint64_t imx1MachineAspPollSkips(const Imx1Machine*) { return aspPollSkips; }
 uint64_t imx1MachineAspPollRounds(const Imx1Machine*) { return aspPollRounds; }
 uint64_t imx1MachineAspPollCycles(const Imx1Machine*) { return aspPollCycles; }
 void imx1SetAspPollSkip(bool skip) { aspPollSkip = skip; }
+uint64_t imx1MachineCrossSpans(const Imx1Machine*) { return crossSpans; }
+uint64_t imx1MachineCrossRefusals(const Imx1Machine*) { return crossRefusals; }
+void imx1SetCrossCompletions(bool on) { crossCompletions = on; crossBlocked = spanCrosses = false; }
 bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on) {
     auto* p = machine->probe;
     if (p->bounds || p->stopped) return false;
