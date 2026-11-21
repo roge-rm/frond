@@ -29,7 +29,7 @@ namespace as {
 constexpr uint8_t Sync = 0x05, Responses = 0x06, Add = 0x07, Change = 0x08, Delete = 0x09, Fetch = 0x0a,
                   SyncKey = 0x0b, ClientId = 0x0c, ServerId = 0x0d, Status = 0x0e, Collection = 0x0f, Class = 0x10,
                   CollectionId = 0x12, GetChanges = 0x13, MoreAvailable = 0x14, WindowSize = 0x15, Commands = 0x16,
-                  Collections = 0x1c, ApplicationData = 0x1d;
+                  Options = 0x17, Truncation = 0x19, Collections = 0x1c, ApplicationData = 0x1d, Supported = 0x20;
 }
 namespace fh {
 constexpr uint8_t DisplayName = 0x07, ServerId = 0x08, ParentId = 0x09, Type = 0x0a, Status = 0x0c, Changes = 0x0e,
@@ -40,7 +40,7 @@ constexpr uint8_t GetItemEstimate = 0x05, Collections = 0x07, Collection = 0x08,
                   Estimate = 0x0c, Response = 0x0d, Status = 0x0e;
 }
 namespace ct {
-constexpr uint8_t Birthday = 0x08, Body = 0x09, BodyTruncated = 0x0b, Business2Phone = 0x0c, BusinessCity = 0x0d,
+constexpr uint8_t Birthday = 0x08, Body = 0x09, BodySize = 0x0a, BodyTruncated = 0x0b, Business2Phone = 0x0c, BusinessCity = 0x0d,
                   BusinessCountry = 0x0e, BusinessPostalCode = 0x0f, BusinessState = 0x10, BusinessStreet = 0x11,
                   BusinessFax = 0x12, BusinessPhone = 0x13, CarPhone = 0x14, Categories = 0x15, Category = 0x16,
                   CompanyName = 0x19, Email1 = 0x1b, Email2 = 0x1c, Email3 = 0x1d, FileAs = 0x1e, FirstName = 0x1f,
@@ -50,23 +50,23 @@ constexpr uint8_t Birthday = 0x08, Body = 0x09, BodyTruncated = 0x0b, Business2P
                   OtherStreet = 0x31, Pager = 0x32, RadioPhone = 0x33, WebPage = 0x37;
 constexpr uint8_t Anniversary = 0x05, AssistantName = 0x06, AssistantPhone = 0x07, Children = 0x17, Child = 0x18,
                   Department = 0x1a, MiddleName = 0x2a, OfficeLocation = 0x2c, Spouse = 0x34, Suffix = 0x35,
-                  Title = 0x36, YomiCompanyName = 0x38, YomiFirstName = 0x39, YomiLastName = 0x3a;
+                  Title = 0x36, YomiCompanyName = 0x38, YomiFirstName = 0x39, YomiLastName = 0x3a, Rtf = 0x3b, Picture = 0x3c;
 // Contacts2
 constexpr uint8_t CustomerId = 0x05, GovernmentId = 0x06, IMAddress = 0x07, IMAddress2 = 0x08, IMAddress3 = 0x09,
                   ManagerName = 0x0a, CompanyMainPhone = 0x0b, AccountName = 0x0c, NickName = 0x0d, MMS = 0x0e;
 }
 namespace cal {
 constexpr uint8_t TimeZone = 0x05, AllDayEvent = 0x06, Body = 0x0b, BodyTruncated = 0x0c, BusyStatus = 0x0d,
-                  Categories = 0x0e, Category = 0x0f, DtStamp = 0x11, EndTime = 0x12, Exception = 0x13, Exceptions = 0x14,
+                  Categories = 0x0e, Category = 0x0f, Rtf = 0x10, DtStamp = 0x11, EndTime = 0x12, Exception = 0x13, Exceptions = 0x14,
                   Deleted = 0x15, ExceptionStartTime = 0x16, Location = 0x17, MeetingStatus = 0x18, Recurrence = 0x1b,
                   Type = 0x1c, Until = 0x1d, Occurrences = 0x1e, Interval = 0x1f, DayOfWeek = 0x20, DayOfMonth = 0x21,
                   WeekOfMonth = 0x22, MonthOfYear = 0x23, Reminder = 0x24, Sensitivity = 0x25, Subject = 0x26,
                   StartTime = 0x27, UID = 0x28;
 }
 namespace tk {
-constexpr uint8_t Body = 0x05, BodyTruncated = 0x07, Categories = 0x08, Category = 0x09, Complete = 0x0a,
+constexpr uint8_t Body = 0x05, BodySize = 0x06, BodyTruncated = 0x07, Categories = 0x08, Category = 0x09, Complete = 0x0a,
                   DateCompleted = 0x0b, DueDate = 0x0c, UtcDueDate = 0x0d, Importance = 0x0e, Sensitivity = 0x1d,
-                  Subject = 0x20;
+                  Subject = 0x20, Rtf = 0x21;
 }
 
 struct FolderInfo {
@@ -84,7 +84,8 @@ constexpr std::array<FolderInfo, 3> folderInfo{{
 
 const FolderInfo* FindFolder(const std::string& id, const std::string& className) {
     for (const auto& folder : folderInfo)
-        if (id == folder.id || (id.empty() && className == folder.className)) return &folder;
+        if (id.empty() ? className == folder.className : id == folder.id && (className.empty() || className == folder.className))
+            return &folder;
     return nullptr;
 }
 // The folder if this server offers it.
@@ -363,10 +364,10 @@ struct TextMap {
 };
 // The fields after birthday have no place in the Palm formats; the profile keeps them for
 // Windows Mobile.
-constexpr std::array<TextMap, 43> contactText{{
+constexpr std::array<TextMap, 42> contactText{{
     {"firstName", pageContacts, ct::FirstName}, {"lastName", pageContacts, ct::LastName},
     {"company", pageContacts, ct::CompanyName}, {"title", pageContacts, ct::JobTitle},
-    {"webpage", pageContacts, ct::WebPage}, {"note", pageContacts, ct::Body},
+    {"webpage", pageContacts, ct::WebPage},
     {"chat1", pageContacts2, ct::IMAddress}, {"chat2", pageContacts2, ct::IMAddress2},
     {"street", pageContacts, ct::BusinessStreet}, {"city", pageContacts, ct::BusinessCity},
     {"state", pageContacts, ct::BusinessState}, {"postalCode", pageContacts, ct::BusinessPostalCode},
@@ -392,7 +393,14 @@ bool IsDate(const TextMap& map) { return map.page == pageContacts && (map.tag ==
 constexpr const char* childSeparator = ", ";
 
 using Tag = uint16_t;  // page << 8 | token
+
 constexpr Tag T(uint8_t page, uint8_t tag) { return Tag(page << 8 | tag); }
+
+using SupportedFields = std::optional<std::set<Tag>>;
+
+bool Updates(const WbxmlNode& data, uint8_t page, uint8_t tag, const SupportedFields& supported) {
+    return !supported || supported->count(T(page, tag)) || data.Find(page, tag);
+}
 
 // AirSync phone fields for each Palm phone label: work, home, fax, other, e-mail, main, pager, mobile.
 const std::vector<Tag>& PhoneTags(int label) {
@@ -411,15 +419,27 @@ const std::vector<Tag>& PhoneTags(int label) {
 }
 constexpr unsigned phoneSlots = 7;
 
-// Slot (1-based) to AirSync field, in slot order, for the phones a record has.
+std::string PhoneTagField(unsigned slot) { return "airsyncPhoneTag" + std::to_string(slot); }
+
+int SlotPhoneLabel(const PimRecord& r, unsigned slot) {
+    const int fallback = slot <= 5 ? int(slot - 1) : 3;
+    return Number(Field(r, "phoneLabel" + std::to_string(slot)), fallback);
+}
+
+// Reserve saved wire fields first. Palm edits keep the slot, but can change its label.
 std::map<unsigned, Tag> PhonePlaces(const PimRecord& r) {
     std::map<unsigned, Tag> places;
     std::set<Tag> used;
     for (unsigned slot = 1; slot <= phoneSlots; ++slot) {
-        const auto n = std::to_string(slot);
-        if (Field(r, "phone" + n).empty()) continue;
-        const int fallback = slot <= 5 ? int(slot - 1) : 3;
-        for (const auto tag : PhoneTags(Number(Field(r, "phoneLabel" + n), fallback))) {
+        if (Field(r, "phone" + std::to_string(slot)).empty()) continue;
+        const auto& tags = PhoneTags(SlotPhoneLabel(r, slot));
+        const int tag = Number(Field(r, PhoneTagField(slot)), -1);
+        if (std::find(tags.begin(), tags.end(), tag) != tags.end() && used.insert(Tag(tag)).second)
+            places[slot] = Tag(tag);
+    }
+    for (unsigned slot = 1; slot <= phoneSlots; ++slot) {
+        if (places.count(slot) || Field(r, "phone" + std::to_string(slot)).empty()) continue;
+        for (const auto tag : PhoneTags(SlotPhoneLabel(r, slot))) {
             if (used.insert(tag).second) {
                 places[slot] = tag;
                 break;
@@ -427,6 +447,34 @@ std::map<unsigned, Tag> PhonePlaces(const PimRecord& r) {
         }
     }
     return places;
+}
+
+// Recover legacy assignments when the saved wire value identifies one current slot.
+bool RecoverPhoneTags(PimRecord& record, const WbxmlNode& view) {
+    std::map<Tag, std::vector<unsigned>> matches;
+    std::map<unsigned, unsigned> candidates;
+    std::set<Tag> reserved;
+    for (const auto& [slot, tag] : PhonePlaces(record))
+        if (Number(Field(record, PhoneTagField(slot)), -1) == tag) reserved.insert(tag);
+
+    for (unsigned slot = 1; slot <= phoneSlots; ++slot) {
+        const auto& tags = PhoneTags(SlotPhoneLabel(record, slot));
+        const auto saved = Number(Field(record, PhoneTagField(slot)), -1);
+        const auto value = Field(record, "phone" + std::to_string(slot));
+        if (value.empty() || std::find(tags.begin(), tags.end(), saved) != tags.end()) continue;
+        for (const auto tag : tags) {
+            if (reserved.count(tag) || view.Text(uint8_t(tag >> 8), uint8_t(tag)) != value) continue;
+            matches[tag].push_back(slot);
+            ++candidates[slot];
+        }
+    }
+    bool changed = false;
+    for (const auto& [tag, slots] : matches) {
+        if (slots.size() != 1 || candidates.at(slots.front()) != 1) continue;
+        record.fields[PhoneTagField(slots.front())] = std::to_string(tag);
+        changed = true;
+    }
+    return changed;
 }
 
 // Birthdays and anniversaries go as the device's local midnight in UTC, as the device sends them.
@@ -461,10 +509,9 @@ WbxmlNode ContactData(const PimRecord& r, const Zone& zone) {
     return data;
 }
 
-void ApplyContact(const WbxmlNode& data, PimRecord& r, const Zone& zone) {
-    const bool bodyTruncated = data.Text(pageContacts, ct::BodyTruncated) == "1";
+void ApplyContact(const WbxmlNode& data, PimRecord& r, const Zone& zone, const SupportedFields& supported) {
     for (const auto& map : contactText) {
-        if (map.tag == ct::Body && map.page == pageContacts && bodyTruncated) continue;
+        if (!Updates(data, map.page, map.tag, supported)) continue;
         auto value = data.Text(map.page, map.tag);
         if (IsDate(map) && !value.empty()) {
             int64_t utc;
@@ -484,6 +531,11 @@ void ApplyContact(const WbxmlNode& data, PimRecord& r, const Zone& zone) {
         }
     for (const auto& [slot, tag] : PhonePlaces(r)) {
         const auto n = std::to_string(slot);
+        const int label = SlotPhoneLabel(r, slot);
+        // Palm's encoder needs an explicit label to keep the slot's default type.
+        r.fields["phoneLabel" + n] = std::to_string(label);
+        if (PhoneTags(label).size() > 1) r.fields[PhoneTagField(slot)] = std::to_string(tag);
+        if (!Updates(data, uint8_t(tag >> 8), uint8_t(tag), supported)) continue;
         auto it = phones.find(tag);
         if (it == phones.end()) {
             r.fields["phone" + n] = "";
@@ -501,19 +553,24 @@ void ApplyContact(const WbxmlNode& data, PimRecord& r, const Zone& zone) {
                 if (!Field(r, "phone" + n).empty()) continue;
                 r.fields["phone" + n] = it->second;
                 r.fields["phoneLabel" + n] = std::to_string(label);
+                if (PhoneTags(label).size() > 1) r.fields[PhoneTagField(slot)] = std::to_string(tag);
+                else r.fields.erase(PhoneTagField(slot));
                 break;
             }
             phones.erase(it);
         }
     }
-    std::string children;
-    if (const auto* list = data.Find(pageContacts, ct::Children))
-        for (const auto& child : list->children)
-            if (child.page == pageContacts && child.tag == ct::Child && !child.text.empty())
-                children += (children.empty() ? "" : childSeparator) + child.text;
-    if (children.empty()) r.fields.erase("children");
-    else r.fields["children"] = children;
-    r.category = ReadCategory(data, pageContacts, ct::Categories, ct::Category);
+    if (Updates(data, pageContacts, ct::Children, supported)) {
+        std::string children;
+        if (const auto* list = data.Find(pageContacts, ct::Children))
+            for (const auto& child : list->children)
+                if (child.page == pageContacts && child.tag == ct::Child && !child.text.empty())
+                    children += (children.empty() ? "" : childSeparator) + child.text;
+        if (children.empty()) r.fields.erase("children");
+        else r.fields["children"] = children;
+    }
+    if (Updates(data, pageContacts, ct::Categories, supported))
+        r.category = ReadCategory(data, pageContacts, ct::Categories, ct::Category);
 }
 
 // Calendar.
@@ -618,7 +675,6 @@ WbxmlNode CalendarData(const PimRecord& r, const Zone& zone, bool stamp) {
         end = CivilFromSeconds(UtcSeconds(start) + 86400);
     }
     data.Add(pageCalendar, cal::AllDayEvent, timed ? "0" : "1");
-    AddText(data, pageCalendar, cal::Body, Field(r, "note"));
     data.Add(pageCalendar, cal::BusyStatus, "2");
     if (stamp) data.Add(pageCalendar, cal::DtStamp, Compact(int64_t(std::time(nullptr))));
     data.Add(pageCalendar, cal::EndTime, Compact(zone.ToUtc(end)));
@@ -658,92 +714,107 @@ WbxmlNode CalendarData(const PimRecord& r, const Zone& zone, bool stamp) {
     return data;
 }
 
-void ApplyCalendar(const WbxmlNode& data, PimRecord& r, const Zone& zone) {
+void ApplyCalendar(const WbxmlNode& data, PimRecord& r, const Zone& zone, const SupportedFields& supported) {
+    const auto updates = [&](uint8_t tag) { return Updates(data, pageCalendar, tag, supported); };
+    const bool timingChanged = updates(cal::StartTime) || updates(cal::EndTime) || updates(cal::AllDayEvent);
+    const bool timingGhosted = !updates(cal::StartTime) || !updates(cal::EndTime) || !updates(cal::AllDayEvent);
+    WbxmlNode previous;
+    if (timingGhosted) previous = CalendarData(r, zone, false);
+    const auto timing = [&](uint8_t tag) {
+        return (updates(tag) ? data : previous).Text(pageCalendar, tag);
+    };
     int64_t startUtc = 0, endUtc = 0;
-    if (!ParseUtc(data.Text(pageCalendar, cal::StartTime), startUtc))
+    if (!ParseUtc(timing(cal::StartTime), startUtc))
         throw std::runtime_error("Calendar item without a start time");
-    if (!ParseUtc(data.Text(pageCalendar, cal::EndTime), endUtc)) endUtc = startUtc;
-    const bool allDay = data.Text(pageCalendar, cal::AllDayEvent) == "1";
+    if (!ParseUtc(timing(cal::EndTime), endUtc)) endUtc = startUtc;
+    const bool allDay = timing(cal::AllDayEvent) == "1";
     // An all-day event's midnight is the device's; the nearest local midnight gives the day.
     const Civil start = zone.ToLocal(allDay ? startUtc + 12 * 3600 : startUtc);
     Civil end = zone.ToLocal(endUtc);
-    r.fields["date"] = FormatDate(start);
-    if (allDay) {
-        r.fields["startTime"] = "";
-        r.fields["endTime"] = "";
-    } else {
-        if (FormatDate(end) != FormatDate(start) || endUtc < startUtc) end.hour = 23, end.minute = 59;
-        r.fields["startTime"] = FormatClock(start);
-        r.fields["endTime"] = FormatClock(end);
+    if (timingChanged) {
+        r.fields["date"] = FormatDate(start);
+        if (allDay) {
+            r.fields["startTime"] = "";
+            r.fields["endTime"] = "";
+        } else {
+            if (FormatDate(end) != FormatDate(start) || endUtc < startUtc) end.hour = 23, end.minute = 59;
+            r.fields["startTime"] = FormatClock(start);
+            r.fields["endTime"] = FormatClock(end);
+        }
     }
     const auto set = [&](const char* field, const std::string& value) {
         if (value.empty()) r.fields.erase(field);
         else r.fields[field] = value;
     };
-    set("summary", data.Text(pageCalendar, cal::Subject));
-    set("location", data.Text(pageCalendar, cal::Location));
-    if (data.Text(pageCalendar, cal::BodyTruncated) != "1") set("note", data.Text(pageCalendar, cal::Body));
-    const auto reminder = data.Text(pageCalendar, cal::Reminder);
-    if (reminder.empty()) {
-        r.fields.erase("alarmAdvance");
-        r.fields.erase("alarmUnit");
-    } else {
-        const int minutes = std::max(0, Number(reminder));
-        const int unit = minutes && minutes % 1440 == 0 && minutes / 1440 <= 99 ? 2 : minutes % 60 == 0 && minutes / 60 <= 99 && minutes ? 1 : 0;
-        const int advance = unit == 2 ? minutes / 1440 : unit == 1 ? minutes / 60 : std::min(minutes, 99);
-        r.fields["alarmAdvance"] = std::to_string(advance);
-        r.fields["alarmUnit"] = std::to_string(unit);
+    if (updates(cal::Subject)) set("summary", data.Text(pageCalendar, cal::Subject));
+    if (updates(cal::Location)) set("location", data.Text(pageCalendar, cal::Location));
+    if (updates(cal::Reminder)) {
+        const auto reminder = data.Text(pageCalendar, cal::Reminder);
+        if (reminder.empty()) {
+            r.fields.erase("alarmAdvance");
+            r.fields.erase("alarmUnit");
+        } else {
+            const int minutes = std::max(0, Number(reminder));
+            const int unit = minutes && minutes % 1440 == 0 && minutes / 1440 <= 99 ? 2 : minutes % 60 == 0 && minutes / 60 <= 99 && minutes ? 1 : 0;
+            const int advance = unit == 2 ? minutes / 1440 : unit == 1 ? minutes / 60 : std::min(minutes, 99);
+            r.fields["alarmAdvance"] = std::to_string(advance);
+            r.fields["alarmUnit"] = std::to_string(unit);
+        }
     }
-    for (const char* key : {"repeatType", "repeatUntil", "repeatInterval", "repeatOn", "repeatWeekStart", "repeatOccurrences"})
-        r.fields.erase(key);
-    if (const auto* rec = data.Find(pageCalendar, cal::Recurrence)) {
-        const int type = Number(rec->Text(pageCalendar, cal::Type), -1);
-        const int dayOfWeek = Number(rec->Text(pageCalendar, cal::DayOfWeek));
-        int interval = std::min(std::max(Number(rec->Text(pageCalendar, cal::Interval), 1), 1), 99);
-        int palm = 0, on = 0;
-        if (type == 0) palm = 1;
-        else if (type == 1) palm = 2, on = dayOfWeek & 0x7f;
-        else if (type == 2) palm = 4;
-        else if (type == 3 || type == 6) {
-            int dow = 0;
-            while (dow < 6 && !(dayOfWeek >> dow & 1)) ++dow;
-            palm = 3;
-            on = (std::min(std::max(Number(rec->Text(pageCalendar, cal::WeekOfMonth), 1), 1), 5) - 1) * 7 + dow;
-            if (type == 6) interval = std::min(interval, 8) * 12;
-        } else if (type == 5) palm = 5;
-        if (palm) {
-            r.fields["repeatType"] = std::to_string(palm);
-            r.fields["repeatInterval"] = std::to_string(interval);
-            r.fields["repeatOn"] = std::to_string(on);
-            r.fields["repeatWeekStart"] = "0";
-            int64_t until;
-            const int occurrences = Number(rec->Text(pageCalendar, cal::Occurrences));
-            const int64_t last = occurrences > 0 ? NthOccurrence(palm, interval, on, start, occurrences) : -1;
-            if (ParseUtc(rec->Text(pageCalendar, cal::Until), until)) {
-                r.fields["repeatUntil"] = FormatDate(zone.ToLocal(until));
-            } else if (last >= 0) {
-                // Palm repeats end on a date: the last occurrence's, with the count kept for AirSync.
-                r.fields["repeatUntil"] = FormatDate(CivilFromSeconds(last * 86400));
-                r.fields["repeatOccurrences"] = std::to_string(occurrences);
-            } else {
-                r.fields["repeatUntil"] = "";
+    if (updates(cal::Recurrence)) {
+        for (const char* key : {"repeatType", "repeatUntil", "repeatInterval", "repeatOn", "repeatWeekStart", "repeatOccurrences"})
+            r.fields.erase(key);
+        if (const auto* rec = data.Find(pageCalendar, cal::Recurrence)) {
+            const int type = Number(rec->Text(pageCalendar, cal::Type), -1);
+            const int dayOfWeek = Number(rec->Text(pageCalendar, cal::DayOfWeek));
+            int interval = std::min(std::max(Number(rec->Text(pageCalendar, cal::Interval), 1), 1), 99);
+            int palm = 0, on = 0;
+            if (type == 0) palm = 1;
+            else if (type == 1) palm = 2, on = dayOfWeek & 0x7f;
+            else if (type == 2) palm = 4;
+            else if (type == 3 || type == 6) {
+                int dow = 0;
+                while (dow < 6 && !(dayOfWeek >> dow & 1)) ++dow;
+                palm = 3;
+                on = (std::min(std::max(Number(rec->Text(pageCalendar, cal::WeekOfMonth), 1), 1), 5) - 1) * 7 + dow;
+                if (type == 6) interval = std::min(interval, 8) * 12;
+            } else if (type == 5) palm = 5;
+            if (palm) {
+                r.fields["repeatType"] = std::to_string(palm);
+                r.fields["repeatInterval"] = std::to_string(interval);
+                r.fields["repeatOn"] = std::to_string(on);
+                r.fields["repeatWeekStart"] = "0";
+                int64_t until;
+                const int occurrences = Number(rec->Text(pageCalendar, cal::Occurrences));
+                const int64_t last = occurrences > 0 ? NthOccurrence(palm, interval, on, start, occurrences) : -1;
+                if (ParseUtc(rec->Text(pageCalendar, cal::Until), until)) {
+                    r.fields["repeatUntil"] = FormatDate(zone.ToLocal(until));
+                } else if (last >= 0) {
+                    // Palm repeats end on a date: the last occurrence's, with the count kept for AirSync.
+                    r.fields["repeatUntil"] = FormatDate(CivilFromSeconds(last * 86400));
+                    r.fields["repeatOccurrences"] = std::to_string(occurrences);
+                } else {
+                    r.fields["repeatUntil"] = "";
+                }
             }
         }
     }
-    std::string exceptions;
-    if (const auto* list = data.Find(pageCalendar, cal::Exceptions)) {
-        for (const auto& item : list->children) {
-            int64_t when;
-            if (item.Text(pageCalendar, cal::Deleted) != "1" || !ParseUtc(item.Text(pageCalendar, cal::ExceptionStartTime), when))
-                continue;
-            if (!exceptions.empty()) exceptions += ',';
-            exceptions += FormatDate(zone.ToLocal(when));
+    if (updates(cal::Exceptions)) {
+        std::string exceptions;
+        if (const auto* list = data.Find(pageCalendar, cal::Exceptions)) {
+            for (const auto& item : list->children) {
+                int64_t when;
+                if (item.Text(pageCalendar, cal::Deleted) != "1" || !ParseUtc(item.Text(pageCalendar, cal::ExceptionStartTime), when))
+                    continue;
+                if (!exceptions.empty()) exceptions += ',';
+                exceptions += FormatDate(zone.ToLocal(when));
+            }
         }
+        set("exceptions", exceptions);
     }
-    set("exceptions", exceptions);
     const auto sensitivity = data.Text(pageCalendar, cal::Sensitivity);
-    r.secret = sensitivity == "2" || sensitivity == "3";
-    r.category = ReadCategory(data, pageCalendar, cal::Categories, cal::Category);
+    if (updates(cal::Sensitivity)) r.secret = sensitivity == "2" || sensitivity == "3";
+    if (updates(cal::Categories)) r.category = ReadCategory(data, pageCalendar, cal::Categories, cal::Category);
 }
 
 // Tasks. Palm priority 1 is the highest; AirSync importance 2 is high.
@@ -751,7 +822,6 @@ int Importance(int priority) { return priority <= 1 ? 2 : priority <= 3 ? 1 : 0;
 
 WbxmlNode TaskData(const PimRecord& r, const Zone& zone) {
     WbxmlNode data(pageAirSync, as::ApplicationData);
-    AddText(data, pageTasks, tk::Body, Field(r, "note"));
     AddCategory(data, pageTasks, tk::Categories, tk::Category, r.category);
     const bool complete = Field(r, "complete") == "1";
     data.Add(pageTasks, tk::Complete, complete ? "1" : "0");
@@ -769,41 +839,363 @@ WbxmlNode TaskData(const PimRecord& r, const Zone& zone) {
     return data;
 }
 
-void ApplyTask(const WbxmlNode& data, PimRecord& r, const Zone& zone) {
-    r.fields["summary"] = data.Text(pageTasks, tk::Subject);
-    if (data.Text(pageTasks, tk::BodyTruncated) != "1") r.fields["note"] = data.Text(pageTasks, tk::Body);
-    const bool complete = data.Text(pageTasks, tk::Complete) == "1";
-    r.fields["complete"] = complete ? "1" : "0";
+void ApplyTask(const WbxmlNode& data, PimRecord& r, const Zone& zone, const SupportedFields& supported) {
+    const auto updates = [&](uint8_t tag) { return Updates(data, pageTasks, tag, supported); };
+    if (updates(tk::Subject)) r.fields["summary"] = data.Text(pageTasks, tk::Subject);
+    if (updates(tk::Complete)) r.fields["complete"] = data.Text(pageTasks, tk::Complete) == "1" ? "1" : "0";
+    const bool complete = Field(r, "complete") == "1";
     int64_t when;
-    if (complete && ParseUtc(data.Text(pageTasks, tk::DateCompleted), when)) r.fields["completionDate"] = FormatDate(zone.ToLocal(when));
-    else if (!complete) r.fields.erase("completionDate");
+    if (updates(tk::DateCompleted)) {
+        if (complete && ParseUtc(data.Text(pageTasks, tk::DateCompleted), when))
+            r.fields["completionDate"] = FormatDate(zone.ToLocal(when));
+        else
+            r.fields.erase("completionDate");
+    }
     // DueDate is the device's local date written as UTC.
     const auto due = data.Text(pageTasks, tk::DueDate);
-    r.fields["dueDate"] = ParseUtc(due, when) ? FormatDate(CivilFromSeconds(when)) : "";
+    if (updates(tk::DueDate)) r.fields["dueDate"] = ParseUtc(due, when) ? FormatDate(CivilFromSeconds(when)) : "";
     const int importance = Number(data.Text(pageTasks, tk::Importance), 1);
-    if (Importance(Number(Field(r, "priority"), 1)) != importance)
+    if (updates(tk::Importance) && Importance(Number(Field(r, "priority"), 1)) != importance)
         r.fields["priority"] = importance >= 2 ? "1" : importance == 1 ? "3" : "5";
     const auto sensitivity = data.Text(pageTasks, tk::Sensitivity);
-    r.secret = sensitivity == "2" || sensitivity == "3";
-    r.category = ReadCategory(data, pageTasks, tk::Categories, tk::Category);
+    if (updates(tk::Sensitivity)) r.secret = sensitivity == "2" || sensitivity == "3";
+    if (updates(tk::Categories)) r.category = ReadCategory(data, pageTasks, tk::Categories, tk::Category);
 }
 
-WbxmlNode ItemData(const PimRecord& r, const Zone& zone, bool stamp = true) {
-    switch (r.kind) {
-        case PimKind::contacts: return ContactData(r, zone);
-        case PimKind::calendar: return CalendarData(r, zone, stamp);
-        case PimKind::tasks: return TaskData(r, zone);
+// Desktop AirSync 2.5 uses legacy RTF tags, including ones removed from later specs.
+struct BodyTags {
+    uint8_t page, body, size, truncated, rtf;
+};
+
+BodyTags LegacyBody(PimKind kind) {
+    switch (kind) {
+        case PimKind::contacts: return {pageContacts, ct::Body, ct::BodySize, ct::BodyTruncated, ct::Rtf};
+        case PimKind::calendar: return {pageCalendar, cal::Body, 0, cal::BodyTruncated, cal::Rtf};
+        case PimKind::tasks: return {pageTasks, tk::Body, tk::BodySize, tk::BodyTruncated, tk::Rtf};
         default: throw std::runtime_error("Unsupported AirSync item");
     }
 }
 
-void ApplyItem(const WbxmlNode& data, PimRecord& r, const Zone& zone) {
+constexpr size_t maxPicture = 48 * 1024, maxRtf = 64 * 1024, maxRawRtf = 1024 * 1024;
+constexpr size_t maxIncomingBody = 256 * 1024;
+constexpr size_t maxReplayResponse = 8u << 20;
+
+uint32_t RtfWord(const Bytes& bytes, size_t offset) {
+    return uint32_t(bytes[offset]) | uint32_t(bytes[offset + 1]) << 8 |
+           uint32_t(bytes[offset + 2]) << 16 | uint32_t(bytes[offset + 3]) << 24;
+}
+
+bool ValidPayload(const std::string& text, size_t limit, bool rtf) {
+    if (text.size() > (rtf ? (limit + 2) / 3 * 4 : limit)) return false;
+    Bytes bytes;
+    if (!Unbase64(text, bytes) || bytes.empty() || bytes.size() > limit || Base64(bytes) != text) return false;
+    if (!rtf) return true;
+    // MS-OXRTFCP header and compressed payload checksum.
+    if (bytes.size() < 16 || RtfWord(bytes, 0) != bytes.size() - 4 || RtfWord(bytes, 4) > maxRawRtf) return false;
+    const auto type = RtfWord(bytes, 8);
+    if (type == 0x414c454d) return RtfWord(bytes, 4) == bytes.size() - 16;
+    if (type != 0x75465a4c || bytes.size() < 19) return false;
+    uint32_t crc = 0;
+    for (size_t i = 16; i < bytes.size(); ++i) {
+        crc ^= bytes[i];
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (crc & 1 ? 0xedb88320u : 0);
+    }
+    return crc == RtfWord(bytes, 12);
+}
+
+std::optional<std::string> ExpandRtf(const std::string& encoded) {
+    Bytes bytes;
+    if (!Unbase64(encoded, bytes)) return {};
+    if (RtfWord(bytes, 8) == 0x414c454d) return std::string(bytes.begin() + 16, bytes.end());
+    constexpr char seed[] =
+        "{\\rtf1\\ansi\\mac\\deff0\\deftab720{\\fonttbl;}{\\f0\\fnil \\froman \\fswiss "
+        "\\fmodern \\fscript \\fdecor MS Sans SerifSymbolArialTimes New RomanCourier"
+        "{\\colortbl\\red0\\green0\\blue0\r\n\\par \\pard\\plain\\f0\\fs20\\b\\i\\u\\tab\\tx";
+    std::array<char, 4096> dict{};
+    std::copy_n(seed, sizeof(seed) - 1, dict.begin());
+    size_t write = sizeof(seed) - 1;
+    const size_t length = RtfWord(bytes, 4);
+    std::string text;
+    text.reserve(length);
+    for (size_t pos = 16; pos < bytes.size();) {
+        const auto flags = bytes[pos++];
+        for (unsigned bit = 1; bit < 256 && pos < bytes.size(); bit <<= 1) {
+            if (!(flags & bit)) {
+                if (text.size() == length) return {};
+                dict[write] = bytes[pos++];
+                text += dict[write];
+                write = (write + 1) & 4095;
+                continue;
+            }
+            if (pos + 1 >= bytes.size()) return {};
+            size_t read = (size_t(bytes[pos]) << 4) | (bytes[pos + 1] >> 4);
+            const size_t count = (bytes[pos + 1] & 15) + 2;
+            pos += 2;
+            if (read == write) return text.size() == length && pos == bytes.size() ? std::optional(text) : std::nullopt;
+            if (count > length - text.size()) return {};
+            for (size_t n = 0; n < count; ++n) {
+                dict[write] = dict[read];
+                text += dict[write];
+                read = (read + 1) & 4095;
+                write = (write + 1) & 4095;
+            }
+        }
+    }
+    return {};
+}
+
+bool AppendRtfAnsi(std::string& text, unsigned byte) {
+    static constexpr std::array<uint16_t, 32> windows1252{
+        0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+        0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017d, 0,
+        0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+        0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0, 0x017e, 0x0178};
+    const unsigned code = byte >= 0x80 && byte <= 0x9f ? windows1252[byte - 0x80] : byte;
+    if (code < 32 || code == 127) return false;
+    if (code < 0x80) {
+        text += char(code);
+    } else {
+        if (code >= 0x800) text += char(0xe0 | (code >> 12));
+        text += char((code >= 0x800 ? 0x80 : 0xc0) | ((code >> 6) & 0x3f));
+        text += char(0x80 | (code & 0x3f));
+    }
+    return text.size() <= maxIncomingBody;
+}
+
+// Decode the plain text from the RTF form used by WM5 notes.
+std::optional<std::string> PlainRtf(const std::string& encoded) {
+    const auto raw = ExpandRtf(encoded);
+    if (!raw || raw->compare(0, 6, "{\\rtf1") != 0) return {};
+    const auto& rtf = *raw;
+    std::string text;
+    size_t depth = 0, skipDepth = 0;
+    bool inFontTable = false;
+    int defaultFont = 0, tableFont = -1;
+    std::vector<int> fonts;
+    std::set<int> nonAnsiFonts;
+    for (size_t pos = 0; pos < rtf.size();) {
+        const unsigned char ch = rtf[pos++];
+        if (ch == '\r' || ch == '\n') continue;
+        if (ch == '{') {
+            if (depth == 0 && pos != 1) return {};
+            fonts.push_back(fonts.empty() ? defaultFont : fonts.back());
+            ++depth;
+        } else if (!depth) {
+            return {};
+        } else if (ch == '}') {
+            if (depth == skipDepth) {
+                skipDepth = 0;
+                inFontTable = false;
+            }
+            fonts.pop_back();
+            --depth;
+        } else if (ch != '\\') {
+            if (skipDepth) continue;
+            if (ch < 32 || ch > 126) return {};
+            text += char(ch);
+        } else {
+            if (pos == rtf.size()) return {};
+            const auto start = pos;
+            while (pos < rtf.size() && rtf[pos] >= 'a' && rtf[pos] <= 'z') ++pos;
+            if (pos == start) {
+                const auto symbol = rtf[pos++];
+                if (symbol == '\\' || symbol == '{' || symbol == '}') {
+                    if (!skipDepth) text += symbol;
+                } else if (symbol == '\'' && pos + 2 <= rtf.size() && std::isxdigit((unsigned char)rtf[pos]) &&
+                           std::isxdigit((unsigned char)rtf[pos + 1])) {
+                    const auto byte = std::strtoul(rtf.substr(pos, 2).c_str(), nullptr, 16);
+                    pos += 2;
+                    if (skipDepth) continue;
+                    if ((byte >= 0x80 && nonAnsiFonts.count(fonts.back())) || !AppendRtfAnsi(text, byte)) return {};
+                } else {
+                    return {};
+                }
+                continue;
+            }
+            const auto word = rtf.substr(start, pos - start);
+            const auto argument = pos;
+            if (pos < rtf.size() && rtf[pos] == '-') ++pos;
+            while (pos < rtf.size() && rtf[pos] >= '0' && rtf[pos] <= '9') ++pos;
+            const auto argumentEnd = pos;
+            if (pos < rtf.size() && rtf[pos] == ' ') ++pos;
+            if (word == "bin") return {};
+            if (skipDepth) {
+                if (inFontTable && word == "f") tableFont = Number(rtf.substr(argument, argumentEnd - argument), -1);
+                if (inFontTable && (word == "fcharset" || word == "cpg")) {
+                    const auto value = Number(rtf.substr(argument, argumentEnd - argument), -1);
+                    if (tableFont < 0) return {};
+                    if (word == "fcharset" ? value != 0 && value != 1 : value != 1252) nonAnsiFonts.insert(tableFont);
+                }
+                continue;
+            }
+            if (word == "fonttbl" || word == "colortbl") {
+                if (depth < 2 || start < 2 || rtf[start - 2] != '{') return {};
+                skipDepth = depth;
+                inFontTable = word == "fonttbl";
+                tableFont = -1;
+            } else if (word == "f" || word == "deff") {
+                const auto font = Number(rtf.substr(argument, argumentEnd - argument), -1);
+                if (font < 0) return {};
+                if (word == "deff") defaultFont = font;
+                fonts.back() = font;
+            } else if (word == "plain") {
+                fonts.back() = defaultFont;
+            } else if (word == "ansicpg") {
+                if (rtf.compare(argument, argumentEnd - argument, "1252") != 0) return {};
+            } else if (word == "par" || word == "line") {
+                text += '\n';
+            } else if (word == "tab") {
+                text += '\t';
+            } else {
+                static const std::set<std::string> formatting{
+                    "rtf", "ansi", "deflang", "deftab", "fs", "b", "i", "ul", "ulnone",
+                    "strike", "cf", "highlight", "pard", "ql", "qr", "qc", "qj"};
+                if (!formatting.count(word)) return {};
+            }
+        }
+        if (text.size() > maxIncomingBody) return {};
+    }
+    if (depth || text.size() > maxIncomingBody) return {};
+    if (!text.empty() && text.back() == '\n') text.pop_back();
+    return text;
+}
+
+void StoreField(PimRecord& record, const char* key, const std::string& value) {
+    if (value.empty()) record.fields.erase(key);
+    else record.fields[key] = value;
+}
+
+void ValidatePayload(const WbxmlNode* node, size_t limit, bool rtf) {
+    if (node && (node->opaque || !node->children.empty() || (!node->text.empty() && !ValidPayload(node->text, limit, rtf))))
+        throw std::runtime_error("Invalid AirSync binary field");
+}
+
+bool Utf8Continuation(unsigned char byte) { return (byte & 0xc0) == 0x80; }
+
+size_t BodyCharacters(const std::string& body) {
+    return std::count_if(body.begin(), body.end(), [](char byte) { return !Utf8Continuation(byte); });
+}
+
+std::string BodyHash(const std::string& body) {
+    // Host editors can change CRLF to LF during an unrelated edit.
+    std::string normalized;
+    for (size_t i = 0; i < body.size(); ++i)
+        if (body[i] != '\r' || i + 1 == body.size() || body[i + 1] != '\n') normalized += body[i];
+    return Sha256Hex(reinterpret_cast<const uint8_t*>(normalized.data()), normalized.size());
+}
+
+void ApplyBody(const WbxmlNode& data, PimRecord& record, const SupportedFields& supported, bool replace) {
+    const auto tags = LegacyBody(record.kind);
+    const auto* body = data.Find(tags.page, tags.body);
+    if (body && (body->opaque || !body->children.empty() || body->text.size() > maxIncomingBody))
+        throw std::runtime_error("Invalid AirSync body");
+
+    const auto* size = tags.size ? data.Find(tags.page, tags.size) : nullptr;
+    const auto* truncated = data.Find(tags.page, tags.truncated);
+    const bool incomplete = (truncated && (truncated->opaque || !truncated->children.empty() || truncated->text != "0")) ||
+                            (size && (size->opaque || !size->children.empty() || !body ||
+                                      Number(size->text, -1) != int(BodyCharacters(body->text))));
+    const auto* rtf = data.Find(tags.page, tags.rtf);
+    ValidatePayload(rtf, maxRtf, true);
+    const bool richOnly = !body && !size && !truncated && rtf && !rtf->text.empty();
+    // WM5 sends a rich contact note without Body or Picture and omits Supported.
+    const bool legacyRichEdit = replace && record.kind == PimKind::contacts && !supported && richOnly;
+    const bool repeatedRichEdit = richOnly && rtf->text == Field(record, "airsyncRtf");
+    if (richOnly && !repeatedRichEdit) {
+        const auto plain = PlainRtf(rtf->text);
+        if (!plain) throw std::runtime_error("Unsupported AirSync rich note");
+        StoreField(record, "note", *plain);
+    }
+    if (!incomplete && (body || (replace && !richOnly && Updates(data, tags.page, tags.body, supported))))
+        StoreField(record, "note", body ? body->text : std::string());
+
+    // A repeated rich field cannot make a stale rendition current after a host edit.
+    if (rtf && !rtf->text.empty() && !incomplete && !repeatedRichEdit) {
+        StoreField(record, "airsyncRtf", rtf->text);
+        StoreField(record, "airsyncRtfBodyHash", BodyHash(Field(record, "note")));
+    } else if ((rtf && rtf->text.empty()) ||
+               (!rtf && !incomplete && replace && Updates(data, tags.page, tags.rtf, supported))) {
+        StoreField(record, "airsyncRtf", {});
+        StoreField(record, "airsyncRtfBodyHash", {});
+    }
+
+    if (record.kind == PimKind::contacts) {
+        const auto* picture = data.Find(tags.page, ct::Picture);
+        ValidatePayload(picture, maxPicture, false);
+        if (picture || (replace && !legacyRichEdit && Updates(data, tags.page, ct::Picture, supported)))
+            StoreField(record, "airsyncPicture", picture ? picture->text : std::string());
+    }
+}
+
+// Calendar's body precedes BusyStatus and its RTF precedes DtStamp.
+void WriteRtf(WbxmlNode& data, const BodyTags& tags, const std::string& value) {
+    const auto at = std::find_if(data.children.begin(), data.children.end(), [](const WbxmlNode& node) {
+        return node.page == pageCalendar && (node.tag == cal::DtStamp || node.tag == cal::EndTime);
+    });
+    data.children.emplace(at, tags.page, tags.rtf, value);
+}
+
+void WriteBody(WbxmlNode& data, const PimRecord& record, size_t bodyLimit) {
+    const auto tags = LegacyBody(record.kind);
+    const auto body = Field(record, "note");
+    const auto rtf = Field(record, "airsyncRtf");
+    const auto hash = Field(record, "airsyncRtfBodyHash");
+    const bool hasRtf = !rtf.empty() && hash == BodyHash(body) && ValidPayload(rtf, maxRtf, true);
+    const auto firstBody = data.children.size();
+    const auto characters = body.size() > bodyLimit ? BodyCharacters(body) : body.size();
+    if (characters > bodyLimit) {
+        size_t end = 0;
+        for (size_t count = 0; end < body.size(); ++end) {
+            if (!Utf8Continuation(body[end]) && count++ == bodyLimit) break;
+        }
+        data.Add(tags.page, tags.body, body.substr(0, end));
+        if (tags.size) data.Add(tags.page, tags.size, std::to_string(characters));
+        data.Add(tags.page, tags.truncated, "1");
+    } else if (!body.empty() || hasRtf) {
+        data.Add(tags.page, tags.body, body);
+    }
+
+    auto position = data.children.begin();
+    if (record.kind == PimKind::calendar) position += 2;  // After TimeZone and AllDayEvent.
+    if (record.kind != PimKind::contacts)
+        std::rotate(position, data.children.begin() + firstBody, data.children.end());
+
+    if (hasRtf) WriteRtf(data, tags, rtf);
+    if (record.kind == PimKind::contacts) {
+        const auto picture = Field(record, "airsyncPicture");
+        if (!picture.empty() && ValidPayload(picture, maxPicture, false)) data.Add(pageContacts, ct::Picture, picture);
+    }
+}
+
+WbxmlNode ItemData(const PimRecord& r, const Zone& zone, bool wire = true, size_t bodyLimit = std::string::npos) {
+    WbxmlNode data;
     switch (r.kind) {
-        case PimKind::contacts: ApplyContact(data, r, zone); break;
-        case PimKind::calendar: ApplyCalendar(data, r, zone); break;
-        case PimKind::tasks: ApplyTask(data, r, zone); break;
+        case PimKind::contacts: data = ContactData(r, zone); break;
+        case PimKind::calendar: data = CalendarData(r, zone, wire); break;
+        case PimKind::tasks: data = TaskData(r, zone); break;
         default: throw std::runtime_error("Unsupported AirSync item");
     }
+    WriteBody(data, r, wire ? bodyLimit : std::string::npos);
+    return data;
+}
+
+void ApplyItem(const WbxmlNode& data, PimRecord& r, const Zone& zone, bool replace = false,
+               const SupportedFields& supported = {}) {
+    switch (r.kind) {
+        case PimKind::contacts: ApplyContact(data, r, zone, supported); break;
+        case PimKind::calendar: ApplyCalendar(data, r, zone, supported); break;
+        case PimKind::tasks: ApplyTask(data, r, zone, supported); break;
+        default: throw std::runtime_error("Unsupported AirSync item");
+    }
+    ApplyBody(data, r, supported, replace);
+}
+
+size_t BodyLimit(const WbxmlNode& request) {
+    const auto* options = request.Find(pageAirSync, as::Options);
+    const int truncation = options ? Number(options->Text(pageAirSync, as::Truncation), -1) : -1;
+    constexpr std::array<size_t, 9> limits{0, 512, 1024, 2048, 5120, 10240, 20480, 51200, 102400};
+    return truncation >= 0 && truncation < int(limits.size()) ? limits[truncation] : std::string::npos;
 }
 
 // The device's view of a record, or nothing for a record the device can't show, like an event
@@ -877,7 +1269,7 @@ class CollectionSync {
           overwriteQueued(overwriteQueued) {}
 
     // Fills the response collection. Returns false when there is more to send.
-    bool Run(const WbxmlNode& request, WbxmlNode& response) {
+    bool Run(const WbxmlNode& request, WbxmlNode& response, bool durableReply) {
         const auto key = request.Text(pageAirSync, as::SyncKey, "0");
         const auto stored = profile.DeviceValue(scope, "airsync-synckey");
         response.Add(pageAirSync, as::Class, folder.className);
@@ -887,6 +1279,14 @@ class CollectionSync {
             for (const auto& link : profile.PimLinks(scope, error)) Must(profile.RemovePimLink(scope, link.guestId, error), error);
             Must(error.empty(), error);
             Must(profile.SetDeviceValue(scope, "airsync-synckey", "1", &error), error);
+            std::string fields;
+            // A prefix distinguishes an explicitly empty Supported list from omission.
+            if (const auto* list = request.Find(pageAirSync, as::Supported)) {
+                std::set<int64_t> tags;
+                for (const auto& child : list->children) tags.insert(T(child.page, child.tag));
+                fields = ":" + FormatIds(tags);
+            }
+            Must(profile.SetDeviceValue(scope, "airsync-supported", fields, &error), error);
             SaveState();
             response.Add(pageAirSync, as::SyncKey, "1");
             response.Add(pageAirSync, as::CollectionId, folder.id);
@@ -907,6 +1307,12 @@ class CollectionSync {
         response.Add(pageAirSync, as::Status, "1");
 
         LoadState();
+        const auto fields = profile.DeviceValue(scope, "airsync-supported");
+        if (!fields.empty()) {
+            supported.emplace();
+            const auto ids = ParseIds(fields.substr(1));
+            supported->insert(ids.begin(), ids.end());
+        }
         QueueOverwrite();
 
         const auto* commands = request.Find(pageAirSync, as::Commands);
@@ -929,8 +1335,8 @@ class CollectionSync {
         }
         const bool getChanges = request.Find(pageAirSync, as::GetChanges) != nullptr;
         if (getChanges) {
-            const int window = std::max(1, Number(request.Text(pageAirSync, as::WindowSize), 100));
-            more = Server(out, window);
+            const int window = std::clamp(Number(request.Text(pageAirSync, as::WindowSize), 100), 1, 512);
+            more = Server(out, window, BodyLimit(request), durableReply);
         }
         Must(profile.SetDeviceValue(scope, "airsync-synckey", std::to_string(next), &error), error);
         SaveState();
@@ -1023,17 +1429,48 @@ class CollectionSync {
         unconfirmed.erase(recordId);
     }
 
+    bool ReadView(const PimLink& link, WbxmlNode& view) {
+        Bytes bytes;
+        std::string error;
+        return !link.guestHash.empty() && Unbase64(link.guestHash, bytes) &&
+               DecodeWbxml(bytes.data(), bytes.size(), view, error);
+    }
+
+    bool RecoverPhones(PimRecord& record, const PimLink& link) {
+        WbxmlNode view;
+        return record.kind == PimKind::contacts && ReadView(link, view) && RecoverPhoneTags(record, view);
+    }
+
+    // An empty element clears a field that was present in the device's last view.
+    void ClearRemovedFields(WbxmlNode& data, const PimLink& link) {
+        WbxmlNode view;
+        if (!ReadView(link, view)) return;
+        const auto tags = LegacyBody(folder.kind);
+        const auto removed = [&](uint8_t tag) { return view.Find(tags.page, tag) && !data.Find(tags.page, tag); };
+        if (removed(tags.body)) {
+            auto at = data.children.end();
+            if (folder.kind == PimKind::calendar) at = data.children.begin() + 2;
+            if (folder.kind == PimKind::tasks) at = data.children.begin();
+            data.children.emplace(at, tags.page, tags.body);
+        }
+        if (removed(tags.rtf)) WriteRtf(data, tags, {});
+        if (folder.kind == PimKind::contacts) {
+            if (removed(ct::Picture)) data.Add(tags.page, ct::Picture);
+            for (int label = 0; label < 8; ++label)
+                for (const auto tag : PhoneTags(label)) {
+                    const auto page = uint8_t(tag >> 8), token = uint8_t(tag);
+                    if (view.Find(page, token) && !data.Find(page, token)) data.Add(page, token);
+                }
+        }
+    }
+
     // Puts the device's last view back over a profile record. False when the link has none.
     bool Restore(const PimRecord& record, const PimLink& link, std::string& error) {
-        Bytes bytes;
         WbxmlNode view;
-        if (link.guestHash.empty() || !Unbase64(link.guestHash, bytes) || !DecodeWbxml(bytes.data(), bytes.size(), view, error)) {
-            error.clear();
-            return false;
-        }
+        if (!ReadView(link, view)) return false;
         PimRecord restored = record;
         try {
-            ApplyItem(view, restored, zone);
+            ApplyItem(view, restored, zone, true);
         } catch (const std::exception&) {
             return false;
         }
@@ -1065,6 +1502,9 @@ class CollectionSync {
         std::string error;
         const auto* data = command.Find(pageAirSync, as::ApplicationData);
         const auto serverId = command.Text(pageAirSync, as::ServerId);
+        const auto* picture = data && folder.kind == PimKind::contacts ? data->Find(pageContacts, ct::Picture) : nullptr;
+        if (picture && picture->text.size() > maxPicture && (command.tag == as::Add || command.tag == as::Change))
+            return Reply(replies, command.tag, command.Text(pageAirSync, as::ClientId), serverId, "6");
         if (command.tag == as::Add) {
             const auto clientId = command.Text(pageAirSync, as::ClientId);
             if (!data) return Reply(replies, as::Add, clientId, {}, "6");
@@ -1134,9 +1574,10 @@ class CollectionSync {
             resend.insert(id);
             return;
         }
+        RecoverPhones(*local, link->second);
         PimRecord applied = *local;
         try {
-            ApplyItem(*data, applied, Learn(*data));
+            ApplyItem(*data, applied, Learn(*data), true, supported);
         } catch (const std::exception&) {
             return Reply(replies, as::Change, {}, serverId, "6");
         }
@@ -1164,11 +1605,13 @@ class CollectionSync {
     }
 
     // Returns true when the window is full and more is waiting.
-    bool Server(WbxmlNode& out, int window) {
+    bool Server(WbxmlNode& out, int window, size_t bodyLimit, bool durableReply) {
         std::string error;
         int sent = 0;
-        const auto records = profile.PimRecords(folder.kind, true);
-        for (const auto& record : records) {
+        // Leave room for the collection and Sync envelope.
+        size_t remaining = maxReplayResponse - 256;
+        auto records = profile.PimRecords(folder.kind, true);
+        for (auto& record : records) {
             auto link = links.find(record.id);
             const bool gone = record.deleted || record.archived;
             if (link == links.end() ? gone : record.revision == link->second.revision && !resend.count(record.id))
@@ -1184,31 +1627,40 @@ class CollectionSync {
                 // A link from before views were kept: send the profile's version as a sync would.
             }
             if (sent == window) return true;
-            WbxmlNode data;
+            const bool added = link == links.end();
+            const bool recovered = !gone && !added && RecoverPhones(record, link->second);
+            WbxmlNode item(pageAirSync, added ? as::Add : gone ? as::Delete : as::Change);
+            item.Add(pageAirSync, as::ServerId, ItemId(folder, record.id));
             if (!gone) {
+                WbxmlNode data;
                 try {
-                    data = ItemData(record, zone);
+                    data = ItemData(record, zone, true, bodyLimit);
                 } catch (const std::exception&) {
                     continue;  // A record the device can't show, like an event with no date.
                 }
+                if (!added) ClearRemovedFields(data, link->second);
+                item.children.push_back(std::move(data));
+            }
+            if (durableReply) {
+                const auto size = EncodeWbxml(item).size();
+                if (size > remaining) {
+                    if (sent) return true;
+                    throw std::runtime_error("AirSync item exceeds the durable reply limit");
+                }
+                remaining -= size;
             }
             ++sent;
-            if (link == links.end()) {
-                auto& add = out.Add(pageAirSync, as::Add);
-                add.Add(pageAirSync, as::ServerId, ItemId(folder, record.id));
-                add.children.push_back(std::move(data));
+            out.children.push_back(std::move(item));
+            if (added) {
                 Remember(record, error);
                 unconfirmed.insert(record.id);
                 unconfirmedKey = next;
                 ++counts.toDevice;
             } else if (gone) {
-                out.Add(pageAirSync, as::Delete).Add(pageAirSync, as::ServerId, ItemId(folder, record.id));
                 Forget(record.id, error);
                 ++counts.deleted;
             } else {
-                auto& item = out.Add(pageAirSync, as::Change);
-                item.Add(pageAirSync, as::ServerId, ItemId(folder, record.id));
-                item.children.push_back(std::move(data));
+                if (recovered) Must(profile.SavePimRecord(record, error), error);
                 Remember(record, error);
                 ++counts.toDevice;
             }
@@ -1224,6 +1676,7 @@ class CollectionSync {
     Zone zone;
     const PimAction action;
     bool& overwriteQueued;  // per folder for the connection
+    SupportedFields supported;
     std::map<int64_t, PimLink> links;
     std::set<int64_t> resend, unconfirmed;
     int64_t unconfirmedKey{0}, next{0};  // next: the SyncKey of this answer
@@ -1351,7 +1804,7 @@ AirSyncResponse AirSyncServer::HandleLocked(const AirSyncRequest& request) {
     const auto command = QueryValue(request.target, "Cmd");
     int status = 200;
     if (command == "FolderSync") response.body = FolderSync(request.body, status);
-    else if (command == "Sync") response.body = Sync(request.body, status);
+    else if (command == "Sync") response.body = Sync(request, status);
     else if (command == "GetItemEstimate") response.body = Estimate(request.body, status);
     else status = 501;
     response.status = status;
@@ -1391,22 +1844,37 @@ Bytes AirSyncServer::FolderSync(const Bytes& body, int& status) {
     return EncodeWbxml(out);
 }
 
-Bytes AirSyncServer::Sync(const Bytes& body, int& status) {
-    if (!lastSyncRequest.empty() && body == lastSyncRequest) return lastSyncResponse;
+Bytes AirSyncServer::Sync(const AirSyncRequest& frame, int& status) {
+    const auto& body = frame.body;
+    if (!lastSyncRequest.empty() && body == lastSyncRequest && frame.target == lastSyncTarget) return lastSyncResponse;
     WbxmlNode request;
     std::string error;
     if (!DecodeWbxml(body.data(), body.size(), request, error) || request.page != pageAirSync || request.tag != as::Sync) {
         status = 400;
         return {};
     }
+    // WM5 retries a single Delete with the old key if its response is lost.
+    constexpr auto replayKey = "airsync-delete-reply";
+    const auto* list = request.Find(pageAirSync, as::Collections);
+    const auto* single = list && list->children.size() == 1 ? &list->children.front() : nullptr;
+    const auto* commands = single ? single->Find(pageAirSync, as::Commands) : nullptr;
+    const bool replayable = commands && commands->children.size() == 1 &&
+                            commands->children.front().page == pageAirSync &&
+                            commands->children.front().tag == as::Delete;
+    const auto identity = replayable ?
+        Sha256Hex(reinterpret_cast<const uint8_t*>(frame.target.data()), frame.target.size()) +
+        Sha256Hex(body.data(), body.size()) : std::string();
+
     WbxmlNode out(pageAirSync, as::Sync);
     auto& collections = out.Add(pageAirSync, as::Collections);
     // All or nothing: a request that fails leaves the profile and the keys as they were, so
     // the device's retry is applied once.
-    const auto saved = std::make_tuple(timeZone, settled, overwriteQueued, counts);
+    const auto saved = std::make_tuple(timeZone, settled, overwriteQueued, counts, actions);
+    Bytes response;
     try {
         Change change(profile);
-        if (const auto* list = request.Find(pageAirSync, as::Collections)) {
+        std::string replayScope, replayPrefix;
+        if (list) {
             for (const auto& collection : list->children) {
                 if (collection.tag != as::Collection) continue;
                 const auto id = collection.Text(pageAirSync, as::CollectionId);
@@ -1419,18 +1887,52 @@ Bytes AirSyncServer::Sync(const Bytes& body, int& status) {
                     result.Add(pageAirSync, as::Status, "8");
                     continue;
                 }
-                CollectionSync sync(profile, deviceKey, *folder, counts, timeZone, Action(folder->kind),
+                const auto scope = "airsync:" + deviceKey + "/" + folder->className;
+                const auto prior = profile.DeviceValue(scope, replayKey);
+                const auto key = collection.Text(pageAirSync, as::SyncKey, "0");
+                const auto action = Action(folder->kind);
+                const char actionCode = '0' + int(action);
+                if (replayable && Digits(key) && key != "0" && prior.compare(0, identity.size(), identity) == 0 &&
+                    prior.size() > identity.size() + 3 && prior.size() <= identity.size() + 3 + maxReplayResponse &&
+                    profile.DeviceValue(scope, "airsync-synckey") == std::to_string(std::stoll(key) + 1)) {
+                    const auto offset = identity.size();
+                    response.assign(prior.begin() + offset + 3, prior.end());
+                    if (prior[offset] == actionCode) {
+                        settled[folder->kind] = prior[offset + 1] == '1';
+                        overwriteQueued[folder->kind] = prior[offset + 2] == '1';
+                    }
+                    change.Commit();
+                    lastSyncTarget = frame.target;
+                    lastSyncRequest = body;
+                    lastSyncResponse = response;
+                    return response;
+                }
+                CollectionSync sync(profile, deviceKey, *folder, counts, timeZone, action,
                                     overwriteQueued[folder->kind]);
-                settled[folder->kind] = sync.Run(collection, result);
+                settled[folder->kind] = sync.Run(collection, result, replayable);
+                if (result.Text(pageAirSync, as::Status) != "1") continue;
+                if (!prior.empty()) Must(profile.SetDeviceValue(scope, replayKey, "", &error), error);
+                if (replayable && key != "0") {
+                    replayScope = scope;
+                    replayPrefix = identity + actionCode + (settled[folder->kind] ? '1' : '0') +
+                                   (overwriteQueued[folder->kind] ? '1' : '0');
+                }
             }
+        }
+        response = EncodeWbxml(out);
+        if (!replayScope.empty()) {
+            if (response.size() > maxReplayResponse) throw std::runtime_error("AirSync durable reply exceeds its limit");
+            replayPrefix.append(response.begin(), response.end());
+            Must(profile.SetDeviceValue(replayScope, replayKey, replayPrefix, &error), error);
         }
         change.Commit();
     } catch (...) {
-        std::tie(timeZone, settled, overwriteQueued, counts) = saved;
+        std::tie(timeZone, settled, overwriteQueued, counts, actions) = saved;
         throw;
     }
+    lastSyncTarget = frame.target;
     lastSyncRequest = body;
-    lastSyncResponse = EncodeWbxml(out);
+    lastSyncResponse = std::move(response);
     return lastSyncResponse;
 }
 
