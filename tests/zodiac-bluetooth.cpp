@@ -12,10 +12,12 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "GuestDatabaseOps.h"
+#include "machine_state_archive.h"
 #include "soc_IMX1.h"
 #include "zodiac_panel.h"
 
@@ -125,6 +127,7 @@ int main(int argc, char** argv) {
         };
         const char* taps = std::getenv("TAPS");
         std::string list = taps ? taps : "";
+        std::vector<uint8_t> session;
         size_t at = 0;
         while (at < list.size()) {
             int x = 0, y = 0, wait = 1500;
@@ -143,15 +146,24 @@ int main(int argc, char** argv) {
     // power, stroke X1 Y1 X2 Y2, install PATH, launch NAME, wait MS, shot NAME, signal NAME (a file in DIR or
     // an absolute path), waitfor NAME MS, calls N (database lists through guest calls), export NAME (checks the
     // probe's received payload), relink (the controller set again, so the link drops), startcall MS (runs until
-    // the driver's next start call), save and load (a session saved and loaded in this process).
+    // the driver's next start call), checkpoint (save and restore the same running radio),
+    // save and load (in this process), save NAME (saved in DIR), or ZODIAC_SESSION (load in a fresh process).
     if (mode == "steps" && argc > 2) {
-        SocIMX1* soc = start(rom);
+        auto soc = std::unique_ptr<SocIMX1>(start(rom));
         const std::string dir = argv[2];
+        const char* sessionPath = std::getenv("ZODIAC_SESSION");
+        if (sessionPath) {
+            auto session = readFile(sessionPath);
+            if (session.empty() || !soc->Load(session.size(), session.data())) return 1;
+        }
         if (const char* bt = std::getenv("BT")) {
             std::string error;
             if (!soc->SetBluetooth(bt, error)) { std::fprintf(stderr, "bluetooth: %s\n", error.c_str()); return 1; }
         }
-        toPreferences(*soc);
+        if (sessionPath)
+            std::printf("load: bluetooth %s, t %.3f\n", soc->BluetoothState().c_str(), double(soc->GetTime()) / 1e9);
+        else
+            toPreferences(*soc);
         paced = std::getenv("BT") != nullptr;
         std::string list = std::getenv("STEPS") ? std::getenv("STEPS") : "";
         std::vector<uint8_t> session;
@@ -179,13 +191,26 @@ int main(int argc, char** argv) {
                 const uint64_t before = soc->BluetoothLastStart(), until = soc->GetTime() + uint64_t(wait) * 1000000;
                 while (soc->BluetoothLastStart() == before && soc->GetTime() < until && !soc->Halted()) runFor(*soc, 1);
                 std::printf("startcall: %s\n", soc->BluetoothLastStart() == before ? "none" : "seen");
-            } else if (step == "save") {
-                std::printf("save: %d\n", soc->Save());
+            } else if (step == "checkpoint") {
+                assert(soc->BluetoothState() == "connected");
+                if (!soc->Save()) return 1;
                 const auto buffer = soc->GetSavestate();
-                session.assign(static_cast<const uint8_t*>(buffer.data),
-                               static_cast<const uint8_t*>(buffer.data) + buffer.size);
+                SoC::InputCheckpoint checkpoint(*soc);
+                const auto savedTime = soc->GetTime();
+                const auto lastStart = soc->BluetoothLastStart();
+                runFor(*soc, 100);
+                assert(soc->GetTime() > savedTime);
+                if (!checkpoint.Restore(buffer.size, buffer.data)) return 1;
+                assert(soc->GetTime() == savedTime);
+                assert(soc->BluetoothLastStart() == lastStart);
+                assert(soc->BluetoothState() == "connected");
+            } else if (step == "save") {
+                if (!soc->Save()) return 1;
+                const auto buffer = soc->GetSavestate();
+                const auto* first = static_cast<const uint8_t*>(buffer.data);
+                session.assign(first, first + buffer.size);
             } else if (step == "load") {
-                std::printf("load: %d\n", !session.empty() && soc->Load(session.size(), session.data()));
+                if (session.empty() || !soc->Load(session.size(), session.data())) return 1;
             } else if (int x2 = 0, y2 = 0; std::sscanf(step.c_str(), "stroke %d %d %d %d", &x, &y, &x2, &y2) == 4) {
                 // A pen stroke in 20 moves, 20 ms apart.
                 for (int i = 0; i <= 20; ++i) {
@@ -196,7 +221,26 @@ int main(int argc, char** argv) {
                 runFor(*soc, 300);
             } else if (std::sscanf(step.c_str(), "%31s %255[^;]", what, arg) == 2) {
                 const std::string w = what;
-                if (w == "install") {
+                if (w == "save") {
+                    if (!soc->Save()) return 1;
+                    const auto buffer = soc->GetSavestate();
+                    StateContainerReader archive;
+                    const auto* bytes = static_cast<const uint8_t*>(buffer.data);
+                    if (archive.open(bytes, buffer.size) != StateContainerError::ok) return 1;
+                    const auto* address = archive.find(stateFourcc("BTAD"));
+                    if (!address || address->size != 6) {
+                        std::fprintf(stderr, "save: Bluetooth address missing\n");
+                        return 1;
+                    }
+                    std::printf("saved-address:");
+                    for (size_t i = 0; i < address->size; ++i)
+                        std::printf(" %02x", bytes[address->offset + i]);
+                    std::puts("");
+                    std::ofstream file(dir + "/" + arg, std::ios::binary);
+                    file.write(static_cast<const char*>(buffer.data), buffer.size);
+                    file.close();
+                    if (!file) return 1;
+                } else if (w == "install") {
                     auto prc = readFile(arg);
                     std::printf("install %s: %d\n", arg, GuestDatabaseOps::Install(*soc, prc.size(), prc.data()));
                     runFor(*soc, 1000);

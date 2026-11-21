@@ -2,6 +2,7 @@
 #define FROND_IMX1_BOOT_PROBE_H
 
 #include "arm_diagnostic.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -508,12 +509,15 @@ struct Imx1StateInfo {
     char cardId[imx1CardIdBytes + 1]{};
     // Slot 2: the state has an SD2 section, and (load only) the card in slot 2 took on its card state.
     bool graphicsSdSection = false, graphicsSdResumed = false;
+    // The Bluetooth controller address in HCI byte order. Zero means the state has no address.
+    std::array<uint8_t, 6> bluetoothAddress{};
 };
 // An attached I2C bus is saved through its stateIdentity, saveState and loadState; one with identity 0
 // returns unsupportedConfiguration, and a state from another bus busMismatch. A frame from AcquireFrame is
 // acknowledged first, or save and load return notAtBoundary. A load ends the pixels PeekFrame lent.
 // buildNote is free text kept in the state.
-Imx1StateStatus imx1MachineSaveState(Imx1Machine*, std::vector<uint8_t>& out, const char* buildNote = nullptr);
+Imx1StateStatus imx1MachineSaveState(Imx1Machine*, std::vector<uint8_t>& out, const char* buildNote = nullptr,
+                                     std::array<uint8_t, 6> bluetoothAddress = {});
 // Checks everything a load checks, without changing the machine.
 Imx1StateInfo imx1MachineCheckState(const Imx1Machine*, const uint8_t* data, size_t size,
                                     uint32_t flags = 0, const char* buildNote = nullptr);

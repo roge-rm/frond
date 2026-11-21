@@ -599,7 +599,10 @@ bool SocIMX1::Save() {
         std::cerr << "zodiac: not saved, the machine has stopped" << std::endl;
         return false;
     }
-    return imx1MachineSaveState(machine, saved, "frond") == Imx1StateStatus::ok;
+    std::array<uint8_t, 6> address{};
+    if (!bluetooth.backend.Connected() || !bluetooth.backend.Address(address) || address == std::array<uint8_t, 6>{})
+        address = bluetooth.address;
+    return imx1MachineSaveState(machine, saved, "frond", address) == Imx1StateStatus::ok;
 }
 
 bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
@@ -616,6 +619,8 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     SoC::Reset();
     // A saved machine is taken as past its boot.
     orientationTracker.Loaded(imx1MachineStartups(machine));
+    if (!RestoringCheckpoint() && info.bluetoothAddress != std::array<uint8_t, 6>{})
+        bluetooth.address = info.bluetoothAddress;
     StateChanged();
     ApplyBattery();
     ApplyUartLines();

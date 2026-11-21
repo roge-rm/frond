@@ -91,6 +91,47 @@ def relink(args, engine):
     return 0
 
 
+# Save with the live controller, then reopen the session in a new process.
+PERSISTENCE_STEPS = ('tap 220 15 1500; tap 250 15 1500; tap 213 56 1500; tap 200 76 5000; '
+                     'checkpoint; save session.state')
+
+
+def persistence(args, engine):
+    with tempfile.TemporaryDirectory(prefix='zodiac-bt-', dir=ROOT / 'build') as folder:
+        folder = Path(folder)
+        radio, socket = start_radio(args, folder)
+        try:
+            env = dict(os.environ, BT=str(socket), ZODIAC_TEST_FAST=args.fast,
+                       STEPS=PERSISTENCE_STEPS)
+            command = [str(args.test), 'steps', str(folder)]
+            before = subprocess.run(command, env=env, capture_output=True, text=True, timeout=1200)
+            sys.stdout.write(before.stdout)
+            if before.returncode:
+                sys.stdout.write(before.stderr[-4000:])
+                return 1
+            env.update(ZODIAC_SESSION=str(folder / 'session.state'), STEPS='wait 1000; ' + RADIO_OFF_ON + '; save reopened.state')
+            after = subprocess.run(command, env=env, capture_output=True, text=True, timeout=1200)
+            sys.stdout.write(after.stdout)
+            if after.returncode:
+                sys.stdout.write(after.stderr[-4000:])
+                return 1
+        finally:
+            stop([radio])
+    if ('checkpoint: bluetooth connected, t' not in before.stdout or
+            'load: bluetooth configured; radio off, t' not in after.stdout or
+            'tap 200 76 5000: bluetooth connected, t' not in after.stdout):
+        print(f'FAIL: checkpoint or session reload left the radio in the wrong state ({engine})')
+        return 1
+    address = r'^saved-address:((?: [0-9a-f]{2}){6})$'
+    original = re.search(address, before.stdout, re.M)
+    reopened = re.search(address, after.stdout, re.M)
+    if not original or not reopened or original.group(1) != reopened.group(1):
+        print(f'FAIL: the live controller address changed across the load ({engine})')
+        return 1
+    print(f'zodiac bluetooth address and checkpoint restore ({engine}): ok')
+    return 0
+
+
 def start_radio(args, folder):
     radio = subprocess.Popen([str(args.btvirt), f'-s{folder}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     socket = folder / 'bt-server-bredr'
@@ -317,13 +358,18 @@ def main():
     parser.add_argument('--peer', type=Path, default=ROOT / 'build/bluetooth-opp-peer/bluetooth-opp-peer')
     parser.add_argument('--probe', type=Path, default=ROOT / 'build/bluetooth-probe/FrondBluetoothProbe.prc')
     parser.add_argument('--fast', choices=['0', '1'], default='1')
-    parser.add_argument('--only', choices=['send', 'receive', 'inkstorm', 'relink', 'dun'])
+    parser.add_argument('--only', choices=['send', 'receive', 'inkstorm', 'relink', 'dun', 'persistence'])
     parser.add_argument('--keep', type=Path, help='a new folder for the receive run, kept after it')
     args = parser.parse_args()
     if not os.environ.get('ZODIAC_ROM') or not os.environ.get('ZODIAC_STATE'):
         print('SKIP: set ZODIAC_ROM and ZODIAC_STATE')
         return 0
-    for path in (args.btvirt, args.peer, args.probe):
+    paths = [args.btvirt]
+    if args.only not in ('relink', 'persistence'):
+        paths.append(args.peer)
+    if args.only in (None, 'send', 'receive'):
+        paths.append(args.probe)
+    for path in paths:
         if not path.exists():
             print(f'SKIP: {path} is missing')
             return 0
@@ -331,6 +377,8 @@ def main():
         return receive(args, "Fast" if args.fast == "1" else "Exact")
     if args.only == 'inkstorm':
         return inkstorm(args, "Fast" if args.fast == "1" else "Exact")
+    if args.only == 'persistence':
+        return persistence(args, "Fast" if args.fast == "1" else "Exact")
     if args.only == 'relink':
         return relink(args, "Fast" if args.fast == "1" else "Exact")
     if args.only == 'dun':
@@ -375,7 +423,7 @@ def main():
     print(f'zodiac bluetooth OPP send ({engine}): ok')
     if args.only == 'send':
         return 0
-    return relink(args, engine) or dun(args, engine) or inkstorm(args, engine)
+    return persistence(args, engine) or relink(args, engine) or dun(args, engine) or inkstorm(args, engine)
 
 
 if __name__ == '__main__':

@@ -3693,6 +3693,10 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
         if (!finish(a)) return info;
         info.cardSection = true;
     } else if (info.status != S::ok) return info;
+    if (open("BTAD", 1, false, a)) {
+        a.DoBuffer(info.bluetoothAddress.data(), info.bluetoothAddress.size());
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
     // In states saved after a card was taken out of the slot in use.
     if (open("SDPL", stateCardPulledVersion, false, a)) {
         uint32_t pulled = 0;
@@ -3819,7 +3823,8 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
 }
 }  // namespace
 
-Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>& out, const char* buildNote) {
+Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>& out, const char* buildNote,
+                                     std::array<uint8_t, 6> bluetoothAddress) {
     using S = Imx1StateStatus;
     out.clear();
     if (!machine) return S::notAtBoundary;
@@ -3947,6 +3952,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
     if (jit) {
         auto a = file.begin(stateFourcc("JITC"), stateJitVersion);
         a.Do64(jitBlocks).Do64(jitInstructions);
+        file.end();
+    }
+    if (bluetoothAddress != std::array<uint8_t, 6>{}) {
+        auto a = file.begin(stateFourcc("BTAD"), 1);
+        a.DoBuffer(bluetoothAddress.data(), bluetoothAddress.size());
         file.end();
     }
     file.finish();
