@@ -1019,6 +1019,7 @@ bool gFastEngineMissing = false;
             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
         commandContext.replayClockLast = replayStartedAt;
         if (rx1950Soc) commandContext.speedLimitHz = soc->FollowHz();
+        commandContext.speedPending = zodiac != nullptr;
         commandContext.sessionFolder = sessionFolder;
         commandContext.sessionPath = sessionPath;
 
@@ -1476,6 +1477,7 @@ bool gFastEngineMissing = false;
                             commandContext.speedIps = uint64_t(double(commandContext.speedLimitHz) * zodiacSpeed->RealTime());
                         }
                         commandContext.speedDetail = zodiacSpeed->Line();
+                        commandContext.speedPending = false;
 #ifdef __ANDROID__
                         cout << zodiacSpeed->Line() << endl;
 #endif

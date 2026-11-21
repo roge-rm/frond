@@ -11,11 +11,14 @@ object MipsReadout {
         return Layout(n[0], n[1], n[2], n[3], n[4], n[5])
     }
 
-    // The figure in a speed-state reply ("312.00 MHz, limit ..."; the Zodiac's is in MIPS), rounded; null when it isn't there.
-    fun parseMips(text: String): Long? {
+    // The figure in a speed-state reply ("312.00 MHz, limit ..."; the Zodiac's is in MIPS), rounded; "-" while the
+    // Zodiac hasn't measured one yet; null when it isn't there.
+    fun parseMips(text: String): String? {
         val head = text.substringBefore(',').trim()
         if (!head.endsWith(" MHz") && !head.endsWith(" MIPS")) return null
-        return head.substringBefore(' ').toDoubleOrNull()?.let { Math.round(it) }
+        val figure = head.substringBefore(' ')
+        if (figure == "-") return figure
+        return figure.toDoubleOrNull()?.let { Math.round(it).toString() }
     }
 
     // The unit of that figure: "MHz" for a core clock, "MIPS" where the board reports instructions a second.
