@@ -6089,20 +6089,27 @@ static uint8_t *cpuPrvJitHostCodePage(ArmCpu *cpu, uint32_t va) {
     return (uint8_t *)romGetPeepholeBuffer(rom) + (page - data);
 }
 
+// ARM920T Fast blocks: plain pages only, straight from memory: Fast keeps no I-cache contents.
+static bool cpuPrvJitFetchMva(ArmCpu *cpu, uint32_t mva, uint32_t *word) {
+    const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, mva, cpu->privileged, false);
+    if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
+    bool counted;
+    const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
+    if (!page) return false;
+    memcpy(word, page + (pa & 0xfffu), 4);
+    return true;
+}
+
+bool cpuJitFetchMva(ArmCpu *cpu, uint32_t mva, uint32_t *word) {
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks) return false;
+    return cpuPrvJitFetchMva(cpu, mva & ~3u, word);
+}
+
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
     va &= ~3u;
     if (cpu->model == ArmCpuModel::arm920t) {
-        if (cpu->jitBlocks) {
-            // Plain pages only, straight from memory: Fast keeps no I-cache contents. The MMU sees the MVA.
-            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, cpuPrvMva(cpu, va), cpu->privileged, false);
-            if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
-            bool counted;
-            const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
-            const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
-            if (!page) return false;
-            memcpy(word, page + (pa & 0xfffu), 4);
-            return true;
-        }
+        if (cpu->jitBlocks) return cpuPrvJitFetchMva(cpu, cpuPrvMva(cpu, va), word);  // the MMU sees the MVA
         uint_fast8_t fsr;
         return icacheArm920Word(cpu->ic, va, cpu->privileged, &fsr, word);
     }

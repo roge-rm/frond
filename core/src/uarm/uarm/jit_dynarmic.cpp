@@ -60,6 +60,9 @@ struct Stats {
     // (unwatched pages only) or lost fetch permission, and how often the mappings were checked.
     uint64_t codePages = 0, unwatched = 0, pagesWritten = 0, mapChecks = 0, mapChanged = 0, unwatchedDropped = 0;
     uint64_t fetchDropped = 0;
+    // ARM920T: code pages of another PID's slot a flush found moved, those found mapped as before when the
+    // PID came back, and compile-thread blocks installed under another PID than the one they were fetched under.
+    uint64_t suspends = 0, resumes = 0, otherPidInstalls = 0;
     std::unordered_map<uint32_t, uint64_t> interpPc;
     // Instruction at each interpreted PC (Thumb: the halfword), and the guest PC current
     // at each whole-cache invalidation with the word there.
@@ -137,6 +140,8 @@ struct Stats {
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
                 (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
+        fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu\n", (unsigned long long)suspends,
+                (unsigned long long)resumes, (unsigned long long)otherPidInstalls);
         fprintf(stderr,
                 "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
                 "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
@@ -440,6 +445,8 @@ struct Env final : public A32::UserCallbacks {
         uint8_t *host;
         uint8_t *lines;  // RAM code flags for the page, null for ROM and unwatched pages
         uint32_t access;
+        bool suspended = false;  // in suspended[] until its PID runs again
+        bool stale = false;  // suspended, and its blocks from before were read from another physical page
     };
     std::unordered_map<uint32_t, uint32_t> accessPages;  // code pages by access
     uint64_t permContext = ~0ull;
@@ -447,6 +454,17 @@ struct Env final : public A32::UserCallbacks {
     std::unordered_map<uint8_t *, std::vector<uint32_t>> byHost;
     std::vector<uint32_t> unwatched;
     uint32_t mapGen = 0;
+    // ARM920T Fast blocks: code pages (MVAs) of another PID's slot whose mapping a TLB flush found moved, by
+    // slot. WinCE unmaps a process's slot while others run and maps it back the same before it runs again.
+    // The pages' blocks below 32 MB run under that PID's tag only, so they can't be reached until the PID
+    // is back; jitRun then keeps the pages mapped as before and drops the rest (Resume). A page may be
+    // listed more than once, or after it was dropped; its suspended flag says whether it still counts.
+    std::array<std::vector<uint32_t>, 128> suspended;
+    // The PID's slot still has suspended pages that aren't mapped yet: the run is under the absent tag,
+    // where code below 32 MB isn't compiled, so the interpreter fetches it (and takes the prefetch abort
+    // WinCE maps the slot back from). absentRuns counts such runs by slot, up to kAbsentRuns.
+    bool absent = false;
+    std::array<uint8_t, 128> absentRuns{};
 
     // The page dynarmic keeps code by (the run's VA) for a code page here (an MVA), and the code page of a VA.
     // An MVA page past 32 MB whose PID has a tag may also have blocks at its VA below 32 MB under that tag.
@@ -462,10 +480,13 @@ struct Env final : public A32::UserCallbacks {
         return cpuJitCodePa(cpu, page << 12, &pa, &access) ? pa >> 12 : ~0u;
     }
 
-    void NoteCode(uint32_t va) {
-        const uint32_t page = CodePageOf(va);
+    void NoteCode(uint32_t va) { NoteCodeAt(CodePageOf(va), va & 0xfffu); }
+
+    // va: an address in the code page (an MVA page on the ARM920T) at the code's offset.
+    void NoteCodeAt(uint32_t page, uint32_t va) {
         auto it = code.find(page);
         if (it == code.end()) it = NotePage(page);
+        else if (it->second.suspended) it = NoteSuspended(it, page);
         // Fast blocks: the CPU keeps the 64-byte lines by physical page; a store to one drops the page's code.
         if (arm920 && !lineBound && it->second.host) cpuJitNoteArm920Code(cpu, (it->second.pa << 12) | (va & 0xfffu));
         uint8_t *lines = it->second.lines;
@@ -498,6 +519,20 @@ struct Env final : public A32::UserCallbacks {
             stats.unwatched++;
             unwatched.push_back(page);
         }
+        return it;
+    }
+
+    // New code from a suspended page (from 32 MB up, or another PID's below): if the page is mapped to
+    // another physical page now, it's watched there, and the blocks from before (which can't run until
+    // Resume) are marked stale, so Resume drops them. The page stays in suspended[].
+    std::unordered_map<uint32_t, CodePage>::iterator NoteSuspended(std::unordered_map<uint32_t, CodePage>::iterator it,
+                                                                   uint32_t page) {
+        uint32_t access;
+        const uint32_t pa = CodePa(page, access);
+        if (pa == ~0u || (pa == it->second.pa && access == it->second.access)) return it;
+        Forget(page);
+        it = NotePage(page);
+        it->second.suspended = it->second.stale = true;
         return it;
     }
 
@@ -602,18 +637,66 @@ struct Env final : public A32::UserCallbacks {
         byHost.erase(it);
     }
 
-    // After a TLB flush, drop the code of every page whose mapping moved.
+    // After a TLB flush, drop the code of every page whose mapping moved. ARM920T Fast blocks: a page of
+    // another PID's slot (with a tag) is suspended instead, dropping only blocks run at its MVA, which any
+    // PID can reach. Suspended pages wait for Resume.
     void CheckMappings() {
         stats.mapChecks++;
         std::vector<uint32_t> moved;
-        for (const auto &[page, c] : code) {
+        const uint32_t current = cpuGetPid(cpu) >> 25;
+        const bool suspend = arm920 && !lineBound && pidTags;
+        for (auto &[page, c] : code) {
+            if (c.suspended) continue;
             uint32_t access;
-            if (CodePa(page, access) != c.pa || access != c.access) moved.push_back(page);
+            if (CodePa(page, access) == c.pa && access == c.access) continue;
+            const uint32_t slot = page >> 13;
+            if (suspend && slot && slot != current && pidTags[slot]) {
+                stats.suspends++;
+                c.suspended = true;
+                suspended[slot].push_back(page);
+                if (jit->HasCodeIn(page << 12, 4096)) jit->InvalidateCacheRange(page << 12, 4096);
+                continue;
+            }
+            moved.push_back(page);
         }
         for (uint32_t page : moved) {
             stats.mapChanged++;
             Drop(page);
         }
+    }
+
+    // Before running under the PID of slot: its suspended pages mapped as when they were noted keep their
+    // code, pages mapped elsewhere are dropped, and pages not mapped stay suspended (the run goes under the
+    // absent tag) for up to kAbsentRuns runs, then are dropped too. True if any stay.
+    static constexpr uint8_t kAbsentRuns = 64;
+    bool Resume(uint32_t slot) {
+        std::vector<uint32_t> list, left;
+        list.swap(suspended[slot]);
+        const bool last = ++absentRuns[slot] > kAbsentRuns;
+        for (uint32_t page : list) {
+            const auto c = code.find(page);
+            if (c == code.end() || !c->second.suspended) continue;
+            uint32_t access;
+            const uint32_t pa = CodePa(page, access);
+            if (!c->second.stale && pa == c->second.pa && access == c->second.access) {
+                stats.resumes++;
+                c->second.suspended = false;
+                continue;
+            }
+            if (pa == ~0u && !last && !c->second.stale) {
+                left.push_back(page);
+                continue;
+            }
+            c->second.suspended = false;
+            stats.mapChanged++;
+            Drop(page);
+        }
+        if (left.empty()) {
+            absentRuns[slot] = 0;
+            return false;
+        }
+        suspended[slot].swap(left);
+        return true;
     }
 
     void DropUnwatched(uint32_t first, uint32_t last) {
@@ -649,6 +732,8 @@ struct Env final : public A32::UserCallbacks {
         byHost.clear();
         byPa.clear();
         unwatched.clear();
+        for (auto &list : suspended) list.clear();
+        absentRuns.fill(0);
         cpuJitForgetCode(cpu);
         gen = ~0ull;
         mapGen = cpuJitMapGen(cpu);
@@ -767,6 +852,11 @@ struct Env final : public A32::UserCallbacks {
     uint32_t hot = 1;
 
     bool ShouldCompile(A32::VAddr pc, bool thumb) override {
+        if (absent && pc < 0x02000000u) {
+            stats.cold++;
+            jit->HaltExecution(kCold);
+            return false;
+        }
         if (hot <= 1) return true;
         const uint32_t key = pc | uint32_t(thumb);  // PC is even
         Heat &h = heat[(key * 0x9e3779b1u) >> (32 - kHeatBits)];
@@ -994,17 +1084,29 @@ struct Env final : public A32::UserCallbacks {
     // the block is dropped. Otherwise they are noted as code, as MemoryReadCode does.
     bool CodeUnchanged(A32::CodeSnapshot &snapshot) override {
         auto &s = static_cast<Snapshot &>(snapshot);
-        // Fetched under another PID: words below 32 MB would be another address space's. Code from 32 MB up
-        // reads the same under every PID; its block keeps the tag it was compiled under.
-        if (arm920 && s.pid != cpuGetPid(cpu) && s.base < 0x02000000u) return false;
+        // Fetched under another PID below 32 MB: the words are checked again at their MVA, which reads the
+        // same under every PID. The block keeps the tag it was queued under, that PID's, so it only runs
+        // there. PID 0's slot 0 has no MVA of its own. Code from 32 MB up reads the same under every PID.
+        const bool otherPid = arm920 && s.pid != cpuGetPid(cpu) && s.base < 0x02000000u;
+        if (otherPid && !s.pid) return false;
+        const uint32_t mvaBase = otherPid ? s.base | s.pid : 0;
         for (size_t i = 0; i < s.words.size(); i++) {
             if (!s.read[i]) continue;
             uint32_t w = 0;
-            const bool ok = cpuJitFetch(cpu, s.base + uint32_t(i) * 4, &w);
+            const bool ok = otherPid ? cpuJitFetchMva(cpu, mvaBase + uint32_t(i) * 4, &w)
+                                     : cpuJitFetch(cpu, s.base + uint32_t(i) * 4, &w);
             if (ok != bool(s.fetched[i]) || (ok && w != s.words[i])) return false;
         }
-        for (size_t i = 0; i < s.words.size(); i++)
-            if (s.read[i]) NoteCode(s.base + uint32_t(i) * 4);
+        if (otherPid) stats.otherPidInstalls++;
+        for (size_t i = 0; i < s.words.size(); i++) {
+            if (!s.read[i]) continue;
+            if (otherPid) {
+                const uint32_t mva = mvaBase + uint32_t(i) * 4;
+                NoteCodeAt(mva >> 12, mva & 0xfffu);
+            } else {
+                NoteCode(s.base + uint32_t(i) * 4);
+            }
+        }
         return true;
     }
 
@@ -1498,6 +1600,7 @@ struct FrondJit {
 // Stride (20-21). Neither reaches the host (MXCSR on x64; the arm64 prelude masks them out of FPCR). AHP,
 // rounding mode, FZ and DN stay 0, as they would reach the host's FP state.
 constexpr unsigned kPidTags = 32;
+constexpr unsigned kAbsentTag = kPidTags - 1;  // Env::absent: code from 32 MB up only, for any PID
 constexpr uint32_t jitPrvTagFpscr(unsigned tag) { return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20); }
 static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x00370000);
 
@@ -1857,14 +1960,14 @@ void jitWriteProtectPage(FrondJit *j, uint8_t *hostPage) {
     jitPrvEach(j, [&](Env &e) { e.ProtectHost(hostPage); });
 }
 
-// ARM920T Fast blocks: the tag for the CPU's PID into the JIT's FPSCR, so its blocks are found and linked
-// only under that PID. The PID only changes between runs (MCR c13 isn't a p15 slot word). Once every tag is
-// taken, both levels drop their code and tags start over.
-static void jitPrvSetTag(FrondJit *j, Env &e, A32::Jit &jit) {
+// ARM920T Fast blocks: the tag for the CPU's PID, so its blocks are found and linked only under that PID.
+// The PID only changes between runs (MCR c13 isn't a p15 slot word). Once every tag is taken, both levels
+// drop their code and tags start over.
+static uint8_t jitPrvPidTag(FrondJit *j) {
     const uint32_t index = cpuGetPid(j->cpu) >> 25;
     uint8_t tag = j->pidTags[index];
     if (index && !tag) {
-        if (j->nextTag == kPidTags) {
+        if (j->nextTag == kAbsentTag) {
             std::fill(std::begin(j->pidTags), std::end(j->pidTags), 0);
             j->nextTag = 1;
             j->tagRestarts++;
@@ -1872,6 +1975,11 @@ static void jitPrvSetTag(FrondJit *j, Env &e, A32::Jit &jit) {
         }
         tag = j->pidTags[index] = j->nextTag++;
     }
+    return tag;
+}
+
+// The tag into the JIT's FPSCR.
+static void jitPrvSetTag(Env &e, A32::Jit &jit, uint8_t tag) {
     if (tag == e.tag) return;
     e.tag = tag;
     jit.SetFpscr(jitPrvTagFpscr(tag));
@@ -1891,11 +1999,16 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         jit.ClearCache();  // Reset drops the pending cache clear's halt flag
         e.tag = 0;  // Reset sets FPSCR to 0
     }
-    if (e.arm920) jitPrvSetTag(j, e, jit);
+    const uint8_t tag = e.arm920 ? jitPrvPidTag(j) : 0;
     e.CheckGen();
     if (const uint32_t g = cpuJitMapGen(e.cpu); g != e.mapGen) {
         e.mapGen = g;
         if (!e.code.empty()) e.CheckMappings();
+    }
+    if (e.arm920) {
+        const uint32_t slot = cpuGetPid(j->cpu) >> 25;
+        e.absent = !e.suspended[slot].empty() && e.Resume(slot);
+        jitPrvSetTag(e, jit, e.absent ? kAbsentTag : tag);
     }
     if (!j->remaskPa.empty() || !j->remaskHost.empty()) jitPrvRemask(j);
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));
