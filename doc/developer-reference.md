@@ -17,6 +17,7 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `-n`, `--nand FILE` | NAND image, for devices that have one. |
 | `--device NAME` | Device for raw firmware: `palm-tx`, `palm-e2`, `palm-zire-72` or `sony-clie-tg50`. The E2 is also found from its NOR header. |
 | `--engine exact\|fast` | CPU engine: `exact` is the interpreter, `fast` is the JIT where it's built in. Default `exact`. `FROND_JIT` overrides it. |
+| `--battery SETTING` | Start with `max` (default), `level N` or `host N`, with N from 0 to 100. Quote settings with spaces. Add `charging` or `battery` for the charging state. |
 | `--run-for SECONDS` | Exit after this many wall-clock seconds and print execution diagnostics. Not with `--script` or `--desktop-socket`. |
 | `--framebuffer-output FILE` | Save the unrotated LCD as a PNG at the end of `--run-for`. Needs `--run-for`. |
 | `--input-replay FILE` | Replay timed pen and key events and snapshots, see [Input replay](#input-replay). |
@@ -39,6 +40,9 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--usb off\|pty\|tcp:PORT\|unix:PATH` | Same for the USB HotSync port, through a built-in USB host. |
 | `--irda off\|pty\|tcp:PORT\|unix:PATH\|phone` | Same for infrared SIR bytes, or `phone` for the core's mobile phone (the `irPhone` capability). Not with the infrared keyboard. |
 | `--bluetooth off\|SOCKET` | Connect the virtual radio to a local H4 controller Unix socket (such as `btvirt`). |
+| `--sync-folder DIR` | Use this directory for Sync Manager profiles. |
+| `--sync-machine KEY`, `--sync-profile NAME` | Use the key to remember the handheld's assigned profile, or name a profile for this run. |
+| `--sync-user NAME`, `--sync-network` | Set the name given to a new Palm on its first HotSync, or route Network HotSync to the built-in Sync Manager, respectively. |
 | `--desktop-socket PATH` | Connect to the desktop launcher's control socket, see [Control socket](#control-socket). Not with `--run-for` or `--script`. |
 | `--save-on-disconnect FILE` | Save the session to this absolute path if the control socket closes without a `quit`, then exit, 1 if that save failed. Holds `FILE.core` locked for the run. Needs `--desktop-socket`. |
 | `--script FILE` | Run console commands from a file at start. One per line, `#` starts a comment. |
@@ -205,6 +209,11 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `hold-state` | Show the Hold switch. |
 | `hold on\|off` | Set the Hold switch (TG50). |
 | `audio-on`, `audio-off` | Turn audio on or off. |
+| `cradle [attached\|detached]` | Show whether the guest is docked or change the manual cradle setting. A virtual USB cable also docks the guest. |
+| `cradle-button [down\|up]` | Read, hold or release the cradle's HotSync button. |
+| `headphones [in\|out]` | Read or change whether headphones are plugged in. |
+| `mic-tone HZ\|off` | Feed a test sine wave to the microphone or remove the test source. |
+| `pcm-capture PATH\|off` | Write raw 44.1 kHz stereo PCM from the board, or stop and print a summary. |
 | `mount IMAGE` | Insert an SD card image. The built-in help says "Unmount SD card." |
 | `sd-take-out`, `ms-take-out` | Leave the ejected card or stick settled in the machine folder's card file and empty the slot. Prints its identity and `protected` or `writable`. |
 | `sd-put-in IDENTITY [protected\|writable]`, `ms-put-in ...` | Insert the card file in the machine folder as a new card with that identity. |
@@ -264,6 +273,8 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
 | `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
 | `rumble` | `on` or `off`, sent while the Zodiac's guest rumble motor is on, Rumble is enabled and no game controller that can rumble is open, so the window can show it. |
+| `attention` | Guest LED and vibration state, sent when it changes, for example `led=green vibrate=1`. |
+| `sync` | Sync Manager status when it changes, or a failure starting a pending HotSync. |
 | `shortcut` | A key pressed in the Palm window that belongs to the app, as `ctrl+s`, `ctrl+shift+s`, `ctrl+1` or `f12`: F11, F12, and Ctrl (with Shift) and a letter or digit. They never reach the Palm. With the infrared keyboard attached, Ctrl keys go to the Palm and only `f11` and `f12` are sent. |
 | `serial`, `usb`, `infrared`, `bluetooth`, `microphone`, `camera` | The new state, sent when it changes, for example a peer connecting or the camera going back to the pattern. |
 
@@ -306,6 +317,15 @@ State commands take no argument. Mode commands change the setting and reply with
 | `gamepad-state` | | `gamepad`: `detached` (`detached busy` while host serial, infrared, the infrared keyboard or the USB cable has the connector), `unavailable` (not a TG50), or `attached` with the pad's phase (`waiting`, `plugging`, `identifying`, `identified`), `hold` when its Hold slide is on, and `ids=`, `replies=`, `sent=` counts |
 | `gamepad` | `on` or `off` | `gamepad`: plugs the CLIÉ game controller into the TG50's connector or takes it out, while running; `busy` if serial, infrared or the USB cable has the connector |
 | `gamepad-key` | `up`, `down`, `left`, `right`, `a`, `b`, `x`, `y`, `home`, `menu` or `hold`, space, `d` or `u` | `gamepad`; `detached` with no pad. `hold d` moves the Hold slide |
+| `battery-state` | | `battery`: setting and charging state, or `unavailable` on devices without battery control. |
+| `battery` | Same setting as `--battery` | `battery`: apply the setting and return it. |
+| `headphones-state`, `headphones` | None to read, `in` or `out` to set | `headphones`: `in`, `out` or `unavailable` for a read on devices without this control. |
+| `cradle-state`, `cradle-setting` | | `cradle`: `attached`, `detached` or `unavailable`. The first reads whether the guest is docked, including by USB. The second reads the manual setting. |
+| `cradle` | `attached` or `detached` | `cradle`: change the manual setting and return whether the guest is docked. |
+| `cradle-button-state`, `cradle-button` | None to read, `down` or `up` to set | `cradle-button`: actual button state, or `unavailable` for a read on devices without this control. |
+| `sync-state`, `sync-profile` | None to read, profile name to set (empty to use the assigned profile) | `sync`: Sync Manager status. The profile change applies to the next HotSync. |
+| `sync-start` | Empty, `local` or `network` | `sync`: start HotSync on USB or serial. `local` also disables Network HotSync. With `network`, open the guest's HotSync app and return `network` with a prompt to tap Network HotSync. |
+| `activesync-start` | `usb`, `serial` or empty for the configured transport | `sync`: start ActiveSync on Windows Mobile. |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |
@@ -331,6 +351,8 @@ State commands take no argument. Mode commands change the setting and reply with
 The Zire 72 camera starts on the test pattern each run and goes back to it on a save, sleep, reset, a load and leaving the app; its source is never saved. The core crops the centre of each picture to the size the camera asks for and scales it. With `camera-mode frames` the core makes `.camera-frames` in the machine folder (deleted when the core quits) and the frontend writes into it: 64 header bytes, little-endian, then the pixels. The header is `FrondCam`, version 1, capacity (1280 x 960 x 4 bytes), a sequence the writer makes odd before writing and even after, then format (1 RGB24, 2 RGBA, 3 I420, 4 NV21, 5 YUYV), width, height, a clockwise rotation (0, 90, 180, 270) and flags (1 mirror, 2 limited-range YUV). The core reads the newest whole frame each time the camera takes one.
 
 ### Card commands
+
+On the Zodiac, `sd-protection` and `sd2-protection` read each slot's write-protect setting. Eject the card before changing it with `sd-read-only` or `sd2-read-only` and `on` or `off`. The reply code is `protection` with `read-only` or `writable`.
 
 | Command | Argument | Reply |
 | --- | --- | --- |
@@ -473,6 +495,8 @@ A `link:ID` that isn't in the store acts as `off` and shows as Unknown connectio
 `make deb` builds `btvirt` with `tools/build-bluetooth-provider.py` and installs it as `/usr/lib/frond/btvirt`. For This Frond's radio the hub looks for `FROND_BTVIRT`, `../lib/frond/btvirt` beside the binary, `btvirt` beside the binary, then the build tree, and runs it in `<runtime>/frond/radio/`. It stops 5 seconds after nothing uses it.
 
 ## Developer runner
+
+Pass `--sd-insert IMAGE` to insert a raw SD image after the installs and keep it in the saved session. Pass `--reset` for a guest soft reset after that step and before launching the app.
 
 `tools/frond-run.py` installs PRC and PDB files into a private copy of a session, launches an app, runs a replay, takes screenshots, exports databases, and prints one JSON result. It needs Python 3.11 or later, a built core, and your own session or firmware.
 
@@ -800,6 +824,15 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_JIT_HOT` | Times a block is reached before it's compiled. `1` compiles at once. Default 4. |
 | `FROND_JIT_MAX_UNCHECKED` | Most cycles generated code runs without checking its budget. `0` means unchecked. |
 | `FROND_JIT_STATS` | Print JIT counters at exit. |
+| `FROND_DELAY_SKIP`, `FROND_POLL_SKIP` | Set to `0` to disable Fast delay-loop or GPIO polling-loop skips, respectively. |
+| `FROND_ASP_POLL_SKIP` | Set to `0` to disable the Zodiac Fast skip for the pen FIFO poll. |
+| `FROND_INPUT_TRACE` | Write host input timing to this file, or set it to `stderr`. |
+| `FROND_ZODIAC_STOP_ON_EXCEPTION` | Stop at a Zodiac CPU exception instead of handing it to the guest. |
+| `FROND_ZODIAC_BT_LOG` | Print Zodiac Bluetooth diagnostics. |
+| `FROND_ACX_TRACE` | rx1950 Wi-Fi trace. Set to `1` for firmware activity or `2` to include register accesses. |
+| `FROND_RX1950_UART_TRACE`, `FROND_RX1950_USB_TRACE`, `FROND_RX1950_RNDIS_TRACE` | Enable rx1950 UART, USB or RNDIS diagnostics. |
+| `FROND_AIRSYNC_TRACE` | Append Windows Mobile AirSync diagnostics to this file. |
+| `APPDATA`, `XDG_DATA_HOME` | Sync Manager looks under `APPDATA/Frond/sync` on Windows or `XDG_DATA_HOME/frond/sync` on Linux. |
 | `FROND_IDLE_SKIP` | `0` turns off the Fast engine's skip of the PalmOS 5 kernel idle wait loop (Zire 72 and T\|X), for measuring. |
 | `FROND_ZODIAC_GPU` | Zodiac in Fast: `on` (or `1`) draws the graphics engine's fills on the host GPU, `diff` draws them on both and checks each GPU fill against the CPU's, reporting mismatches to stderr. Off by default. |
 | `FROND_ZODIAC_GPU_DEVICE` | The EGL device's DRM node to draw on, e.g. `/dev/dri/renderD128`, or `surfaceless` for Mesa's surfaceless platform. Default: the first hardware device. |
@@ -905,6 +938,14 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `FROND_TEST_E2_DENVFS_NOR` | Qualified 6 MiB E2 de-NVFS NOR for desktop and Android raw/session audio checks, and for the `palm-e2-denvfs` entry in `tests/smoke.py`. Read only; changed-image checks use copies. |
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
 | `FROND_TEST_CAMERA_SHOT` | Desktop test: a PNG path to save the Display panel with the Camera row to. |
+| `BENCH_BATTERY` | Battery setting for the Zodiac replay benchmark. Same syntax as `--battery`. |
+| `BENCH_ZODIAC_WAV`, `BENCH_ZODIAC_PACE` | Files for the Zodiac replay benchmark's PCM as WAV and its guest time, wall time, PCM counts and underruns, respectively. |
+| `FROND_BENCH_PRC` | Alternate FrondBench PRC for `test-zodiac-guest-calls`. |
+| `ZODIAC_STATE`, `ZODIAC_TEST_FAST` | State file for real-ROM Zodiac tests. Set `ZODIAC_TEST_FAST=1` to run the test binary in Fast. |
+| `ZODIAC_SESSION` | Session reopened by the Zodiac Bluetooth persistence test. |
+| `FROND_ZODIAC_SESSION` | Zodiac session for the second core in `tests/link-irda-cores.py`. |
+| `BT`, `EARLY`, `STEPS`, `TAPS` | Zodiac Bluetooth test harness settings for the radio socket, early boot trace hooks, scripted steps and timed taps. |
+| `FROND_MIGRATE` | Pass `sessions\|machine\|old` to the desktop Dana card migration test. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BENCH_ZODIAC_LOAD` | A Zodiac state file saved by `BENCH_ZODIAC_SAVE`; `benchmark-replay` loads it and starts there. |
 | `BENCH_ZODIAC_SD2` | An SD image `benchmark-replay` puts in the Zodiac's second slot from the start, in memory. The run's end lists the sectors that differ from the file on stderr. |
@@ -939,6 +980,9 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `OBJ_ROOT` | Where the core's objects, Dynarmic, the desktop build and the test binaries go. Default `build/out`; it and `out/` can each be a link to a faster disk. `make clean` empties both and leaves the rest of `build/`. |
 | `ARM64_JOBS` | Jobs for the arm64 Docker build. |
 | `APPIMAGE_JOBS` | Jobs for the AppImage Docker builds. |
+| `DESKTOP_DEV_PATHS` | `ON` lets desktop builds find helpers in the checkout. Packaging can set it to `OFF`. |
+| `DYNARMIC_CMAKE_ARGS` | Extra CMake arguments for building Dynarmic. |
+| `WINDOWS_SHIM_CXX`, `WINDOWS_SHIM_OUT` | Compiler and output directory for `make installer-shims`. |
 | `FROND_DYNARMIC_SRC`, `FROND_DYNARMIC_LIBS` | Where the core's makefile finds the Dynarmic source and libraries. `make` sets them from `DYNARMIC_SRC`. |
 | `DYNARMIC_SRC` | The Dynarmic source. Default `vendor/dynarmic`. |
 | `JIT_DIFF_ARGS` | Arguments for `make test-jit-differential`, such as `--seeds 1: --duration 3600` or `--seed N`. Replaces the default runs. |
@@ -1004,6 +1048,7 @@ All in `tools/`. Most take `--help`.
 | `desktop` | The Qt app, `out/frond-desktop`. |
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |
 | `appimage`, `appimage-arm64` | AppImages for x86-64 and arm64, built in Docker on Debian 12. They carry mtools in `usr/lib/frond` for SD file exchange. |
+| `installer-shims` | Build the Windows CE installer helpers with MinGW. |
 | `clean` | Remove build output. |
 | `device-profiles` | Build the device profile dump. |
 | `generate-device-data`, `check-device-data` | Write, or check, the generated profile data. |
@@ -1022,6 +1067,9 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/out/test-zodiac-jit ROM` compares private SmallROM traces. |
 | `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |
 | `rx1950-boot`, `test-rx1950-boot` | Build the HP iPAQ rx1950 boot tool, or run it until the file system writes to NAND (skips without the firmware). Outside `make test`. |
+| `test-zodiac-code-hooks` | Stop at ARM and Thumb code hooks, then continue after clearing the hooks. Outside `make test`. |
+| `test-zodiac-guest-exceptions` | Synthetic guest data and prefetch aborts, undefined instructions and alignment faults in Exact and Fast. Outside `make test`. |
+| `test-zodiac-faster` | Zodiac guest clock and execution checks at Faster speed. Outside `make test`. |
 | `test-zodiac-mmu` | ARM920 TTBR/DACR, abort/reset and retained instruction-cache checks in Exact and Fast. Outside `make test`. |
 | `test-zodiac` | All the Zodiac tests below that are in `make test`. |
 | `test-zodiac-sound` | Zodiac sound words, slots, frame rate against guest time and saved state. |
@@ -1122,24 +1170,33 @@ Tests in `make test`, by area:
 
 | Area | Targets |
 | --- | --- |
-| CPU and engines | `test-cpu`, `test-arm920-fcse`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit` |
-| SoC and timing | `test-s3c2442`, `test-s3c2442-machine`, `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
+| CPU and engines | `test-cpu`, `test-arm920-fcse`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit`, `test-xscale-cost`, `test-xscale-cost-session` |
+| SoC and timing | `test-s3c2442`, `test-s3c2442-machine`, `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16`, `test-pxa-clock`, `test-pxa-faster` |
 | Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-clie-gamepad`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
-| Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/out/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions), `test-tg50-sd-refusal` (the TG50 smoke session; `sd-*` commands are refused on a Memory Stick device) |
+| Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/out/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions), `test-tg50-sd-refusal` (the TG50 smoke session; `sd-*` commands are refused on a Memory Stick device), `test-card-install`, `test-68k-card-swap` |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
 | Camera | `test-z72-camera`, `test-z72-camera-host`, `test-iwmmxt-shift`, `test-iwmmxt-ops` |
-| Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
+| Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard`, `test-zodiac-usb-function` |
 | Dana USB, printing and Wi-Fi | `test-68k-card-provider`, `test-68k-dana`, `test-68k-sd`, `test-68k-vz-registers`, `test-dana-card-inventory`, `test-isp-frame`, `test-isp-host-atl`, `test-isp-host-irq`, `test-isp-host-pio`, `test-isp-host-root`, `test-print-text`, `test-raw-print-file`, `test-raw-print-job`, `test-usb-raw-printer`, `test-usb-printer-runtime`, `test-usb-prism2-adapter` (the adapter leaf), `test-net-wifi-router` (the shared Ethernet router), `test-usb-wifi-runtime` (the Dana's adapter on the ISP1161 port: enumeration, slirp ARP, supply, port reset, swap with the printer, reset, load, a load mid frame and a rejected load), `test-dana-wifi-module` (the Dana Wireless's built-in Wi-Fi module). `desktop-print` in `make test-desktop` covers the USB port row |
+| Battery | `test-battery-power`, `test-pxa-battery-pins`, `test-68k-battery`, `test-zodiac-battery` |
+| Sync Manager | `test-sync-engine`, `test-sync-pim`, `test-sync-airsync` |
 | Link protocol | `test-link-protocol` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
-| Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi`, `test-modem`, `test-ir-peer`, `test-ir-printer` |
+| Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi`, `test-modem`, `test-ir-peer`, `test-ir-printer`, `test-acx100`, `test-rndis-host` |
 | Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link`, `test-audio-metrics`, `test-audio-timing`, `test-tx-baseline`, `test-menu-response`, `test-wm9712-irq`, `test-pxa-ac97-irq`, `test-pace-patch` |
 
 Not in `make test`. The first group builds a program and runs it with a private session, the rest are firmware-free and can be run by name:
 
 | Target | Needs |
 | --- | --- |
+| `test-arm-speed`, `test-frond-68k-speed` | Runtime speed control on the T\|X smoke session or IIIx ROM, respectively. |
+| `test-frond-68k-auto-off` | Idle auto-off on IIIx and m515 ROMs from `FROND_DEVICE_IMAGES`. |
+| `test-frond-arm-big-install` | Large database installs on ARM smoke sessions. |
+| `test-battery-control` | Battery option and control socket on ARM and 68k smoke sessions. |
+| `test-zodiac-guest-calls`, `test-zodiac-resume` | Real-ROM guest database calls and reset, or save and resume parity, in Exact and Fast. Takes `ZODIAC_ROM` and `ZODIAC_STATE`. |
+| `test-zodiac-bluetooth` | Real-ROM radio relink, address persistence, OPP and DUN against the virtual Bluetooth controller and peers. Takes `ZODIAC_ROM` and `ZODIAC_STATE`. |
+| `test-native-budget` | Firmware-free guest call budget and timeout checks. |
 | `test-tx-lifecycle-rom`, `test-tx-power-rom`, `test-tx-usb-rom` | Build only. Run the program with a TX session. |
 | `test-z72-camera-rom` | Zire 72 session in `Z72_SESSION` and ffmpeg. Camera viewfinder and photos at each size against the test pattern, a save and load with the viewfinder up, then a picture file and pushed frames in the viewfinder and a photo, and a save going back to the pattern. |
 | `test-z72-video-rom` | Zire 72 session in `Z72_SESSION`, ffmpeg and mtools. A 320 x 240 Camera clip on a blank SD card: every frame against the pattern and its counter, the frame rate and the 1 kHz tone's level, playback in Media, and a recording across a save and a load. |
