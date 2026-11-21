@@ -876,11 +876,12 @@ struct Probe {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
         if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran, cpuArm920TakeJitAccessPc(p.cpu));
-        // The graphics ring pointer writes of the ROM's two batch producers (Origo submits about 90000 a second).
-        // Both are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
+        // The graphics ring pointer writes of the ROM's keyed copy and copy helper producers (Origo submits about 190000
+        // a second in a mission briefing) and of the blend (200a9788, about 4000 a second in Origo's missions).
+        // All are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
         if (pa == 0x16010220 && inJit) {
             const uint32_t pc = cpuArm920TakeJitAccessPc(p.cpu);
-            return size == 4 && (pc == 0x200aa504 || pc == 0x200a9ed4) && p.graphicsMemory &&
+            return size == 4 && (pc == 0x200aa504 || pc == 0x200a9ed4 || pc == 0x200a9788) && p.graphicsMemory &&
                    p.cs5Configuration.virtualProfile() && !p.options.cs5ConfigurationObserver &&
                    p.jitChargedWrite(pa, 4, value, ran, pc);
         }
@@ -2570,7 +2571,7 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     // loops' timer reads (delayLoopPc), and the batch producers' ring pointer writes (jitChargedWrite).
     static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0,
                                              0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030,
-                                             0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4};
+                                             0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4, 0x200a9788};
     cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
