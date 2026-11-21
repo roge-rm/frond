@@ -3,6 +3,7 @@
 #include <SDL.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <algorithm>
 
 #include "keys.h"
@@ -288,6 +289,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 GamepadState& one = pads[event.caxis.which];
                 if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) one.leftX = event.caxis.value;
                 else if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) one.leftY = event.caxis.value;
+                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTX) { one.rightX = event.caxis.value; UpdateGamepad(); break; }
+                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY) { one.rightY = event.caxis.value; UpdateGamepad(); break; }
                 else break;
                 lastStickPad = event.caxis.which;
                 UpdateGamepad();
@@ -608,6 +611,9 @@ GamepadState SdlEventHandler::CombinedPads() const {
         if (!all.dpadX) all.dpadX = one.dpadX;
         if (!all.dpadY) all.dpadY = one.dpadY;
         if (!stickPad && (one.leftX || one.leftY)) stickPad = &one;
+        // The right stick only presses keys, so the furthest push on each axis counts.
+        if (std::abs(int(one.rightX)) > std::abs(int(all.rightX))) all.rightX = one.rightX;
+        if (std::abs(int(one.rightY)) > std::abs(int(all.rightY))) all.rightY = one.rightY;
     }
     if (stickPad) { all.leftX = stickPad->leftX; all.leftY = stickPad->leftY; }
     return all;

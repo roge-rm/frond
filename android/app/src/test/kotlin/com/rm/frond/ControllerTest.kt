@@ -73,6 +73,47 @@ class ControllerTest {
     }
 
     @Test
+    fun stickKeysSaveAndName() {
+        val up = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.UP)
+        val left = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.LEFT)
+        assertTrue(ControllerMap.isStickKey(up) && ControllerMap.isStickKey(left))
+        assertFalse(ControllerMap.isStickKey(KeyEvent.KEYCODE_BUTTON_A) || ControllerMap.isStickKey(KeyEvent.KEYCODE_BUTTON_16))
+        assertEquals("Right stick up", ControllerMap.keyName(up))
+        assertEquals("Left stick left", ControllerMap.keyName(left))
+        val map = ControllerMap.defaults(Device.TX).assign(PalmButton.APP3, up).assign(PalmButton.APP4, left)
+        assertEquals(map, ControllerMap.decode(map.encode(), Device.TX))
+        // A map saved before stick keys reads the same.
+        val old = ControllerMap.defaults(Device.TX)
+        assertEquals(old, ControllerMap.decode(old.encode(), Device.TX))
+        // Eight stick keys, all different.
+        val all = (0..1).flatMap { s -> StickDirection.entries.map { ControllerMap.stickKey(s, it) } }
+        assertEquals(8, all.toSet().size)
+    }
+
+    @Test
+    fun stickDirectionsPressWhatTheMapGivesThem() {
+        val rightUp = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.UP)
+        val rightLeft = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.LEFT)
+        val leftDown = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.DOWN)
+        val (c, sent) = input(ControllerMap(mapOf(rightUp to PalmButton.APP1, rightLeft to PalmButton.APP2, leftDown to PalmButton.MENU)))
+        c.axes(1, 0f, 0f, 0f, 0f, 0f, -0.4f)
+        assertEquals(emptyList<String>(), sent)
+        c.axes(1, 0f, 0f, 0f, 0f, 0f, -0.6f)
+        assertEquals(listOf("+app1"), sent)
+        // Held between the release and press points stays down.
+        c.axes(1, 0f, 0f, 0f, 0f, -0.7f, -0.4f)
+        assertEquals(listOf("+app1", "+app2"), sent)
+        c.axes(1, 0f, 0f, 0f, 0f, 0f, -0.2f)
+        assertEquals(listOf("+app1", "+app2", "-app2", "-app1"), sent)
+        // The left stick's direction presses its key as well as the 5-way.
+        sent.clear()
+        c.axes(1, 0f, 0.9f, 0f, 0f)
+        assertEquals(setOf("+down", "+menu"), sent.toSet())
+        c.release(1)
+        assertTrue(c.held.isEmpty())
+    }
+
+    @Test
     fun keyNames() {
         assertEquals("A", ControllerMap.keyName(KeyEvent.KEYCODE_BUTTON_A))
         assertEquals("Start", ControllerMap.keyName(KeyEvent.KEYCODE_BUTTON_START))

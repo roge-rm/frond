@@ -98,8 +98,9 @@ enum class PalmButton(val id: String) {
     }
 }
 
-// Which controller key (an Android keycode) presses which Palm button. One key presses one button;
-// a button can have more than one key. The d-pad hat and left stick always drive the 5-way.
+// Which controller key (an Android keycode, or a stick direction as stickKey numbers it) presses which
+// Palm button. One key presses one button; a button can have more than one key. The d-pad hat and left
+// stick always drive the 5-way, and the Zodiac's left stick its analogue stick.
 data class ControllerMap(val keys: Map<Int, PalmButton>) {
     fun keysFor(button: PalmButton): List<Int> = keys.filterValues { it == button }.keys.sorted()
 
@@ -201,8 +202,16 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().remove(prefKey(device)).apply()
         }
 
+        // A stick pushed past half travel counts as a key per direction. These numbers are past Android's
+        // keycodes, so they save like keys and an older app reads them as keys that never come.
+        const val STICK_LEFT = 0
+        const val STICK_RIGHT = 1
+        private const val STICK_KEY_BASE = 0x10000
+        fun stickKey(stick: Int, direction: StickDirection): Int = STICK_KEY_BASE + stick * 4 + direction.ordinal
+        fun isStickKey(key: Int): Boolean = key in STICK_KEY_BASE until STICK_KEY_BASE + 8
+
         // A short name for a controller key, for the settings list.
-        fun keyName(key: Int): String = when (key) {
+        fun keyName(key: Int): String = if (isStickKey(key)) stickKeyName(key) else when (key) {
             KeyEvent.KEYCODE_BUTTON_A -> "A"
             KeyEvent.KEYCODE_BUTTON_B -> "B"
             KeyEvent.KEYCODE_BUTTON_C -> "C"
@@ -225,6 +234,12 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             KeyEvent.KEYCODE_DPAD_CENTER -> "D-pad centre"
             in KeyEvent.KEYCODE_BUTTON_1..KeyEvent.KEYCODE_BUTTON_16 -> "Button ${key - KeyEvent.KEYCODE_BUTTON_1 + 1}"
             else -> "Key $key"
+        }
+
+        private fun stickKeyName(key: Int): String {
+            val n = key - STICK_KEY_BASE
+            val stick = if (n / 4 == STICK_LEFT) "Left stick" else "Right stick"
+            return "$stick ${StickDirection.entries[n % 4].name.lowercase()}"
         }
 
         // Events from a gamepad, joystick or d-pad device, as opposed to a keyboard. A keyboard's
@@ -269,15 +284,19 @@ class ControllerInput(var map: ControllerMap, private val send: (PalmButton, Boo
         return true
     }
 
-    // Stick and hat positions from -1 to 1 for one device; the hat wins where it's pressed.
-    fun axes(device: Int, stickX: Float, stickY: Float, hatX: Float, hatY: Float) {
+    // Stick and hat positions from -1 to 1 for one device; the hat wins where it's pressed. The left
+    // stick drives the 5-way, and both sticks' directions also press what the map gives them.
+    fun axes(device: Int, stickX: Float, stickY: Float, hatX: Float, hatY: Float, rightX: Float = 0f, rightY: Float = 0f) {
         val x = if (hatX != 0f) hatX else stickX
         val y = if (hatY != 0f) hatY else stickY
         direction(device, PalmButton.LEFT, x, -1)
         direction(device, PalmButton.RIGHT, x, 1)
         direction(device, PalmButton.UP, y, -1)
         direction(device, PalmButton.DOWN, y, 1)
+        stickKeys.update(device, ControllerMap.STICK_LEFT, stickX, stickY) { key, down -> key(device, key, down) }
+        stickKeys.update(device, ControllerMap.STICK_RIGHT, rightX, rightY) { key, down -> key(device, key, down) }
     }
+    private val stickKeys = StickKeys()
 
     // Presses past PRESS and lets go under RELEASE, so a stick resting near the edge doesn't chatter.
     private fun direction(device: Int, button: PalmButton, value: Float, sign: Int) {
@@ -305,10 +324,12 @@ class ControllerInput(var map: ControllerMap, private val send: (PalmButton, Boo
 
     // Lets go of everything one device holds, as when it's unplugged.
     fun release(device: Int) {
+        stickKeys.forget(device)
         holds.keys.filter { it.substring(1).substringBefore(':') == device.toString() }.forEach { unhold(it) }
     }
 
     fun releaseAll() {
+        stickKeys.forgetAll()
         holds.keys.toList().forEach { unhold(it) }
     }
 
@@ -318,4 +339,33 @@ class ControllerInput(var map: ControllerMap, private val send: (PalmButton, Boo
         const val PRESS = 0.5f
         const val RELEASE = 0.35f
     }
+}
+
+enum class StickDirection { LEFT, RIGHT, UP, DOWN }
+
+// Stick directions as keys (ControllerMap.stickKey): pressed past PRESS, let go under RELEASE.
+// Not thread-safe: call it from the UI thread.
+class StickKeys {
+    private val held = mutableMapOf<Int, MutableSet<Int>>()
+
+    // Calls change for each of the stick's direction keys that went down or up.
+    fun update(device: Int, stick: Int, x: Float, y: Float, change: (Int, Boolean) -> Unit) {
+        val keys = held.getOrPut(device) { mutableSetOf() }
+        for ((direction, value) in listOf(
+            StickDirection.LEFT to -x, StickDirection.RIGHT to x,
+            StickDirection.UP to -y, StickDirection.DOWN to y,
+        )) {
+            val key = ControllerMap.stickKey(stick, direction)
+            if (key in keys) {
+                if (!(value >= ControllerInput.RELEASE)) { keys.remove(key); change(key, false) }
+            } else if (value > ControllerInput.PRESS) {
+                keys.add(key)
+                change(key, true)
+            }
+        }
+    }
+
+    // Forgets what a device holds without sending ups, for an owner that lets go itself.
+    fun forget(device: Int) { held.remove(device) }
+    fun forgetAll() = held.clear()
 }

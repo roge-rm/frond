@@ -7,10 +7,10 @@
 
 #include "DeviceControls.h"
 
-// A host game controller as SDL reports it: the left stick's axes (-32768 to 32767, right and down
+// A host game controller as SDL reports it: the sticks' axes (-32768 to 32767, right and down
 // positive) and the buttons a device uses.
 struct GamepadState {
-    int16_t leftX{0}, leftY{0};
+    int16_t leftX{0}, leftY{0}, rightX{0}, rightY{0};
     bool a{false}, b{false}, x{false}, y{false};
     bool leftShoulder{false}, rightShoulder{false}, leftStick{false};
     bool back{false}, start{false}, guide{false};
@@ -28,16 +28,17 @@ struct GamepadInput {
 constexpr float gamepadStickRest = 0.12f;
 
 // The Zodiac from a controller. The left stick is the analogue stick over its whole range and its
-// click the stick's press. A, B, X and Y are the Action keys by place (bottom, right, left, top), the
-// shoulders are the triggers, Start and Guide are Home and Back is Function. The d-pad pushes the stick
-// to full travel on its axis and wins over the left stick there.
+// click the stick's press. A, B, X and Y are the Action keys by place (bottom, right, left, top), and so
+// is the right stick pushed past half travel that way, for games that take the Action keys as a second
+// stick. The shoulders are the triggers, Start and Guide are Home and Back is Function. The d-pad pushes
+// the stick to full travel on its axis and wins over the left stick there.
 inline GamepadInput zodiacGamepadInput(const GamepadState& pad) {
     GamepadInput input;
     auto hold = [&](bool down, KeyId key) { if (down) input.keys |= deviceKeyBit(key); };
-    hold(pad.a, keyIdHard1);
-    hold(pad.b, keyIdHard2);
-    hold(pad.x, keyIdHard3);
-    hold(pad.y, keyIdHard4);
+    hold(pad.a || pad.rightY > 16384, keyIdHard1);
+    hold(pad.b || pad.rightX > 16384, keyIdHard2);
+    hold(pad.x || pad.rightX < -16384, keyIdHard3);
+    hold(pad.y || pad.rightY < -16384, keyIdHard4);
     hold(pad.leftShoulder, keyIdTriggerLeft);
     hold(pad.rightShoulder, keyIdTriggerRight);
     hold(pad.leftStick, keyIdStickPress);

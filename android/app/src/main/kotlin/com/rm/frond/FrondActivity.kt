@@ -567,6 +567,8 @@ open class FrondActivity : SDLActivity() {
                     event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y),
                     maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_LTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_BRAKE)),
                     maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_RTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_GAS)),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_Z),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_RZ),
                 )
             } else if (!leaving) {
                 controller.axes(
@@ -575,6 +577,8 @@ open class FrondActivity : SDLActivity() {
                     event.getAxisValue(android.view.MotionEvent.AXIS_Y),
                     event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
                     event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_Z),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_RZ),
                 )
             }
             return true
