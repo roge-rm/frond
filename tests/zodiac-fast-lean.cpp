@@ -1794,7 +1794,12 @@ void uartPolls() {
     const auto& e = exact.run.result;
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[8] == 0x41 + 48);
     same(plain, fast);
-    same(exact, fast);
+    // Fast passes a cycle before some graphics changes as a stall with no instruction (spanBoundary), where Exact
+    // runs part of a poll round, so it retires a few fewer instructions (99 of 70278 here) with Exact's registers,
+    // timer sum and ticks.
+    sameResult(exact, fast);
+    assert(exact.cheap.time.ticks == fast.cheap.time.ticks && fast.cheap.status == exact.cheap.status);
+    assert(fast.cheap.retired <= exact.cheap.retired && fast.cheap.retired * 100 >= exact.cheap.retired * 99);
     sameExact(exactPlain, exact);
     assert(n >= 40 && r >= 10000);
     assert(en >= 40 && er >= 10000);
@@ -1915,10 +1920,13 @@ void delayShort() {
     std::fflush(stdout);
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[1] >= 120 &&
            e.registers[1] <= 124);
-    // Generated code sees the timer at block ends, so a wait may end a count or two after Exact's, not more, and
-    // the 20 waits together no fewer counts than Exact's and at most 5 more.
+    // Generated code sees the timer at block ends, so a wait may end a count or two after Exact's. A span that
+    // ends one cycle before a graphics change passes that cycle as a stall with no instruction (spanBoundary), which
+    // can move a read past the 120th count and add one more round of the loop, up to 7 counts. So one wait may end
+    // up to 7 counts after Exact's, and the 20 waits together no fewer counts than Exact's and at most 5 + 7 more.
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[1] >= 120 &&
-           f.registers[8] <= e.registers[8] + 2 && f.registers[9] <= e.registers[9] + 5 && f.registers[9] >= e.registers[9]);
+           f.registers[8] <= e.registers[8] + 7 && f.registers[9] <= e.registers[9] + 5 + 7 &&
+           f.registers[9] >= e.registers[9]);
     assert(fast.cheap.retired * 4 <= exact.cheap.retired * 5);
 }
 
