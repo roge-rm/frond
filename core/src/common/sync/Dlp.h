@@ -20,7 +20,7 @@ class PacketLink {
    public:
     virtual ~PacketLink() = default;
     virtual bool Send(const Bytes& message) = 0;
-    // Waits up to timeoutMs for the next message.
+    // Waits for the next message. Network HotSync uses timeoutMs as the read idle limit.
     virtual bool Receive(Bytes& message, int timeoutMs) = 0;
     virtual std::string Name() const = 0;  // serial, netsync
     // Set when the line failed: closed, a timeout or an abort from the handheld.

@@ -15,22 +15,33 @@ int MsLeft(Clock::time_point deadline) {
     return left > 0 ? int(std::min<long long>(left, 1 << 30)) : 0;
 }
 
-// Buffered reads on a stream, with a deadline per call.
+struct ReadDeadline {
+    Clock::time_point expires;
+    std::chrono::milliseconds idle{0};
+};
+
+// Buffered reads on a stream.
 class Reader {
    public:
     explicit Reader(SyncStream& stream) : stream(stream) {}
     // Makes at least n bytes ready. False on timeout or when closed (closed is set).
     bool Need(size_t n, Clock::time_point deadline, const std::atomic<bool>* stop = nullptr) {
+        ReadDeadline fixed{deadline};
+        return Need(n, fixed, stop);
+    }
+
+    bool Need(size_t n, ReadDeadline& deadline, const std::atomic<bool>* stop = nullptr) {
         while (buffer.size() - at < n) {
             if (stop && *stop) return false;
             uint8_t chunk[4096];
-            const int wait = std::min(MsLeft(deadline), 200);
+            const int wait = std::min(MsLeft(deadline.expires), 200);
             const long got = stream.Read(chunk, sizeof(chunk), wait);
             if (got < 0) return closed = true, false;
             if (got > 0) {
+                if (deadline.idle.count() > 0) deadline.expires = Clock::now() + deadline.idle;
                 if (at > 65536) buffer.erase(buffer.begin(), buffer.begin() + long(at)), at = 0;
                 buffer.insert(buffer.end(), chunk, chunk + got);
-            } else if (!MsLeft(deadline)) {
+            } else if (!MsLeft(deadline.expires)) {
                 return false;
             }
         }
@@ -221,7 +232,18 @@ class NetSyncLink final : public HandheldLink {
     }
 
     bool Receive(Bytes& message, int timeoutMs) override {
-        const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+        const auto timeout = std::chrono::milliseconds(timeoutMs);
+        return ReceiveFrame(message, {Clock::now() + timeout, transport == Transport::network ? timeout : std::chrono::milliseconds(0)});
+    }
+
+    bool ReceiveHandshake(Bytes& message) {
+        return ReceiveFrame(message, {Clock::now() + std::chrono::seconds(10)});
+    }
+
+    uint8_t xid{0};
+
+   private:
+    bool ReceiveFrame(Bytes& message, ReadDeadline deadline) {
         if (!in.Need(6, deadline)) return Fail(in.closed ? "The handheld went away." : "The handheld stopped answering.");
         const uint8_t* p = in.Peek();
         if (p[0] != 1) return Fail("The handheld's NetSync framing broke.");
@@ -237,9 +259,6 @@ class NetSyncLink final : public HandheldLink {
         return true;
     }
 
-    uint8_t xid{0};
-
-   private:
     bool Fail(const std::string& why) {
         error = why;
         return false;
@@ -359,9 +378,9 @@ std::unique_ptr<HandheldLink> AcceptHandheld(SyncStream& stream, Transport trans
             if (kind != 0x90) continue;
             auto net = std::make_unique<NetSyncLink>(stream, in, transport);
             Bytes message;
-            if (!net->SendAs(Bytes(netSyncReply1, netSyncReply1 + sizeof(netSyncReply1)), 0xff) || !net->Receive(message, 10000) ||
+            if (!net->SendAs(Bytes(netSyncReply1, netSyncReply1 + sizeof(netSyncReply1)), 0xff) || !net->ReceiveHandshake(message) ||
                 message.empty() || message[0] != 0x92 ||
-                !net->SendAs(Bytes(netSyncReply2, netSyncReply2 + sizeof(netSyncReply2)), 0xff) || !net->Receive(message, 10000) ||
+                !net->SendAs(Bytes(netSyncReply2, netSyncReply2 + sizeof(netSyncReply2)), 0xff) || !net->ReceiveHandshake(message) ||
                 message.empty() || message[0] != 0x93) {
                 error = "The NetSync handshake failed" + (net->error.empty() ? std::string(".") : ": " + net->error);
                 return nullptr;

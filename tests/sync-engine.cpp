@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -163,6 +165,12 @@ void TestSerialLine() {
     CHECK(!ok && !link->error.empty());
 }
 
+Bytes NetSyncFrame(uint8_t xid, const Bytes& message) {
+    Bytes frame{1, xid, 0, 0, uint8_t(message.size() >> 8), uint8_t(message.size())};
+    frame.insert(frame.end(), message.begin(), message.end());
+    return frame;
+}
+
 void TestNetSyncLine() {
     auto pipe = std::make_shared<SyncPipe>();
     SyncPipe::End end(pipe);
@@ -171,22 +179,17 @@ void TestNetSyncLine() {
     std::string error;
     std::thread desk([&] { link = AcceptHandheld(end, Transport::usb, stop, error); });
     Handheld h{*pipe};
-    const auto frame = [](uint8_t xid, const Bytes& m) {
-        Bytes f{1, xid, 0, 0, uint8_t(m.size() >> 8), uint8_t(m.size())};
-        f.insert(f.end(), m.begin(), m.end());
-        return f;
-    };
     Bytes hello(22, 0);
     hello[0] = 0x90, hello[1] = 1;
-    h.Put(frame(0xff, hello));
+    h.Put(NetSyncFrame(0xff, hello));
     auto r = h.Bytes6(6 + 50);
     CHECK(r.size() == 56 && r[0] == 1 && r[1] == 0xff && r[5] == 50 && r[6] == 0x12);
     Bytes m(50, 0);
     m[0] = 0x92;
-    h.Put(frame(0xff, m));
+    h.Put(NetSyncFrame(0xff, m));
     r = h.Bytes6(6 + 46);
     CHECK(r.size() == 52 && r[5] == 46 && r[6] == 0x13);
-    h.Put(frame(0xff, Bytes{0x93, 0, 0, 0, 0, 0, 0, 0}));
+    h.Put(NetSyncFrame(0xff, Bytes{0x93, 0, 0, 0, 0, 0, 0, 0}));
     desk.join();
     CHECK(link != nullptr);
     if (!link) return std::printf("FAIL netsync accept: %s\n", error.c_str()), void(++failures);
@@ -194,12 +197,112 @@ void TestNetSyncLine() {
     CHECK(link->Send(Bytes{0x12, 1, 0x20, 4, 0, 1, 0, 4}));
     r = h.Bytes6(6 + 8);
     CHECK(r.size() == 14 && r[1] == 0 && r[6] == 0x12);
-    h.Put(frame(0, Bytes{0x92, 0, 0, 0}));
+    h.Put(NetSyncFrame(0, Bytes{0x92, 0, 0, 0}));
     Bytes answer;
     CHECK(link->Receive(answer, 2000) && answer == (Bytes{0x92, 0, 0, 0}));
     CHECK(link->Send(Bytes{0x2f, 1}));
     r = h.Bytes6(6 + 2);
     CHECK(r.size() == 8 && r[1] == 1);
+}
+
+// Delivers fragments on the reader's thread so the test controls when each gap starts.
+class TimedNetSyncStream final : public SyncStream {
+   public:
+    using Clock = std::chrono::steady_clock;
+    using Milliseconds = std::chrono::milliseconds;
+
+    struct Fragment {
+        Milliseconds gap;
+        Bytes bytes;
+    };
+
+    void Queue(std::deque<Fragment> input, Milliseconds limit) {
+        fragments = std::move(input);
+        lastRead = Clock::now();
+        end = lastRead + limit;
+    }
+
+    long Read(uint8_t* out, size_t max, int timeoutMs) override {
+        const auto now = Clock::now();
+        if (now >= end) return -1;
+        const auto pollEnd = std::min(end, now + Milliseconds(timeoutMs));
+        if (fragments.empty() || lastRead + fragments.front().gap > pollEnd) {
+            std::this_thread::sleep_until(pollEnd);
+            return 0;
+        }
+        const auto& fragment = fragments.front();
+        std::this_thread::sleep_until(lastRead + fragment.gap);
+        const auto size = fragment.bytes.size();
+        if (size > max) return -1;
+        std::copy(fragment.bytes.begin(), fragment.bytes.end(), out);
+        const auto readAt = Clock::now();
+        longestGap = std::max(longestGap, std::chrono::ceil<Milliseconds>(readAt - lastRead));
+        lastRead = readAt;
+        fragments.pop_front();
+        return long(size);
+    }
+
+    bool Write(const uint8_t*, size_t) override { return true; }
+    void Abort() override { end = Clock::time_point{}; }
+
+    Clock::time_point lastRead;
+    Milliseconds longestGap{0};
+
+   private:
+    std::deque<Fragment> fragments;
+    Clock::time_point end;
+};
+
+void TestNetSyncTimeout(Transport transport, bool stall, bool productionTimeout = false) {
+    using Clock = TimedNetSyncStream::Clock;
+    using Milliseconds = TimedNetSyncStream::Milliseconds;
+    using namespace std::chrono_literals;
+    TimedNetSyncStream stream;
+    stream.Queue({{0ms, NetSyncFrame(0xff, {0x90})}, {0ms, NetSyncFrame(0xff, {0x92})},
+                  {0ms, NetSyncFrame(0xff, {0x93})}}, 2s);
+    std::string error;
+    std::atomic<bool> stop{false};
+    auto link = AcceptHandheld(stream, transport, stop, error);
+    CHECK(link != nullptr);
+    if (!link) return;
+
+    constexpr int timeoutMs = 600;
+    constexpr uint8_t function = 0x12;
+    const auto frame = NetSyncFrame(0, DlpResponse(function, 0, {{0x20, {1, 2, 3}}}));
+    const auto gap = productionTimeout ? 8000ms : 350ms;
+    std::deque<TimedNetSyncStream::Fragment> fragments{
+        {0ms, Bytes(frame.begin(), frame.begin() + 3)},
+        {gap, Bytes(frame.begin() + 3, frame.begin() + 7)}};
+    if (!stall) {
+        fragments.push_back({gap, Bytes(frame.begin() + 7, frame.begin() + 9)});
+        fragments.push_back({gap, Bytes(frame.begin() + 9, frame.end())});
+    }
+
+    const auto start = Clock::now();
+    stream.Queue(std::move(fragments), productionTimeout ? 35s : 5s);
+    auto dlp = productionTimeout ? DlpClient(*link) : DlpClient(*link, timeoutMs);
+    std::vector<DlpArg> answer;
+    const auto result = dlp.Call(function, {}, answer);
+    const auto finished = Clock::now();
+    const auto elapsed = std::chrono::duration_cast<Milliseconds>(finished - start);
+    const auto idle = std::chrono::duration_cast<Milliseconds>(finished - stream.lastRead);
+    std::printf("NetSync %s %s: result=%d elapsed=%lld ms longest read gap=%lld ms final idle=%lld ms\n",
+                link->Name().c_str(), stall ? "stall" : "advancing", result,
+                static_cast<long long>(elapsed.count()), static_cast<long long>(stream.longestGap.count()),
+                static_cast<long long>(idle.count()));
+    const auto timeout = productionTimeout ? 20s : Milliseconds(timeoutMs);
+    if (stall || transport == Transport::usb) {
+        CHECK(result < 0 && dlp.LinkError() == "The handheld stopped answering.");
+        if (stall) {
+            const auto tolerance = productionTimeout ? 2s : gap;
+            CHECK(idle >= timeout - 5ms && idle < timeout + tolerance);
+        } else {
+            CHECK(elapsed >= timeout - 5ms && idle < timeout - 5ms);
+        }
+    } else {
+        CHECK(result == 0 && answer.size() == 1 && answer[0].data == (Bytes{1, 2, 3}));
+        CHECK(elapsed > timeout && stream.longestGap < timeout);
+    }
 }
 
 // A resource close to the legacy packet limit must be assembled from two DLP reads.
@@ -810,11 +913,19 @@ void TestStore(const std::string& root) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) return std::fprintf(stderr, "usage: sync-engine SCRATCH_FOLDER\n"), 2;
+    if (argc == 2 && std::string(argv[1]) == "--netsync-production-timeout") {
+        TestNetSyncTimeout(Transport::network, false, true);
+        TestNetSyncTimeout(Transport::network, true, true);
+        return failures ? 1 : 0;
+    }
+    if (argc != 2) return std::fprintf(stderr, "usage: sync-engine SCRATCH_FOLDER | --netsync-production-timeout\n"), 2;
     std::filesystem::remove_all(argv[1]);
     TestChecksums();
     TestSerialLine();
     TestNetSyncLine();
+    TestNetSyncTimeout(Transport::network, false);
+    TestNetSyncTimeout(Transport::network, true);
+    TestNetSyncTimeout(Transport::usb, false);
     TestDlp();
     TestLegacyResourceRead();
     TestPalmDb();
