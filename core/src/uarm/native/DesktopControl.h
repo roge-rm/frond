@@ -973,6 +973,12 @@ class DesktopControl {
             // Same figures as the desktop window title, plus audio underruns since start and the speed setting. The Zodiac
             // gives the instructions it really ran, then its whole speed line.
             char text[128];
+            if (ctx.speedPending) {
+                std::snprintf(text, sizeof(text), "- MIPS, limit - MIPS, 0%%, %llu underruns, %s",
+                              static_cast<unsigned long long>(ctx.audioDriver.GetUnderrunCount()),
+                              ctx.mainLoop.SpeedName().c_str());
+                return {true, "speed", text};
+            }
             // The rx1950 gives the clock its guest got against the clock it runs at.
             const bool clock = ctx.speedLimitHz != 0;
             const uint64_t ipsMax = clock ? ctx.speedLimitHz : ctx.mainLoop.GetCurrentIpsMax();

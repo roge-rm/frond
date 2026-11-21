@@ -63,6 +63,8 @@ namespace commands {
         // Where set (the rx1950), speedIps is the clock the guest got in Hz and this the clock it runs at.
         uint64_t speedLimitHz{0};
         std::string speedDetail{};
+        // The Zodiac before its first window: speed-state gives "- MIPS" so the unit doesn't change once it has one.
+        bool speedPending{false};
     };
 
     // The input replay's clock in us: guest time under --emulated-time, else host time. A reset

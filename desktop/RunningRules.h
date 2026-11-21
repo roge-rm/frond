@@ -268,11 +268,12 @@ inline QString machineStopText(const QString& log) {
 }
 
 // The figure in speed-state's reply ("312.00 MHz, limit ..." or "250.00 MIPS ...") as "312 MHz" or
-// "250 MIPS"; empty when the reply has none.
+// "250 MIPS", or "- MIPS" while the Zodiac hasn't measured one yet; empty when the reply has none.
 inline QString speedFigure(const QString& reply) {
-    static const QRegularExpression figure(R"(^\s*([0-9]+(?:\.[0-9]+)?)\s*(MHz|MIPS))");
+    static const QRegularExpression figure(R"(^\s*([0-9]+(?:\.[0-9]+)?|-)\s*(MHz|MIPS))");
     const auto match = figure.match(reply);
     if (!match.hasMatch()) return {};
+    if (match.captured(1) == "-") return QObject::tr("- %1").arg(match.captured(2));
     const auto value = qRound(match.captured(1).toDouble());
     return match.captured(2) == "MHz" ? QObject::tr("%1 MHz").arg(value) : QObject::tr("%1 MIPS").arg(value);
 }

@@ -13,8 +13,10 @@ class MipsReadoutTest {
     }
 
     @Test fun parsesMips() {
-        assertEquals(312L, MipsReadout.parseMips("312.00 MHz, limit 312.00 MHz, 100%, 0 underruns"))
-        assertEquals(148L, MipsReadout.parseMips("148.00 MIPS, limit 200.00 MIPS, 74%, 0 underruns"))
+        assertEquals("312", MipsReadout.parseMips("312.00 MHz, limit 312.00 MHz, 100%, 0 underruns"))
+        assertEquals("148", MipsReadout.parseMips("148.00 MIPS, limit 200.00 MIPS, 74%, 0 underruns"))
+        assertEquals("-", MipsReadout.parseMips("- MIPS, limit - MIPS, 0%, 0 underruns, original"))
+        assertEquals("MIPS", MipsReadout.unit("- MIPS, limit - MIPS, 0%, 0 underruns, original"))
         assertEquals("MHz", MipsReadout.unit("312.00 MHz, limit 312.00 MHz, 100%, 0 underruns"))
         assertEquals("MIPS", MipsReadout.unit("148.00 MIPS, limit 200.00 MIPS, 74%, 0 underruns"))
         assertEquals(null, MipsReadout.parseMips("unknown"))

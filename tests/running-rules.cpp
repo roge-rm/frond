@@ -165,6 +165,7 @@ class RunningRulesTest : public QObject {
         QCOMPARE(subtitle(traitsFor(named("palm-iiix")), true, "Palm IIIx", "312 MHz"), QString("Palm IIIx"));
         QCOMPARE(speedFigure("312.40 MHz, limit 400"), QString("312 MHz"));
         QCOMPARE(speedFigure("85.6 MIPS"), QString("86 MIPS"));
+        QCOMPARE(speedFigure("- MIPS, limit - MIPS, 0%, 0 underruns, original"), QString("- MIPS"));
         QCOMPARE(speedFigure("idle"), QString());
     }
     // The Zodiac's unfinished hardware is listed and greyed; it has a hard reset.
