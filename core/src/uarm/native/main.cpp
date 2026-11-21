@@ -850,6 +850,7 @@ bool gFastEngineMissing = false;
             }
             msCtrlrSwapOnLoad(memoryStick, true);
         }
+        soc->SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
         // Slot 2's card goes in first, so the load carries it on from the state's SD2 section.
         if (secondCardIn && !soc->Sd2Insert()) {
             cerr << "session second SD card could not be put in" << endl;
@@ -864,6 +865,7 @@ bool gFastEngineMissing = false;
         // on it as on a hot eject.
         bool sdInsertPending = false, msInsertPending = false;
         soc->SetSdWriteProtect(frondNative::slotCards().sdProtected);
+        soc->SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
         if (msSwapped) {
             msCtrlrSwapEject(memoryStick);
             msInsertPending = msCtrlrPresent(memoryStick);

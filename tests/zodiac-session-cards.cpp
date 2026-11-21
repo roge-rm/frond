@@ -67,13 +67,18 @@ void startSession(SocIMX1& soc, const fs::path& folder, frondSession::Contents& 
     assert(frondSession::loadPath(folder, contents, loaded, frondSession::msPhysicalBytes, {}, swap));
     assert(frondNative::attachFolderMedia(contents, loaded));
     bool secondIn = false;
-    for (const auto& media : contents.media)
+    for (const auto& media : contents.media) {
+        if (media.kind == frondMachine::kindSd) frondNative::slotCards().sdProtected = media.writeProtected;
         if (media.kind == frondMachine::kindSd2) {
             secondIn = media.inserted;
             frondNative::slotCards().sd2Protected = media.writeProtected;
         }
+    }
+    soc.SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
     if (secondIn) assert(soc.Sd2Insert());
     assert(soc.Load(contents.savestate.size(), contents.savestate.data()));
+    soc.SetSdWriteProtect(frondNative::slotCards().sdProtected);
+    soc.SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
     if (!soc.CardSwappedOnLoad() && !soc.SdInserted() && sdCardInitialized()) soc.SdInsert();
 }
 }  // namespace
@@ -94,6 +99,7 @@ int main() {
     soc->SdInsert();
     assert(soc->Sd2Insert() && soc->Sd2Inserted() && soc->SecondCardAttached() && soc->HasSecondSdSlot());
     frondNative::slotCards().sd2Protected = true;
+    soc->SetSd2WriteProtect(true);
     run(*soc);
     std::vector<uint8_t> sector(SD_SECTOR_SIZE, 0xc3);
     assert(second.write(20, sector.data()));
@@ -124,6 +130,9 @@ int main() {
     startSession(*soc, folder, contents);
     run(*soc);
     assert(contents.media.size() == 2 && second.initialized() && !soc->Sd2Inserted() && !soc->SecondCardAttached());
+    assert(frondNative::slotCards().sd2Protected && !frondNative::slotCards().sdProtected);
+    assert(soc->Sd2Insert());
+    soc->Sd2Eject();
     assert(firstByte(second, 21) == 0xd4 && soc->SdInserted());
     std::puts("PASS: one saved with slot 2 ejected loads with its card out");
 

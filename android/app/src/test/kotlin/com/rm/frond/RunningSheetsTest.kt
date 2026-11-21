@@ -73,6 +73,15 @@ class RunningSheetsTest {
         assertTrue(CardRow.FILES in RunningSheets.cardRows(stick, SdCard.State.EJECTED, false, false))
     }
 
+    @Test fun bothZodiacSdSlotsShowWriteProtection() {
+        val zodiac = Device.byId("tapwave-zodiac-2")!!
+        for (n in 0..1) {
+            assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.EJECTED, false, false, n))
+            assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.INSERTED, false, false, n))
+            assertFalse(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.NONE, false, false, n))
+        }
+    }
+
     @Test fun noCardSlotNoRows() {
         val none = Device.entries.first { !it.cardSupported }
         assertTrue(RunningSheets.cardRows(none, SdCard.State.INSERTED, false, false).isEmpty())

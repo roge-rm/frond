@@ -186,6 +186,12 @@ inline const Descriptor* describedCard(const QList<Descriptor>& cards, const QSt
     return nullptr;
 }
 
+// An SD tab can change while the card is in a machine. The saved descriptor wins for that card.
+inline bool savedSdProtection(const QList<Descriptor>& cards, const QString& file, const Card& card) {
+    const auto* saved = card.kind == "sd" ? describedCard(cards, file) : nullptr;
+    return saved && saved->identity == card.identity ? saved->writeProtected : card.writeProtected;
+}
+
 // ---- frond-68k sessions ----
 // A frond-68k save (Dana, VZ Palms, T415) starts with a manifest of the card files it links, one
 // row per slot: id (0 card 1, 2 card 2, 1 the stick), kind, "path", key, serial, size, protected,
@@ -466,11 +472,18 @@ inline ToolResult runCardTool(const QString& tool, const QStringList& args, cons
 // point loads with --card-swap; a cut-off move is fixed by reconcile rule 4. Library lock and
 // machine lock held.
 inline QString settleGenerations(const QString& library, const QString& dir, int n);
-inline QString toDrawer(const QString& library, const QString& dir, const QString& id, int n = 0) {
+inline QString toDrawer(const QString& library, const QString& dir, const QString& id, int n = 0, bool finalSave = false) {
     const auto file = cardFileIn(dir, n);
     Card card;
     if (file.isEmpty() || !readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't move the card.");
     if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
+    if (finalSave) {
+        const bool protect = savedSdProtection(descriptorsOf(frondSessions::sessionFrondIn(dir)), file, card);
+        if (protect != card.writeProtected) {
+            card.writeProtected = protect;
+            if (!writeCard(entryDir(library, id), card)) return QStringLiteral("Couldn't save the card's protection.");
+        }
+    }
     auto slot = readSlot(dir, n);
     slot.present = true; slot.swap = true; slot.card = id;
     if (!writeSlot(dir, slot, n)) return QStringLiteral("Couldn't move the card.");
@@ -673,7 +686,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
     QStringList claimed, knownIn;  // knownIn: slots ("dir#n") naming the library card they hold
     for (auto& m : machines) {
         quint32 version = 0;
-        descriptorsOf(m.frond, &version);
+        const auto savedCards = descriptorsOf(m.frond, &version);
         // A v6 card is inside the .frond until its first run. frond-68k saves link card files.
         if (version < 7 && !linkedSession(m.frond)) continue;
         for (int n = 0; n < slotCount; ++n) {
@@ -684,8 +697,10 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
                 if (e && e->card.kind == kindOfFile(file) && !e->inDrawer && !claimed.contains(e->card.id)) {
                     claimed << e->card.id;  // rule 1
                     if (slot.card == e->card.id) knownIn << m.dir + '#' + QString::number(n);
-                    if (e->card.machine != m.name) {
+                    const bool protect = slot.swap ? e->card.writeProtected : savedSdProtection(savedCards, file, e->card);
+                    if (e->card.machine != m.name || e->card.writeProtected != protect) {
                         e->card.machine = m.name;
+                        e->card.writeProtected = protect;
                         writeCard(e->dir, e->card);
                     }
                     continue;
@@ -745,7 +760,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
             if (file.isEmpty()) continue;
             // Rule 6: a linked card left in a stopped machine by a crash goes back to the drawer once settled.
             if (!slot.link.isEmpty() && slot.card == slot.link) {
-                if (settled(m.dir, file, slot.swap)) toDrawer(library, m.dir, slot.card, n);
+                if (settled(m.dir, file, slot.swap)) toDrawer(library, m.dir, slot.card, n, !slot.swap);
                 continue;
             }
             // Rule 7: a take-out the launcher didn't finish, as when Frond died and the core saved
@@ -920,7 +935,7 @@ inline QString releaseAtClose(const QString& sessions, const QString& dir) {
         }
         LibraryLock lock(library);
         if (!lock.ok) return busyMessage();
-        if (const auto e = toDrawer(library, dir, slot.card, n); !e.isEmpty()) error = e;
+        if (const auto e = toDrawer(library, dir, slot.card, n, true); !e.isEmpty()) error = e;
     }
     return error;
 }

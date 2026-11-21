@@ -365,7 +365,7 @@ class Imx1Mmcsd {
             bits += 2 + (longReply ? 136 : 48);
         }
         endData();
-        if (data && answered) {
+        if (data && answered && !vsdWriteRejected(uint8_t(command), reply)) {
             const unsigned width = (format & 0x300) == 0x200 ? 4 : 1;
             const unsigned perBlock = registers[6] * 8 / width + 16 + 2 + ((format & 0x10) ? 16 : 0);
             slot.data = true;

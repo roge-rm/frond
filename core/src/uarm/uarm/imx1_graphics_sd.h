@@ -321,12 +321,13 @@ class Imx1GraphicsSd {
     void sendCardCommand() {
         const uint32_t type = (command >> 8) & 7;
         uint8_t reply[17]{};
-        const auto kind = card.card ? card.command(card.card, uint8_t(command & 0x3f),
+        const uint8_t index = command & 0x3f;
+        const auto kind = card.card ? card.command(card.card, index,
                                                    (argumentHigh << 16) | argumentLow, reply)
                                     : SdReplyNone;
         const bool longReply = kind == SdReply136bits;
         const bool answered = type != 3 && kind != SdReplyNone && longReply == (type == 6);
-        card.dataCommand = answered && (command & 0x800);
+        card.dataCommand = answered && (command & 0x800) && !vsdWriteRejected(index, reply);
         uint64_t bits = 48;
         if (type == 3) card.result = 0x80;
         else if (!answered) { card.result = 0xc0; bits = 64; }

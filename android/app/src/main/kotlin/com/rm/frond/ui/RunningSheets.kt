@@ -276,7 +276,7 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
         }
         CardRow.TRY_AGAIN -> SheetAction("Try again", icon = Icons.Default.Refresh) { model.refresh() }
         CardRow.WRITE_PROTECT -> {
-            val on = model.writeProtected
+            val on = model.protectionOf(n)
             val usable = on != null && model.busy == null && state == SdCard.State.EJECTED
             ListItem(
                 headlineContent = { Text("Write protected") },

@@ -185,6 +185,10 @@ object Cards {
 
     fun describedCard(cards: List<Descriptor>, file: String) = cards.firstOrNull { it.kind == descriptorKindOf(file) }
 
+    private fun savedSdProtection(cards: List<Descriptor>, file: String, card: Card): Boolean =
+        describedCard(cards, file)?.takeIf { card.kind == "sd" && it.identity.contentEquals(card.identity) }
+            ?.writeProtected ?: card.writeProtected
+
     // ---- frond-68k saves ----
     // A frond-68k save (Dana, VZ Palms, T415) starts with a manifest of the card files it links, one
     // row per slot: id (0 card 1, 2 card 2, 1 the stick), kind, "path", key, serial, size, protected,
@@ -411,11 +415,18 @@ object Cards {
     // Card file from a machine folder into the drawer. The slot gets swap first, so a crash at any
     // point loads with --card-swap; a cut-off move is fixed by reconcile rule 4. Library lock and
     // machine held.
-    fun toDrawer(library: File, dir: File, id: String, n: Int = 0): String? {
-        val file = cardFileIn(dir, n)
-        val card = readCard(entryDir(library, id))
-        if (file == null || card == null) return "Couldn't move the card."
+    fun toDrawer(library: File, dir: File, id: String, n: Int = 0, finalSave: Boolean = false): String? {
+        val file = cardFileIn(dir, n) ?: return "Couldn't move the card."
+        val entry = entryDir(library, id)
+        var card = readCard(entry) ?: return "Couldn't move the card."
         CardFile.notReady(File(dir, file))?.let { return it }
+        if (finalSave) {
+            val protect = savedSdProtection(descriptorsOf(sessionFile(dir)).second, file, card)
+            if (protect != card.writeProtected) {
+                card = card.copy(writeProtected = protect)
+                if (!writeCard(entry, card)) return "Couldn't save the card's protection."
+            }
+        }
         val slot = readSlot(dir, n).copy(present = true, swap = true, card = id)
         if (!writeSlot(dir, slot, n)) return "Couldn't move the card."
         // A card frond-68k left saved changes beside goes in with them written into its file.
@@ -635,7 +646,9 @@ object Cards {
         val claimed = HashSet<String>()
         for (dir in ordered) {
             // A v6 card is inside the .frond until its first run. frond-68k saves link card files.
-            if (descriptorsOf(sessionFile(dir)).first < 7L && !linkedSession(sessionFile(dir))) continue
+            val frond = sessionFile(dir)
+            val (version, savedCards) = descriptorsOf(frond)
+            if (version < 7L && !linkedSession(frond)) continue
             for (n in 0 until SLOTS) {
                 val slot = readSlot(dir, n)
                 val file = cardFileIn(dir, n)
@@ -643,7 +656,9 @@ object Cards {
                 if (file != null) {
                     if (e != null && e.card.kind == kindOfFile(file) && !e.inDrawer && e.card.id !in claimed) {
                         claimed += e.card.id // rule 1
-                        if (e.card.machine != dir.name) writeCard(e.dir, e.card.copy(machine = dir.name))
+                        val protect = if (slot.swap) e.card.writeProtected else savedSdProtection(savedCards, file, e.card)
+                        if (e.card.machine != dir.name || e.card.writeProtected != protect)
+                            writeCard(e.dir, e.card.copy(machine = dir.name, writeProtected = protect))
                         continue
                     }
                     // Rule 2, or rule 3 for a second holder: a new entry, named after the first one's,
@@ -680,7 +695,7 @@ object Cards {
             val slot = readSlot(dir, n)
             val file = cardFileIn(dir, n) ?: continue
             if (slot.link == null || slot.card != slot.link) continue
-            if (settled(dir, file, slot.swap)) toDrawer(library, dir, slot.card, n)
+            if (settled(dir, file, slot.swap)) toDrawer(library, dir, slot.card, n, finalSave = !slot.swap)
         }
         // Hints of drawer cards.
         for (e in entries(library)) if (e.inDrawer && e.card.machine != null) writeCard(e.dir, e.card.copy(machine = null))
@@ -812,7 +827,9 @@ object Cards {
             if (slot.link == null || slot.card != slot.link || file == null) continue
             if (!settled(dir, file, false)) { error = "The card stays in the machine: its last save isn't finished."; continue }
             val library = libraryFor(sessions)
-            LibraryLock(library).use { lock -> (if (!lock.ok) BUSY else toDrawer(library, dir, slot.link, n))?.let { error = it } }
+            LibraryLock(library).use { lock ->
+                (if (!lock.ok) BUSY else toDrawer(library, dir, slot.link, n, finalSave = true))?.let { error = it }
+            }
         }
         return error
     }

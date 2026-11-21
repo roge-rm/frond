@@ -123,6 +123,7 @@ data class Device internal constructor(
     // keyboard, so the keyboard choice puts them beside the silkscreen and buttons.
     val jogControls: Boolean get() = sideTabWidth > 0
     val jogBesideButtons: Boolean get() = sideTabWidth > 0 && silkscreenHeight > 0
+    val sdWriteProtection: Boolean get() = id == "tapwave-zodiac-2"
     // A 68k device's slots take linked card files through frond-68k's sd-, sd2- and ms- commands (SdCard, Cards).
     val linkedCards: Boolean get() = runs68k && storageSlots.isNotEmpty()
     // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.

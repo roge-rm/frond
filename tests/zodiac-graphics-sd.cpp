@@ -386,7 +386,44 @@ static void cardSlot() {
     puts("PASS: slot 2 card detect and its interrupt, SD init and identify, PIO single and multi-block read and write, errors, save and load mid-transfer");
 }
 
+static void protectedCard() {
+    Imx1GraphicsSd slot;
+    initialisation(slot);
+    VSD* card = vsdInit(sectorRead, sectorWrite, 2048);
+    assert(card);
+    slot.attachCard(card);
+    initCard(slot);
+    vsdSetWriteProtect(card, true);
+    slot.setWriteProtect(true);
+    assert(get(slot, 0x204d3728, 0x16010910) & 1);
+    uint8_t reply[17]{};
+    const auto before = image;
+    assert(cardCommand(slot, 0x4c18, 0, 1) == 0x80);
+    assert(response(slot, 1) & 0x400);  // R1 WP_VIOLATION
+    assert(cardCommand(slot, 0x2c19, 0, 2) == 0x80);
+    assert(response(slot, 1) & 0x400);
+    uint8_t readback[512]{};
+    assert(cardCommand(slot, 0x5c11, 0, 1) == 0x80);
+    assert(waitBlock(slot, 0x100));
+    readBlock(slot, readback);
+    assert(std::memcmp(readback, image.data(), sizeof(readback)) == 0);
+    assert(vsdCommand(card, 32, 0, reply) == SdReply48bits);
+    assert(vsdCommand(card, 33, 512, reply) == SdReply48bits);
+    assert(vsdCommand(card, 38, 0, reply) == SdReply48bits);
+    assert(reply[1] & 4);
+    assert(image == before);
+    vsdSetWriteProtect(card, false);
+    slot.setWriteProtect(false);
+    assert(!(get(slot, 0x204d3728, 0x16010910) & 1));
+    assert(vsdCommand(card, 24, 0, reply) == SdReply48bits);
+    uint8_t block[512]{};
+    assert(vsdDataXferBlockToCard(card, block, sizeof(block)) == SdDataOk);
+    assert(image != before);
+    std::free(card);
+}
+
 int main() {
     emptySlot();
     cardSlot();
+    protectedCard();
 }

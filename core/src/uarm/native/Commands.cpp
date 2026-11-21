@@ -195,7 +195,10 @@ namespace {
             result = frondSdCandidate::fail("busy", "Eject the card before taking it out.");
         } else {
             result = frondNative::takeOutFileCard(ctx->sessionFolder, frondMachine::kindSd2, protect, identity);
-            if (result.ok) frondNative::slotCards().sd2Protected = false;
+            if (result.ok) {
+                frondNative::slotCards().sd2Protected = false;
+                ctx->soc->SetSd2WriteProtect(false);
+            }
         }
         cout << (result.ok ? frondNative::takenOutReply(identity, protect) : result.message) << endl;
     }
@@ -212,7 +215,10 @@ namespace {
             result = frondSdCandidate::fail("unsupported", "This device has no second SD slot.");
         } else {
             result = frondNative::putInSd2(ctx->sessionFolder, ctx->soc->GetDeviceType(), identity, protect);
-            if (result.ok && !ctx->soc->Sd2Insert()) result = frondSdCandidate::fail("size", "The second slot can't take this card.");
+            if (result.ok) {
+                ctx->soc->SetSd2WriteProtect(protect);
+                if (!ctx->soc->Sd2Insert()) result = frondSdCandidate::fail("size", "The second slot can't take this card.");
+            }
         }
         if (!result.ok) cout << result.message << endl;
     }

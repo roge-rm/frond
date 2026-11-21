@@ -2984,6 +2984,9 @@ Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine* machine, VSD* card
     candidate.attachSdCard(card);
     return p->acceptGraphics(candidate, commit);
 }
+void imx1MachineSetGraphicsSdWriteProtect(Imx1Machine* machine, bool on) {
+    if (machine) machine->probe->cs5Configuration.sdSlot().setWriteProtect(on);
+}
 VSD* imx1MachineGraphicsSdCard(const Imx1Machine* machine) {
     return machine ? machine->probe->cs5Configuration.sdState().attachedCard() : nullptr;
 }

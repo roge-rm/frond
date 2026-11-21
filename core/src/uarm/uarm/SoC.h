@@ -217,6 +217,7 @@ class SoC {
     virtual bool Sd2Insert() { return false; }
     virtual void Sd2Eject() {}
     virtual bool Sd2Inserted() const { return false; }
+    virtual void SetSd2WriteProtect(bool) {}
 
     virtual void DumpMMU() = 0;
 

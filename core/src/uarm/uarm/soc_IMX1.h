@@ -213,6 +213,8 @@ class SocIMX1 : public SoC {
     // attached, for tests.
     bool SecondCardAttached() const { return imx1MachineGraphicsSdCard(machine) != nullptr; }
     bool HasSecondSdSlot() const override { return true; }
+    void SetSdWriteProtect(bool on) override;
+    void SetSd2WriteProtect(bool on) override;
     bool Sd2Insert() override;
     void Sd2Eject() override;
     bool Sd2Inserted() const override { return card2In; }
@@ -322,6 +324,7 @@ class SocIMX1 : public SoC {
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.
+    bool sdProtected{}, sd2Protected{};
     void SyncCard();
     // The same for slot 2, card2In and vsd2.
     void SyncSecondCard();

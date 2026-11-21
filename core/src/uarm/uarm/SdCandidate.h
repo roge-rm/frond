@@ -161,7 +161,7 @@ inline bool hasSpace(const std::filesystem::path& folder, uint64_t bytes) {
 inline bool writeAll(int fd, const void* data, size_t size, uint64_t offset) {
     const auto* p = static_cast<const uint8_t*>(data);
     while (size) {
-        const auto n = ::pwrite(fd, p, size, off_t(offset));
+        const auto n = ::pwrite(fd, p, size, int64_t(offset));
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return false;
         p += n;

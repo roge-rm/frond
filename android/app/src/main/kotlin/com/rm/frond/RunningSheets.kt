@@ -74,7 +74,8 @@ object RunningSheets {
         }
         if (oldPlace) rows -= CardRow.FILES
         // frond-68k's stick takes its protection from Cards when it goes in.
-        if (device.memoryStick && !device.runs68k && n == 0 && state != SdCard.State.NONE && state != SdCard.State.UNKNOWN) rows += CardRow.WRITE_PROTECT
+        if (((device.memoryStick && !device.runs68k && n == 0) || device.sdWriteProtection) &&
+            state != SdCard.State.NONE && state != SdCard.State.UNKNOWN) rows += CardRow.WRITE_PROTECT
         return rows
     }
 
