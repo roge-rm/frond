@@ -14,12 +14,17 @@
 // The Dana has two SD slots (0 and 2), the VZ Palms one (0), the T415 one Memory Stick (1); the
 // device is set before any card moves.
 class RuntimeCards {
-    struct Card {
+    struct CardLock {
         int fd{-1};
+        ~CardLock() { if (fd >= 0) ::close(fd); }
+    };
+    struct Card {
+        std::shared_ptr<CardLock> lock;
+        int Fd() const { return lock->fd; }
         std::string key, path;
         uint32_t serial{};
         CardImage::Protocol protocol{CardImage::Protocol::sd};
-        uint64_t baseDev{},baseIno{},baseMtime{};
+        frondPosix::FileStamp base;
         bool protectedCard{}, failed{};
         std::shared_ptr<FileCardBacking> backing;
         std::shared_ptr<CardImage> image;
@@ -36,7 +41,6 @@ class RuntimeCards {
             lastCommit = std::chrono::steady_clock::now();
             return true;
         }
-        ~Card() { if (fd >= 0) ::close(fd); }
     };
     std::shared_ptr<Card> cards[2];
     std::shared_ptr<Card> stick;
@@ -64,24 +68,41 @@ class RuntimeCards {
             return true;
         }, next->serial, next->protocol);
     }
+    static bool LockCard(Card& card, const std::filesystem::path& path, std::string& error) {
+        card.lock = std::make_shared<CardLock>();
+        const int fd = card.lock->fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        struct stat mine{}, named{};
+        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) || fstat(fd, &mine) ||
+            !S_ISREG(mine.st_mode) || lstat(path.c_str(), &named) || !S_ISREG(named.st_mode) ||
+            !frondPosix::FileMatchesPath(fd, path, mine, named)) {
+            error = "error: cannot lock card file";
+            return false;
+        }
+        if (!frondPosix::ReadFileStamp(fd, mine, card.base)) {
+            error = "error: cannot read card file identity";
+            return false;
+        }
+        return true;
+    }
+    static bool MatchesBase(const Card& card, const std::string& path, const frondPosix::FileStamp& expected) {
+        frondPosix::FileStamp named;
+        return card.base == expected && frondPosix::ReadPathStamp(path, named) && named == expected;
+    }
     std::shared_ptr<Card> Open(unsigned n, const std::string& inputPath, const std::string& key,
-                               const std::string& policy, std::string& error, const std::string& protocol="sd") {
+                               const std::string& policy, std::string& error, const std::string& protocol="sd", std::shared_ptr<Card> next = {}) {
         if (n >= Slots() || (protocol != "sd" && protocol != "mmc")) { error="error: invalid slot or protocol"; return {}; }
-        const auto path=std::filesystem::path(inputPath).lexically_normal().string();
+        const auto file=std::filesystem::path(inputPath).lexically_normal();
+        const auto path=file.string();
         auto fail = [&](const std::string& why) -> std::shared_ptr<Card> { error=why; return {}; };
-        auto next = std::make_shared<Card>();
+        if (!next) {
+            next = std::make_shared<Card>();
+            if (!LockCard(*next, file, error)) return {};
+        }
         next->protocol = protocol=="mmc" ? CardImage::Protocol::mmc : CardImage::Protocol::sd;
         next->key = key; next->path = path; next->protectedCard = policy == "protected";
         // CID is 32 bits, so refuse a serial collision as well as duplicate identities.
         next->serial = uint32_t(std::stoul(key.substr(0, 8), nullptr, 16));
 
-        next->fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-        struct stat mine{}, named{};
-        if (next->fd < 0 || flock(next->fd, LOCK_EX | LOCK_NB) || fstat(next->fd, &mine) ||
-            stat(path.c_str(), &named) || !S_ISREG(mine.st_mode) || mine.st_dev != named.st_dev || mine.st_ino != named.st_ino)
-            return fail("error: cannot lock card file");
-        next->baseDev=mine.st_dev; next->baseIno=mine.st_ino;
-        next->baseMtime=frondPosix::MtimeNs(mine);
         frondSdFile::Info info;
         std::vector<uint32_t> table;
         if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok ||
@@ -102,19 +123,16 @@ class RuntimeCards {
     }
     // A v2 .frondms of one of the device's stick sizes, with boot blocks the Sony driver takes.
     std::shared_ptr<Card> OpenStick(const std::string& inputPath, const std::string& key,
-                                    const std::string& policy, std::string& error) {
-        const auto path=std::filesystem::path(inputPath).lexically_normal().string();
+                                    const std::string& policy, std::string& error, std::shared_ptr<Card> next = {}) {
+        const auto file=std::filesystem::path(inputPath).lexically_normal();
+        const auto path=file.string();
         auto fail = [&](const std::string& why) -> std::shared_ptr<Card> { error=why; return {}; };
-        auto next = std::make_shared<Card>();
+        if (!next) {
+            next = std::make_shared<Card>();
+            if (!LockCard(*next, file, error)) return {};
+        }
         next->key = key; next->path = path; next->protectedCard = policy == "protected";
         next->serial = uint32_t(std::stoul(key.substr(0, 8), nullptr, 16));
-        next->fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-        struct stat mine{}, named{};
-        if (next->fd < 0 || flock(next->fd, LOCK_EX | LOCK_NB) || fstat(next->fd, &mine) ||
-            stat(path.c_str(), &named) || !S_ISREG(mine.st_mode) || mine.st_dev != named.st_dev || mine.st_ino != named.st_ino)
-            return fail("error: cannot lock card file");
-        next->baseDev=mine.st_dev; next->baseIno=mine.st_ino;
-        next->baseMtime=frondPosix::MtimeNs(mine);
         frondSdFile::Info info;
         std::vector<uint32_t> table;
         if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok || !info.classic ||
@@ -132,8 +150,8 @@ class RuntimeCards {
     }
     static bool SameFile(const Card& c, const std::string& path) {
         struct stat named{}, owned{};
-        return !lstat(path.c_str(), &named) && S_ISREG(named.st_mode) && !fstat(c.fd, &owned) &&
-               named.st_dev == owned.st_dev && named.st_ino == owned.st_ino;
+        return !lstat(path.c_str(), &named) && S_ISREG(named.st_mode) && !fstat(c.Fd(), &owned) &&
+               frondPosix::FileMatchesPath(c.Fd(), path, owned, named);
     }
 
   public:
@@ -173,7 +191,8 @@ class RuntimeCards {
         size_t count=0;
         for(const auto& c:{cards[0],cards[1],stick}) if(c) {
             struct stat st{};
-            if(fstat(c->fd,&st) || frondPosix::MtimeNs(st)!=c->baseMtime)
+            frondPosix::FileStamp stamp;
+            if(fstat(c->Fd(),&st) || !frondPosix::ReadFileStamp(c->Fd(),st,stamp) || !(stamp==c->base))
                 return false;
             if(c->failed || !c->backing->DurableIs(c->path) || gExternalStorage.GetImage(c->key)!=c->image.get()) return false;
             ++count;
@@ -188,13 +207,13 @@ class RuntimeCards {
             const auto& c=*cards[n];
             out << (n?2:0) << " sd " << std::quoted(c.path) << " " << c.key << " "
                 << c.serial << " " << c.backing->Size() << " " << c.protectedCard << " "
-                << gExternalStorage.IsMounted(slot(n)) << " " << c.baseDev << " " << c.baseIno << " " << c.baseMtime << " " << (c.protocol==CardImage::Protocol::mmc?"mmc":"sd") << " " << c.backing->RootGenerationId() << "\n";
+                << gExternalStorage.IsMounted(slot(n)) << " " << c.base.dev << " " << c.base.ino << " " << c.base.mtime << " " << (c.protocol==CardImage::Protocol::mmc?"mmc":"sd") << " " << c.backing->RootGenerationId() << "\n";
         }
         if(stick) {
             const auto& c=*stick;
             out << "1 ms " << std::quoted(c.path) << " " << c.key << " " << c.serial << " " << c.backing->Size() << " "
-                << c.protectedCard << " " << gExternalStorage.IsMounted(EmHAL::Slot::memorystick) << " " << c.baseDev << " "
-                << c.baseIno << " " << c.baseMtime << " sd " << c.backing->RootGenerationId() << "\n";
+                << c.protectedCard << " " << gExternalStorage.IsMounted(EmHAL::Slot::memorystick) << " " << c.base.dev << " "
+                << c.base.ino << " " << c.base.mtime << " sd " << c.backing->RootGenerationId() << "\n";
         }
         return out.str();
     }
@@ -238,14 +257,14 @@ class RuntimeCards {
                 !ValidGeometry(deviceType,id,protocol,size) || (seen&(1u<<id)) || protect>1 || insert>1) return "invalid portable descriptor";
             seen|=1u<<id;
             const auto path=std::filesystem::absolute(dir/name).lexically_normal();
-            struct stat st{}; frondSdFile::Info info;
-            if(lstat(path.c_str(),&st) || !S_ISREG(st.st_mode) ||
+            frondSdFile::Info info; frondPosix::FileStamp stamp;
+            if(!frondPosix::ReadPathStamp(path,stamp) ||
                 frondMachine::readSdHeader(path,info)!=frondMachine::SiblingStatus::ok ||
                 info.version!=frondSdFile::versionV2 || info.payloadBytes!=size || info.crc!=crc)
                 return "invalid portable media header or checksum";
             out << id << " sd " << std::quoted(path.string()) << " " << key << " " << serial << " "
-                << size << " " << protect << " " << insert << " " << st.st_dev << " " << st.st_ino << " "
-                << frondPosix::MtimeNs(st) << " " << protocol << " 0\n";
+                << size << " " << protect << " " << insert << " " << stamp.dev << " " << stamp.ino << " "
+                << stamp.mtime << " " << protocol << " 0\n";
         }
         if(!seen) return "empty portable manifest";
         linked=out.str(); return "";
@@ -271,10 +290,13 @@ class RuntimeCards {
                 (id==1 ? (protocol!="sd" || !StickSlot() || !ValidStickBytes(deviceType,size)) : !ValidGeometry(deviceType,id,protocol,size)) ||
                 serial!=std::stoul(key.substr(0,8),nullptr,16)) return "invalid card descriptor";
             path=std::filesystem::path(path).lexically_normal().string();
+#ifdef _WIN32
+            if (!swap && !frondPosix::HasWindowsIdentity(dev)) return "linked card file identity is ambiguous";
+#endif
+            const frondPosix::FileStamp expected{dev,ino,mtime};
             auto same=[&](const std::string& p) {
-                struct stat st{};
-                return !lstat(p.c_str(),&st) && S_ISREG(st.st_mode) && uint64_t(st.st_dev)==dev && uint64_t(st.st_ino)==ino &&
-                       frondPosix::MtimeNs(st)==mtime;
+                frondPosix::FileStamp actual;
+                return frondPosix::ReadPathStamp(p,actual) && actual==expected;
             };
             if(!same(path) && !folder.empty()) {
                 const auto moved=(std::filesystem::path(folder)/MachineName(id)).lexically_normal().string();
@@ -298,26 +320,34 @@ class RuntimeCards {
             for(auto* c:{&cards[0],&cards[1],&stick}) if(*c && (*c)->key==key &&
                 (*c)->protocol==(protocol=="mmc"?CardImage::Protocol::mmc:CardImage::Protocol::sd) && SameFile(**c,path)) {
                 if((*c)->path!=path) return "linked card generation namespace changed";
+                if (!MatchesBase(**c, path, expected)) return "linked card source was replaced or modified";
                 if((*c)->protectedCard==bool(protect) && (*c)->path==path) held=*c;
                 else {
-                    auto copy=std::make_shared<Card>(); copy->fd=dup((*c)->fd);
-                    if(copy->fd<0) return "cannot retain card lock";
+                    auto copy=std::make_shared<Card>();
+                    copy->lock=(*c)->lock;
                     copy->protocol=(*c)->protocol; copy->key=key; copy->path=path; copy->serial=(*c)->serial;
-                    copy->baseDev=(*c)->baseDev; copy->baseIno=(*c)->baseIno; copy->baseMtime=(*c)->baseMtime;
+                    copy->base=(*c)->base;
                     copy->protectedCard=protect; copy->failed=(*c)->failed; copy->backing=(*c)->backing;
                     if(ms && !(*c)->Settle()) return "stick I/O failed";
                     copy->lastCommit=(*c)->lastCommit;
                     BindImage(copy, ms); held=std::move(copy);
                 }
             }
+            std::string error;
+            auto locked = held;
+            if (!locked) {
+                locked = std::make_shared<Card>();
+                if (!LockCard(*locked, path, error)) return error;
+            }
+            if (!MatchesBase(*locked, path, expected)) return "linked card source was replaced or modified";
             FileCardOptions preflight; preflight.rejectInvalidRoot=true; preflight.requireRoot=true;
             preflight.minimumRoot=held?std::max(history,held->backing->RootGenerationId()):history; preflight.identity=key;
             if(!FileCardBacking::Open(path,size,frondSdFile::headerBytes,preflight))
                 return "linked card committed history missing or invalid";
-            std::string error;
-            if(!held) held=ms?OpenStick(path,key,protect?"protected":"writable",error):Open(n,path,key,protect?"protected":"writable",error,protocol);
+            if (!held) held = ms ? OpenStick(path,key,protect?"protected":"writable",error,locked) :
+                                   Open(n,path,key,protect?"protected":"writable",error,protocol,locked);
             if(!held) return error;
-            if(held->baseDev!=dev || held->baseIno!=ino || held->baseMtime!=mtime)
+            if(!MatchesBase(*held,path,expected))
                 return "linked card source was replaced or modified";
             if(held->failed || held->backing->Size()!=size) return "card geometry or I/O fault";
             FileCardOptions check; check.rejectInvalidRoot=true; check.requireRoot=true;

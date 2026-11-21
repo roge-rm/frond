@@ -2,6 +2,7 @@
 #include "FrondSdImage.h"
 #include "MachineFolder.h"
 
+#include <string_view>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -201,8 +202,14 @@ static void MachineFolder() {
 }
 
 void CardBackingGenerations();
+void HeldRecovery();
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--held-recovery") {
+        HeldRecovery();
+        std::puts("Held card recovery checks passed");
+        return 0;
+    }
     RangeChecks();
     SdImageCodec();
     MachineFolder();

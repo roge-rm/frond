@@ -397,10 +397,17 @@ struct CardLock {
         if (fd >= 0 && ::flock(fd, LOCK_EX | LOCK_NB) != 0) { ::close(fd); fd = -2; }
     }
     ~CardLock() { if (fd >= 0) ::close(fd); }
+
+    bool Matches(const std::filesystem::path& card) const {
+        struct stat held{}, named{};
+        return fd >= 0 && ::fstat(fd, &held) == 0 && ::lstat(card.c_str(), &named) == 0 &&
+               S_ISREG(held.st_mode) && frondPosix::FileMatchesPath(fd, card, held, named);
+    }
 };
 
 // The generation entries of `card`: its own .gen- names, with or without the root.
-inline std::vector<std::filesystem::path> linkedGenerations(const std::filesystem::path& card) {
+inline std::vector<std::filesystem::path> linkedGenerations(const std::filesystem::path& card,
+                                                            std::error_code* error = nullptr) {
     auto dir = card.parent_path();
     if (dir.empty()) dir = ".";
     std::vector<std::filesystem::path> found;
@@ -410,6 +417,7 @@ inline std::vector<std::filesystem::path> linkedGenerations(const std::filesyste
         if (FileCardBacking::GeneratedName(card.filename().string(), name) && !FileCardBacking::NeighbourName(card, name))
             found.push_back(it->path());
     }
+    if (error) *error = ec;
     return found;
 }
 
@@ -435,16 +443,9 @@ inline bool linkedUnsettled(const std::filesystem::path& card) {
 
 // "DEV INO MTIME_NS" of a file, as a settle mark records the settled file.
 inline std::string fileStamp(const std::filesystem::path& path) {
-    struct stat st{};
-    if (::stat(path.c_str(), &st) != 0) return {};
-    return std::to_string(uint64_t(st.st_dev)) + ' ' + std::to_string(uint64_t(st.st_ino)) + ' ' +
-           std::to_string(frondPosix::MtimeNs(st));
-}
-// A file's change time in nanoseconds, 0 if it can't be read.
-inline uint64_t changedAt(const std::filesystem::path& path) {
-    struct stat st{};
-    if (::stat(path.c_str(), &st) != 0) return 0;
-    return frondPosix::MtimeNs(st);
+    frondPosix::FileStamp stamp;
+    if (!frondPosix::ReadPathStamp(path, stamp)) return {};
+    return std::to_string(stamp.dev) + ' ' + std::to_string(stamp.ino) + ' ' + std::to_string(stamp.mtime);
 }
 
 // A settle-linked cut off part way, finished or undone. The settled file is written to
@@ -460,29 +461,51 @@ inline bool finishSettle(const std::filesystem::path& card) {
     const auto temp = dir / (".settled-" + tag + ".tmp"), mark = dir / (".settling-" + tag);
     std::error_code ec;
     const bool marked = std::filesystem::exists(mark, ec);
+    if (ec) return false;
     const bool written = std::filesystem::exists(temp, ec);
+    if (ec) return false;
     if (!marked) {
         if (written) std::filesystem::remove(temp, ec);
-        return true;
+        return !ec;
     }
     if (written) {
         std::filesystem::remove(temp, ec);
         if (ec) return false;
     } else {
-        std::string stamp;
-        std::getline(std::ifstream(mark), stamp);
-        const uint64_t markedAt = changedAt(mark);
-        bool stale = !stamp.empty() && stamp == fileStamp(card) && markedAt;
-        for (const auto& path : linkedGenerations(card))
-            if (changedAt(path) > markedAt) stale = false;
+        std::string line, extra;
+        if (!std::getline(std::ifstream(mark), line)) return false;
+        frondPosix::FileStamp recorded, current, marker;
+        std::istringstream fields(line);
+        if (!(fields >> recorded.dev >> recorded.ino >> recorded.mtime) || fields >> extra ||
+            !frondPosix::ReadPathStamp(card, current) || !frondPosix::ReadPathStamp(mark, marker))
+            return false;
+#ifdef _WIN32
+        // CRT identity and whole-second times cannot prove the replacement is in place.
+        if (!frondPosix::HasWindowsIdentity(recorded.dev)) return false;
+#endif
+        bool stale = recorded == current;
         if (stale) {
-            FileCardBacking::DiscardGenerations(card);
-            if (!linkedGenerations(card).empty()) return false;
+            const auto generations = linkedGenerations(card, &ec);
+            if (ec) return false;
+            for (const auto& path : generations) {
+                frondPosix::FileStamp generation;
+                if (!frondPosix::ReadPathStamp(path, generation)) return false;
+                if (generation.mtime > marker.mtime) stale = false;
+            }
+            if (stale && !FileCardBacking::DiscardGenerations(card)) return false;
         }
     }
     if (!frondStorage::syncDir(dir)) return false;
     std::filesystem::remove(mark, ec);
     return !ec && frondStorage::syncDir(dir);
+}
+
+inline Result recoverLinked(const std::filesystem::path& card) {
+    CardLock lock(card);
+    if (!lock.Matches(card)) return fail("busy", "Couldn't lock the session's card file.");
+    if (!finishSettle(card))
+        return fail("unsettled", "Couldn't verify the card's unfinished settle. Its recovery files were kept.");
+    return {true, "", "recovered"};
 }
 
 // Writes a linked card's generations into its file and drops them, as frond-68k's take-out does, so
@@ -493,7 +516,8 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
     CardLock lock(card);
     if (lock.fd == -1) return fail("read", "Could not read the card file.");
     if (lock.fd == -2) return fail("busy", "The card is in a running machine.");
-    if (!finishSettle(card)) return fail("write", "Couldn't write the card file.");
+    if (!lock.Matches(card)) return fail("unsettled", "The card file changed while it was being locked.");
+    if (!finishSettle(card)) return fail("unsettled", "Couldn't verify the card's unfinished settle. Its recovery files were kept.");
     if (linkedUnsettled(card)) return fail("unsettled", frondStorage::unsettledMessage);
     auto dir = card.parent_path();
     if (dir.empty()) dir = ".";
@@ -532,8 +556,8 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
     }
     // Hold both inodes across the rename so another opener can't see the new base with the old history.
     CardLock replacement(temp);
-    if (replacement.fd < 0) {
-        std::filesystem::remove(temp, ec);
+    if (!replacement.Matches(temp)) {
+        if (replacement.fd < 0) std::filesystem::remove(temp, ec);
         return fail("busy", "Couldn't lock the settled card.");
     }
     // The mark, then the swap: see finishSettle.
@@ -608,10 +632,7 @@ inline Result copyLinked(const std::filesystem::path& source, const std::filesys
                          uint64_t size, bool classic, const Progress& progress) {
     CardLock lock(source);
     if (lock.fd < 0) return fail("read", "Couldn't lock the session's card file.");
-    struct stat held{}, named{};
-    if (::fstat(lock.fd, &held) != 0 || ::lstat(source.c_str(), &named) != 0 ||
-        held.st_dev != named.st_dev || held.st_ino != named.st_ino || !S_ISREG(held.st_mode) ||
-        fileStamp(source) != stamp || linkedUnsettled(source))
+    if (!lock.Matches(source) || fileStamp(source) != stamp || linkedUnsettled(source))
         return fail("unsettled", "The session's card file changed or has an unfinished write.");
     std::error_code ec;
     if (std::filesystem::exists(dest, ec) || ec)
@@ -663,9 +684,11 @@ inline Result moveLinked(const std::filesystem::path& from, const std::filesyste
     const bool toHere = std::filesystem::exists(to, ec);
     if (fromHere && toHere && !sameInode(from, to)) return fail("exists", "There's already a card file there.");
     if (!fromHere && !toHere) return fail("read", "Could not read the card file.");
-    CardLock lock(fromHere ? from : to);
+    const auto& lockedPath = fromHere ? from : to;
+    CardLock lock(lockedPath);
     if (lock.fd == -1) return fail("read", "Could not read the card file.");
     if (lock.fd == -2) return fail("busy", "The card is in a running machine.");
+    if (!lock.Matches(lockedPath)) return fail("unsettled", "The card file changed while it was being locked.");
     if (fromHere && !finishSettle(from)) return fail("write", "Couldn't write the card file.");
     if (fromHere && linkedUnsettled(from)) return fail("unsettled", frondStorage::unsettledMessage);
     struct stat a{}, b{};
@@ -762,10 +785,7 @@ inline Result run(const std::vector<std::string>& args, const Progress& progress
     } else if (args.size() == 3 && args[0] == "settle-linked") {
         result = settleLinked(args[1], args[2]);
     } else if (args.size() == 2 && args[0] == "recover-linked") {
-        CardLock lock(args[1]);
-        if (lock.fd < 0) return fail("busy", "Couldn't lock the session's card file.");
-        if (!finishSettle(args[1])) return fail("write", "Couldn't finish writing the card's saved changes.");
-        result = {true, "", "recovered"};
+        result = recoverLinked(args[1]);
     } else if (args.size() == 8 && args[0] == "copy-linked") {
         const auto number = [](const std::string& text, uint64_t& out) {
             if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) return false;

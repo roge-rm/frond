@@ -3084,3 +3084,10 @@ test-acx100: prepare
 # The rx1950's bootloader and OS to the kernel's first serial lines, when the firmware is here.
 test-rx1950-boot: $(OBJ_ROOT)/rx1950-boot
 	python3 tests/rx1950-boot.py $(OBJ_ROOT)/rx1950-boot
+
+.PHONY: test-linked-card-lock test-linked-card-lock-wine
+test-linked-card-lock:
+	bash tests/linked-card-lock.sh linux
+
+test-linked-card-lock-wine:
+	bash tests/linked-card-lock.sh wine
