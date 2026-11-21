@@ -7,6 +7,7 @@
 
 #include "CPU.h"
 #include "RAM.h"
+#include "jit_dynarmic.h"
 #include "mem.h"
 #include "memory_buffer.h"
 #include "patch_dispatch.h"
@@ -14,15 +15,27 @@
 
 namespace {
 constexpr uint32_t code = 0x1000, table = 0x4000, bytes = 0x20000;
+constexpr uint32_t faultAddress = 0x00100000, deviceWord = faultAddress - 4;
 constexpr uint32_t control = 0x2020, ttb = 0x2040, domain = 0x2060,
                    lineInval = 0x2080, allInval = 0x20a0, store = 0x20c0, tlbInval = 0x20e0;
 constexpr uint32_t cleanIndex = 0x2400, cleanInvalIndex = 0x2420, rejected = 0x2440;
 struct Machine {
     ArmCpu* cpu;
     uint8_t* ram;
+    unsigned deviceWrites = 0;
+    uint32_t deviceValue = 0;
+
+    static bool deviceAccess(void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
+        assert(address == deviceWord && size == 4 && write);
+        auto& machine = *static_cast<Machine*>(context);
+        ++machine.deviceWrites;
+        std::memcpy(&machine.deviceValue, data, size);
+        return true;
+    }
     explicit Machine(bool fast) {
         assert(cpuSetFastEngine(fast));
         auto* mem = memInit();
+        assert(memRegionAdd(mem, deviceWord, 4, deviceAccess, this));
         MemoryBuffer buffer{};
         assert(memoryBufferAllocate(&buffer, bytes));
         ram = buffer.buffer;
@@ -35,6 +48,8 @@ struct Machine {
     void word(uint32_t address, uint32_t value) { std::memcpy(ram + address, &value, 4); }
     void reset() {
         std::memset(ram, 0, bytes);
+        deviceWrites = 0;
+        deviceValue = 0;
         cpuReset(cpu, code);
         cpuArm920SetIcacheIndexCompatibility(cpu, false);
         cpuSetReg(cpu, ARM_REG_NUM_CPSR, 0xd3);
@@ -332,6 +347,28 @@ int main() {
         m.step(code); assert(cpuGetRegisters(m.cpu)[3] == 1);
         m.cp(lineInval, code); m.step(code); assert(cpuGetRegisters(m.cpu)[3] == 2);
     });
+    for (Machine* m : {&exact, &fast}) {
+        m->reset();
+        m->word(table, 0x00000c02);  // Uncached section containing the device word.
+        m->word(table + 4, 0);       // The second store takes a section translation fault.
+        m->word(code, 0xe8a20030);   // stmia r2!, {r4, r5}
+        m->setup(0x79);
+        cpuSetReg(m->cpu, 2, deviceWord);
+        cpuSetReg(m->cpu, 4, 0x12345678);
+        cpuSetReg(m->cpu, 5, 0x87654321);
+        const auto faultExits = jitFaultExits();
+        m->step(code);
+        assert(jitFaultExits() == faultExits + (m == &fast ? 1 : 0));
+        // A refused access followed by interpretation would write the first word twice.
+        assert(m->deviceWrites == 1 && m->deviceValue == 0x12345678);
+        const auto* regs = cpuGetRegisters(m->cpu);
+        assert(regs[2] == deviceWord && regs[14] == code + 8 && regs[15] == 0x10);
+        assert(cpuGetRegExternal(m->cpu, ARM_REG_NUM_CPSR) == 0xd7);
+        assert(cpuGetRegExternal(m->cpu, ARM_REG_NUM_SPSR) == 0xd3);
+        assert(m->read(5) == 5 && m->read(6) == faultAddress);
+    }
+    same(exact, fast);
+    std::puts("PASS: ARM920 JIT data abort takes the vector without repeating the first STM store");
     uint64_t blocks = 0, instructions = 0;
     assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions) && blocks && instructions);
     std::printf("PASS: ARM920 TTBR/DACR/control, MMU permissions/domain/abort/reset, I-cache SMC/synonyms/eviction, empty Dcache index maintenance and guards, Exact/Fast blocks=%llu instructions=%llu\n",
