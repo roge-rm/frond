@@ -1,5 +1,4 @@
 #include "DesktopLink.h"
-#ifndef __EMSCRIPTEN__
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
@@ -172,4 +171,3 @@ bool DesktopLink::Receive(std::vector<uint8_t>& frame) {
 }
 
 }  // namespace frondNet
-#endif

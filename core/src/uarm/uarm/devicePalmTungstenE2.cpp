@@ -126,9 +126,7 @@ struct Device {
     enum DeviceType5 type;
     struct PxaKpc *kpc;
     struct VSD *vsd;
-#ifndef __EMSCRIPTEN__
     LibertasCF *wifi;
-#endif
     uint32_t noRamMarker;
     // The Bluetooth controller's address, least significant byte first, all zero until
     // Bluetooth is first used. It's kept with the session so peers keep trusting this machine
@@ -240,9 +238,7 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
 
     dev->type = type;
     dev->battery = BatteryPower{};
-#ifndef __EMSCRIPTEN__
     dev->wifi = nullptr;
-#endif
 
     dev->gpio = sp->gpio;
     dev->vsd = vsd;
@@ -287,11 +283,9 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
         pxaGpioSetState(sp->gpio, 37, true);
         pxaGpioSetState(sp->gpio, 13, true);  // no USB cable (palmtx.h USB_DETECT_N)
         // GPIO90, external power, follows the battery setting (deviceApplyBattery).
-#ifndef __EMSCRIPTEN__
         sp->soc->wirelessDevice = std::make_unique<LibertasCF>(
             sp->mem, sp->gpio, reschedule, getTime, &sp->soc->networkSimulation);
         dev->wifi = sp->soc->wirelessDevice.get();
-#endif
         sp->nand = directNandGetNand(dev->nand);
         return dev;
     }
@@ -414,9 +408,7 @@ void devicePeriodic(struct Device *dev, uint32_t tier) {
     }
     if (tier == DEVICE_PERIODIC_TIER0) {if(dev->nand)directNandPeriodic(dev->nand);
 if(dev->qci)pxaQciPeriodic(dev->qci);
-#ifndef __EMSCRIPTEN__
 if(dev->wifi)dev->wifi->Tick();
-#endif
 }
 }
 
@@ -484,9 +476,7 @@ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
     if (tier == DEVICE_PERIODIC_TIER0) {
         return (dev->nand && directNandTaskRequired(dev->nand))
             || (dev->qci && pxaQciTaskRequired(dev->qci))
-#ifndef __EMSCRIPTEN__
             || (dev->wifi && dev->wifi->NeedsTick())
-#endif
             ;
     } else {
         return true;
@@ -531,9 +521,7 @@ void deviceSave(struct Device *dev, T &savestate) {
         SaveChunkHelper helper(*chunk);
         helper.Do32(dev->noRamMarker);
     }
-#ifndef __EMSCRIPTEN__
     if(dev->wifi)dev->wifi->Save(savestate);
-#endif
     wm9712Lsave(dev->wm9712L, savestate);
     if (dev->ov9640) ov9640Save(dev->ov9640, savestate);
     if (dev->qci) pxaQciSave(dev->qci, savestate);
@@ -579,9 +567,7 @@ void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
         loader.NotifyError();
         return;
     }
-#ifndef __EMSCRIPTEN__
     if(dev->wifi)dev->wifi->Load(loader);
-#endif
     wm9712Load(dev->wm9712L, loader, preserveInput);
     if (dev->ov9640 && !ov9640Load(dev->ov9640, loader)) return;
     if (dev->qci && !pxaQciLoad(dev->qci, loader)) return;
@@ -597,9 +583,7 @@ template void deviceLoad<SavestateLoader<ChunkType>>(Device *dev,
                                                      SavestateLoader<ChunkType> &loader, bool);
 
 void deviceNetworkPeriodic(Device* dev){
-#ifndef __EMSCRIPTEN__
     if(dev->wifi)dev->wifi->Poll();
-#endif
 }
 
 bool deviceSetBluetooth(Device* dev,const std::string& path,std::string& error){

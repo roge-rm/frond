@@ -1,6 +1,5 @@
 #ifndef FROND_HOST_NETWORK_H
 #define FROND_HOST_NETWORK_H
-#ifndef __EMSCRIPTEN__
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -39,5 +38,4 @@ class HostNetwork {
     struct Impl;
     std::unique_ptr<Impl> impl;
 };
-#endif
 #endif

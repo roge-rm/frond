@@ -23,19 +23,11 @@
 #define calculateLineIndex(va) (va & ~(0xffffffff << CACHE_LINE_WIDTH_BITS))
 #define maskLine(va) (va & (0xffffffff << CACHE_LINE_WIDTH_BITS))
 
-#ifdef __EMSCRIPTEN__
-    #define DECODED_INSTRUCTION_TYPE uint16_t
-    #define DECODED_BITS 0xc000
-    #define DECODED_BITS_ARM 0x4000
-    #define DECODED_BITS_THUMB 0xc000
-    #define DECODED_BITS_SHIFT 0
-#else
     #define DECODED_INSTRUCTION_TYPE uint32_t
     #define DECODED_BITS 0x03
     #define DECODED_BITS_ARM 0x02
     #define DECODED_BITS_THUMB 0x03
     #define DECODED_BITS_SHIFT 2
-#endif
 
 struct icacheline {
     uint8_t data[1 << CACHE_LINE_WIDTH_BITS];
@@ -136,7 +128,6 @@ static inline uint32_t icacheFetchKey(const struct icache* ic, bool privileged) 
     return (ic->permGen << 1) | (privileged ? 1 : 0);
 }
 
-#ifndef __EMSCRIPTEN__
 // Misses, invalidations, alignment faults, new decodes and stale fetch keys use icacheFetch.
 // Not for the ARM920T, which fetches every instruction through icacheFetch.
 template <int size>
@@ -156,6 +147,5 @@ static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va, uint3
     else instr = line->translatedThumbInstructions[offset >> 1];
     return true;
 }
-#endif
 
 #endif

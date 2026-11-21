@@ -1,4 +1,3 @@
-#ifndef __EMSCRIPTEN__
 #include "HostInfrared.h"
 #include "soc_PXA.h"
 #include "pxa_UART.h"
@@ -303,4 +302,3 @@ std::string HostInfrared::Describe() const {
         (impl->restart?" suspended":"")+
         (impl->error.empty()?"":" error: "+impl->error);
 }
-#endif

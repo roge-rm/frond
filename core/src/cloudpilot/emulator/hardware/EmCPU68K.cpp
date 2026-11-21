@@ -13,10 +13,6 @@
 
 #include "EmCPU68K.h"
 
-#ifdef __EMSCRIPTEN__
-    #include <emscripten.h>
-#endif
-
 #include <algorithm>  // find
 
 #include "Byteswapping.h"  // Canonical
@@ -60,11 +56,7 @@ int movem_index1[256];  // (normally in newcpu.c)
 int movem_index2[256];  // (normally in newcpu.c)
 int movem_next[256];    // (normally in newcpu.c)
 
-#ifdef __EMSCRIPTEN__
-cpuop_func* cpufunctbl_base;
-#else
 cpuop_func* cpufunctbl[65536];  // (normally in newcpu.c)
-#endif
 
 uint16 last_op_for_exception_3;    /* Opcode of faulting instruction */
 emuptr last_addr_for_exception_3;  /* PC at fault time */
@@ -468,11 +460,7 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
             gUaeTimingExtra = 0;
             gUaeBusCount = 0;
 
-#ifdef __EMSCRIPTEN__
-            ((cpuop_func*)((long)cpufunctbl_base + opcode))(opcode);
-#else
             (cpufunctbl[opcode])(opcode);
-#endif
 
             switch (kind) {
                 case kTimingBccShort:
@@ -1300,11 +1288,6 @@ void EmCPU68K::InitializeUAETables(void) {
 
     // The rest of this code is based on build_cpufunctbl in newcpu.c.
 
-#ifdef __EMSCRIPTEN__
-    cpuop_func** cpufunctbl =
-        (cpuop_func**)malloc(0x10000 * sizeof(cpuop_func*));  // (normally in newcpu.c)
-#endif
-
     unsigned long opcode;
     struct cputbl* tbl = op_smalltbl_3;
 
@@ -1349,22 +1332,6 @@ void EmCPU68K::InitializeUAETables(void) {
 #endif
         }
     }
-
-#ifdef __EMSCRIPTEN__
-    cpufunctbl_base = (cpuop_func*)EM_ASM_INT(
-        {
-            wasmTable.grow(0x10000);
-
-            for (let i = 0; i <= 0xffff; i++)
-                wasmTable.set(wasmTable.length - 0xffff - 1 + i,
-                              wasmTable.get(HEAPU32[($0 >>> 2) + i]));
-
-            return wasmTable.length - 0xffff - 1;
-        },
-        cpufunctbl);
-
-    free(cpufunctbl);
-#endif
 
     BuildCpuTiming();
 

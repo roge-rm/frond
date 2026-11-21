@@ -1,5 +1,4 @@
 #include "zodiac_native.h"
-#ifndef __EMSCRIPTEN__
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -285,4 +284,3 @@ void Session::Close() {
     impl->closed = true;
 }
 }  // namespace ZodiacNative
-#endif

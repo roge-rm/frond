@@ -1,4 +1,3 @@
-#ifndef __EMSCRIPTEN__
 #include "UsbHostBridge.h"
 #include "soc_PXA.h"
 #include "soc_IMX1.h"
@@ -74,4 +73,3 @@ bool UsbHostBridge::StartCable(SoC* soc, std::string& error) {
     impl->cableRequest = true;
     return Start(soc, config, error);
 }
-#endif

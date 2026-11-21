@@ -1,4 +1,3 @@
-#ifndef __EMSCRIPTEN__
 #include "UsbHostBridge.h"
 #include <algorithm>
 
@@ -216,4 +215,3 @@ std::string UsbHostBridge::Describe() const {
 
 const UsbBusHost* UsbHostBridge::Host() const { return impl->host.get(); }
 std::vector<std::string> UsbHostBridge::TakeMessages() { return std::move(impl->messages); }
-#endif

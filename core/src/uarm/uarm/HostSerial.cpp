@@ -1,4 +1,3 @@
-#ifndef __EMSCRIPTEN__
 #include "PosixCompat.h"
 #include "HostSerial.h"
 
@@ -735,4 +734,3 @@ HostSerial::Counters HostByteLink::GetCounters() const {
     auto& s = *impl->shared;
     return {s.received, s.sent, s.rxDiscarded, s.txDropped};
 }
-#endif

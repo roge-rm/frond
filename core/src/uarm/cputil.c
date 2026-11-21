@@ -3,12 +3,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-#ifdef __EMSCRIPTEN__
-    #include "emscripten.h"
-
-EM_JS(void, __emscripten_abort, (), { throw new Error("emulator terminated"); })
-#endif
-
 uint64_t timestampUsec() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -17,9 +11,5 @@ uint64_t timestampUsec() {
 }
 
 void uarmAbort() {
-#ifdef __EMSCRIPTEN__
-    __emscripten_abort();
-#else
     abort();
-#endif
 }

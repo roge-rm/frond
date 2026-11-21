@@ -12,10 +12,6 @@
 #include "savestate/savestateAll.h"
 #include "uae/UAE.h"
 
-#ifdef __EMSCRIPTEN__
-    #include <emscripten.h>
-#endif
-
 // 2 has the layout of 1. It marks a state whose guest RAM holds the PACE dispatch hooks
 // (INSTR_PACE_DISPATCH, the T|X), which 0.15.0 and earlier can't run, so they refuse it.
 #define SAVESTATE_VERSION 2
@@ -29,11 +25,7 @@
 #endif
 
 namespace {
-#ifdef __EMSCRIPTEN__
-    cpuop_func* cpufunctbl_base;
-#else
     cpuop_func* cpufunctbl[65536];  // (normally in newcpu.c)
-#endif
 
     struct ArmMem* mem = nullptr;
 
@@ -388,11 +380,6 @@ static void staticInit() {
 
     // The rest of this code is based on build_cpufunctbl in newcpu.c.
 
-#ifdef __EMSCRIPTEN__
-    cpuop_func** cpufunctbl =
-        (cpuop_func**)malloc(0x10000 * sizeof(cpuop_func*));  // (normally in newcpu.c)
-#endif
-
     unsigned long opcode;
     struct cputbl* tbl = op_smalltbl_3;
 
@@ -425,22 +412,6 @@ static void staticInit() {
 
     for (i = 0; tbl[i].handler != NULL; i++)
         if (tbl[i].specific) cpufunctbl[tbl[i].opcode] = tbl[i].handler;
-
-#ifdef __EMSCRIPTEN__
-    cpufunctbl_base = (cpuop_func*)EM_ASM_INT(
-        {
-            wasmTable.grow(0x10000);
-
-            for (let i = 0; i <= 0xffff; i++)
-                wasmTable.set(wasmTable.length - 0xffff - 1 + i,
-                              wasmTable.get(HEAPU32[($0 >>> 2) + i]));
-
-            return wasmTable.length - 0xffff - 1;
-        },
-        cpufunctbl);
-
-    free(cpufunctbl);
-#endif
 
     // (hey readcpu doesn't free this guy!)
     free(table68k);
@@ -742,11 +713,7 @@ enum paceStatus paceExecute() {
     const regstruct before = regs;
     const struct flag_struct beforeFlags = regflags;
 
-#ifdef __EMSCRIPTEN__
-    ((cpuop_func*)((long)cpufunctbl_base + opcode))(opcode);
-#else
     cpufunctbl[opcode](opcode);
-#endif
 
     //    fprintf(stderr, "a7 now %#010x, top of stack is %#010x\n", m68k_areg(regs, 7),
     //            uae_get32(m68k_areg(regs, 7)));

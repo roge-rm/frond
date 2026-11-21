@@ -220,13 +220,11 @@ class SocPXA : public SocGeneric<SocPXA> {
 
     static void RescheduleCB(void *ctx, uint32_t task);
     static uint64_t GetTimeCB(void *ctx);
-#ifndef __EMSCRIPTEN__
     static uint32_t TimerElapsedCB(void* ctx);
     static void TimerRescheduleCB(void* ctx);
     static bool OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr);
     static bool GpioPeekCB(void* ctx, uint32_t pa, uint32_t* value);
     uint32_t TimerElapsedAt(uint32_t cycles) const;
-#endif
 
    private:
     IrKeyboard irKeyboard;

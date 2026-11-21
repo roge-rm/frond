@@ -1,6 +1,5 @@
 #ifndef FROND_NETWORK_SIMULATION_H
 #define FROND_NETWORK_SIMULATION_H
-#ifndef __EMSCRIPTEN__
 #include <array>
 #include <cstdint>
 #include <string>
@@ -67,5 +66,4 @@ class NetworkSimulation {
         }
     }
 };
-#endif
 #endif

@@ -7,12 +7,10 @@
 #include <stdexcept>
 #include <exception>
 #include <memory>
-#ifndef __EMSCRIPTEN__
 #include "native_boundary.h"
 #include "soc_IMX1.h"
 #include "tg50_pace_session.h"
 #include <map>
-#endif
 
 #include "CPU.h"
 #include "Defer.h"
@@ -96,7 +94,6 @@ struct ScratchState {
     ArmCpu* cpu;
 };
 
-#ifndef __EMSCRIPTEN__
 // A Zodiac guest call's frame: the machine's registers on the PACE site it starts from, the 68k state there and
 // the host-side 68k registers' owner before it (pace.h external memory).
 struct ZodiacFrame {
@@ -109,7 +106,6 @@ static bool zodiacPaceAccess(void* context, uint32_t address, void* data, uint32
     auto* soc = static_cast<SocIMX1*>(context);
     return write ? soc->WriteGuest(address, data, size) : soc->ReadGuest(address, data, size);
 }
-#endif
 
 struct SyscallDispatch {
     class SoC* soc;
@@ -117,7 +113,6 @@ struct SyscallDispatch {
     ScratchState scratchStates[MAX_NEST_LEVEL];
     size_t nestLevel{0};
     bool deadMansSwitch{false};
-#ifndef __EMSCRIPTEN__
     bool recoverable{false};
     bool failed{false};
     std::unique_ptr<Tg50Pace::Session> tg50;
@@ -128,10 +123,8 @@ struct SyscallDispatch {
     ZodiacFrame zodiacFrames[MAX_NEST_LEVEL];
     bool zodiacPaceLive{false};
     std::map<uint32_t, M68kTrapHandler> zodiacStubs;
-#endif
 };
 
-#ifndef __EMSCRIPTEN__
 // The pace.h helpers go to the Zodiac's memory only while its guest work needs them: a recovery scope, a call
 // or a callback registration. Everywhere else they stay on the PXA's own memory, so a PACE exception or a PXA
 // guest call never reaches the Zodiac, and a Zodiac that goes away leaves nothing behind.
@@ -141,22 +134,18 @@ static void zodiacPaceOffWhenIdle(struct SyscallDispatch* sd) {
     sd->zodiacPaceLive = false;
     paceReleaseExternalMemory(sd->zodiac);
 }
-#endif
 
 struct SyscallDispatch* initSyscallDispatch(SoC* soc) {
     struct SyscallDispatch* sd = new SyscallDispatch();
 
     sd->soc = soc;
     for (auto& scratchState : sd->scratchStates) scratchState.cpu = soc->GetCpu();
-#ifndef __EMSCRIPTEN__
     // A PXA SoC calls this mid-construction, before its device is set, so its type can't be asked for.
     sd->zodiac = dynamic_cast<SocIMX1*>(soc);
-#endif
 
     return sd;
 }
 
-#ifndef __EMSCRIPTEN__
 void syscallDispatchBeginRecovery(struct SyscallDispatch* sd) {
     if (sd->nestLevel || sd->recoverable) ERR("nested injected-call recovery scope");
     if (sd->zodiac) zodiacPaceOn(sd);
@@ -197,15 +186,12 @@ void syscallDispatchEndRecovery(struct SyscallDispatch* sd) {
     sd->nestLevel = 0;
     sd->deadMansSwitch = false;
 }
-#endif
 
 static void injectedCallTimeout(struct SyscallDispatch* sd) {
-#ifndef __EMSCRIPTEN__
     if (sd->recoverable || sd->zodiac) {
         sd->failed = true;
         throw InjectedCallError();
     }
-#endif
     ERR("failed to execute injected call within time limit\n");
 }
 
@@ -214,7 +200,6 @@ bool syscallDispatchInProgress(struct SyscallDispatch* sd) { return sd->nestLeve
 bool syscallDispatchM68kSupport(struct SyscallDispatch* sd) { return sd->soc->PrepareM68kSupport(); }
 
 bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode) {
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) {
         if (sd->nestLevel || !syscallDispatchM68kSupport(sd)) return false;
         auto* soc = sd->zodiac;
@@ -238,9 +223,7 @@ bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode)
         else zodiacPaceOffWhenIdle(sd);
         return ready;
     }
-#endif
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
-#ifndef __EMSCRIPTEN__
         try {
             if (!Tg50Pace::OriginalLayout(*sd->soc)) return false;
             if (sd->tg50) { sd->tg50->CheckOwner(); return true; }
@@ -251,9 +234,6 @@ bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode)
             Tg50Pace::Boundary::Capture(*sd->soc, true);
             return true;
         } catch (const std::runtime_error&) { return false; }
-#else
-        return false;
-#endif
     }
     if (!syscallDispatchM68kSupport(sd)) return false;
     if (sd->nestLevel > 0) ERR("syscallDispatchPrepare is only allowed on top level\n");
@@ -263,19 +243,14 @@ bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode)
                                   PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS / (after ? 4 : 1),
                                   PREPARE_INJECTED_CALL_IPS))
         return true;
-#ifndef __EMSCRIPTEN__
     // A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself.
     return mode == SYSCALL_PREPARE_WAKE && NativeBoundary::WakeIdle(*sd->soc) &&
            sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
                                      PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
                                      PREPARE_INJECTED_CALL_IPS);
-#else
-    return false;
-#endif
 }
 
 void syscallDispatchValidateMemory(struct SyscallDispatch* sd, uint32_t address, size_t size, bool write) {
-#ifndef __EMSCRIPTEN__
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
         if (!sd->tg50 || !sd->recoverable || size > UINT32_MAX) {
             if (sd->tg50) sd->tg50->Fail();
@@ -284,10 +259,6 @@ void syscallDispatchValidateMemory(struct SyscallDispatch* sd, uint32_t address,
         }
         sd->tg50->BeforeTransfer(address, uint32_t(size), write);
     }
-#else
-    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
-        throw std::runtime_error("TG50 guest transfers are unavailable in this build");
-#endif
 }
 
 bool syscallDispatch_strncpy_toHost(struct SyscallDispatch* sd, void* dest, uint32_t src,
@@ -295,7 +266,6 @@ bool syscallDispatch_strncpy_toHost(struct SyscallDispatch* sd, void* dest, uint
     struct ArmCpu* cpu = sd->soc->GetCpu();
     syscallDispatchValidateMemory(sd, src, maxLen, false);
     memset(dest, 0, maxLen);
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) {
         for (size_t i = 0; i < maxLen; i++) {
             if (!sd->zodiac->ReadGuest(src + i, static_cast<char*>(dest) + i, 1)) return false;
@@ -303,7 +273,6 @@ bool syscallDispatch_strncpy_toHost(struct SyscallDispatch* sd, void* dest, uint
         }
         return true;
     }
-#endif
 
     for (size_t i = 0; i < maxLen; i++) {
         if (!cpuMemOpExternal(cpu, dest, src, 1, false)) return false;
@@ -321,7 +290,6 @@ bool syscallDispatch_memcpy_fromHost(struct SyscallDispatch* sd, uint32_t dest, 
     struct ArmCpu* cpu = sd->soc->GetCpu();
     MemcpyResult memcpyResult;
     syscallDispatchValidateMemory(sd, dest, size);
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) return size > UINT32_MAX ? false : sd->zodiac->WriteGuest(dest, src, uint32_t(size));
     if (sd->tg50) {
         if (!cpuNativeBuffer(cpu, dest, const_cast<void*>(src), size, true, false)) {
@@ -331,7 +299,6 @@ bool syscallDispatch_memcpy_fromHost(struct SyscallDispatch* sd, uint32_t dest, 
         }
         return true;
     }
-#endif
     memcpy_hostToArm(dest, reinterpret_cast<const uint8_t*>(src), size, true, cpu, &memcpyResult);
 
     return memcpyResult.ok;
@@ -342,7 +309,6 @@ bool syscallDispatch_memcpy_toHost(struct SyscallDispatch* sd, void* dest, uint3
     struct ArmCpu* cpu = sd->soc->GetCpu();
     MemcpyResult memcpyResult;
     syscallDispatchValidateMemory(sd, src, size, false);
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) return size > UINT32_MAX ? false : sd->zodiac->ReadGuest(src, dest, uint32_t(size));
     if (sd->tg50) {
         if (!cpuNativeBuffer(cpu, src, dest, size, false, false)) {
@@ -352,36 +318,27 @@ bool syscallDispatch_memcpy_toHost(struct SyscallDispatch* sd, void* dest, uint3
         }
         return true;
     }
-#endif
     memcpy_armToHost(reinterpret_cast<uint8_t*>(dest), src, size, true, cpu, &memcpyResult);
 
     return memcpyResult.ok;
 }
 
 static size_t pushState(struct SyscallDispatch* sd, ScratchState::Type type) {
-#ifndef __EMSCRIPTEN__
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
         if (!sd->tg50 || !sd->recoverable)
             throw std::runtime_error("TG50 call needs an active guest transaction");
         sd->tg50->BeforeCall();
     }
-#else
-    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
-        throw std::runtime_error("TG50 guest calls are unavailable in this build");
-#endif
     if (sd->nestLevel >= MAX_NEST_LEVEL) {
-#ifndef __EMSCRIPTEN__
         if (sd->zodiac) throw std::runtime_error("Zodiac injected call nesting limit exceeded");
         if (sd->tg50) {
             sd->failed = true;
             sd->tg50->Fail();
             throw std::runtime_error("TG50 injected call nesting limit exceeded");
         }
-#endif
         ERR("unable to dispatch syscall: max nest level reached\n");
     }
 
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) {
         // From the syscall site, or the TRAP #0 site in a callback: r0 is the 68k state on both.
         auto& frame = sd->zodiacFrames[sd->nestLevel];
@@ -401,7 +358,6 @@ static size_t pushState(struct SyscallDispatch* sd, ScratchState::Type type) {
         sd->zodiacPaceLive = true;
         return sd->nestLevel++;
     }
-#endif
     const uint32_t nestLevel = sd->nestLevel++;
     sd->scratchStates[nestLevel].Save(type);
 
@@ -410,17 +366,14 @@ static size_t pushState(struct SyscallDispatch* sd, ScratchState::Type type) {
 
 static void popState(struct SyscallDispatch* sd, size_t nestLevel) {
     if (sd->nestLevel != nestLevel + 1) {
-#ifndef __EMSCRIPTEN__
         if (sd->tg50) {
             sd->failed = true;
             sd->tg50->Fail();
             throw std::runtime_error("TG50 injected call nesting state changed");
         }
-#endif
         ERR("bad nest level\n");
     }
 
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) {
         // The 68k state and registers as they were, and the helpers back on the frame's owner.
         const auto& frame = sd->zodiacFrames[nestLevel];
@@ -436,24 +389,17 @@ static void popState(struct SyscallDispatch* sd, size_t nestLevel) {
         if (!ok) throw std::runtime_error("Zodiac: could not put the guest back after a call");
         return;
     }
-#endif
     sd->scratchStates[nestLevel].Restore();
     sd->nestLevel--;
 }
 
 void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampoline,
                                      M68kStub stub, uint32_t argumentBytes) {
-#ifndef __EMSCRIPTEN__
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
         if (!sd->tg50 || !sd->recoverable)
             throw std::runtime_error("TG50 callback needs an active guest transaction");
         sd->tg50->Register(trampoline, argumentBytes);
     }
-#else
-    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
-        throw std::runtime_error("TG50 guest callbacks are unavailable in this build");
-#endif
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) {
         // The stub runs from the ROM PACE's TRAP #0 frame (SocIMX1::SetTrap0Hook), with the helpers on the
         // 68k state there. The guest goes on at an RTS in the ROM, past the bl, so the ROM PACE returns
@@ -490,9 +436,7 @@ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampo
         });
         return;
     }
-#endif
     M68kTrapHandler trapHandler = [=](struct ArmCpu* cpu, uint32_t address) -> bool {
-#ifndef __EMSCRIPTEN__
         if (sd->tg50) {
             try {
                 const uint32_t sp = sd->tg50->BeforeCallback(address);
@@ -508,7 +452,6 @@ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampo
             }
             return true;
         }
-#endif
         const uint32_t sp = paceGetAreg(7);
         const uint32_t returnAddress = paceGet32(sp);
         stub(cpu, sp + 4, [=]() { sd->deadMansSwitch = true; });
@@ -516,18 +459,15 @@ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampo
         paceSetPC(returnAddress);
         return true;
     };
-#ifndef __EMSCRIPTEN__
     if (sd->tg50) {
         const uint8_t instruction[]{0x4e, 0x40};
         syscallDispatch_memcpy_fromHost(sd, trampoline, instruction, sizeof(instruction));
     } else
-#endif
         paceSet16(trampoline, INSTRUCTION_M68K_TRAP0);
     cpuAddM68kTrap0Handler(sd->soc->GetCpu(), trampoline, trapHandler);
 }
 
 void syscallDispatchUnregisterM68kStub(struct SyscallDispatch* sd, uint32_t trampoline) {
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) {
         sd->zodiacStubs.erase(trampoline);
         if (sd->zodiacStubs.empty()) sd->zodiac->SetTrap0Hook(nullptr);
@@ -538,14 +478,12 @@ void syscallDispatchUnregisterM68kStub(struct SyscallDispatch* sd, uint32_t tram
         sd->tg50->Unregister(trampoline);
         return;
     }
-#endif
     cpuRemoveM68kTrap0Handler(sd->soc->GetCpu(), trampoline);
 }
 
 static bool executeInjectedCall(struct SyscallDispatch* sd, uint32_t flags) {
     auto* soc = sd->soc;
     struct ArmCpu* cpu = soc->GetCpu();
-#ifndef __EMSCRIPTEN__
     if (sd->tg50) {
         auto& budget = sd->tg50->ExecutionBudget();
         const uint64_t localStart = soc->GetInjectedTimeNsec();
@@ -580,7 +518,6 @@ static bool executeInjectedCall(struct SyscallDispatch* sd, uint32_t flags) {
                 pureCycles >= INJECTED_CALL_TIMEOUT_SEC * INJECTED_CALL_IPS) return false;
         }
     }
-#endif
 
     if (flags & SC_EXECUTE_FULL) {
         if (soc->ExecuteInjected(INJECTED_CALL_TIMEOUT_SEC * INJECTED_CALL_IPS,
@@ -600,14 +537,10 @@ static bool executeInjectedCall(struct SyscallDispatch* sd, uint32_t flags) {
 }
 
 static void rejectTg50NativeCall(struct SyscallDispatch* sd) {
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) throw std::runtime_error("Zodiac native ARM calls aren't available");
-#endif
     if (sd->soc->GetDeviceType() != DeviceType5::deviceTypeTG50) return;
-#ifndef __EMSCRIPTEN__
     if (sd->tg50) sd->tg50->Fail();
     sd->failed = true;
-#endif
     throw std::runtime_error("TG50 native ARM injection is unqualified");
 }
 
@@ -622,7 +555,6 @@ static void executeInjectedSyscall(struct SyscallDispatch* sd, uint32_t flags, u
 
 static void executeInjectedSyscall68k(struct SyscallDispatch* sd, uint32_t flags,
                                       uint16_t syscall) {
-#ifndef __EMSCRIPTEN__
     if (sd->zodiac) {
         // Through the ROM's dispatcher from the frame's site, with the arguments pushed on the 68k stack.
         auto* soc = sd->zodiac;
@@ -643,7 +575,6 @@ static void executeInjectedSyscall68k(struct SyscallDispatch* sd, uint32_t flags
         if (!paceLoad68kState()) throw std::runtime_error("Zodiac: could not read the 68k state after a call");
         return;
     }
-#endif
     struct ArmCpu* cpu = sd->soc->GetCpu();
     struct NAND* nand = sd->soc->GetNand();
     bool deadMansSwitchSaved = sd->deadMansSwitch;
@@ -747,10 +678,8 @@ uint16_t syscall_FtrSet(struct SyscallDispatch* sd, uint32_t flags, uint32_t cre
 
 static uint32_t syscall68k(struct SyscallDispatch* sd, uint32_t flags, uint16_t syscall,
                            bool returnPtr, std::function<void()> setupStack) {
-#ifndef __EMSCRIPTEN__
     // Do not execute guest cleanup calls while unwinding a failed export.
     if (sd->failed) return 0;
-#endif
     const size_t nestLevel = pushState(
         sd, (flags & SC_EXECUTE_FULL) ? ScratchState::Type::pace : ScratchState::Type::full);
 
@@ -765,15 +694,11 @@ static uint32_t syscall68k(struct SyscallDispatch* sd, uint32_t flags, uint16_t 
         executeInjectedSyscall68k(sd, flags, syscall);
         const uint32_t result = returnPtr ? paceGetAreg(0) : paceGetDreg(0);
         popState(sd, nestLevel);
-#ifndef __EMSCRIPTEN__
         if (sd->tg50) sd->tg50->AfterCall();
-#endif
         return result;
     } catch (...) {
-#ifndef __EMSCRIPTEN__
         sd->failed = true;
         if (sd->tg50) sd->tg50->Fail();
-#endif
         throw;
     }
 }
@@ -784,14 +709,11 @@ uint32_t syscall68k_SysGetOsVersionString(struct SyscallDispatch* sd, uint32_t f
 
 uint32_t syscall68k_MemPtrNew(struct SyscallDispatch* sd, uint32_t flags, uint32_t size) {
     const uint32_t result = syscall68k(sd, flags, SYSCALL_68K_MEM_PTR_NEW, true, [=]() { pacePush32(size); });
-#ifndef __EMSCRIPTEN__
     if (sd->tg50) sd->tg50->AddAllocation(result, size);
-#endif
     return result;
 }
 
 uint16_t syscall68k_MemPtrFree(struct SyscallDispatch* sd, uint32_t flags, uint32_t memPtr) {
-#ifndef __EMSCRIPTEN__
     if (sd->failed) return 0;
     if (sd->tg50) {
         if (std::uncaught_exceptions()) {
@@ -812,7 +734,6 @@ uint16_t syscall68k_MemPtrFree(struct SyscallDispatch* sd, uint32_t flags, uint3
             return 0;
         }
     }
-#endif
     return syscall68k(sd, flags, SYSCALL_68K_MEM_CHUNK_FREE, false,
                        [=]() { pacePush32(memPtr); });
 }

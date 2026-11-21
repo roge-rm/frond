@@ -20,19 +20,15 @@
 
 #include "CPEndian.h"
 #include "MMU.h"
-#ifndef __EMSCRIPTEN__
 #include "MMU_internal.h"
-#endif
 #include "MPU.h"
 #include "cp15mmu.h"
 #include "cp15mpu.h"
 #include "cputil.h"
 #include "gdbstub.h"
 #include "icache.h"
-#ifndef __EMSCRIPTEN__
 #include "icache_internal.h"
 #include "mem_internal.h"
-#endif
 #include "mem.h"
 #include "ROM.h"
 #include "memcpy.h"
@@ -96,13 +92,8 @@
 
 #define SAVESTATE_VERSION 3
 
-#ifdef __EMSCRIPTEN__
-    #define PREFIX_EXEC_FN(...) (ExecFn((uint32_t)__VA_ARGS__ + EXEC_FN_PREFIX_VALUE))
-    #define ATTR_EMCC_NOINLINE __attribute__((noinline))
-#else
     #define PREFIX_EXEC_FN(...) (__VA_ARGS__)
     #define ATTR_EMCC_NOINLINE
-#endif
 
 #define cpuPrvGetRegNotPC(cpu, reg) (cpu->regs[reg])
 
@@ -244,9 +235,7 @@ struct ArmCpu {
     bool privileged;
 
     uint32_t curInstrPC;
-#ifndef __EMSCRIPTEN__
     const uint32_t* cyclesInProgress;
-#endif
 
     // Cost model (xscale_cost.h, dcache_cost.h). The I-cache charges costCore's table per instruction when
     // its costOn is set (1 per instruction otherwise); costMemory adds the region and data cache charges
@@ -274,10 +263,8 @@ struct ArmCpu {
     // instruction's memory charges (pendingCharge), which generated code compares with the cycles left.
     CostJitHint jitHint;
     bool costJitHint;  // Fast with memory charges: jitHint is kept
-#ifndef __EMSCRIPTEN__
     // Per host TLB entry, written with it: the page's C (bit 0), B (1) and X (2) bits and its region (4-6).
     uint8_t hostTlbInfo[2][HOST_TLB_SIZE];
-#endif
 
     struct ArmBankedRegs bank_usr;  // usr regs when in another mode
     struct ArmBankedRegs bank_svc;  // svc regs when in another mode
@@ -370,7 +357,6 @@ struct ArmCpu {
     void* earlyAudioContext = nullptr;
     uint32_t earlyAudioFrom[2]{};
     uint16_t breakPaceSyscall;
-    #ifndef __EMSCRIPTEN__
     uint32_t nativePc[2];
     struct { uint32_t address; NativeCallback callback; void* context; } nativeCallbacks[8];
     uint8_t nativeCallDepth;
@@ -379,8 +365,6 @@ struct ArmCpu {
     uint32_t nativeStackOwnerAddress, nativeStackOwnerValue;
     uint32_t nativeScratchBase, nativeScratchSize;
     uint8_t* nativeScratchData;
-    #endif
-
 
     M68kTrapHandlerMap *m68kTrap0Handlers;
     // ARM920T Fast engine, not saved. leanRun is set only inside cpuArm920RunLean; leanExit asks it to stop
@@ -611,7 +595,6 @@ void cpuJitCostRunStart(struct ArmCpu *cpu, uint32_t budget, bool joins) {
 
 void cpuJitCostHalted(struct ArmCpu *cpu) { cpu->jitHint.halted = 1; }
 
-#ifndef __EMSCRIPTEN__
 // One load or store's charge: the data cache model's for SDRAM, SRAM and flash, the region charge for the
 // rest. info is the page's (cpuPrvCostInfo). Only inside a batch: accesses from outside one (host reads,
 // injected call setup) neither change the model nor charge. PACE's accesses change it without a charge,
@@ -664,7 +647,6 @@ static FORCE_INLINE void cpuPrvCostHostHit(struct ArmCpu *cpu, uint32_t va) {
     cpuPrvCostAccess(cpu, va, info, write);
     if constexpr (size == 8) cpuPrvCostAccess(cpu, va + 4, info, write);
 }
-#endif
 
 static FORCE_INLINE uint32_t cpuPrvClz(uint32_t val) {
     if (!val) return 32;
@@ -890,11 +872,9 @@ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
 {
     ++cpu->exceptionSequence;
     if (cpuPrvArm920<kind>(cpu)) icacheArm920BranchInline(cpu->ic);
-#ifndef __EMSCRIPTEN__
     if (cpu->nativeCallDepth && ((newLowBits & 0x1f) == ARM_SR_MODE_ABT ||
                                   (newLowBits & 0x1f) == ARM_SR_MODE_UND))
         cpuSetSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT);
-#endif
     if (cpu->modePace) {
 #ifdef TRACE_PACE
         fprintf(stderr, "exception in PACE %#010x %#010x\n", lr,
@@ -1056,13 +1036,11 @@ t = T bit (LDR vs LDRT)
 
 baseReg is returned in return val along with flags:
 
-
 ARM_MODE_2_REG	is mask for reg
 ARM_MODE_2_WORD	is flag for word access
 ARM_MODE_2_LOAD	is flag for load
 ARM_MODE_2_INV	is flag for invalid instructions
 ARM_MODE_2_T	is flag for T
-
 
 */
 static uint_fast8_t cpuPrvArmAdrModeDecode_2(uint32_t instr) {
@@ -1234,7 +1212,6 @@ static FORCE_INLINE int32_t cpuPrvMedia_signedSaturate32(int32_t sign) {
     return (sign < 0) ? -0x80000000L : 0x7fffffffl;
 }
 
-#ifndef __EMSCRIPTEN__
 // The read half of ramAccessInline, for RAM and ROM (which reads the same way).
 template <int size>
 static FORCE_INLINE void cpuPrvHostRead(const uint8_t *addr, void *bufP) {
@@ -1336,9 +1313,7 @@ static __attribute__((noinline)) void cpuPrvJitFill(struct ArmCpu *cpu, uint32_t
     }
 }
 #endif
-#endif
 
-#ifndef __EMSCRIPTEN__
 // ARM920T Fast data accesses, only inside cpuArm920RunLean. The host TLB arrays hold host page addresses
 // (host - va) for reads and writes alike, filled only for pages the lean page callback calls plain and the
 // MMU TLB holds now, keyed by privilege; mem->hostTlb.gen moves on every TLB, domain, S, R, TTB and
@@ -1501,14 +1476,12 @@ static FORCE_INLINE bool cpuPrvLeanMemOp(struct ArmCpu *cpu, void *buf, uint32_t
     }
     return cpuPrvLeanMemOpSlow<size, write>(cpu, buf, va, privileged);
 }
-#endif
 
 // arm920 is the interpreter kind's model, from cpuPrvMemOpEx. jit: the Fast engine's callbacks,
 // which also note device pages (cpuPrvJitFill).
 template <int memorySystemKind, int size, bool write, bool arm920, bool jit = false>
 static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
                                             bool priviledged, uint_fast8_t *fsrP) {
-#ifndef __EMSCRIPTEN__
     if (unlikely(cpu->nativeCallDepth && cpu->nativeScratchData &&
                  vaddr >= cpu->nativeScratchBase &&
                  uint64_t(vaddr) + size <= uint64_t(cpu->nativeScratchBase) + cpu->nativeScratchSize)) {
@@ -1519,7 +1492,6 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
     if constexpr (arm920 && armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 4) {
         if (unlikely(cpu->leanRun)) return cpuPrvLeanMemOp<size, write>(cpu, buf, vaddr, priviledged);
     }
-#endif
 
     if constexpr (size > 1) {
         if (vaddr & (size - 1)) {
@@ -1540,7 +1512,6 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
     // The ARM920T's FCSE: the TLB and the D-cache model below are keyed by MVA.
     if constexpr (arm920) vaddr = cpuPrvMva(cpu, vaddr);
 
-#ifndef __EMSCRIPTEN__
     if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8) {
       if constexpr (!arm920) {
         struct HostTlb &hostTlb = cpu->mem->hostTlb;
@@ -1560,17 +1531,12 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         }
       }
     }
-#endif
 
     uint32_t pa;
     uint8_t costInfo = 0;
     if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU) {
         MMUTranslateResult translateResult =
-#ifndef __EMSCRIPTEN__
             mmuTranslateCached<write, true>(cpu->memorySystem.mmu, vaddr, priviledged);
-#else
-            mmuTranslate(cpu->memorySystem.mmu, vaddr, priviledged, write);
-#endif
 
         if (!MMU_TRANSLATE_RESULT_OK(translateResult)) {
             if (fsrP) *fsrP = MMU_TRANSLATE_RESULT_FSR(translateResult);
@@ -1581,7 +1547,6 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         costInfo = cpuPrvCostInfo(MMU_TRANSLATE_RESULT_CACHEABLE(translateResult),
                                   MMU_TRANSLATE_RESULT_BUFFERABLE(translateResult),
                                   MMU_TRANSLATE_RESULT_XSCALE_X(translateResult), cost::pxaRegion(pa));
-#ifndef __EMSCRIPTEN__
         // Before the access, so a device read sees its own charge.
         if constexpr (!arm920) {
             if (cpu->costMemory) {
@@ -1589,7 +1554,6 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
                 if constexpr (size == 8) cpuPrvCostAccess(cpu, vaddr + 4, costInfo, write);
             }
         }
-#endif
         if constexpr (arm920) {
             auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
             dc->mem = cpu->mem;
@@ -1607,11 +1571,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         pa = vaddr;
     }
 
-#ifndef __EMSCRIPTEN__
     bool ok = memAccessRamInline<size, write>(cpu->mem, pa, buf);
-#else
-    bool ok = memAccess<size, write>(cpu->mem, pa, buf);
-#endif
 
     if (!ok) {
         if (fsrP) *fsrP = 10;  // external abort on non-linefetch
@@ -1619,7 +1579,6 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         return false;
     }
 
-#ifndef __EMSCRIPTEN__
     if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8 && !arm920) {
 #ifdef FROND_DYNARMIC
         if constexpr (jit) {
@@ -1629,7 +1588,6 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
 #endif
         cpuPrvHostTlbFill<write>(cpu, vaddr, pa, priviledged, costInfo);
     }
-#endif
 
     return true;
 }
@@ -1656,7 +1614,6 @@ static FORCE_INLINE bool cpuPrvMemOpExGeneric(struct ArmCpu *cpu, void *buf, uin
     }
 }
 
-#ifndef __EMSCRIPTEN__
 // Logs a failed data access, for every one or, with abortLogLimited, the first 16 and then every power of two.
 static void cpuPrvLogAbort(struct ArmCpu *cpu, bool write, unsigned size, uint32_t vaddr, unsigned fsr) {
     if (cpu->abortLogLimited) {
@@ -1667,15 +1624,11 @@ static void cpuPrvLogAbort(struct ArmCpu *cpu, bool write, unsigned size, uint32
     fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n", (int)(write ? 'W' : 'R'), size,
             (unsigned long)vaddr, cpu->curInstrPC, fsr);
 }
-#endif
 
 // for internal use
 template <int memorySystemKind, int size, bool write>
 static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
                                      bool priviledged, uint_fast8_t *fsrP) {
-#ifdef __EMSCRIPTEN__
-    return cpuPrvMemOpEx<memorySystemKind, size, write>(cpu, buf, vaddr, priviledged, fsrP);
-#else
     if (cpuPrvMemOpEx<memorySystemKind, size, write>(cpu, buf, vaddr, priviledged, fsrP))
         return true;
     if (cpu->leanExit) return false;
@@ -1685,16 +1638,12 @@ static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vad
     gdbStubDebugBreakRequested(cpu->debugStub);
 
     return false;
-#endif
 }
 
 // for internal use
 template <int size, bool write>
 static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
                                             bool priviledged, uint_fast8_t *fsrP) {
-#ifdef __EMSCRIPTEN__
-    return cpuPrvMemOpExGeneric<size, write>(cpu, buf, vaddr, priviledged, fsrP);
-#else
     if (cpuPrvMemOpExGeneric<size, write>(cpu, buf, vaddr, priviledged, fsrP)) return true;
 
     cpuPrvLogAbort(cpu, write, unsigned(size), vaddr, fsrP ? unsigned(*fsrP) : 0);
@@ -1702,7 +1651,6 @@ static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint3
     gdbStubDebugBreakRequested(cpu->debugStub);
 
     return false;
-#endif
 }
 
 bool cpuFetchInstruction(ArmCpu *cpu, uint32_t va, uint32_t* word, uint_fast8_t* fsr) {
@@ -1901,13 +1849,11 @@ void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va)
             cpuPrvJoinDrop(cpu, (va & ~31u) + 16);
         }
     }
-#ifndef __EMSCRIPTEN__
     // A clean's write-backs go on the bus and are charged to the MCR, inside a batch.
     if (e.writebacks && cpu->cyclesInProgress) {
         const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->jitHint.pending;
         cpu->jitHint.pending += cpuPrvCacheStall(cpu, core, e, cpu->cacheCosts[0], now);
     }
-#endif
 }
 
 template <typename T>
@@ -2021,10 +1967,8 @@ bool cpuMemOpGuest(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t s
 // A failed data access of the instruction at curInstrPC: logged as cpuPrvMemOp logs the
 // interpreter's own, then the data abort.
 static void cpuPrvDataAbort(struct ArmCpu *cpu, uint32_t vaddr, unsigned size, bool write, uint_fast8_t fsr) {
-#ifndef __EMSCRIPTEN__
     cpuPrvLogAbort(cpu, write, size, vaddr, unsigned(fsr));
     gdbStubDebugBreakRequested(cpu->debugStub);
-#endif
     cpuPrvHandleMemErr(cpu, vaddr, write, false, fsr);
 }
 
@@ -2068,12 +2012,8 @@ static FORCE_INLINE bool cpuPrvSignedAdditionWithPossibleCarryOverflows(uint32_t
 }
 
 static bool cpuPrvPaceFaultDiagnostics() {
-#ifndef __EMSCRIPTEN__
     static const bool enabled = std::getenv("FROND_PACE_FAULT_DIAGNOSTICS") != nullptr;
     return enabled;
-#else
-    return false;
-#endif
 }
 
 static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
@@ -2084,7 +2024,6 @@ static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
     uint_fast8_t fsr;
 
     paceGetMemeryFault(&addr, &wasWrite, &fsr);
-#ifndef __EMSCRIPTEN__
     if (cpuPrvPaceFaultDiagnostics()) {
         const auto after = paceDebugState();
         fprintf(stderr, "PACE-FAULT origin=%s addr=%08x write=%u fsr=%02x arm_pc=%08x cpsr=%08x modePace=%u internal_state=%08x instruction_pc_available=%u instruction_pc=%08x retained_opcode_unvalidated=%04x\n",
@@ -2104,12 +2043,9 @@ static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
         }
         fflush(stderr);
     }
-#endif
     cpuPrvHandleMemErr(cpu, addr, wasWrite, false, fsr);
 
-#ifndef __EMSCRIPTEN__
     fprintf(stderr, "memory fault in PACE %s at 0x%08x\n", wasWrite ? "writing" : "reading", addr);
-#endif
 }
 
 template <int memorySystemKind, bool wasT>
@@ -2265,7 +2201,6 @@ static void execFn_tg50LibraryRefnum(struct ArmCpu *cpu, uint32_t instr) {
 // the peephole found them.
 template <int memorySystemKind>
 static void cpuPrvPeepholeCharge(struct ArmCpu *cpu, uint32_t instr, const uint32_t *before) {
-#ifndef __EMSCRIPTEN__
     if (!cpu->ic->costOn) return;
     size_t count = 0;
     const uint32_t *words = peepholeRoutine(instr, &count);
@@ -2296,9 +2231,6 @@ static void cpuPrvPeepholeCharge(struct ArmCpu *cpu, uint32_t instr, const uint3
                 (void)cpu, (void)va, (void)store;
             }
         });
-#else
-    (void)cpu, (void)instr, (void)before;
-#endif
 }
 
 static void execFn_peephole_ADC_udiv10(struct ArmCpu *cpu, uint32_t instr) {
@@ -3367,9 +3299,7 @@ static void execFn_swi(struct ArmCpu *cpu, uint32_t instr) {
 
             return;
         } else if (cpu->regs[0] == 0x132 && gdbStubEnabled(cpu->debugStub)) {
-#ifndef __EMSCRIPTEN__
             fprintf(stderr, "debug break requested\n");
-#endif
             gdbStubDebugBreakRequested(cpu->debugStub);
 
             return;
@@ -4150,19 +4080,11 @@ static ExecFn ATTR_EMCC_NOINLINE cpuPrvDecoderThumb(uint32_t instr) {
 }
 
 static uint32_t cpuPrvCompressExecFn(ExecFn execFn) {
-#ifdef __EMSCRIPTEN__
-    return (uint32_t)execFn;
-#else
     return (int32_t)((uint8_t *)execFn - (uint8_t *)execFn_noop<ARM_MEMORY_SYSTEM_MMU, true>);
-#endif
 }
 
 static ExecFn cpuPrvDecompressExecFn(uint32_t compressed) {
-#ifdef __EMSCRIPTEN__
-    return (ExecFn)compressed;
-#else
     return (ExecFn)((uint8_t *)execFn_noop<ARM_MEMORY_SYSTEM_MMU, true> + (int32_t)compressed);
-#endif
 }
 
 template <int memorySystemKind>
@@ -4189,24 +4111,6 @@ uint32_t cpuDecodeThumb(uint16_t instr, uint32_t &translatedInstr) {
 template uint32_t cpuDecodeThumb<ARM_MEMORY_SYSTEM_MMU>(uint16_t instr, uint32_t &translatedInstr);
 template uint32_t cpuDecodeThumb<ARM_MEMORY_SYSTEM_MPU>(uint16_t instr, uint32_t &translatedInstr);
 template uint32_t cpuDecodeThumb<ARM_MEMORY_SYSTEM_ARM920T>(uint16_t instr, uint32_t &translatedInstr);
-
-#ifdef __EMSCRIPTEN__
-
-// The content of this function will be replaced with a jump table later.
-template <int memorySystemKind, int tier>
-static void __attribute__((noinline)) cpuPrvDispatchExecFnArm(ExecFn execFn, struct ArmCpu *cpu,
-                                                              uint32_t instr) {
-    ((ExecFn)((uint32_t)execFn & 0xffff))(cpu, instr);
-}
-
-// The content of this function will be replaced with a jump table later.
-template <int memorySystemKind, int tier>
-static void __attribute__((noinline)) cpuPrvDispatchExecFnThumb(ExecFn execFn, struct ArmCpu *cpu,
-                                                                uint32_t instr) {
-    ((ExecFn)((uint32_t)execFn & 0xffff))(cpu, instr);
-}
-
-#endif
 
 static uint32_t translateThumb(uint16_t instrT) {
     bool vB;
@@ -4616,9 +4520,7 @@ static ImmShift cpuPrvImmShiftImmTableEntry(uint32_t key) {
 void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
     cpu->arm920Waiting = false;
     cpu->exceptionSequence = 0;
-#ifndef __EMSCRIPTEN__
     cpuClearNativeRuntime(cpu);
-#endif
     gdbStubResetPace(cpu->debugStub);
     cpu->modePace = false; // Reset starts at the native vector, never stale 68k state.
     cpu->I = true;  // start w/o interrupts in supervisor mode
@@ -4741,7 +4643,6 @@ uint32_t cpuArm920ClockMode(const ArmCpu* cpu) {
     return cp15MMUClockMode(cpu->cp15.cp15mmu);
 }
 
-#ifndef __EMSCRIPTEN__
 void cpuClearNativeRuntime(ArmCpu* cpu) {
     cpu->nativePc[0] = cpu->nativePc[1] = 0;
     memset(cpu->nativeCallbacks, 0, sizeof(cpu->nativeCallbacks));
@@ -4933,8 +4834,6 @@ static bool nativeHook(ArmCpu* cpu, bool injected) {
     return false;
 }
 
-#endif
-
 void cpuSetM68kSyscallHandler(ArmCpu* cpu, M68kSyscallHandler handler, void* context) {
     cpu->m68kSyscallHandler=handler; cpu->m68kSyscallContext=context;
 }
@@ -5103,14 +5002,12 @@ static bool cpuPrvPaceRomFallback(struct ArmCpu *cpu) {
     paceGetMemeryFault(&faultAddr, &faultWrite, &fsr);
     if (!paceRestoreFaultedInstruction()) return false;
     const uint32_t state = paceGetStatePtr(), pc = paceGetPC();
-#ifndef __EMSCRIPTEN__
     // The first 8, then each power of two, so an app that faults every frame can't flood the log.
     static uint32_t faultCount = 0;
     faultCount++;
     if (faultCount <= 8 || !(faultCount & (faultCount - 1)))
         fprintf(stderr, "68k %s 0x%08x faulted (fsr=%u, pc=0x%08x), running it on the ROM PACE (fault %u)\n",
                 faultWrite ? "write to" : "read of", faultAddr, unsigned(fsr), pc, faultCount);
-#endif
     if (!paceSave68kState()) {
         cpuPrvHandlePaceMemoryFault(cpu, __func__);
         return true;
@@ -5201,7 +5098,6 @@ FORCE_INLINE static void cpuPrvCyclePace(struct ArmCpu *cpu) {
     }
 }
 
-#ifndef __EMSCRIPTEN__
 // Expose progress only while a CPU batch is on the stack. Peripheral reads can
 // observe the current instruction's time without forcing a batch every clock tick.
 struct CycleProgress {
@@ -5215,13 +5111,10 @@ struct CycleProgress {
 uint32_t cpuCyclesInProgress(const ArmCpu* cpu) {
     return cpu->cyclesInProgress ? *cpu->cyclesInProgress + cpu->jitHint.pending : 0;
 }
-#endif
 
 ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t cycleAcc = 0;
-#ifndef __EMSCRIPTEN__
     CycleProgress progress(cpu, &cycleAcc);
-#endif
 
     while (cycleAcc < cycles) {
         if (cpu->debugStub) gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
@@ -5234,7 +5127,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
     return cycleAcc;
 }
 
-#ifndef __EMSCRIPTEN__
 // icacheFetchCached for a va in the same 32-byte line as the previous fetch. The line
 // was valid for lineVa when ic->epoch was lineEpoch, and the epoch moves on every
 // invalidation and refill, so an unchanged epoch means the line still holds lineVa.
@@ -5269,9 +5161,7 @@ static FORCE_INLINE void cpuPrvRememberLine(const struct icache* ic, uint32_t pc
                  : 0xffffffff;
     lineEpoch = ic->epoch;
 }
-#endif
 
-#ifndef __EMSCRIPTEN__
 // cpuCycleArm and cpuCycleThumb without a debugger, injected call or native PC break.
 // After a fetch from a valid icache line it runs on through that line for as long as
 // each instruction leaves the PC at the next one, the epoch holds and the next slot is
@@ -5342,7 +5232,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
 
     return acc;
 }
-#endif
 
 // debug is cpu->debugStub != NULL, which is fixed when the CPU is created.
 // cycleAcc is what peripherals see through cyclesInProgress; acc is the loop's copy.
@@ -5350,13 +5239,11 @@ template <int memorySystemKind, bool injected, bool debug>
 ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t cycleAcc = 0;
     uint32_t acc = 0;
-#ifndef __EMSCRIPTEN__
     CycleProgress progress(cpu, &cycleAcc);
     struct icache* const ic = cpu->ic;
     const struct icacheline* line = ic->cache;
     uint32_t lineVa = 0xffffffff;  // never matches: the fast path mask clears bits 1-4
     uint32_t lineEpoch = ic->epoch;
-#endif
     bool ok;
     uint32_t translatedInstr;
     uint32_t decoded;
@@ -5364,10 +5251,8 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
     uint_fast8_t fsr;
 
     while (acc < cycles) {
-#ifndef __EMSCRIPTEN__
         if (unlikely(cpu->nativePc[0] || (injected && cpu->nativeCallDepth)) && nativeHook(cpu, injected))
             return acc + (injected ? 1 : 0);
-#endif
         cpu->curInstrPC = cpu->regs[REG_NO_PC];  // needed for stub to get proper pc
         if constexpr (debug) {
             gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC], true);
@@ -5384,7 +5269,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
         if (fetchPc < 0x02000000UL) fetchPc |= cpu->pid;
 #endif
 
-#ifndef __EMSCRIPTEN__
         const uint32_t pc = cpu->curInstrPC;
         if constexpr (armKindIsArm920(memorySystemKind)) {
             ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, cpu->privileged, &fsr, translatedInstr, decoded);
@@ -5407,11 +5291,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
                 cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
             }
         }
-#else
-        ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr,
-                                                        translatedInstr, decoded);
-        cost = cpu->ic->lastCost;
-#endif
 
         if (!ok) {
             cpuPrvHandleMemErr<memorySystemKind>(cpu, cpu->curInstrPC, false, true, fsr);
@@ -5423,12 +5302,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
 
         cpu->regs[REG_NO_PC] += 2;
 
-#ifdef __EMSCRIPTEN__
-        cpuPrvDispatchExecFnThumb<memorySystemKind, injected>(cpuPrvDecompressExecFn(decoded), cpu,
-                                                              translatedInstr);
-#else
         cpuPrvDecompressExecFn(decoded)(cpu, translatedInstr);
-#endif
 
         cpuPrvTakeCharge(cpu, acc, cycleAcc);
         if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
@@ -5448,23 +5322,19 @@ template <int memorySystemKind, bool injected, bool debug>
 ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t cycleAcc = 0;
     uint32_t acc = 0;
-#ifndef __EMSCRIPTEN__
     CycleProgress progress(cpu, &cycleAcc);
     struct icache* const ic = cpu->ic;
     const struct icacheline* line = ic->cache;
     uint32_t lineVa = 0xffffffff;  // never matches: the fast path mask clears bits 1-4
     uint32_t lineEpoch = ic->epoch;
-#endif
     bool ok;
     uint32_t instr, decoded;
     uint32_t cost = ICACHE_COST_ONE;
     uint_fast8_t fsr;
 
     while (acc < cycles) {
-#ifndef __EMSCRIPTEN__
         if (unlikely(cpu->nativePc[0] || (injected && cpu->nativeCallDepth)) && nativeHook(cpu, injected))
             return acc + (injected ? 1 : 0);
-#endif
         cpu->curInstrPC = cpu->regs[REG_NO_PC];  // needed for stub to get proper pc
         if constexpr (debug) {
             gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC], false);
@@ -5481,7 +5351,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
         if (fetchPc < 0x02000000UL) fetchPc |= cpu->pid;
 #endif
 
-#ifndef __EMSCRIPTEN__
         const uint32_t pc = cpu->curInstrPC;
         if constexpr (armKindIsArm920(memorySystemKind)) {
             ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, cpu->privileged, &fsr, instr, decoded);
@@ -5504,11 +5373,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
                 cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
             }
         }
-#else
-        ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr, instr,
-                                                        decoded);
-        cost = cpu->ic->lastCost;
-#endif
 
         if (!ok) {
             cpuPrvHandleMemErr<memorySystemKind>(cpu, cpu->curInstrPC, false, true, fsr);
@@ -5520,12 +5384,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
 
         cpu->regs[REG_NO_PC] += 4;
 
-#ifdef __EMSCRIPTEN__
-        cpuPrvDispatchExecFnArm<memorySystemKind, injected>(cpuPrvDecompressExecFn(decoded), cpu,
-                                                            instr);
-#else
         cpuPrvDecompressExecFn(decoded)(cpu, instr);
-#endif
 
         cpuPrvTakeCharge(cpu, acc, cycleAcc);
         if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
@@ -5541,7 +5400,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
     return acc;
 }
 
-#ifndef __EMSCRIPTEN__
 // ARM920T Fast engine: the interpreter over the decode cache (ic->cache, which the ARM920T Exact path never
 // uses) and host pages, with no I- or D-cache contents. Each instruction is classed when it is decoded:
 // plain forms run as they are; forms the probe guard decides from registers go through a check first; the
@@ -6037,35 +5895,6 @@ bool cpuArm920PeekWord(ArmCpu *cpu, uint32_t va, uint32_t *word, uint32_t *pa) {
     memcpy(word, page + (*pa & 0xfffu), 4);
     return true;
 }
-#else
-void cpuArm920SetJitAccessPcs(ArmCpu *, const uint32_t *, uint32_t) {}
-bool cpuArm920SetCodeHooks(ArmCpu *, const uint32_t *, uint32_t count) { return !count; }
-bool cpuArm920CodeHookAt(const ArmCpu *, uint32_t) { return false; }
-uint32_t cpuArm920TakeJitAccessPc(ArmCpu *) { return 0; }
-void cpuArm920JitCharge(ArmCpu *, uint32_t, uint32_t) {}
-uint32_t cpuArm920JitCharged(const ArmCpu *) { return 0; }
-bool cpuArm920PeekWord(ArmCpu *, uint32_t, uint32_t *, uint32_t *) { return false; }
-uint32_t cpuArm920RunLean(ArmCpu *, uint32_t, uint32_t *blNext, uint64_t *busAccesses) {
-    *blNext = ~0u;
-    *busAccesses = 0;
-    return 0;
-}
-uint32_t cpuArm920RunLeanFor(ArmCpu *, uint32_t, uint32_t, uint32_t *blNext, uint64_t *busAccesses) {
-    *blNext = ~0u;
-    *busAccesses = 0;
-    return 0;
-}
-void cpuArm920SetLean(ArmCpu *, Arm920LeanPage, Arm920LeanGuard, void *) {}
-void cpuArm920LeanReset(ArmCpu *) {}
-void cpuArm920LeanFlush(ArmCpu *) {}
-void cpuArm920LeanStored(ArmCpu *, uint32_t) {}
-void cpuArm920LeanStoredBytes(ArmCpu *, uint32_t, uint32_t) {}
-void cpuArm920SetLeanRead(ArmCpu *, Arm920LeanRead) {}
-void cpuArm920SetLeanWrite(ArmCpu *, Arm920LeanWrite) {}
-bool cpuArm920LeanInJit(const ArmCpu *) { return false; }
-uint32_t cpuArm920LeanGeneration(const ArmCpu *) { return 0; }
-uint64_t cpuArm920LeanCodeDrops(const ArmCpu *) { return 0; }
-#endif
 
 #ifdef FROND_DYNARMIC
 // JIT glue. The JIT runs only outside injected calls, the debugger and native PC breaks,
@@ -7420,7 +7249,6 @@ static FORCE_INLINE uint32_t cpuPrvCycleBody(struct ArmCpu *cpu, uint32_t cycles
 #endif
     if (cpu->modePace) return cpuCyclePace(cpu, cycles);
 
-#ifndef __EMSCRIPTEN__
     // nativePc is only set by RunToNativePc around a whole run, so it holds for this batch.
 #ifdef FROND_DYNARMIC
     if (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && cpu->jit && !cpu->jitLoopOnly && !injected && !cpu->debugStub &&
@@ -7429,7 +7257,6 @@ static FORCE_INLINE uint32_t cpuPrvCycleBody(struct ArmCpu *cpu, uint32_t cycles
 #endif
     if (!injected && !cpu->debugStub && !cpu->nativePc[0])
         return cpu->T ? cpuCycleLine<memorySystemKind, 2>(cpu, cycles) : cpuCycleLine<memorySystemKind, 4>(cpu, cycles);
-#endif
 
     if (cpu->T)
         return cpu->debugStub ? cpuCycleThumb<memorySystemKind, injected, true>(cpu, cycles)
@@ -7669,7 +7496,6 @@ void cpuRemoveM68kTrap0Handler(struct ArmCpu *cpu, uint32_t address) {
     cpu->m68kTrap0Handlers->erase(address);
 }
 
-#ifndef __EMSCRIPTEN__
 bool cpuOriginalTg50PaceEntryForDiagnostic(ArmCpu* cpu) {
     if (!std::getenv("FROND_TG50_ORIGINAL_PACE_DIAGNOSTIC") || cpu->modePace || cpu->T ||
         cpu->regs[REG_NO_PC] != cpu->curInstrPC || cpu->curInstrPC != 0x20100064 ||
@@ -7687,7 +7513,6 @@ bool cpuOriginalTg50PaceEntryForDiagnostic(ArmCpu* cpu) {
     cpuInvalidateCodeCache(cpu);
     return true;
 }
-#endif
 
 bool cpuIsModePace(struct ArmCpu *cpu) { return cpu->modePace; }
 
@@ -7725,9 +7550,7 @@ void cpuSave(ArmCpu *cpu, T &savestate) {
 
 template <typename T>
 void cpuLoad(ArmCpu *cpu, T &loader) {
-#ifndef __EMSCRIPTEN__
     cpuClearNativeRuntime(cpu);
-#endif
     gdbStubResetPace(cpu->debugStub);
     cpuPrvIdleForget(cpu);
     icacheInval(cpu->ic);
@@ -7757,9 +7580,7 @@ void cpuLoad(ArmCpu *cpu, T &loader) {
     LoadChunkHelper helper(*chunk);
     cpu->DoSaveLoad(helper, version);
 
-#ifndef __EMSCRIPTEN__
     cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC | SLOW_PATH_REASON_NATIVE_FAULT);
-#endif
     cpu->waitingEventsTotal = cpu->waitingFiqs + cpu->waitingIrqs;
     cpuUpdateSlowPath(cpu);
 }
@@ -7800,7 +7621,6 @@ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader) {
     auto waitingIrqs = cpu->waitingIrqs;
     auto waitingFiqs = cpu->waitingFiqs;
 
-#ifndef __EMSCRIPTEN__
     const auto nativeDepth = cpu->nativeCallDepth;
     const auto nativeSession = cpu->nativeSessionActive;
     const auto stackLower=cpu->nativeStackLower, stackUpper=cpu->nativeStackUpper;
@@ -7809,9 +7629,7 @@ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader) {
     auto* scratchData = cpu->nativeScratchData;
     decltype(cpu->nativeCallbacks) callbacks;
     memcpy(callbacks, cpu->nativeCallbacks, sizeof(callbacks));
-#endif
     cpuLoad(cpu, loader);
-#ifndef __EMSCRIPTEN__
     memcpy(cpu->nativeCallbacks, callbacks, sizeof(callbacks));
     cpu->nativeCallDepth = nativeDepth;
     cpu->nativeSessionActive = nativeSession;
@@ -7819,7 +7637,6 @@ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader) {
     cpu->nativeStackOwnerAddress=stackOwnerAddress; cpu->nativeStackOwnerValue=stackOwnerValue;
     cpu->nativeScratchBase = scratchBase; cpu->nativeScratchSize = scratchSize;
     cpu->nativeScratchData = scratchData;
-#endif
 
     cpu->sleeping = sleeping;
     cpu->waitingIrqs = waitingIrqs;
@@ -7868,9 +7685,7 @@ Arm920DataGuard cpuArm920DataGuard(ArmCpu* cpu) {
 static bool cpuPrvArm920StateIdle(const ArmCpu* cpu) {
     if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
     if (cpu->modePace || cpu->sleeping || cpu->earlyAudioHook) return false;
-#ifndef __EMSCRIPTEN__
     if (cpu->nativePc[0] || cpu->nativePc[1] || cpu->nativeCallDepth || cpu->nativeSessionActive) return false;
-#endif
     return true;
 }
 

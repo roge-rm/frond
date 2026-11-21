@@ -1,5 +1,4 @@
 #include "NetworkSimulation.h"
-#ifndef __EMSCRIPTEN__
 #include <arpa/inet.h>
 
 #include <algorithm>
@@ -530,4 +529,3 @@ bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
         return trap != 0xa0ba;
     }
 }
-#endif

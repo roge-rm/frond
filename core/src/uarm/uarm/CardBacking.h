@@ -12,7 +12,7 @@
 
 // Milestone 1 inventory of whole-card paths (do not rewrite these yet):
 //
-// sdCardData: uarm/sdcard.cpp; web/uarm.cpp GetSdCardData*; native/Commands.cpp
+// sdCardData: uarm/sdcard.cpp; native/Commands.cpp
 // save/export; native/DesktopControl.h sd-export and save; native/ReadOnlyGuest.h
 // copy/restore; tests/tx-lifecycle-rom.cpp; tests/e2-state.cpp.
 //
@@ -23,7 +23,7 @@
 //
 // There is no sdCardInsert. Insertion is SoC::SdInsert / SdEject / SdRemount and
 // deviceSetSdCardInserted: SoC.cpp, soc_generic_impl.h, native/main.cpp,
-// Commands.cpp, DesktopControl.h, web/uarm.cpp, device boards, tests.
+// Commands.cpp, DesktopControl.h, device boards, tests.
 //
 // Memory Stick savestate v1 stores protocol state and a present/protect
 // reference (mmiodev_MemoryStickController.cpp). v0 still loads an embedded

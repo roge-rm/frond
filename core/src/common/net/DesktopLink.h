@@ -11,7 +11,6 @@
 // 127.0.0.1:5679 is passed to the handheld's 5679. Whole Ethernet frames in and out;
 // single-threaded; time is guest nanoseconds. Built into libcommon-net.a so only the cores link libslirp.
 
-#ifndef __EMSCRIPTEN__
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -70,5 +69,4 @@ class DesktopLink {
 
 }  // namespace frondNet
 
-#endif
 #endif

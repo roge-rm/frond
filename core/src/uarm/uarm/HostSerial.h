@@ -1,6 +1,5 @@
 #ifndef FROND_HOST_SERIAL_H
 #define FROND_HOST_SERIAL_H
-#ifndef __EMSCRIPTEN__
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -104,5 +103,4 @@ class HostByteLink {
     struct Impl;
     std::unique_ptr<Impl> impl;
 };
-#endif
 #endif

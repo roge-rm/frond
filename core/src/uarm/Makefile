@@ -5,36 +5,9 @@ CFLAGS_COMMON := \
 	-Wno-visibility -Wno-constant-conversion -Wno-constant-logical-operand \
 	-D_FILE_OFFSET_BITS=64
 
-CFLAGS_EMCC_EXTRA = -g
-
-LDFLAGS_TEST_EXTRA ?= -lgtest_main
-
-LDFLAGS_EMCC = $(EMCC_OPT) -Wno-version-check -Wl,-u,fileno -g \
-	--post-js $(WEBIDL_BINDING_JS) \
-	-s EXIT_RUNTIME=0 \
-	-s MODULARIZE=1 \
-	-s ENVIRONMENT="web,worker" \
-	-s EXPORT_NAME=createModule \
-	-s ALLOW_MEMORY_GROWTH=1 \
-	-s INITIAL_MEMORY=33554432 \
-	-s WASM_BIGINT=1 \
-	-s ALLOW_TABLE_GROWTH=1 \
-	-s FILESYSTEM=0 \
-	-s BINARYEN_IGNORE_IMPLICIT_TRAPS=1 \
-	-s EXPORTED_RUNTIME_METHODS=["wasmTable","callMain","HEAPU8","HEAPU32"]
-
-WEBIDL_BINDING_SRC = $(WEBIDL_BINDING_DIR)/uarm.idl ../common/web/session_file5.idl
-
 INCLUDE = -I./uarm -I. -I../common -I../common/zip -I../argparse
 
 STD_C ?= -std=gnu11
-
-WASMOPT ?= $${EMSDK}/upstream/bin/wasm-opt
-WASMOPT_FLAGS = --enable-bulk-memory --enable-bulk-memory-opt  --enable-sign-ext --enable-nontrapping-float-to-int  --inlining-optimizing \
-	-fimfs 1000 -ifwl -pii 1000  -aimfs 10 -tnh -lmu -O4
-
-WASMSTRIP ?= wasm-strip
-YARN = yarn
 
 SOURCE_C = 								\
 	cputil.c							\
@@ -185,24 +158,8 @@ SOURCE_CXX_NATIVE =						\
 	native/InputReplay.cpp				\
 	native/main.cpp
 
-SOURCE_C_EMCC = $(SOURCE_C)
-SOURCE_CXX_EMCC = 						\
-	$(SOURCE_CXX)						\
-	web/main.cpp						\
-	web/uarm.cpp						\
-	web/bridge.cpp
-
-SOURCE_C_TEST = $(SOURCE_C)
-
-SOURCE_CXX_TEST =						\
-	$(SOURCE_CXX)						\
-	test/scheduler.cpp 					\
-	test/queue.cpp
-
 # The infrared phone's and Wi-Fi's slirp side (common/net), ahead of libcommon.a.
 OBJECTS_EXTRA_NATIVE = ../common/libcommon-net.a ../common/libcommon.a
-OBJECTS_EXTRA_TEST = ../common/libcommon-net.a ../common/libcommon.a
-OBJECTS_EXTRA_EMCC = ../common/libcommon-wasm.a
 
 # Fast engine: FROND_DYNARMIC_SRC is a patched Dynarmic source tree and FROND_DYNARMIC_LIBS its
 # built static libraries, in link order. Without them the core builds with the interpreter only.
@@ -212,16 +169,6 @@ OBJECTS_EXTRA_NATIVE += $(FROND_DYNARMIC_LIBS)
 endif
 
 BINARY_NATIVE = cp-uarm$(EXE_SUFFIX)
-BINARY_EMCC = uarm_web.wasm
-BINARY_TEST = test/test
-
-PROCESSED_BINARY_WASM = uarm_web_processed.wasm
-OPTIMIZED_BINARY_WASM = uarm_web_optimized.wasm
-
-GARBAGE_EXTRA = 						\
-	$(PROCESSED_BINARY_WASM)			\
-	$(PROCESSED_BINARY_WASM).s			\
-	$(OPTIMIZED_BINARY_WASM)
 
 include ../Makefile.common
 
@@ -237,25 +184,11 @@ $(BINARY_ZODIAC_DEVELOPER): $(filter-out $(BUILDDIR_NATIVE)/native/main.o,$(OBJE
 	$(LD_NATIVE) -o $@ $^ $(LDFLAGS_NATIVE) $(LDFLAGS_NATIVE_EXTRA)
 zodiac-developer: $(BINARY_ZODIAC_DEVELOPER)
 
-test: $(BINARY_TEST)
-	$(BINARY_TEST)
-
-emscripten: $(OPTIMIZED_BINARY_WASM)
-
-$(PROCESSED_BINARY_WASM): $(BINARY_EMCC)
-	if test -z "$(DEVELOP)"; then $(YARN) --cwd ./tools/build-jump-table && $(YARN) --cwd ./tools/build-jump-table build-jump-table "$$(pwd)/$^" "$$(pwd)/$@"; else cp $^ $@; fi
-
-$(OPTIMIZED_BINARY_WASM): $(PROCESSED_BINARY_WASM)
-	if test -n "$(DEVELOP)"; then cp $^ $@; else $(WASMOPT) $(WASMOPT_FLAGS) -o $@ $^; fi
-	if test -z "$(DEVELOP)"; then $(WASMSTRIP) $@; fi
-
-.PHONY: bin emscripten clean test zodiac-developer
+.PHONY: bin clean zodiac-developer
 
 # Native virtual wireless router
 CXXFLAGS_NATIVE_EXTRA += $(shell pkg-config --cflags slirp)
 LDFLAGS_NATIVE_EXTRA += $(shell pkg-config --libs slirp)
-CXXFLAGS_TEST_EXTRA += $(shell pkg-config --cflags slirp)
-LDFLAGS_TEST_EXTRA += $(shell pkg-config --libs slirp)
 
 
 ifneq ($(FROND_DYNARMIC_SRC),)

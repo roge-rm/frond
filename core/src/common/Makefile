@@ -42,32 +42,11 @@ SOURCE_CXX_NATIVE = 				\
 	$(SOURCE_CXX)					\
 	Cli.cpp
 
-SOURCE_C_EMCC = $(SOURCE_C)
-SOURCE_CXX_EMCC = $(SOURCE_CXX)
-
-SOURCE_C_TEST = $(SOURCE_C)
-SOURCE_CXX_TEST = 					\
-	$(SOURCE_CXX) 					\
-	test/Crc.cpp 					\
-	test/GunzipContext.cpp 			\
-	test/GzipContext.cpp			\
-	test/SaveChunkHelper.cpp		\
-	test/LoadChunkHelper.cpp		\
-	test/Savestate.cpp				\
-	test/SavestateChunk.cpp			\
-	test/SavestateChunkProbe.cpp	\
-	test/SavestateLoader.cpp		\
-	test/SavestateProbe.cpp			\
-	test/Encoding.cpp				\
-	test/main.cpp
-
 LIBRARY_NATIVE = libcommon.a
 # libslirp behind PPP and Wi-Fi, a library of its own so only the cores link libslirp.
 LIBRARY_NET = libcommon-net.a
 OBJECTS_NET = $(BUILDDIR_NATIVE)/net/SlirpIp.o $(BUILDDIR_NATIVE)/net/WifiRouter.o $(BUILDDIR_NATIVE)/net/DesktopLink.o
 GARBAGE_EXTRA = $(LIBRARY_NET)
-LIBRARY_EMCC = libcommon-wasm.a
-BINARY_TEST = test/test
 
 include ../Makefile.common
 
@@ -81,9 +60,4 @@ $(LIBRARY_NET): $(OBJECTS_NET)
 	$(AR_NATIVE) cru $@ $^
 	$(RANLIB_NATIVE) $@
 
-emscripten: $(LIBRARY_EMCC)
-
-test: $(BINARY_TEST)
-	$(BINARY_TEST)
-
-.PHONY: bin net emscripten clean test
+.PHONY: bin net clean

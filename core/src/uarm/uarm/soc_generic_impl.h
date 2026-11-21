@@ -45,7 +45,6 @@ bool SocGeneric<T>::RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
     return true;
 }
 
-#ifndef __EMSCRIPTEN__
 template <class T>
 bool SocGeneric<T>::RunToNativePc(uint32_t first, uint32_t second, uint64_t maxCycles, uint64_t cyclesPerSecond) {
     if (!first || !maxCycles || cyclesPerSecond < 1000 || maxCycles > 50000000 ||
@@ -56,8 +55,6 @@ bool SocGeneric<T>::RunToNativePc(uint32_t first, uint32_t second, uint64_t maxC
     this->AccountInjectedCycles(cycles, cyclesPerSecond);
     return cpuGetSlowPathReason(this->cpu) & SLOW_PATH_REASON_NATIVE_PC;
 }
-
-#endif
 
 template <class T>
 bool SocGeneric<T>::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) {
@@ -78,9 +75,7 @@ void SocGeneric<T>::Reset() {
     paceBreakSyscall = 0;
     SoC::Reset();
 
-#ifndef __EMSCRIPTEN__
     const auto networkMode = std::string(networkSimulation.GetModeName());
-#endif
     const bool keyboardAttached = KeyboardAttached();
     const bool gamepadAttached = GamepadAttached();
     const bool pcmOutputEnabled = pcmEnabled;
@@ -94,10 +89,8 @@ void SocGeneric<T>::Reset() {
     if (!loader.Load(powerOnState->GetBuffer(), powerOnState->GetSize(), static_cast<T&>(*this)))
         ERR("failed to restore power-on state");
 
-#ifndef __EMSCRIPTEN__
     networkSimulation.SetMode(networkMode);
     networkSimulation.Reset();
-#endif
     AttachKeyboard(keyboardAttached);
     // The pad stays plugged in; the rebooted ROM has forgotten it until its next press.
     if (gamepadAttached) AttachGamepad(true, false);
@@ -174,9 +167,7 @@ void SocGeneric<T>::Load(SavestateLoader<ChunkType>& loader) {
     cpuLoad(cpu, loader);
     scheduler->Load(loader);
     systemStateLoad(systemState, loader);
-#ifndef __EMSCRIPTEN__
     networkSimulation.Load(loader);
-#endif
 
     uint32_t version;
     Chunk* chunk = loader.GetChunkOrFail(ChunkType::socGeneric, SOC_GENERIC_SAVESTATE_VERSION,
@@ -196,9 +187,7 @@ void SocGeneric<T>::Save(U& savestate) {
     cpuSave(cpu, savestate);
     scheduler->Save(savestate);
     systemStateSave(systemState, savestate);
-#ifndef __EMSCRIPTEN__
     networkSimulation.Save(savestate);
-#endif
 
     auto* chunk = savestate.GetChunk(ChunkType::socGeneric, SOC_GENERIC_SAVESTATE_VERSION);
     if (!chunk) ERR("unable to allocate chunk");

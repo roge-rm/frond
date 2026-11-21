@@ -3,23 +3,9 @@
 CFLAGS_COMMON = -Wextra -Wall -Wno-unused-parameter -Wno-pragma-pack -Wno-multichar -Wno-unknown-pragmas \
 	-Wno-missing-field-initializers -DEMULATION_LEVEL=EMULATION_UNIX
 
-CFLAGS_EMCC_EXTRA = -D_POSIX_SOURCE
-
-LDFLAGS_TEST_EXTRA ?= -lgtest_main
-
-EMCC_INITIAL_MEMORY = 67108864
-
-WEBIDL_BINDING_SRC = \
-	$(WEBIDL_BINDING_DIR)/cloudpilot.idl \
-	../common/web/gunzip.idl \
-	../common/web/zipfile_walker.idl \
-	../common/web/session_file5.idl \
-	../common/web/rom_info5.idl
-
 INCLUDE = \
 	-I../common \
 	-I../common/zip \
-	-I../skins \
 	-I./emulator/hardware \
 	-I./emulator/hardware/clie \
 	-I./emulator/hardware/handera \
@@ -41,8 +27,7 @@ INCLUDE = \
 	-I./emulator \
 	-I./nanopb \
 	-I./proto \
-	-I../argparse \
-	-Inative/network-backend
+	-I../argparse
 
 SOURCE_C = \
 	emulator/uae/cpudefs.c \
@@ -182,54 +167,7 @@ SOURCE_CXX = \
 	emulator/StackDump.cpp \
 	emulator/Debugger.cpp
 
-SOURCE_C_NATIVE = $(SOURCE_C)
-SOURCE_CXX_NATIVE = \
-	$(SOURCE_CXX) \
-	native/main.cpp \
-	native/MainLoop.cpp \
-	native/Silkscreen.cpp \
-	native/util.cpp \
-	native/EventHandler.cpp \
-	native/Commands.cpp \
-	native/proxyClientWs.cpp \
-	native/proxyClientNative.cpp \
-	native/ProxyHandler.cpp \
-	native/GdbStub.cpp \
-	native/ElfParser.cpp \
-	native/network-backend/NetworkSession.cpp \
-	native/network-backend/networkBackend.cpp \
-	native/network-backend/codes.cpp \
-	native/network-backend/sockopt.cpp \
-	native/DebugSupport.cpp \
-	emulator/assert_native.cpp \
-	emulator/stacktrace.cpp
-
-SOURCE_C_EMCC = $(SOURCE_C)
-SOURCE_CXX_EMCC = \
-	$(SOURCE_CXX) \
-	emulator/assert_emscripten.cpp \
-	web/main.cpp \
-	web/Cloudpilot.cpp \
-	web/RomInfo.cpp \
-	web/SkinLoader.cpp
-
-SOURCE_C_TEST = $(SOURCE_C)
-SOURCE_CXX_TEST = \
-	$(SOURCE_CXX) \
-	emulator/assert_native.cpp \
-	emulator/stacktrace.cpp \
-	test/Fifo.cpp
-
-OBJECTS_EXTRA_NATIVE = ../common/libcommon.a
-OBJECTS_EXTRA_TEST = ../common/libcommon.a
-OBJECTS_EXTRA_EMCC = ../common/libcommon-wasm.a ../skins/libskin-wasm.a
-
-BINARY_NATIVE = cloudpilot-emu$(EXE_SUFFIX)
-BINARY_EMCC = cloudpilot_web.wasm
-BINARY_TEST = test/test
-
-# frond-68k (make FROND_68K=1 frond-68k): the core and Frond's runner in frond/, without the
-# network proxy, readline CLI or SDL front end.
+# frond-68k (make FROND_68K=1 frond-68k): the core and Frond's runner in frond/.
 SOURCE_CXX_FROND = \
 	frond/UsbBusHost.cpp \
 	frond/UsbHostBridge.cpp \
@@ -245,6 +183,7 @@ SOURCE_CXX_FROND = \
 	emulator/stacktrace.cpp
 
 ifdef FROND_68K
+SOURCE_C_NATIVE = $(SOURCE_C)
 SOURCE_CXX_NATIVE = $(SOURCE_CXX_FROND)
 BINARY_NATIVE = frond-68k$(EXE_SUFFIX)
 BUILDDIR_NATIVE = .build-frond
@@ -260,14 +199,11 @@ endif
 
 include ../Makefile.common
 
+# Without FROND_68K there is nothing to link; keep clean from becoming the default goal.
+.DEFAULT_GOAL := bin
 bin: $(BINARY_NATIVE)
 
-emscripten: $(BINARY_EMCC)
-
-test: $(BINARY_TEST)
-	$(BINARY_TEST)
-
-.PHONY: bin emscripten clean test
+.PHONY: bin clean
 ifeq ($(FROND_68K),1)
 $(BUILDDIR_NATIVE)/frond/main.o: frond/RuntimeCards.h emulator/ExternalStorage.h ../uarm/uarm/SessionIo.h ../uarm/uarm/FileCardBacking.h ../uarm/uarm/CardBacking.h ../common/CardImage.h
 endif

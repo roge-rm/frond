@@ -13,11 +13,7 @@ namespace {
     constexpr uint32_t BIN_SIZE = 1000000;
     constexpr uint32_t CYCLES_PER_SECOND_LIMIT_DEFAULT = 100000000;
     constexpr uint32_t MAX_LOAD_MAX = 97;
-#ifdef __EMSCRIPTEN__
-    constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 20;
-#else
     constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 10;
-#endif
     constexpr int PRESERVE_TIMESLICES_FOR_CATCHUP = 3;
 }  // namespace
 
@@ -77,11 +73,7 @@ double MainLoop::Cycle(uint64_t now, bool paused) {
     const uint64_t limit = CurrentLimit();
     double cyclesPerSecond = emulatedTime ? double(limit) : CalculateCyclesPerSecond(
         deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad, limit);
-#ifdef __EMSCRIPTEN__
-    const double runUsec = deltaUsec;
-#else
     const double runUsec = std::min(deltaUsec, double(timesliceUsec));
-#endif
     const uint64_t cyclesEmulated =
         soc->Run(runUsec * cyclesPerSecond / 1E6, round(cyclesPerSecond));
 
