@@ -130,80 +130,78 @@ uint64_t S3cLcd::ticksToEvent(bool interruptOnly) const {
     return lineTicks() * frameLines() - phase;
 }
 
-bool S3cLcd::frameSource(const std::function<bool(uint32_t, void*, size_t)>& memory,
-                         std::vector<uint8_t>& source) const {
-    if (!enabled() || ((lcdcon[0] >> 5) & 3) != 3) return false;
-    const unsigned bppmode = (lcdcon[0] >> 1) & 0xf;
-    if (bppmode != 0xc && bppmode != 0xd) return false;
-    const unsigned width = ((lcdcon[2] >> 8) & 0x7ff) + 1, height = ((lcdcon[1] >> 14) & 0x3ff) + 1;
-    const uint32_t stride = ((saddr[2] & 0x7ff) + ((saddr[2] >> 11) & 0x7ff)) * 2;
-    const uint32_t lineBytes = width * (bppmode == 0xd ? 4 : 2);
-    const uint32_t regs[] = {lcdcon[0], lcdcon[1], lcdcon[2], lcdcon[3], lcdcon[4], saddr[0], saddr[2]};
-    source.resize(sizeof(regs) + size_t(lineBytes) * height);
-    std::memcpy(source.data(), regs, sizeof(regs));
-    const uint32_t start = frameAddress();
-    for (unsigned y = 0; y < height; ++y)
-        if (!memory(start + y * (stride ? stride : lineBytes), source.data() + sizeof(regs) + size_t(y) * lineBytes,
-                    lineBytes))
-            return false;
-    return true;
-}
-
-bool S3cLcd::frame(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint32_t>& pixels,
-                   unsigned& width, unsigned& height, std::string& why) const {
+bool S3cLcd::layout(Layout& out, std::string& why) const {
     if (!enabled()) { why = "LCD off (ENVID clear)"; return false; }
     if (((lcdcon[0] >> 5) & 3) != 3) { why = "STN panel modes aren't decoded"; return false; }
     const unsigned bppmode = (lcdcon[0] >> 1) & 0xf;
     if (bppmode != 0xc && bppmode != 0xd) { why = "TFT modes below 16 bpp (palette) aren't decoded"; return false; }
-    const bool bpp24 = bppmode == 0xd;
-    width = ((lcdcon[2] >> 8) & 0x7ff) + 1;
-    height = ((lcdcon[1] >> 14) & 0x3ff) + 1;
+    out.bpp24 = bppmode == 0xd;
+    out.width = ((lcdcon[2] >> 8) & 0x7ff) + 1;
+    out.height = ((lcdcon[1] >> 14) & 0x3ff) + 1;
+    out.lineBytes = out.width * (out.bpp24 ? 4 : 2);
     // Halfwords per line: PAGEWIDTH shown, then OFFSIZE skipped.
     const uint32_t pageWidth = saddr[2] & 0x7ff, offSize = (saddr[2] >> 11) & 0x7ff;
     const uint32_t stride = (pageWidth + offSize) * 2;
-    const uint32_t lineBytes = width * (bpp24 ? 4 : 2);
-    const bool frm565 = lcdcon[4] & (1u << 11), bpp24bl = lcdcon[4] & (1u << 12);
-    const bool bswp = lcdcon[4] & 2, hwswp = lcdcon[4] & 1;
-    std::vector<uint8_t> line(lineBytes);
+    out.stride = stride ? stride : out.lineBytes;
+    out.start = frameAddress();
+    out.frm565 = lcdcon[4] & (1u << 11);
+    out.bpp24bl = lcdcon[4] & (1u << 12);
+    out.bswp = lcdcon[4] & 2;
+    out.hwswp = lcdcon[4] & 1;
+    return true;
+}
+
+void S3cLcd::convertLine(const Layout& l, const uint8_t* line, uint32_t* out, bool abgr) {
+    const unsigned width = l.width;
+    if (l.bpp24) {
+        for (unsigned x = 0; x < width; ++x) {
+            uint32_t w = uint32_t(line[x * 4]) | uint32_t(line[x * 4 + 1]) << 8 | uint32_t(line[x * 4 + 2]) << 16 |
+                         uint32_t(line[x * 4 + 3]) << 24;
+            if (l.bswp) w = __builtin_bswap32(w);
+            const uint32_t rgb = l.bpp24bl ? w >> 8 : w & 0xffffff;
+            out[x] = abgr ? 0xff000000u | (rgb & 0xff) << 16 | (rgb & 0xff00) | ((rgb >> 16) & 0xff) : rgb;
+        }
+        return;
+    }
+    // A word holds two pixels, the first in D[31:16] unless HWSWP; BSWP swaps the bytes first. So pixel x is
+    // the little-endian halfword x, or x ^ 1 when HWSWP and BSWP are the same, byte swapped with BSWP.
+    const unsigned flip = l.hwswp != l.bswp ? 0 : 1;
+    const bool frm565 = l.frm565, bswp = l.bswp;
+    for (unsigned x = 0; x < width; ++x) {
+        const unsigned i = x ^ flip;
+        uint32_t p = i < width ? uint32_t(line[i * 2]) | uint32_t(line[i * 2 + 1]) << 8 : 0;
+        if (bswp) p = (p >> 8 | p << 8) & 0xffff;
+        // 5:6:5, or 5:5:5:I with the intensity bit as each colour's sixth bit; widened to 8 bits.
+        uint32_t r6, g6, b6;
+        if (frm565) {
+            r6 = ((p >> 11) & 0x1f) << 1 | ((p >> 15) & 1);
+            g6 = (p >> 5) & 0x3f;
+            b6 = (p & 0x1f) << 1 | ((p >> 4) & 1);
+        } else {
+            const uint32_t in = p & 1;
+            r6 = ((p >> 11) & 0x1f) << 1 | in;
+            g6 = ((p >> 6) & 0x1f) << 1 | in;
+            b6 = ((p >> 1) & 0x1f) << 1 | in;
+        }
+        const uint32_t r = r6 << 2 | r6 >> 4, g = g6 << 2 | g6 >> 4, b = b6 << 2 | b6 >> 4;
+        out[x] = abgr ? 0xff000000u | b << 16 | g << 8 | r : r << 16 | g << 8 | b;
+    }
+}
+
+bool S3cLcd::frame(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint32_t>& pixels,
+                   unsigned& width, unsigned& height, std::string& why) const {
+    Layout l;
+    if (!layout(l, why)) return false;
+    width = l.width;
+    height = l.height;
+    std::vector<uint8_t> line(l.lineBytes);
     pixels.assign(size_t(width) * height, 0);
-    const uint32_t start = frameAddress();
     for (unsigned y = 0; y < height; ++y) {
-        if (!memory(start + y * (stride ? stride : lineBytes), line.data(), lineBytes)) {
+        if (!memory(l.lineAddress(y), line.data(), l.lineBytes)) {
             why = "the frame isn't in memory";
             return false;
         }
-        for (unsigned x = 0; x < width; ++x) {
-            uint32_t rgb;
-            if (bpp24) {
-                uint32_t w = uint32_t(line[x * 4]) | uint32_t(line[x * 4 + 1]) << 8 | uint32_t(line[x * 4 + 2]) << 16 |
-                             uint32_t(line[x * 4 + 3]) << 24;
-                if (bswp) w = __builtin_bswap32(w);
-                rgb = bpp24bl ? w >> 8 : w & 0xffffff;
-            } else {
-                // A word holds two pixels, the first in D[31:16] unless HWSWP; BSWP swaps the bytes first.
-                const unsigned word = x / 2 * 4;
-                uint32_t w = uint32_t(line[word]) | uint32_t(line[word + 1]) << 8 | uint32_t(line[word + 2]) << 16 |
-                             uint32_t(line[word + 3]) << 24;
-                if (bswp) w = __builtin_bswap32(w);
-                const bool high = (x & 1) == (hwswp ? 1u : 0u);
-                const uint32_t p = high ? w >> 16 : w & 0xffff;
-                // 5:6:5, or 5:5:5:I with the intensity bit as each colour's sixth bit; widened to 8 bits.
-                uint32_t r6, g6, b6;
-                if (frm565) {
-                    r6 = ((p >> 11) & 0x1f) << 1 | ((p >> 15) & 1);
-                    g6 = (p >> 5) & 0x3f;
-                    b6 = (p & 0x1f) << 1 | ((p >> 4) & 1);
-                } else {
-                    const uint32_t i = p & 1;
-                    r6 = ((p >> 11) & 0x1f) << 1 | i;
-                    g6 = ((p >> 6) & 0x1f) << 1 | i;
-                    b6 = ((p >> 1) & 0x1f) << 1 | i;
-                }
-                const uint32_t r = r6 << 2 | r6 >> 4, g = g6 << 2 | g6 >> 4, b = b6 << 2 | b6 >> 4;
-                rgb = r << 16 | g << 8 | b;
-            }
-            pixels[size_t(y) * width + x] = rgb;
-        }
+        convertLine(l, line.data(), pixels.data() + size_t(y) * width, false);
     }
     return true;
 }

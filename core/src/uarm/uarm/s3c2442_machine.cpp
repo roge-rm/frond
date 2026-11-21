@@ -524,22 +524,19 @@ void S3c2442Machine::setStylus(bool down, uint16_t x, uint16_t y) {
     updateLines();
 }
 
+const uint8_t* S3c2442Machine::sdramSpan(uint32_t pa, size_t n) const {
+    if (pa < sdramBase || uint64_t(pa) + n > uint64_t(sdramBase) + options.ramBytes) return nullptr;
+    return ramBuffer + (pa - sdramBase);
+}
+
 bool S3c2442Machine::screen(std::vector<uint32_t>& pixels, unsigned& width, unsigned& height, std::string& why) const {
     auto memory = [&](uint32_t pa, void* out, size_t n) {
-        if (pa < sdramBase || uint64_t(pa) + n > uint64_t(sdramBase) + options.ramBytes) return false;
-        std::memcpy(out, ramBuffer + (pa - sdramBase), n);
+        const uint8_t* at = sdramSpan(pa, n);
+        if (!at) return false;
+        std::memcpy(out, at, n);
         return true;
     };
     return lcd.frame(memory, pixels, width, height, why);
-}
-
-bool S3c2442Machine::screenSource(std::vector<uint8_t>& source) const {
-    auto memory = [&](uint32_t pa, void* out, size_t n) {
-        if (pa < sdramBase || uint64_t(pa) + n > uint64_t(sdramBase) + options.ramBytes) return false;
-        std::memcpy(out, ramBuffer + (pa - sdramBase), n);
-        return true;
-    };
-    return lcd.frameSource(memory, source);
 }
 
 void S3c2442Machine::catchUp() {

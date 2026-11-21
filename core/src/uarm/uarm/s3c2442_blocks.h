@@ -564,9 +564,23 @@ class S3cLcd {
     // the controller is off or set to something not decoded.
     bool frame(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint32_t>& pixels,
                unsigned& width, unsigned& height, std::string& why) const;
-    // Every input frame() reads: the registers it decodes, then each line's bytes. Equal sources give equal
-    // frames, so a caller can skip converting an unchanged one. False where frame() would fail.
-    bool frameSource(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint8_t>& source) const;
+    // What frame() decodes, without the pixels: the size, where each line starts and the pixel format.
+    struct Layout {
+        unsigned width, height;
+        uint32_t start, stride, lineBytes;
+        bool bpp24, frm565, bpp24bl, bswp, hwswp;
+        bool operator==(const Layout& o) const {
+            return width == o.width && height == o.height && start == o.start && stride == o.stride &&
+                   lineBytes == o.lineBytes && bpp24 == o.bpp24 && frm565 == o.frm565 && bpp24bl == o.bpp24bl &&
+                   bswp == o.bswp && hwswp == o.hwswp;
+        }
+        bool operator!=(const Layout& o) const { return !(*this == o); }
+        uint32_t lineAddress(unsigned y) const { return start + y * stride; }
+    };
+    // False, with why, where frame() would fail before reading memory.
+    bool layout(Layout& out, std::string& why) const;
+    // One line of lineBytes in the layout's format to width pixels, 0xRRGGBB, or with abgr 0xffBBGGRR.
+    static void convertLine(const Layout& layout, const uint8_t* line, uint32_t* out, bool abgr);
     // The frame's physical start, from LCDSADDR1.
     uint32_t frameAddress() const { return (saddr[0] & 0x3fffffff) << 1; }
 
