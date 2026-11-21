@@ -90,6 +90,16 @@ uint64_t jitChargedWrites = 0;  // for tests
 // Fast blocks: set by jitChargedWrite around its access when the write's wait clocks pass with no change. access then
 // commits the write at once, with no preview and no cs5Wait, and jitChargedWrite defers the clocks (deferredHclk).
 bool leanSubmit = false;
+// A graphics-only stretch of a JIT run can leave the board behind the chip until the next board access.
+uint32_t pendingBoardCycles = 0, pendingBoardHclk = 0;
+bool batchSubmitBoard = [] {
+    const char* value = std::getenv("FROND_ZODIAC_SUBMIT_BOARD");
+    return value && !std::strcmp(value, "1");
+}();
+bool keepSubmitSpan = [] {
+    const char* value = std::getenv("FROND_ZODIAC_SUBMIT_SPAN");
+    return value && !std::strcmp(value, "1");
+}();
 bool scanPollSkip = true, fifoWaitSkip = true, uartPollSkip = true;
 // Fast blocks: the pen routine's ASP FIFO wait (skipAspPoll). FROND_ASP_POLL_SKIP=0 turns it off, for measuring. A
 // FIFO_PTR read by the loop's load that sees the loop go on ends the JIT run, so the next run starts on the load
@@ -404,8 +414,19 @@ struct Probe {
         const uint64_t hclk = std::min<uint64_t>(peripherals.idleQuietHclk(), uint64_t(1) << 30);
         if (hclk < 3) return 0;
         const auto busPeriod = peripherals.busReferencePeriod();
-        const __uint128_t board = __uint128_t(hclk - 2) * busPeriod.numerator * cpuPeriod.denominator /
-                                  (__uint128_t(busPeriod.denominator) * cpuPeriod.numerator);
+        // Synchronous CPU cycles use the HCLK period. With separate clocks, keep the same
+        // rounded-down bound and use wider products only when needed.
+        __uint128_t board = hclk - 2;
+        if (busPeriod.numerator != cpuPeriod.numerator || busPeriod.denominator != cpuPeriod.denominator) {
+            uint64_t busUnits, scaled, divisor;
+            if (!__builtin_mul_overflow(hclk - 2, busPeriod.numerator, &busUnits) &&
+                !__builtin_mul_overflow(busUnits, cpuPeriod.denominator, &scaled) &&
+                !__builtin_mul_overflow(busPeriod.denominator, cpuPeriod.numerator, &divisor))
+                board = scaled / divisor;
+            else
+                board = __uint128_t(hclk - 2) * busPeriod.numerator * cpuPeriod.denominator /
+                        (__uint128_t(busPeriod.denominator) * cpuPeriod.numerator);
+        }
         // One charge takes 32 bits of cycles.
         cycles = std::min<uint64_t>(cycles, uint64_t(1) << 24);
         if (board < cycles) cycles = uint64_t(board);
@@ -414,15 +435,16 @@ struct Probe {
             if (now.compare(bounds->deadline) >= 0) return 0;
             // Cycles until the deadline, rounded up; the one that reaches it is charged alone.
             const auto left = bounds->deadline.intervalSince(now);
-            const __uint128_t max = ~__uint128_t(0);
-            __uint128_t steps;
-            if (left.ticks > (max - left.numerator) / left.denominator ||
-                (__uint128_t(left.ticks) * left.denominator + left.numerator) > max / cpuPeriod.denominator ||
-                left.denominator > max / cpuPeriod.numerator) {
+            __uint128_t value, divisor, steps;
+            if (__builtin_mul_overflow(left.ticks, left.denominator, &value) ||
+                __builtin_add_overflow(value, left.numerator, &value) ||
+                __builtin_mul_overflow(value, cpuPeriod.denominator, &value) ||
+                __builtin_mul_overflow(left.denominator, cpuPeriod.numerator, &divisor)) {
                 steps = __uint128_t(left.ticks) * cpuPeriod.denominator / cpuPeriod.numerator;
+            } else if (value <= UINT64_MAX && divisor <= UINT64_MAX) {
+                const uint64_t scaled = uint64_t(value), period = uint64_t(divisor);
+                steps = scaled / period + (scaled % period != 0);
             } else {
-                const __uint128_t value = (__uint128_t(left.ticks) * left.denominator + left.numerator) * cpuPeriod.denominator;
-                const __uint128_t divisor = left.denominator * cpuPeriod.numerator;
                 steps = value / divisor + (value % divisor != 0);
             }
             if (!steps) return 0;
@@ -433,7 +455,27 @@ struct Probe {
     }
     // Charges the waiting cycles. Anything that reads or changes the board, the graphics chip or the
     // time calls this first. A refusal is kept in graphicsWireStatus for the next clock boundary.
-    bool chargeDeferred() {
+    void flushSubmitBoard() {
+        if (!pendingBoardCycles && !pendingBoardHclk) return;
+        peripherals.advanceCpuThenHclk(std::exchange(pendingBoardCycles, 0), quietMode,
+                                       options.assumeMpllSettled, std::exchange(pendingBoardHclk, 0));
+        const auto status = peripherals.clockStatus();
+        if (status != Imx1BootstrapAccess::ok && graphicsWireStatus == Imx1BootstrapAccess::ok)
+            graphicsWireStatus = status;
+    }
+    void chargeBoardAfterGraphics(uint32_t cycles, uint32_t hclk, bool keepBoard) {
+        if (keepBoard) {
+            pendingBoardCycles += cycles;
+            pendingBoardHclk += hclk;
+        } else {
+            peripherals.advanceCpuThenHclk(cycles, quietMode, options.assumeMpllSettled, hclk);
+        }
+    }
+    bool chargeDeferred(bool keepBoard = false) {
+        if (!keepBoard) {
+            flushSubmitBoard();
+            if (graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
+        }
         quietCycles = 0;
         linesPending = false;
         if (!deferredCycles && !deferredHclk) return true;
@@ -446,8 +488,8 @@ struct Probe {
             status = advanceGraphicsCpu(cycles, cpuPeriod);
             if (status == Imx1BootstrapAccess::ok) {
                 if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-                peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
-                status = peripherals.clockStatus();
+                chargeBoardAfterGraphics(cycles, 0, keepBoard);
+                if (!keepBoard) status = peripherals.clockStatus();
             }
         } else {
             // Wait clocks come only from Fast's lean path and JIT, inside a quiet span: it takes the cycles and then
@@ -469,8 +511,8 @@ struct Probe {
                 });
             if (status == Imx1BootstrapAccess::ok) {
                 if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
-                peripherals.advanceCpuThenHclk(cycles, quietMode, options.assumeMpllSettled, hclk);
-                status = peripherals.clockStatus();
+                chargeBoardAfterGraphics(cycles, hclk, keepBoard);
+                if (!keepBoard) status = peripherals.clockStatus();
             }
         }
         if (status == Imx1BootstrapAccess::ok) return true;
@@ -717,6 +759,7 @@ struct Probe {
     static bool leanReadAnswer(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t left,
                                bool single, uint32_t* value, uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
+        if (pendingBoardCycles || pendingBoardHclk) p.flushSubmitBoard();
         *cost = 0;
         if (inJit && (pa & ~1u) == 0x15000000) return single && size == 1 && p.jitYmfAccess(pa, false, *value, ran, pc);
         if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
@@ -980,13 +1023,21 @@ struct Probe {
     // span is worked out again, and the run stops at its next block if the span now ends before its budget.
     __attribute__((noinline)) bool jitChargedWrite(uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t pc) {
         if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver) return false;
+        // The existing span already excludes charges from earlier runs. A write inside it can keep the
+        // board behind the chip, and can keep the span if it only adds to an active queue.
+        const uint64_t used = uint64_t(ran) + leanCs5.waitCost;
+        const uint64_t remaining = quietCycles > used ? quietCycles - used : 0;
+        const bool queued = cs5Configuration.engineState().idleQuietTicks() != UINT64_MAX;
+        const bool keepBoard = batchSubmitBoard && remaining >= leanMinimumSpan &&
+            uint64_t(pendingBoardCycles) + deferredCycles + ran <= UINT32_MAX &&
+            uint64_t(pendingBoardHclk) + deferredHclk + leanCs5.waitClocks <= UINT32_MAX;
         deferredHclk += leanCs5.waitClocks;
         result.cs5WaitClocks += leanCs5.waitClocks;
         work += leanCs5.waitClocks;
         leanCs5 = {};
         deferredCycles += ran;
         cpuArm920JitCharge(cpu, ran, 0);
-        if (!chargeDeferred()) return false;
+        if (!chargeDeferred(keepBoard)) return false;
         auto& t = result.trace;
         const auto saved = t;
         t.pc = pc;
@@ -1002,6 +1053,7 @@ struct Probe {
                      !graphicsFrame.scanDue(cs5Configuration, peripherals.eimState()) &&
                      acceptGraphics(cs5Configuration, false) == Imx1BootstrapAccess::ok;
         const bool lean = leanSubmit;
+        if (!lean && keepBoard) flushSubmitBoard();
         const bool ok = access(this, pa, uint_fast8_t(size), true, &datum);
         leanSubmit = false;
         t = saved;
@@ -1017,8 +1069,19 @@ struct Probe {
             work += clocks;
             cost = leanClockCost(clocks);
         }
-        updateInterrupts();
-        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        // A queued write cannot change the front batch's deadline, and scan and board deadlines
+        // still hold within the original span. A new batch needs its own graphics bound.
+        const bool reuseSpan = keepSubmitSpan && lean && queued && remaining > cost &&
+            cs5Configuration.engineState().idleQuietTicks() != UINT64_MAX;
+        if (reuseSpan) {
+            quietCycles = remaining;
+        } else if (keepBoard && lean && remaining > cost) {
+            quietCycles = std::min(remaining, cs5Configuration.quietCpuCycles(peripherals.cpuReferencePeriod(quietMode)));
+        } else {
+            flushSubmitBoard();
+            updateInterrupts();
+            quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        }
         if (cost) {
             if (quietCycles > cost) quietCycles -= cost;
             else {
@@ -1567,6 +1630,7 @@ struct Probe {
     }
     static bool access(void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
         auto& p = *static_cast<Probe*>(context);
+        if (!leanSubmit && (pendingBoardCycles || pendingBoardHclk)) p.flushSubmitBoard();
         // A register write can change which pages are plain (SDRAM modes, the PCM DMA buffer).
         if (p.fastEngine && write && Imx1Bootstrap::plainPagesWrite(address)) cpuArm920LeanFlush(p.cpu);
         // ROM and RAM hold no time. Everything else sees the board at this instruction's own time, and so
@@ -2549,6 +2613,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                                                          uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)),
                                                          &instructions);
                     inJit = false;
+                    p->flushSubmitBoard();
                     delayPassed = false;
                     if (jitHalt) {
                         jitHalt = false;

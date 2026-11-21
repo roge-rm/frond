@@ -1284,6 +1284,30 @@ void jitRingSubmits() {
     assert(w >= 8);
 }
 
+// Read the ring between two submissions while the head batch is still drawing.
+void jitQueuedRingSubmits() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    for (unsigned i = 0; i < 12; ++i) {
+        g.fill(4);
+        g.fill();
+        g.busy();
+        g.word(g.cursor, 0xe1a08006); g.cursor += 4; ++g.retired;  // mov r8, r6
+        g.op(0xb8c64, 0x1601021c, false, 0);
+        g.word(g.cursor, 0xe1a09006); g.cursor += 4; ++g.retired;  // mov r9, r6
+        g.spin(40000);
+    }
+    g.op(0, 0x16800000, false, 0);
+    g.end();
+    const uint64_t before = imx1MachineJitChargedWrites(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    print("queued ring submits exact", exact); print("queued ring submits blocks", fast);
+    sameResult(exact, fast);
+    assert(exact.run.result.registers[8] & 0x80000000u);
+    assert(exact.run.result.registers[6] == 0xffffffff);
+    assert(imx1MachineJitChargedWrites(nullptr) - before >= 12);
+}
+
 // The ROM's timer delay loop (2009f678) waiting 120 counts of timer 1 at prescaler 256, 20 times. Fast blocks skip
 // the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
 // Exact's guest time. With stores, each wait comes right after graphics memory stores, whose wait clocks are still
@@ -2341,6 +2365,7 @@ void jitLong() {
     jitBoardRegisters();
     jitRingPolls();
     jitRingSubmits();
+    jitQueuedRingSubmits();
     jitSwiTimer();
     delayLoop();
     delayLoop(true);

@@ -247,8 +247,14 @@ uint64_t Imx1Bootstrap::referenceQuietSteps(uint64_t numerator, uint64_t denomin
     // periods to go, in eventScale units; the others have more. These are imx1StepsUntil's sums for it, exact
     // as every product fits 128 bits.
     if (!numerator || !denominator) return 1;
-    const __uint128_t left = __uint128_t(lazy.event) - __uint128_t(lazy.units) * (lazy.eventScale / lazy.denominator);
-    const __uint128_t scaled = left * denominator, divisor = __uint128_t(lazy.eventScale) * numerator;
+    // A queued charge is smaller than the event, so the product and subtraction fit in 64 bits.
+    const uint64_t left = lazy.event - lazy.units * (lazy.eventScale / lazy.denominator);
+    uint64_t scaled64, divisor64;
+    if (!__builtin_mul_overflow(left, denominator, &scaled64) &&
+        !__builtin_mul_overflow(lazy.eventScale, numerator, &divisor64))
+        return scaled64 / divisor64 + (scaled64 % divisor64 != 0);
+
+    const __uint128_t scaled = __uint128_t(left) * denominator, divisor = __uint128_t(lazy.eventScale) * numerator;
     const __uint128_t steps = scaled / divisor + (scaled % divisor != 0);
     return steps > UINT64_MAX ? UINT64_MAX : steps ? uint64_t(steps) : 1;
 }
