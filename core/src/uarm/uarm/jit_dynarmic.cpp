@@ -243,6 +243,34 @@ constexpr std::size_t kPsrCoprocessor = 8;
 
 thread_local uint32_t cp15Pc = ~0u, cp15Rd = 0, cp15Word = 0;
 
+// ARM920T access pcs (cpuArm920SetJitAccessPcs) that start their block: the block before one links to it, so
+// only finished blocks' ticks come before its access. accessNoted: the block's first instruction noted its pc,
+// so the next one clears the slot again (an access that went to a host page, or none, leaves nothing set for a
+// later read at another pc). False when the block ends before pc.
+thread_local bool accessNoted = false;
+
+bool AccessPcSplit(bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
+    const bool start = pc == A32::LocationDescriptor{ir.block.Location()}.PC();
+    if (start) {
+        accessNoted = false;
+    } else if (std::exchange(accessNoted, false)) {
+        ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(0));
+    }
+    if (startsBlock && !start) {
+        ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
+        return false;
+    }
+    return true;
+}
+
+// A marked pc's value goes to cpuJitAccessPcSlot before the instruction (psr slot, opc1 3). One that starts its
+// block is only noted unconditional, as a failed one would leave the slot set.
+void NoteAccessPc(bool thumb, uint32_t word, bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
+    if (startsBlock && !thumb && word >> 28 != 14) return;
+    ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
+    accessNoted = startsBlock;
+}
+
 // PreCodeReadHook's work: the instruction at pc goes to the JIT if plain(pc, word) says
 // so (word gets the aligned word holding it); a p15 c3 access ends its block after it.
 template <typename Plain>
@@ -329,6 +357,7 @@ struct Snapshot final : public A32::CodeSnapshot {
     std::vector<uint32_t> marked;  // access pcs among them
     size_t next = 0;
     bool arm920 = false;
+    bool startBlocks = false;  // cpuJitAccessPcsStartBlocks when fetched: a marked pc only ever starts the block
     uint32_t pid = 0;  // ARM920T: the FCSE PID the words were fetched under
     // ARM920T, fetched under a PID below 32 MB: each VA page's physical page and access then, for a check
     // at install when another PID runs and the slot isn't mapped (Env::CodeUnchanged).
@@ -361,6 +390,9 @@ struct Snapshot final : public A32::CodeSnapshot {
 
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
         if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
+        const bool isMarked = std::find(marked.begin(), marked.end(), pc) != marked.end();
+        if (!AccessPcSplit(isMarked && startBlocks, pc, ir)) return false;
+        uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             while (next < plain.size() && plain[next].first != at) next++;
             if (next == plain.size()) {
@@ -369,10 +401,10 @@ struct Snapshot final : public A32::CodeSnapshot {
             }
             const uint32_t i = (at - base) >> 2;
             w = words[i];
+            word = w;
             return plain[next].second;
         });
-        if (ok && std::find(marked.begin(), marked.end(), pc) != marked.end())
-            ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
+        if (ok && isMarked) NoteAccessPc(thumb, word, startBlocks, pc, ir);
         return ok;
     }
 };
@@ -1265,14 +1297,9 @@ struct Env final : public A32::UserCallbacks {
             ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
             return false;
         }
-        // Access pcs that start their block (cpuJitAccessPcsStartBlocks): the block before them links to them, so
-        // only finished blocks' ticks come before their access.
         const bool marked = arm920 && cpuJitAccessPcMarked(cpu, pc);
         const bool startsBlock = marked && cpuJitAccessPcsStartBlocks(cpu);
-        if (startsBlock && pc != A32::LocationDescriptor{ir.block.Location()}.PC()) {
-            ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
-            return false;
-        }
+        if (!AccessPcSplit(startsBlock, pc, ir)) return false;
         uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             const bool plain = cpuJitFetch(cpu, at & ~3u, &w) && cpuJitPlain(cpu, at, w, thumb);
@@ -1280,10 +1307,7 @@ struct Env final : public A32::UserCallbacks {
             word = w;
             return plain;
         });
-        // An access pc: its value goes to cpuJitAccessPcSlot before the instruction (psr slot, opc1 3). One that
-        // starts its block is only noted unconditional, as a failed one would leave the slot set.
-        if (ok && marked && (!startsBlock || thumb || word >> 28 == 14))
-            ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
+        if (ok && marked) NoteAccessPc(thumb, word, startsBlock, pc, ir);
         return ok;
     }
 
@@ -1295,6 +1319,7 @@ struct Env final : public A32::UserCallbacks {
     std::unique_ptr<A32::CodeSnapshot> SnapshotCode(A32::VAddr pc, bool thumb, bool whole) override {
         auto s = std::make_unique<Snapshot>();
         s->arm920 = arm920;
+        s->startBlocks = arm920 && cpuJitAccessPcsStartBlocks(cpu);
         s->pid = arm920 ? cpuGetPid(cpu) : 0;
         s->model = model;
         s->base = pc & ~3u;
@@ -1321,9 +1346,12 @@ struct Env final : public A32::UserCallbacks {
             const uint32_t i = word(at);
             const uint32_t w = s->words[i];
             const bool plain = s->fetched[i] && cpuJitPlain(cpu, at, w, thumb);
+            // A marked pc that starts its block ends the snapshot before it unless it's the first.
+            const bool marked = arm920 && cpuJitAccessPcMarked(cpu, at);
+            if (marked && s->startBlocks && at != pc) break;
             s->plain.push_back({at, plain});
             if (!plain) break;
-            if (arm920 && cpuJitAccessPcMarked(cpu, at)) s->marked.push_back(at);
+            if (marked) s->marked.push_back(at);
             uint32_t size = 4;
             if (thumb) {
                 const uint32_t h = (at & 2) ? w >> 16 : w & 0xffff;
