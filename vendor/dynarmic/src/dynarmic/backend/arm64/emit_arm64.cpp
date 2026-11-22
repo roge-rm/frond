@@ -209,7 +209,7 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     ebi.entry_point = code.xptr<CodePtr>();
 
     // Frond: the page guard (A32::UserConfig::frond_page_guard), before anything runs.
-    if (conf.frond_page_guard) {
+    if (conf.frond_page_guard && (A32::LocationDescriptor{block.Location()}.FPSCR().Value() & conf.frond_page_guard_fpscr)) {
         const u32 first = A32::LocationDescriptor{block.Location()}.PC();
         const u32 last = A32::LocationDescriptor{block.EndLocation()}.PC() - 1;
         SharedLabel guarded;

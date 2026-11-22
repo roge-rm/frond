@@ -1809,6 +1809,7 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     if (e.arm920 && !e.lineBound) {
         conf.frond_page_guard = e.guard.data();
         conf.frond_page_guard_end = 0x02000000u;
+        conf.frond_page_guard_fpscr = jitPrvTagFpscr(kPidTags - 1);  // tag 0 (PID 0) runs are never guarded
     }
     // Unaligned accesses go through the callbacks, which fault on them.
     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;

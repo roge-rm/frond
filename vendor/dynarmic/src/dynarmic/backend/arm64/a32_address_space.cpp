@@ -730,6 +730,7 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .max_unchecked_instructions = conf.enable_cycle_counting ? conf.max_unchecked_instructions : 0,
         .frond_page_guard = conf.frond_page_guard,
         .frond_page_guard_end = conf.frond_page_guard_end,
+        .frond_page_guard_fpscr = conf.frond_page_guard_fpscr,
 
         .page_table_pointer = mcl::bit_cast<u64>(conf.page_table),
         .page_table_address_space_bits = 32,

@@ -211,9 +211,11 @@ struct UserConfig {
 
     /// Frond: a byte per 4 KiB page below frond_page_guard_end. A block whose code starts or ends on a page
     /// whose byte is non-zero leaves at its entry through InterpreterFallback at its PC, having run
-    /// nothing, so blocks on pages that can't be fetched for now stay compiled. x64 and arm64.
+    /// nothing, so blocks on pages that can't be fetched for now stay compiled. Only blocks whose
+    /// location's FPSCR has one of the frond_page_guard_fpscr bits set check it. x64 and arm64.
     const std::uint8_t* frond_page_guard = nullptr;
     std::uint32_t frond_page_guard_end = 0;
+    std::uint32_t frond_page_guard_fpscr = 0;
 
     /// Frond: when non-zero, a block holds at most this many instructions and every block
     /// link checks the cycles left (LinkBlockFast as well as LinkBlock), so a run goes at

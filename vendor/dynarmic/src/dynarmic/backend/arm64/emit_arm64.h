@@ -129,6 +129,7 @@ struct EmitConfig {
     // Frond: A32::UserConfig::frond_page_guard (A32 only).
     const std::uint8_t* frond_page_guard = nullptr;
     std::uint32_t frond_page_guard_end = 0;
+    std::uint32_t frond_page_guard_fpscr = 0;
 
     // Page table
     u64 page_table_pointer;
