@@ -210,10 +210,16 @@ translated:
     pa = (adr - va) + paPage;
 
     if (!inspect && sz > 1024) {
-        hostTlbFlush(&mmu->mem->hostTlb);
+        // The host TLB only holds pages whose entry is live, so it needs a flush only when a live entry
+        // (another page of a 64 KB page or section, as the walked page's own entry is dead) changes.
+        bool replaced = false;
         for (uint32_t offset = 0; offset < sz; offset += 4096) {
             struct TlbEntry *tlbEntry = mmu->tlb + ((va + offset) >> 12);
 
+            if (tlbEntry->gen == mmu->gen &&
+                (tlbEntry->ap != ap || tlbEntry->c != c || tlbEntry->b != b || tlbEntry->x != x ||
+                 tlbEntry->domain != dom || tlbEntry->section != section || tlbEntry->pa != (paPage + offset) >> 12))
+                replaced = true;
             tlbEntry->ap = ap;
             tlbEntry->c = c;
             tlbEntry->b = b;
@@ -223,6 +229,7 @@ translated:
             tlbEntry->pa = (paPage + offset) >> 12;
             tlbEntry->gen = mmu->gen;
         }
+        if (replaced) hostTlbFlush(&mmu->mem->hostTlb);
     }
 
     if (access) {
