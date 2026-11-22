@@ -2352,7 +2352,7 @@ test-zodiac-dcache: $(OBJ_ROOT)/test-zodiac-dcache
 
 # Every i.MX1 test target.
 .PHONY: test-imx1
-test-imx1: test-imx1-aitc test-imx1-clocks-gpio test-imx1-live-clocks test-imx1-gpio-idle test-imx1-gpio-pad test-imx1-gpio-active test-imx1-mpll test-imx1-spll test-imx1-eim test-imx1-timer test-imx1-uart test-imx1-timer2 test-imx1-sysctrl test-imx1-mmcsd test-imx1-mmcsd-card test-imx1-memory-dma test-imx1-i2c-read-window test-imx1-i2c test-imx1-asp test-imx1-pwm test-imx1-rtc test-imx1-watchdog test-imx1-mpll-retune test-imx1-rtc-live-writes test-imx1-run-cache
+test-imx1: test-imx1-aitc test-imx1-clocks-gpio test-imx1-live-clocks test-imx1-gpio-idle test-imx1-gpio-pad test-imx1-gpio-active test-imx1-mpll test-imx1-spll test-imx1-eim test-imx1-timer test-imx1-uart test-imx1-timer2 test-imx1-sysctrl test-imx1-mmcsd test-imx1-mmcsd-card test-imx1-memory-dma test-imx1-i2c-read-window test-imx1-i2c test-imx1-asp test-imx1-pwm test-imx1-rtc test-imx1-watchdog test-imx1-mpll-retune test-imx1-rtc-live-writes test-imx1-run-cache test-imx1-steps-until
 test: test-imx1
 
 # The UART cache flag survives board assignment.
@@ -2378,6 +2378,13 @@ test-imx1-clocks-gpio: prepare
 		core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp \
 		core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp -o $(OBJ_ROOT)/test-imx1-clocks-gpio
 	$(OBJ_ROOT)/test-imx1-clocks-gpio
+
+.PHONY: test-imx1-steps-until
+# imx1StepsUntil's 64-bit and divided-denominator branches against its 128-bit count.
+test-imx1-steps-until: prepare
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm \
+		tests/imx1-steps-until.cpp -o $(OBJ_ROOT)/test-imx1-steps-until
+	$(OBJ_ROOT)/test-imx1-steps-until
 
 .PHONY: test-imx1-live-clocks
 test-imx1-live-clocks: prepare
@@ -2822,12 +2829,13 @@ test-zodiac-ymf-ready: benchmark-replay
 
 .PHONY: test-zodiac-fast-lean
 # The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access.
-test-zodiac-fast-lean: $(OBJ_ROOT)/zodiac-boot-probe
+test-zodiac-fast-lean: $(OBJ_ROOT)/zodiac-boot-probe test-imx1-steps-until
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-fast-lean.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-fast-lean
 	$(OBJ_ROOT)/test-zodiac-fast-lean
+	ZODIAC_FAST_LEAN_RING=1 FROND_ZODIAC_CROSS_END=0 FROND_ZODIAC_KEEP_CHECKS=0 $(OBJ_ROOT)/test-zodiac-fast-lean
 
 .PHONY: test-zodiac-code-hooks
 # Code hooks on their own: set on cached ARM and Thumb code, every pass stopped, cleared code runs lean and compiled.

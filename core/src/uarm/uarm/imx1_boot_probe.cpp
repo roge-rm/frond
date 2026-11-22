@@ -1265,8 +1265,8 @@ struct Probe {
             // The run's lean checks still hold: the board hasn't moved, the line and the write clocks are the same,
             // and a submit changes only the engine's queue, which none of them read. The ring view, memoryReady and
             // the register checks read the ring and window registers, the EIM and the GPIO, which it doesn't write.
-            if (keepLeanChecks && checks.checked && checks.usable && checks.clocks == clocks &&
-                !graphicsMemory->gpuResidency()) {
+            // Here the write took its clocks from these checks.
+            if (keepLeanChecks && checks.checked && checks.usable && !graphicsMemory->gpuResidency()) {
                 leanCs5 = checks;
                 leanCs5.waitClocks = leanCs5.waitCost = 0;
             }
