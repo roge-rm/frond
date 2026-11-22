@@ -8,6 +8,7 @@ class EmRegsVZPalmM130 : public EMPalmVZWithSD<EmRegsVZNoScreen> {
    public:
     EmRegsVZPalmM130(void);
     virtual ~EmRegsVZPalmM130(void);
+    void SetUsbCradle(bool attached);
 
     virtual Bool GetLCDScreenOn(void);
     virtual Bool GetLCDBacklightOn(void);

@@ -33,7 +33,8 @@ enum class ChunkType : uint32 {
     regsISPDana = 0x1f0,
     uartDana = 0x200,
     spiSlaveSD2 = 0x201,
-    busTiming = 0x210
+    busTiming = 0x210,
+    regsMQUsb = 0x220
 };
 
 #endif  // _CHUNK_TYPE_H_

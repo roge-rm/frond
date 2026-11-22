@@ -18,7 +18,7 @@
 
 class EmRegsVZPalmM505 : public EmRegsVZPalmM500 {
    public:
-    EmRegsVZPalmM505(void);
+    explicit EmRegsVZPalmM505(bool chargeOnPortK = false);
     virtual ~EmRegsVZPalmM505(void);
 
     virtual void SetSubBankHandlers(void);

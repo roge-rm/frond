@@ -23,6 +23,7 @@ enum EmADSChannelType {
     kChannelBattery7843,
     kChannelBattery7846,
     kChannelDockSerial,
+    kChannelDockPower,
     kChannelDockTwister,
     kChannelTemp0,
     kChannelTemp1,

@@ -1142,11 +1142,15 @@ void EmDevice::CreateRegs(void) const {
             break;
 
         case kDevicePalmM130: {
-            EmBankRegs::AddSubBank(new EmRegsVZPalmM130);
+            auto* board = new EmRegsVZPalmM130();
+            EmBankRegs::AddSubBank(board);
 
             EmRegsFrameBuffer* framebuffer = new EmRegsFrameBuffer(T_BASE);
 
-            EmBankRegs::AddSubBank(new EmRegsMediaQ11xx(*framebuffer, MMIO_BASE, T_BASE));
+            auto* mediaq = new EmRegsMediaQ11xx(*framebuffer, MMIO_BASE, T_BASE);
+            mediaq->EnableUsb([board](bool attached) { board->SetUsbCradle(attached); },
+                              [board](bool asserted) { board->SetUsbIrq3Line(asserted); });
+            EmBankRegs::AddSubBank(mediaq);
             EmBankRegs::AddSubBank(framebuffer);
             break;
         }
@@ -1200,11 +1204,15 @@ void EmDevice::CreateRegs(void) const {
         } break;
 
         case kDevicePalmM520: {
-            EmBankRegs::AddSubBank(new EmRegsVZPalmM505);
+            auto* board = new EmRegsVZPalmM505(true);
+            EmBankRegs::AddSubBank(board);
 
             EmRegsFrameBuffer* framebuffer = new EmRegsFrameBuffer(T_BASE);
 
-            EmBankRegs::AddSubBank(new EmRegsMediaQ11xx(*framebuffer, MMIO_BASE, T_BASE));
+            auto* mediaq = new EmRegsMediaQ11xx(*framebuffer, MMIO_BASE, T_BASE);
+            mediaq->EnableUsb([board](bool attached) { board->SetUsbCradle(attached); },
+                              [board](bool asserted) { board->SetUsbIrq3Line(asserted); });
+            EmBankRegs::AddSubBank(mediaq);
             EmBankRegs::AddSubBank(framebuffer);
             break;
         }
@@ -1741,7 +1749,6 @@ bool EmDevice::EmulatesDockStatus() const {
     if (Supports68328()) return false;
 
     switch (fDeviceID) {
-        case kDevicePalmM130:
         case kDevicePalmI705:
         case kDevicePalmI710:
         case kDevicePalmPacifiC:
@@ -1786,6 +1793,12 @@ bool EmDevice::BatteryChargingSupported() const {
     if (!EmulatesDockStatus()) return true;
 
     switch (fDeviceID) {
+        case kDevicePalmIIIc:  // Adapter present on PD6
+        case kDevicePalmV:  // Charger ID on the ADC
+        case kDevicePalmVx:
+        case kDevicePalmM130:  // Adapter present on PC6
+        case kDeviceDana:  // Charging voltage measured with PJ6 released
+        case kDeviceDanaWireless:
         case kDevicePalmM500:  // AC_PWR#
         case kDevicePalmM505:
         case kDevicePalmM515:

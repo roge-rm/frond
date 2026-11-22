@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "EmBattery.h"
+#include "EmCPU.h"
 #include "EmCommon.h"
 #include "EmLowMem.h"
 #include "EmPalmOS.h"
@@ -283,6 +284,55 @@ namespace {
             EmLowMem::fgLowMem.globals.sysBatteryMinThreshold = RomBatteryMinThreshold();
     }
 
+    // The m520 can fill its USB receive queue before the ROM finishes reading a HotSync write.
+    constexpr UInt16 m520StockUsbReceiveSize = 1062;
+    constexpr UInt16 m520UsbReceiveSize = 8 * 1024;
+
+    bool IsM520UsbReceiveSetup(emuptr trapWord) {
+        return gCPU->GetPC() == trapWord && gSession->GetDevice().GetIDString() == "PalmM520" &&
+               EmMemGet32(0x100ab85c) == 0x48780426 && EmMemGet32(0x100ab8fc) == 0x3f3c0426 &&
+               EmMemGet32(0x100ab8d2) == 0x73796e63 && EmMemGet32(0x100ab908) == 0x74134e4f;
+    }
+
+    CallROMType HeadpatchM520UsbReceiveAllocate() {
+        if (IsM520UsbReceiveSetup(0x100ab862)) {
+            const emuptr size = gCPU->GetSP();
+            if (EmMemGet32(size) == m520StockUsbReceiveSize) EmMemPut32(size, m520UsbReceiveSize);
+        }
+        return kExecuteROM;
+    }
+
+    CallROMType HeadpatchM520UsbReceiveBuffer() {
+        if (!IsM520UsbReceiveSetup(0x100ab90c)) return kExecuteROM;
+
+        // SrmSetReceiveBuffer takes a port ID, a buffer pointer and its size.
+        const emuptr args = gCPU->GetSP();
+        const emuptr buffer = EmMemGet32(args + 2);
+        if (buffer && EmMemGet16(args + 6) == m520StockUsbReceiveSize && MemPtrSize(buffer) >= m520UsbReceiveSize)
+            EmMemPut16(args + 6, m520UsbReceiveSize);
+        return kExecuteROM;
+    }
+
+    CallROMType HeadpatchSysLibFind() {
+        constexpr emuptr unregisterFind = 0x102d361a;
+        // The stock m520's Bluetooth Exchange callback runs with HotSync's globals.
+        // Skip that callback's unload of the unsupported Bluetooth library.
+        if (gCPU->GetPC() != unregisterFind ||
+            gSession->GetDevice().GetIDString() != "PalmM520" ||
+            EmMemGet32(0x102d3640) != 0x2f280594)
+            return kExecuteROM;
+
+        CALLED_SETUP("Err", "const Char* nameP, UInt16* refNumP");
+        CALLED_GET_PARAM_VAL(emuptr, nameP);
+        constexpr char libraryName[] = "Bluetooth Exchange Library";
+        if (nameP != 0x102d3674 ||
+            EmMem_memcmp(static_cast<emuptr>(nameP), static_cast<const void*>(libraryName), sizeof(libraryName)) != 0)
+            return kExecuteROM;
+
+        PUT_RESULT_VAL(Err, sysErrLibNotFound);
+        return kSkipROM;
+    }
+
     CallROMType HeadpatchSysLibLoad(void) {
         CALLED_SETUP("Err", "UInt32 libType, UInt32 libCreator, UInt16* refNumP");
 
@@ -513,6 +563,9 @@ namespace {
         {sysTrapHwrBatteryLevel, HeadpatchHwrBatteryLevel, NULL},
         {sysTrapHwrBattery, HeadpatchHwrBattery, TailpatchHwrBattery},
         {sysTrapSysLibLoad, HeadpatchSysLibLoad, NULL},
+        {sysTrapSysLibFind, HeadpatchSysLibFind, NULL},
+        {sysTrapMemPtrNew, HeadpatchM520UsbReceiveAllocate, NULL},
+        {sysTrapSerialDispatch, HeadpatchM520UsbReceiveBuffer, NULL},
         {sysTrapHwrIRQ4Handler, HeadpatchHwrIRQ4Handler, TailpatchHwrIRQ4Handler},
         {sysTrapSysSleep, HeadpatchSysSleep, NULL},
         {sysTrapEvtGetEvent, HeadpatchEvtGetEvent, NULL},

@@ -13,6 +13,8 @@
 
 #include "EmRegsEZPalmIIIc.h"
 
+#include "EmBattery.h"
+
 #include "EmCommon.h"
 #include "EmRegsEZPrv.h"
 #include "EmSPISlaveADS784x.h"  // EmSPISlaveADS784x
@@ -134,10 +136,11 @@ uint8 EmRegsEZPalmIIIc::GetPortInternalValue(int port) {
 
         result |= hwrEZPortDPowerFail;
 
-        // Make sure hwrEZPortDAdapterInstalled is set, or the dock-status routines
-        // will report that we're powered (even if we aren't docked!).
-
-        result |= hwrEZPortDAdapterInstalled;
+        // The adapter-detect input is active low.
+        if (gBattery.ExternalPower())
+            result &= ~hwrEZPortDAdapterInstalled;
+        else
+            result |= hwrEZPortDAdapterInstalled;
     }
 
     return result;

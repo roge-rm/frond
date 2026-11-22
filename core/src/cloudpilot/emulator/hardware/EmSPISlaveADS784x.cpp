@@ -409,6 +409,11 @@ void EmSPISlaveADS784x::ProcessCommand(uint8 command) {
             break;
         }
 
+        case kChannelDockPower:
+            // The Palm V/Vx ROM takes ADC readings 38–154 (high eight bits) as external power.
+            result = gBattery.ExternalPower() ? 96 << 4 : 0;
+            break;
+
         case kChannelDockSerial: {
             result = fDockLevel;
             break;

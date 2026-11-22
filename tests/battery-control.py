@@ -62,10 +62,9 @@ def check_68k(core, rom, root):
 
 
 def check_dana(core, rom, root):
-    # The Dana's level is on its main battery channel; its charger isn't modelled.
     c = Client(core, [rom, '--device', 'alphasmart-dana'], root, 'dana')
     try:
-        check_commands(c, charging=False)
+        check_commands(c)
     finally:
         c.quit()
 

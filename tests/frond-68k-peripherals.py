@@ -918,7 +918,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rom', type=Path, action='append', default=[])
     parser.add_argument('--device', choices=['palm-iiix', 'sony-clie-t415', 'palm-m125', 'palm-m500',
-                                                 'palm-m505', 'palm-m515', 'ibm-workpad-c500'],
+                                                 'palm-m505', 'palm-m515', 'ibm-workpad-c500', 'palm-m130', 'palm-m520'],
                         help='device for the supplied ROM; default palm-iiix or sony-clie-t415 for a T400 ROM')
     parser.add_argument('--only', action='append', choices=CHECKS)
     parser.add_argument('--sdk', type=Path, default=ROOT.parent / 'palm-os-sdk/sdk-3.5')

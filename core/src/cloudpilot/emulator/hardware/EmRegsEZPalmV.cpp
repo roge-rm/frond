@@ -39,7 +39,8 @@ const uint16 kButtonMap[kNumButtonRows][kNumButtonCols] = {
 // ---------------------------------------------------------------------------
 
 EmRegsEZPalmV::EmRegsEZPalmV(void) : EmRegsEZ() {
-    fSPISlaveADC = new EmSPISlaveADS784x(kChannelSet2);
+    fSPISlaveADC = new EmSPISlaveADS784x(kChannelUnused, kChannelPenY, kChannelBattery7843,
+        kChannelUnused, kChannelUnused, kChannelPenX, kChannelDockPower, kChannelUnused);
 }
 
 // ---------------------------------------------------------------------------

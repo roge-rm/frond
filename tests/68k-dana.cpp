@@ -1596,6 +1596,31 @@ int main() {
     st.ReleaseDanaInput();
     auto released=Save(st); assert(Load(st,released));
     assert(st.Byte(0)==shift.Code()); assert(st.Byte(0)==0x40); assert(st.Byte(0)==0x40);
+    {
+        const auto saved = gBattery;
+        St power;
+        power.Raw(0xfffff421, 1, 8);
+        power.Raw(0xfffff431, 1, 0);
+        auto* adc = power.GetSPI2Slave();
+        const auto read = [adc](uint8 command) {
+            adc->DoExchange(7, command);
+            const uint16 hi = adc->DoExchange(7, 0), lo = adc->DoExchange(7, 0);
+            return ((hi << 8) | lo) >> 3;
+        };
+        power.Raw(0xfffff438, 1, 0);
+        assert(BatteryPower::Parse("max battery", gBattery));
+        assert(power.GetPortInputValue('G') & 2);
+        const auto settled = read(0xa4);
+        assert(read(0xe4) == 50);
+        assert(BatteryPower::Parse("max charging", gBattery));
+        assert(!(power.GetPortInputValue('G') & 2));
+        assert(read(0xa4) > settled + 10);
+        power.Raw(0xfffff438, 1, 0x40);
+        assert(read(0xa4) == settled);
+        assert(BatteryPower::Parse("max battery", gBattery));
+        assert(read(0xa4) == settled && read(0xe4) == 50);
+        gBattery = saved;
+    }
     assert(st.SetVirtualAnalogueInputs(0xabc,0x456,false));
     assert(!(st.GetPortInputValue('G')&2));
     assert(!st.SetVirtualAnalogueInputs(4096,0,true));

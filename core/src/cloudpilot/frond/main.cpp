@@ -5,6 +5,7 @@
 #include "EmBankRegs.h"
 #include "UsbDanaPort.h"
 #include "EmRegsUsbD12.h"
+#include "EmRegsMediaQ11xx.h"
 #include "EmRegsVZPegVenice.h"
 #include "UsbPrinterRuntime.h"
 #include "UsbWifiRuntime.h"
@@ -1635,25 +1636,40 @@ class Runner {
         if(usbHooks.replaced) usbHooks.replaced(usbHooks.context);
     }
     // The PDIUSBD12 for this machine's USB cradle.
-    EmRegsUsbD12* UsbCradle() const {
+    EmRegsUsbD12* D12Cradle() const {
         if(!profile->capabilities.usb) return nullptr;
         emuptr address = 0x10400000;
         if (profile->deviceType == deviceTypeT415) address = 0x10900000;
         if (profile->deviceType == deviceTypeM125) address = 0x1f000000;
         return dynamic_cast<EmRegsUsbD12*>(EmBankRegs::GetSubBank(address, 4));
     }
+    EmRegsMediaQ11xx* MediaQCradle() const {
+        if (!profile->capabilities.usb ||
+            (profile->deviceType != deviceTypeM130 && profile->deviceType != deviceTypeM520))
+            return nullptr;
+        return dynamic_cast<EmRegsMediaQ11xx*>(EmBankRegs::GetSubBank(MMIO_BASE, 4));
+    }
+    UsbDevicePort UsbCradle() const {
+        if (auto* mediaq = MediaQCradle()) return mediaq->UsbPort();
+        if (auto* d12 = D12Cradle()) return d12->Port();
+        return {};
+    }
+    void SetUsbCradleCable(bool attached) {
+        usbCable = attached;
+        if (auto* mediaq = MediaQCradle()) mediaq->SetUsbCable(attached);
+        else if (auto* d12 = D12Cradle()) d12->SetCable(attached);
+    }
     // usb-mode: the cradle cable to a host PTY, TCP or Unix socket for pilot-link; off unplugs it.
     bool StartUsbCradle(const string& mode,string& error) {
-        auto* d12=UsbCradle();
-        if(!d12) { error="This device has no USB cradle.";return false; }
+        if(!UsbCradle()) { error="This device has no USB cradle.";return false; }
         UsbHostBridge::Config config;
         if(!HostSerial::Parse(mode,config)) { error="Use off, pty, tcp:PORT, unix:PATH or sync.";return false; }
         StopUsb(config.kind!=HostSerial::Kind::off && HostSerial::Format(config)==usbCradleMode);
         usbCradleMode="off";
         usbError.clear();
         if(!usbBridge.Start(UsbHostBridge::Backend{
-            [this] { auto* d=UsbCradle(); return d ? d->Port() : UsbDevicePort{}; },
-            [this](bool attached) { usbCable=attached; if(auto* d=UsbCradle()) d->SetCable(attached); },
+            [this] { return UsbCradle(); },
+            [this](bool attached) { SetUsbCradleCable(attached); },
             [this] { return usbCable; }, [] { return false; },
             [] { return gDebugger.IsStopped(); }, [this] { return UsbTime(); },
             [] {}, [this](const UsbHostHooks* hooks) { usbHooks=hooks?*hooks:UsbHostHooks{}; }
@@ -2288,12 +2304,12 @@ class Runner {
         StateChanged("serial", lastSerial, SerialDescription());
         if (UsbCradle()) StateChanged("usb", lastUsb, UsbDescription());
         StateChanged("infrared", lastInfrared, InfraredDescription());
-        if (syncPress) {
+        if (syncUsbPending) {
             if (usbBridge.Host() && usbBridge.Host()->GetPhase() == UsbBusHost::Phase::running) {
-                syncPress = false;
-                PressHotSync();
-            } else if (std::chrono::steady_clock::now() > syncPressBy) {
-                syncPress = false;
+                syncUsbPending = false;
+                if (!MediaQCradle()) PressHotSync();
+            } else if (std::chrono::steady_clock::now() > syncUsbReadyBy) {
+                syncUsbPending = false;
                 desktop->Event("sync", "failed usb: USB didn't come up.");
             }
         }
@@ -2654,7 +2670,7 @@ class Runner {
         if (command == "sync-start") {
             // Puts the cradle on the sync manager (the USB cradle where there is one, else serial)
             // unless it already is, then presses the cradle's HotSync button.
-            if (syncPress) return {false, "busy", "A HotSync is already starting."};
+            if (syncUsbPending) return {false, "busy", "A HotSync is already starting."};
             if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
                 return {false, "busy", "A HotSync is already running."};
             if (argument == "network") {
@@ -2672,8 +2688,10 @@ class Runner {
             if (usbSync || (!serialSync && UsbCradle() && usbCradleMode == "off")) {
                 string error;
                 if (!StartUsbCradle("sync", error)) return {false, "usb", error};
-                syncPress = true;
-                syncPressBy = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+                // The MediaQ cradle joins the bus when HotSync starts.
+                if (MediaQCradle()) PressHotSync();
+                syncUsbPending = true;
+                syncUsbReadyBy = std::chrono::steady_clock::now() + std::chrono::seconds(20);
                 return {true, "sync", "Starting a HotSync over USB."};
             }
             if (UsbCradle() && usbCradleMode != "off")
@@ -3758,8 +3776,8 @@ class Runner {
     BackgroundJob saveJob;
     bool desktopMode{false};
     string lastSerial, lastInfrared, lastUsb, lastSync, serialError, infraredError;
-    bool syncPress{false};  // sync-start waits for the USB cradle to come up before pressing HotSync
-    std::chrono::steady_clock::time_point syncPressBy;
+    bool syncUsbPending{false};  // sync-start waits for USB enumeration
+    std::chrono::steady_clock::time_point syncUsbReadyBy;
     HostLink68k serialLink, irLink, modemSyncLink;
     ModemTransport68k* serialTransport{nullptr};
     IrPhoneTransport68k* irTransport{nullptr};

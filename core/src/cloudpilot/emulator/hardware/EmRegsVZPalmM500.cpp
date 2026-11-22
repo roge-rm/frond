@@ -52,7 +52,9 @@ const uint16 kGenericMonoMap[kNumButtonRows][kNumButtonCols] = {
 //		� EmRegsVZPalmM500::EmRegsVZPalmM500
 // ---------------------------------------------------------------------------
 
-EmRegsVZPalmM500::EmRegsVZPalmM500(void) { fSPISlaveADC = new EmSPISlaveADS784x(kChannelSet1); }
+EmRegsVZPalmM500::EmRegsVZPalmM500(bool chargeOnPortK) : chargeOnPortK(chargeOnPortK) {
+    fSPISlaveADC = new EmSPISlaveADS784x(kChannelSet1);
+}
 
 // ---------------------------------------------------------------------------
 //		� EmRegsVZPalmM500::~EmRegsVZPalmM500
@@ -150,6 +152,11 @@ uint8 EmRegsVZPalmM500::GetPortInputValue(int port) {
             result |= hwrVZPortKAC_PWR_N;
     }
 
+    // CHARGING# is PE6 on the m500 family and PK1 on the m520.
+    if (!gBattery.charging) {
+        if (chargeOnPortK && port == 'K') result |= 0x02;
+        if (!chargeOnPortK && port == 'E') result |= 0x40;
+    }
     return result;
 }
 

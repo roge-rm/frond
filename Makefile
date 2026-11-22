@@ -2872,6 +2872,13 @@ test: test-zodiac
 
 # The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,
 # so their sub-makes running side by side only link and never rewrite an object another one is reading.
+.PHONY: test-mediaq-usb
+test: test-mediaq-usb
+test-mediaq-usb: prepare
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Icore/src/common -Icore/src/cloudpilot/emulator/hardware tests/mediaq-usb.cpp -o $(OBJ_ROOT)/test-mediaq-usb
+	$(OBJ_ROOT)/test-mediaq-usb
+
 .PHONY: test-68k-vz-registers
 test: test-68k-vz-registers
 test-68k-vz-registers: prepare out/frond-68k
