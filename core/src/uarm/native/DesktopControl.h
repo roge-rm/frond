@@ -78,13 +78,14 @@ class DesktopControl {
     }
     // The sync manager's state when it changes, and a HotSync press waiting for USB to come up.
     void syncChanged(commands::Context& ctx) {
-        if (syncPress) {
-            const auto* host = ctx.usb ? ctx.usb->Host() : nullptr;
-            if (host && host->GetPhase() == UsbBusHost::Phase::running) {
-                syncPress = false;
+        cancelReplacedSyncPress(ctx);
+        if (syncPressBridge) {
+            const auto* host = ctx.usb->Host();
+            if (host->GetPhase() == UsbBusHost::Phase::running) {
+                syncPressBridge = nullptr;
                 if (!ctx.soc->PressHotSync()) event("sync", "failed usb: The HotSync button could not be pressed.");
             } else if (std::chrono::steady_clock::now() > syncPressBy) {
-                syncPress = false;
+                syncPressBridge = nullptr;
                 event("sync", "failed usb: USB didn't come up.");
             }
         }
@@ -213,8 +214,17 @@ class DesktopControl {
     AttentionState lastAttention{};
     bool attentionSent{false};
     std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth, lastSync;
-    bool syncPress{false};
+    const UsbHostBridge* syncPressBridge{nullptr};
+    uint64_t syncPressRoute{0};
     std::chrono::steady_clock::time_point syncPressBy;
+
+    void cancelReplacedSyncPress(const commands::Context& ctx) {
+        if (!syncPressBridge) return;
+        if (ctx.usb == syncPressBridge && ctx.usb->RouteGeneration() == syncPressRoute &&
+            ctx.usb->GetConfig().kind == HostSerial::Kind::syncManager && ctx.usb->Host()) return;
+        syncPressBridge = nullptr;
+        event("sync", "failed usb: The Sync Manager USB route changed.");
+    }
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";
         const auto state = ctx.usb->Describe();
@@ -671,7 +681,8 @@ class DesktopControl {
             using Kind = HostSerial::Kind;
             const bool usbSync = ctx.usb && ctx.usb->GetConfig().kind == Kind::syncManager;
             const bool serialSync = ctx.serial && ctx.serial->GetConfig().kind == Kind::syncManager;
-            if (syncPress) return {false, "busy", "A HotSync is already starting."};
+            cancelReplacedSyncPress(ctx);
+            if (syncPressBridge) return {false, "busy", "A HotSync is already starting."};
             if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
                 return {false, "busy", "A HotSync is already running."};
             if (path == "network") {
@@ -695,7 +706,8 @@ class DesktopControl {
                 ctx.usbError.clear();
                 if (!ctx.usb->Start(ctx.soc, config, ctx.usbError)) return {false, "usb", ctx.usbError};
                 // Wait for enumeration after plugging in the cable for this sync.
-                syncPress = true;
+                syncPressBridge = ctx.usb;
+                syncPressRoute = ctx.usb->RouteGeneration();
                 syncPressBy = std::chrono::steady_clock::now() + std::chrono::seconds(20);
                 return {true, "sync", "Starting a HotSync over USB."};
             }
@@ -712,6 +724,8 @@ class DesktopControl {
             return {true, "sync", "HotSync button pressed."};
         }
         if (command == "hotsync") {
+            if (ctx.soc->CradleSupported() && !ctx.soc->CradleAttached())
+                return {false, "cradle", "Attach the cradle or USB cable first."};
             if (!ctx.soc->PressHotSync())
                 return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
             return {true, "hotsync", "HotSync button pressed."};
@@ -820,8 +834,10 @@ class DesktopControl {
                 return {false, "argument", network ? "Use on or off." : "Use off, pty, tcp:PORT, unix:PATH or sync."};
             // A new endpoint unplugs the cable first; queued bytes are dropped.
             ctx.usbError.clear();
-            if (path == "on" ? !ctx.usb->StartCable(ctx.soc, ctx.usbError) : !ctx.usb->Start(ctx.soc, config, ctx.usbError))
-                return {false, "usb", ctx.usbError};
+            const bool started = path == "on" ? ctx.usb->StartCable(ctx.soc, ctx.usbError)
+                                              : ctx.usb->Start(ctx.soc, config, ctx.usbError);
+            cancelReplacedSyncPress(ctx);
+            if (!started) return {false, "usb", ctx.usbError};
             return {true, "usb", UsbState(ctx)};
         }
         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};

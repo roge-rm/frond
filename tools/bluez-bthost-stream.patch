@@ -1,0 +1,221 @@
+--- a/emulator/bthost.c
++++ b/emulator/bthost.c
+@@ -56,6 +56,8 @@
+ #define L2CAP_IT_FIXED_CHAN	0x0003
+ 
+ /* RFCOMM setters */
++#include "bluetooth-rfcomm-stream.h"
++
+ #define RFCOMM_ADDR(cr, dlci)	(((dlci & 0x3f) << 2) | (cr << 1) | 0x01)
+ #define RFCOMM_CTRL(type, pf)	(((type & 0xef) | (pf << 4)))
+ #define RFCOMM_LEN8(len)	(((len) << 1) | 1)
+@@ -112,7 +114,7 @@
+ 	return 0xff - rfcomm_crc_table[CRC(data) ^ data[2]];
+ }
+ 
+-static uint8_t rfcomm_fcs(uint8_t *data)
++static uint8_t rfcomm_fcs(const uint8_t *data)
+ {
+ 	return 0xff - CRC(data);
+ }
+@@ -182,6 +184,12 @@
+ };
+ 
+ struct l2conn {
++	struct {
++		uint16_t mtu;
++		unsigned credits;
++		bool credit_mode;
++		bool open;
++	} rfcomm_stream;
+ 	struct l2conn *next;
+ 	uint16_t scid;
+ 	uint16_t dcid;
+@@ -249,6 +257,8 @@
+ };
+ 
+ struct bthost {
++	uint8_t stream_channel;
++	void (*stream_disc)(uint16_t handle, uint16_t cid);
+ 	bool ready;
+ 	bthost_ready_cb ready_cb;
+ 	uint8_t bdaddr[6];
+@@ -2886,6 +2896,7 @@
+ 	uint8_t dlci;
+ 	struct rfcomm_conn_cb_data *cb;
+ 	uint8_t chan;
++	bool stream;
+ 
+ 	if (len < sizeof(*hdr))
+ 		return;
+@@ -2894,8 +2905,22 @@
+ 	dlci = RFCOMM_GET_DLCI(hdr->address);
+ 
+ 	cb = bthost_find_rfcomm_cb_by_channel(bthost, chan);
++	stream = bthost->stream_channel && dlci == bthost->stream_channel * 2;
++	if (stream) {
++		struct l2conn *link;
++
++		/* The stream's channel hook is shared by the L2CAP links on this ACL. */
++		for (link = conn->l2conns; link; link = link->next) {
++			if (link != l2conn && link->rfcomm_stream.open) {
++				rfcomm_dm_send(bthost, conn, l2conn, 1, dlci);
++				return;
++			}
++		}
++		l2conn->rfcomm_stream.open = cb != NULL;
++	}
+ 	if (!dlci || cb) {
+-		bthost_add_rfcomm_conn(bthost, conn, l2conn, chan);
++		if (!stream)
++			bthost_add_rfcomm_conn(bthost, conn, l2conn, chan);
+ 		rfcomm_ua_send(bthost, conn, l2conn, 1, dlci);
+ 		if (cb && cb->func)
+ 			cb->func(conn->handle, l2conn->scid, cb->user_data,
+@@ -2918,6 +2943,73 @@
+ 	dlci = RFCOMM_GET_DLCI(hdr->address);
+ 
+ 	rfcomm_ua_send(bthost, conn, l2conn, 0, dlci);
++	if (bthost->stream_channel &&
++			(!dlci || dlci == bthost->stream_channel * 2)) {
++		bool open = l2conn->rfcomm_stream.open;
++		memset(&l2conn->rfcomm_stream, 0, sizeof(l2conn->rfcomm_stream));
++		if (open && bthost->stream_disc)
++			bthost->stream_disc(conn->handle, l2conn->scid);
++	}
++}
++
++void frond_rfcomm_stream_enable(struct bthost *bthost, uint8_t channel,
++				void (*disc)(uint16_t handle, uint16_t cid))
++{
++	bthost->stream_channel = channel;
++	bthost->stream_disc = disc;
++}
++
++static struct l2conn *rfcomm_stream_link(struct bthost *bthost,
++					uint16_t handle, uint16_t cid)
++{
++	struct btconn *conn = bthost_find_conn(bthost, handle);
++	struct l2conn *link = conn ? btconn_find_l2cap_conn_by_scid(conn, cid) : NULL;
++
++	return link && link->psm == 3 && link->rfcomm_stream.open ? link : NULL;
++}
++
++size_t frond_rfcomm_stream_space(struct bthost *bthost, uint16_t handle, uint16_t cid)
++{
++	struct l2conn *link = rfcomm_stream_link(bthost, handle, cid);
++
++	if (!link || (link->rfcomm_stream.credit_mode && !link->rfcomm_stream.credits))
++		return 0;
++	return link->rfcomm_stream.mtu ? link->rfcomm_stream.mtu : 127;
++}
++
++static void rfcomm_stream_frame(struct bthost *bthost, uint16_t handle,
++				struct l2conn *link, const void *data,
++				uint16_t len, bool grant_credit)
++{
++	uint8_t frame[FROND_RFCOMM_MAX_FRAME + 5];
++	size_t pos = 0;
++
++	frame[pos++] = RFCOMM_ADDR(0, bthost->stream_channel * 2);
++	frame[pos++] = RFCOMM_CTRL(RFCOMM_UIH, grant_credit);
++	frame[pos++] = len > 127 ? RFCOMM_LEN16(len) : RFCOMM_LEN8(len);
++	if (len > 127)
++		frame[pos++] = len >> 7;
++	if (grant_credit)
++		frame[pos++] = 1;
++	else {
++		memcpy(frame + pos, data, len);
++		pos += len;
++	}
++	frame[pos++] = rfcomm_fcs(frame);
++	send_acl(bthost, handle, link->dcid, 0, frame, pos);
++}
++
++bool frond_rfcomm_stream_send(struct bthost *bthost, uint16_t handle, uint16_t cid,
++				const void *data, uint16_t len)
++{
++	struct l2conn *link = rfcomm_stream_link(bthost, handle, cid);
++
++	if (!len || len > frond_rfcomm_stream_space(bthost, handle, cid))
++		return false;
++	if (link->rfcomm_stream.credit_mode)
++		link->rfcomm_stream.credits--;
++	rfcomm_stream_frame(bthost, handle, link, data, len, false);
++	return true;
+ }
+ 
+ static void rfcomm_uih_send(struct bthost *bthost, struct btconn *conn,
+@@ -3050,6 +3142,22 @@
+ 	pn_cmd.max_retrans = pn->max_retrans;
+ 	pn_cmd.mtu = pn->mtu;
+ 	pn_cmd.credits = 255;
++	if (bthost->stream_channel && pn->dlci == bthost->stream_channel * 2) {
++		uint16_t mtu = le16_to_cpu(pn->mtu);
++
++		if (!mtu)
++			return;
++		if (!l2conn->rfcomm_stream.open) {
++			l2conn->rfcomm_stream.mtu = MIN(mtu, FROND_RFCOMM_MAX_FRAME);
++			l2conn->rfcomm_stream.credit_mode = pn->flow_ctrl == 0xf0;
++			l2conn->rfcomm_stream.credits = pn->credits;
++		}
++		pn_cmd.mtu = cpu_to_le16(l2conn->rfcomm_stream.mtu ?
++					l2conn->rfcomm_stream.mtu : 127);
++		pn_cmd.flow_ctrl = l2conn->rfcomm_stream.credit_mode ? 0xe0 : 0;
++		pn_cmd.credits = !l2conn->rfcomm_stream.open &&
++				l2conn->rfcomm_stream.credit_mode ? 7 : 0;
++	}
+ 
+ 	rfcomm_uih_send(bthost, conn, l2conn, RFCOMM_ADDR(1, 0),
+ 			RFCOMM_MCC_TYPE(0, RFCOMM_PN), &pn_cmd, sizeof(pn_cmd));
+@@ -3109,6 +3217,8 @@
+ 		data_len = (uint16_t) GET_LEN8(hdr->length);
+ 		hdr_len = sizeof(*hdr);
+ 	} else {
++		if (len < sizeof(*hdr) + 1)
++			return;
+ 		uint8_t ex_len = *((uint8_t *)(data + sizeof(*hdr)));
+ 		data_len = GET_LEN16((((uint16_t) ex_len << 8) | hdr->length));
+ 		hdr_len = sizeof(*hdr) + sizeof(uint8_t);
+@@ -3127,6 +3237,30 @@
+ 
+ 		hook = find_rfcomm_chan_hook(conn,
+ 					RFCOMM_GET_CHANNEL(hdr->address));
++		if (bthost->stream_channel &&
++				RFCOMM_GET_DLCI(hdr->address) == bthost->stream_channel * 2) {
++			bool credit = l2conn->rfcomm_stream.credit_mode &&
++					(hdr->control & 0x10);
++
++			/* The credit octet precedes the information field and is outside its length. */
++			if (!l2conn->rfcomm_stream.open ||
++					len != hdr_len + data_len + credit + 1 ||
++					data_len > (l2conn->rfcomm_stream.mtu ?
++						l2conn->rfcomm_stream.mtu : 127) ||
++					((const uint8_t *)data)[len - 1] != rfcomm_fcs(data))
++				return;
++			if (credit) {
++				l2conn->rfcomm_stream.credits = MIN(65535,
++					l2conn->rfcomm_stream.credits + *(const uint8_t *)p);
++				p++;
++			}
++			if (hook && data_len) {
++				hook->func(p, data_len, hook->user_data);
++				if (l2conn->rfcomm_stream.credit_mode)
++					rfcomm_stream_frame(bthost, conn->handle, l2conn, NULL, 0, true);
++			}
++			return;
++		}
+ 		if (hook && data_len)
+ 			hook->func(p, data_len, hook->user_data);
+ 	} else {
+@@ -3139,6 +3273,9 @@
+ 				uint16_t len)
+ {
+ 	const struct rfcomm_hdr *hdr = data;
++
++	if (len < sizeof(*hdr))
++		return;
+ 
+ 	bthost_debug(bthost, "RFCOMM data: %u bytes", len);
+ 

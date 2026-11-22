@@ -9,7 +9,7 @@ struct UsbHostBridge::Impl {
     HostByteLink link;
     std::unique_ptr<UsbBusHost> host;
     RndisHost rndis;
-    uint64_t lastNow{0}, netPollAt{0};
+    uint64_t lastNow{0}, netPollAt{0}, routeGeneration{0};
     static constexpr uint64_t netPollNs = 1000000;
     bool replaced{false}, plugPending{false}, lastEnabled{false}, linkKept{false};
     // The cable in with no host endpoint: an RNDIS device's link is the network, not bytes (StartCable).
@@ -161,6 +161,7 @@ void UsbHostBridge::Impl::StopBridge(bool keepLink) {
     if (impl->host) impl->host->Detach();
     impl->soc.cable(impl->soc.defaultCable());
     impl->host.reset();
+    ++routeGeneration;
     impl->rndis.Stop();
     impl->rndis.frameFromDevice = nullptr;
     if (keepLink) linkKept = true; else impl->link.Close();
@@ -215,5 +216,6 @@ std::string UsbHostBridge::Describe() const {
            (impl->host->Rndis() ? impl->rndis.Up() ? " rndis up" : " rndis starting" : "");
 }
 
+uint64_t UsbHostBridge::RouteGeneration() const { return impl->routeGeneration; }
 const UsbBusHost* UsbHostBridge::Host() const { return impl->host.get(); }
 std::vector<std::string> UsbHostBridge::TakeMessages() { return std::move(impl->messages); }

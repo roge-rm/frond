@@ -65,6 +65,7 @@ class UsbHostBridge {
     std::string Endpoint() const;
     std::string Describe() const;  // off, or kind, endpoint, peer and USB state
     std::vector<std::string> TakeMessages();
+    uint64_t RouteGeneration() const;  // changes when the endpoint is stopped or replaced
     const UsbBusHost* Host() const;  // nullptr when off
 
    private:

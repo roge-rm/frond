@@ -29,6 +29,7 @@ struct SyncOptions {
     std::string machineKey;  // the frontend's id for this machine; empty: key by the Palm user
     bool network{false};    // route the virtual host's Network HotSync to this manager
     std::string userName;    // name for a handheld that has no user yet; empty: the profile's name
+    int networkReplyIdleMs{0}; // override the default DLP reply deadline for a slow network route
 };
 
 bool ConfiguredHotSyncUsesNetwork(const SyncOptions& options);

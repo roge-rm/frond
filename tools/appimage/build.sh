@@ -69,16 +69,18 @@ for f in emulator/main.c emulator/serial.c emulator/server.c emulator/vhci.c emu
     $CC -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -c $BLUEZ/$f -o $BT/$(echo $f | tr / _).o
 done
 $CC -static-libgcc $BT/*.o -o $OUT/btvirt
-# The Bluetooth phone: bluetooth-opp-peer --dun on bthost with the config patch, and the modem, PPP and slirp.
+# The Bluetooth phone and HotSync peer use the staged bthost and the core sync library.
 PHONE=$WORK/phone
 rm -rf $PHONE && mkdir -p $PHONE/emulator
 cp $BLUEZ/emulator/bthost.c $PHONE/emulator/bthost.c
 patch --batch -p1 -d $PHONE -i /src/tools/bluez-bthost-config.patch
+patch --batch -p1 -d $PHONE -i /src/tools/bluez-bthost-stream.patch
 SLIRP=$(pkg-config --cflags --libs slirp)
-$CC -std=gnu11 -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -I$BLUEZ/emulator -c $PHONE/emulator/bthost.c -o $PHONE/bthost.o
+$CC -std=gnu11 -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -I$BLUEZ/emulator -Itools -c $PHONE/emulator/bthost.c -o $PHONE/bthost.o
 $CC -std=gnu11 -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -I$BLUEZ/emulator -Itools -c tools/bluetooth-opp-peer.c -o $PHONE/peer.o
 $CXX $COMPAT -std=c++17 -O2 -I$SRC/common $SLIRP -c tools/bluetooth-dun.cpp -o $PHONE/dun.o
-$CXX $STATIC $PHONE/peer.o $PHONE/dun.o $PHONE/bthost.o $(ls $BT/*.o | grep -v -e emulator_main -e emulator_bthost -e emulator_serial \
+$CXX $COMPAT -std=c++17 -O2 -pthread -I$SRC/common -c tools/bluetooth-hotsync.cpp -o $PHONE/hotsync.o
+$CXX $STATIC -pthread $PHONE/peer.o $PHONE/dun.o $PHONE/hotsync.o $PHONE/bthost.o $(ls $BT/*.o | grep -v -e emulator_main -e emulator_bthost -e emulator_serial \
     -e emulator_server -e emulator_vhci -e emulator_btdev -e emulator_phy -e emulator_le) \
     $SRC/common/libcommon-net.a $SRC/common/libcommon.a $SLIRP -o $OUT/bluetooth-phone
 for binary in frond frond-68k frond-desktop; do
