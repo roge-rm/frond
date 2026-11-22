@@ -7,11 +7,13 @@
 
 #include <oaknut/oaknut.hpp>
 
+#include "dynarmic/backend/arm64/a32_jitstate.h"
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/backend/arm64/emit_context.h"
 #include "dynarmic/backend/arm64/fpsr_manager.h"
 #include "dynarmic/backend/arm64/reg_alloc.h"
 #include "dynarmic/backend/arm64/verbose_debugging_output.h"
+#include "dynarmic/frontend/A32/a32_location_descriptor.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/microinstruction.h"
 #include "dynarmic/ir/opcodes.h"
@@ -205,6 +207,31 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     EmitContext ctx{block, reg_alloc, conf, ebi, fpsr_manager, fastmem_manager, {}};
 
     ebi.entry_point = code.xptr<CodePtr>();
+
+    // Frond: the page guard (A32::UserConfig::frond_page_guard), before anything runs.
+    if (conf.frond_page_guard) {
+        const u32 first = A32::LocationDescriptor{block.Location()}.PC();
+        const u32 last = A32::LocationDescriptor{block.EndLocation()}.PC() - 1;
+        SharedLabel guarded;
+        for (u32 page = first >> 12; page <= last >> 12 && page < (conf.frond_page_guard_end >> 12); page++) {
+            if (!guarded) {
+                guarded = GenSharedLabel();
+            }
+            code.MOV(Xscratch0, reinterpret_cast<u64>(conf.frond_page_guard + page));
+            code.LDRB(Wscratch0, Xscratch0);
+            code.CBNZ(Wscratch0, *guarded);
+        }
+        if (guarded) {
+            ctx.deferred_emits.emplace_back([&code, &ctx, guarded, first] {
+                code.l(*guarded);
+                code.MOV(W1, first);
+                code.STR(W1, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
+                code.MOV(X2, 1);
+                EmitRelocation(code, ctx, LinkTarget::InterpreterFallback);
+                EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+            });
+        }
+    }
 
     if (ctx.block.GetCondition() == IR::Cond::AL) {
         ASSERT(!ctx.block.HasConditionFailedLocation());

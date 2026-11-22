@@ -119,6 +119,8 @@ bool cpuJitCodePageWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word);
 // ARM920T Fast blocks: as cpuJitFetch, at an MVA (no FCSE relocation). False on other cores.
 bool cpuJitFetchMva(ArmCpu *cpu, uint32_t mva, uint32_t *word);
+// ARM920T Fast blocks: the word at a physical address in RAM or ROM, whatever maps it.
+bool cpuJitFetchPa(ArmCpu *cpu, uint32_t pa, uint32_t *word);
 // While on, cpuJitFetch reads only RAM and ROM; a fetch from anything else fails and is
 // noted for cpuJitRefused (turning it on clears that). For code compiled ahead, which the
 // guest may never run, so no device sees a read the guest didn't make.

@@ -6106,6 +6106,15 @@ bool cpuJitFetchMva(ArmCpu *cpu, uint32_t mva, uint32_t *word) {
     return cpuPrvJitFetchMva(cpu, mva & ~3u, word);
 }
 
+bool cpuJitFetchPa(ArmCpu *cpu, uint32_t pa, uint32_t *word) {
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return false;
+    bool counted;
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
+    if (!page) return false;
+    memcpy(word, page + (pa & 0xffcu), 4);
+    return true;
+}
+
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
     va &= ~3u;
     if (cpu->model == ArmCpuModel::arm920t) {

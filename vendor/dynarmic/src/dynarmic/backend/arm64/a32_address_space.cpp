@@ -728,6 +728,8 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .check_halt_on_memory_access = conf.check_halt_on_memory_access,
         .check_halt_on_link = conf.check_halt_on_link,
         .max_unchecked_instructions = conf.enable_cycle_counting ? conf.max_unchecked_instructions : 0,
+        .frond_page_guard = conf.frond_page_guard,
+        .frond_page_guard_end = conf.frond_page_guard_end,
 
         .page_table_pointer = mcl::bit_cast<u64>(conf.page_table),
         .page_table_address_space_bits = 32,
