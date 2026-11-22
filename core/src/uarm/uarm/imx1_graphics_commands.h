@@ -720,6 +720,27 @@ class Imx1GraphicsCommands {
                             x += 3;
                             continue;
                         }
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                        if (!kInvert && !kA4 && moveSafe) {
+                            // Some of the four hold the key: the others go in at once over the destination's
+                            // pixels, which the key lanes keep. Bit 15 of each lane is set where the lane isn't
+                            // the key (exact per lane, no borrow between lanes).
+                            const uint64_t low15 = 0x7fff7fff7fff7fffull;
+                            const uint64_t set = (((lanes & low15) + low15) | lanes) & 0x8000800080008000ull;
+                            const uint64_t mask = (set >> 15) * 0xffff;
+                            uint64_t old;
+                            std::memcpy(&old, out + x * 2, 8);
+                            const uint64_t merged = (old & ~mask) | (four & mask);
+                            std::memcpy(out + x * 2, &merged, 8);
+                            const uint32_t firstLane = uint32_t(__builtin_ctzll(set)) >> 4;
+                            const uint32_t lastLane = uint32_t(63 - __builtin_clzll(set)) >> 4;
+                            if (high == 0) low = x * 2 + firstLane * 2;
+                            high = x * 2 + lastLane * 2 + 2;
+                            written += uint32_t(__builtin_popcountll(set));
+                            x += 3;
+                            continue;
+                        }
+#endif
                     }
                 }
                 uint32_t colour = kPixels ? in[x] : fillColour;
