@@ -62,6 +62,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 set(front_end ${uarm_cxx})
 list(FILTER front_end INCLUDE REGEX "/native/")
 list(FILTER uarm_cxx EXCLUDE REGEX "/native/")
+# The Zodiac's MIDI out goes through MidiManager here (ZodiacMidiJni.cpp), not RtMidi.
+list(FILTER front_end EXCLUDE REGEX "/native/ZodiacRtMidi\\.cpp$")
 
 # src/common (sessions, zip, card images) has no SoC code, so both cores link it.
 add_library(frondcommon STATIC ${common_c} ${common_cxx})
@@ -236,7 +238,7 @@ endif()
 
 # The desktop front end (what out/frond runs) with the readline CLI swapped for a
 # stub. Its main() is renamed so android_main.cpp can set up the process first.
-add_library(main SHARED android_main.cpp CliNone.cpp ${front_end})
+add_library(main SHARED android_main.cpp CliNone.cpp ZodiacMidiJni.cpp ${front_end})
 target_include_directories(main PRIVATE "${UARM}/native")
 set_source_files_properties("${UARM}/native/main.cpp" PROPERTIES
     COMPILE_DEFINITIONS "SDL_MAIN_HANDLED;main=frond_core_main")
