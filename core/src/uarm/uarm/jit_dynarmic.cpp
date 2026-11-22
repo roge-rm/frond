@@ -461,6 +461,7 @@ struct Env final : public A32::UserCallbacks {
         bool suspended = false;  // in suspended[] until its PID runs again
         bool stale = false;  // suspended, and its blocks from before were read from another physical page
         bool noted = false;  // suspended, and code was noted from it since: blocks at its MVA may be live
+        MmuCodeWalkMemo walk;  // the last mapping check's table words (CodePa)
     };
     std::unordered_map<uint32_t, uint32_t> accessPages;  // code pages by access
     uint64_t permContext = ~0ull;
@@ -494,6 +495,11 @@ struct Env final : public A32::UserCallbacks {
     uint32_t CodePa(uint32_t page, uint32_t &access) {
         uint32_t pa;
         return cpuJitCodePa(cpu, page << 12, &pa, &access) ? pa >> 12 : ~0u;
+    }
+    // The same for a noted page, through its walk memo: most flushes leave the tables a page uses alone.
+    uint32_t CodePa(uint32_t page, CodePage &c, uint32_t &access) {
+        uint32_t pa;
+        return cpuJitCodePaMemo(cpu, page << 12, &pa, &access, &c.walk) ? pa >> 12 : ~0u;
     }
 
     void NoteCode(uint32_t va) { NoteCodeAt(CodePageOf(va), va & 0xfffu); }
@@ -549,7 +555,7 @@ struct Env final : public A32::UserCallbacks {
     std::unordered_map<uint32_t, CodePage>::iterator NoteSuspended(std::unordered_map<uint32_t, CodePage>::iterator it,
                                                                    uint32_t page) {
         uint32_t access;
-        const uint32_t pa = CodePa(page, access);
+        const uint32_t pa = CodePa(page, it->second, access);
         if (pa == ~0u || (pa == it->second.pa && access == it->second.access)) return it;
         Forget(page);
         it = NotePage(page);
@@ -670,7 +676,7 @@ struct Env final : public A32::UserCallbacks {
         for (auto &[page, c] : code) {
             if (c.suspended && !c.noted) continue;
             uint32_t access;
-            if (CodePa(page, access) == c.pa && access == c.access) continue;
+            if (CodePa(page, c, access) == c.pa && access == c.access) continue;
             if (c.suspended) {
                 c.noted = false;
                 if (jit->HasCodeIn(page << 12, 4096)) {
@@ -708,7 +714,7 @@ struct Env final : public A32::UserCallbacks {
             const auto c = code.find(page);
             if (c == code.end() || !c->second.suspended) continue;
             uint32_t access;
-            const uint32_t pa = CodePa(page, access);
+            const uint32_t pa = CodePa(page, c->second, access);
             if (!c->second.stale && pa == c->second.pa && access == c->second.access) {
                 stats.resumes++;
                 c->second.suspended = false;

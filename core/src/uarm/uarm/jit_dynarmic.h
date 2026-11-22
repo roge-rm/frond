@@ -136,6 +136,10 @@ uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va);
 // Physical address of va by the page tables, without touching the TLBs, and in *access the
 // domain and AP of its page (MMU_ACCESS_*, see mmuTranslateCodeAccess), also on a fault.
 bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access);
+// The same, remembering the page table words the walk read in memo (an MmuCodeWalkMemo) on the ARM920T with
+// Fast blocks, so a walk over unchanged tables is a compare.
+struct MmuCodeWalkMemo;
+bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, MmuCodeWalkMemo *memo);
 // Whether code from a page with that access may be fetched now, in the current mode.
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
 // Domains, S and R: what cpuJitAccessReadable depends on besides the access and the

@@ -69,7 +69,9 @@ bool mmuIsOn(struct ArmMmu *mmu) { return mmu->transTablPA != MMU_DISABLED_TTP; 
 static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uint32_t adr,
                                                          bool priviledged, bool write, bool inspect = false,
                                                          bool checkRead = true, uint8_t *access = nullptr,
-                                                         bool *uniformP = nullptr) {
+                                                         bool *uniformP = nullptr, MmuCodeWalkMemo *memo = nullptr,
+                                                         const uint8_t *(*host)(void *, uint32_t) = nullptr,
+                                                         void *hostCtx = nullptr) {
     bool c = false, b = false, x = false;
     bool section = false, coarse = true, pxa_tex_page = false;
     uint32_t va, paPage = 0, sz, t, pa;
@@ -80,8 +82,20 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
     MMUTranslateResult result;
 
     const auto readTable = [&](uint32_t pa, uint32_t* dest) {
-        return (!inspect || memIsBufferRange(mmu->mem,pa,4,false)) &&
-               memAccess<4,false>(mmu->mem,pa,dest);
+        const bool ok = (!inspect || memIsBufferRange(mmu->mem,pa,4,false)) &&
+                        memAccess<4,false>(mmu->mem,pa,dest);
+        // A word that failed, isn't plain memory or doesn't read the same there can't be checked later.
+        if (memo && memo->n != 0xff) {
+            const uint8_t *h = ok && memo->n < 10 ? host(hostCtx, pa) : nullptr;
+            uint32_t v;
+            if (h && (memcpy(&v, h, 4), v == *dest)) {
+                memo->word[memo->n] = h;
+                memo->value[memo->n++] = v;
+            } else {
+                memo->n = 0xff;
+            }
+        }
+        return ok;
     };
     // read first level table
     if (mmu->transTablPA & 3) return TRANSLATE_RESULT_FAULT(0x01);  // alignment fault
@@ -273,6 +287,29 @@ MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
     return uint64_t((addr & 0xfff) | (entry.pa << 12));
 }
 
+// The walk behind mmuTranslateCodeAccess, its table words recorded in memo when given.
+static MMUTranslateResult codeAccessWalk(ArmMmu* mmu, uint32_t addr, uint32_t* access, MmuCodeWalkMemo* memo,
+                                         const uint8_t* (*host)(void*, uint32_t), void* ctx) {
+    uint8_t a;
+    bool uniform;
+    const MMUTranslateResult r = translateAndCache(mmu,addr,true,false,true,false,&a,&uniform,memo,host,ctx);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return r;
+    uint32_t acc = uint32_t(a >> 2) << 8;
+    if (uniform) {
+        acc |= (a & 3) * 0x55u;
+    } else {
+        for (uint32_t k = 0; k < 4; ++k) {
+            const uint32_t sub = (addr & ~0xfffu) | (k << 10);
+            if (MMU_TRANSLATE_RESULT_OK(translateAndCache(mmu,sub,true,false,true,false,&a,&uniform,memo,host,ctx)))
+                acc |= uint32_t(a & 3) << (2 * k);
+            else
+                acc |= 0x1000u << k;
+        }
+    }
+    *access = acc;
+    return r;
+}
+
 MMUTranslateResult mmuTranslateCodeAccess(ArmMmu* mmu, uint32_t addr, uint32_t* access) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) {
         *access = MMU_ACCESS_ANY;
@@ -285,23 +322,32 @@ MMUTranslateResult mmuTranslateCodeAccess(ArmMmu* mmu, uint32_t addr, uint32_t* 
         *access = (uint32_t(entry.domain) << 8) | (entry.ap * 0x55u);
         return uint64_t((addr & 0xfff) | (entry.pa << 12));
     }
-    uint8_t a;
-    bool uniform;
-    const MMUTranslateResult r = translateAndCache(mmu,addr,true,false,true,false,&a,&uniform);
-    if (!MMU_TRANSLATE_RESULT_OK(r)) return r;
-    uint32_t acc = uint32_t(a >> 2) << 8;
-    if (uniform) {
-        acc |= (a & 3) * 0x55u;
-    } else {
-        for (uint32_t k = 0; k < 4; ++k) {
-            const uint32_t sub = (addr & ~0xfffu) | (k << 10);
-            if (MMU_TRANSLATE_RESULT_OK(translateAndCache(mmu,sub,true,false,true,false,&a,&uniform)))
-                acc |= uint32_t(a & 3) << (2 * k);
-            else
-                acc |= 0x1000u << k;
+    return codeAccessWalk(mmu, addr, access, nullptr, nullptr, nullptr);
+}
+
+MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu* mmu, uint32_t addr, uint32_t* access, MmuCodeWalkMemo* memo,
+                                              const uint8_t* (*host)(void*, uint32_t), void* ctx) {
+    if (mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[addr >> 12].gen == mmu->gen)
+        return mmuTranslateCodeAccess(mmu, addr, access);
+    if (memo->n && memo->n != 0xff && memo->ttb == mmu->transTablPA) {
+        bool same = true;
+        for (uint8_t i = 0; same && i < memo->n; ++i) {
+            uint32_t v;
+            memcpy(&v, memo->word[i], 4);
+            same = v == memo->value[i];
+        }
+        if (same) {
+            *access = memo->access;
+            return memo->result;
         }
     }
-    *access = acc;
+    *access = 0;
+    memo->n = 0;
+    memo->ttb = mmu->transTablPA;
+    const MMUTranslateResult r = codeAccessWalk(mmu, addr, access, memo, host, ctx);
+    if (memo->n == 0xff) memo->n = 0;
+    memo->result = r;
+    memo->access = *access;
     return r;
 }
 

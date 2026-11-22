@@ -42,6 +42,20 @@ MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged,
 // has no mapping. MMU_ACCESS_ANY with the MMU off.
 #define MMU_ACCESS_ANY 0x10000u
 MMUTranslateResult mmuTranslateCodeAccess(ArmMmu*, uint32_t va, uint32_t* access);
+// The page table words mmuTranslateCodeAccessMemo's last walk for a page read, by host address, with their
+// values and what the walk gave. The walk depends on the TTB and those words alone.
+struct MmuCodeWalkMemo {
+    uint32_t ttb = 0, access = 0;
+    MMUTranslateResult result = 0;
+    uint8_t n = 0;  // words held, 0 for none
+    const uint8_t* word[10];
+    uint32_t value[10];
+};
+// mmuTranslateCodeAccess with the same results: a live TLB entry answers as there; otherwise memo's result
+// while the TTB and every word it holds are as recorded, or else a walk, recorded in memo when host gives
+// the host address of every table word it read (null for one that isn't plain memory).
+MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu*, uint32_t va, uint32_t* access, MmuCodeWalkMemo* memo,
+                                              const uint8_t* (*host)(void*, uint32_t pa), void* ctx);
 // Whether reads of every mapped subpage of a page with that access are allowed now in
 // this mode.
 bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged);

@@ -6149,6 +6149,23 @@ bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access) {
     return true;
 }
 
+// A page table word's host address for mmuTranslateCodeAccessMemo: RAM through the lean path's pages.
+static const uint8_t *cpuPrvTableWord(void *ctx, uint32_t pa) {
+    ArmCpu *cpu = (ArmCpu *)ctx;
+    bool counted;
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
+    return page ? page + (pa & 0xffcu) : nullptr;
+}
+
+bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, MmuCodeWalkMemo *memo) {
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return cpuJitCodePa(cpu, va, pa, access);
+    const MMUTranslateResult r =
+        mmuTranslateCodeAccessMemo(cpu->memorySystem.mmu, va, access, memo, cpuPrvTableWord, cpu);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+    *pa = MMU_TRANSLATE_RESULT_PA(r);
+    return true;
+}
+
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access) {
     return mmuAccessReadable(cpu->memorySystem.mmu, access, cpu->privileged);
 }
