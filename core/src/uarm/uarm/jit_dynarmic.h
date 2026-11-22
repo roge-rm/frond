@@ -140,6 +140,8 @@ bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access);
 // Fast blocks, so a walk over unchanged tables is a compare.
 struct MmuCodeWalkMemo;
 bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, MmuCodeWalkMemo *memo);
+// The translation table base the MMU walks now (MMU_DISABLED_TTP with the MMU off).
+uint32_t cpuJitTtb(ArmCpu *cpu);
 // Whether code from a page with that access may be fetched now, in the current mode.
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
 // Domains, S and R: what cpuJitAccessReadable depends on besides the access and the

@@ -46,14 +46,18 @@ bool mmuPageWhollyAllowed(ArmMmu*, uint32_t va, bool privileged, bool write);
 // has no mapping. MMU_ACCESS_ANY with the MMU off.
 #define MMU_ACCESS_ANY 0x10000u
 MMUTranslateResult mmuTranslateCodeAccess(ArmMmu*, uint32_t va, uint32_t* access);
-// The page table words mmuTranslateCodeAccessMemo's last walk for a page read, by host address, with their
-// values and what the walk gave. The walk depends on the TTB and those words alone.
+// The page table words mmuTranslateCodeAccessMemo's last walk for a page read, by host and physical address,
+// with their values and what the walk gave. The walk depends on the TTB and those words alone. walks counts
+// the walks recorded; tlb says the last call was answered by a live TLB entry, without the memo.
 struct MmuCodeWalkMemo {
     uint32_t ttb = 0, access = 0;
     MMUTranslateResult result = 0;
+    uint32_t walks = 0;
     uint8_t n = 0;  // words held, 0 for none
+    bool tlb = false;
     const uint8_t* word[10];
     uint32_t value[10];
+    uint32_t pa[10];
 };
 // mmuTranslateCodeAccess with the same results: a live TLB entry answers as there; otherwise memo's result
 // while the TTB and every word it holds are as recorded, or else a walk, recorded in memo when host gives

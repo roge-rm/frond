@@ -6172,6 +6172,8 @@ static const uint8_t *cpuPrvTableWord(void *ctx, uint32_t pa) {
     return page ? page + (pa & 0xffcu) : nullptr;
 }
 
+uint32_t cpuJitTtb(ArmCpu *cpu) { return mmuGetTTP(cpu->memorySystem.mmu); }
+
 bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, MmuCodeWalkMemo *memo) {
     if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return cpuJitCodePa(cpu, va, pa, access);
     const MMUTranslateResult r =

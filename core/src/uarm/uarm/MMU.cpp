@@ -90,6 +90,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
             uint32_t v;
             if (h && (memcpy(&v, h, 4), v == *dest)) {
                 memo->word[memo->n] = h;
+                memo->pa[memo->n] = pa;
                 memo->value[memo->n++] = v;
             } else {
                 memo->n = 0xff;
@@ -336,8 +337,8 @@ MMUTranslateResult mmuTranslateCodeAccess(ArmMmu* mmu, uint32_t addr, uint32_t* 
 
 MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu* mmu, uint32_t addr, uint32_t* access, MmuCodeWalkMemo* memo,
                                               const uint8_t* (*host)(void*, uint32_t), void* ctx) {
-    if (mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[addr >> 12].gen == mmu->gen)
-        return mmuTranslateCodeAccess(mmu, addr, access);
+    memo->tlb = mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[addr >> 12].gen == mmu->gen;
+    if (mmu->transTablPA == MMU_DISABLED_TTP || memo->tlb) return mmuTranslateCodeAccess(mmu, addr, access);
     if (memo->n && memo->n != 0xff && memo->ttb == mmu->transTablPA) {
         bool same = true;
         for (uint8_t i = 0; same && i < memo->n; ++i) {
@@ -352,6 +353,7 @@ MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu* mmu, uint32_t addr, uint32
     }
     *access = 0;
     memo->n = 0;
+    memo->walks++;
     memo->ttb = mmu->transTablPA;
     const MMUTranslateResult r = codeAccessWalk(mmu, addr, access, memo, host, ctx);
     if (memo->n == 0xff) memo->n = 0;
