@@ -2160,19 +2160,26 @@ inline void Imx1GraphicsCommands::undo(const Undo& u) {
     refused = u.refused;
 }
 // Stats over every worker, printed at exit with FROND_ZODIAC_GFX_STATS: jobs, drains that waited and for how
-// long, pushes that found the ring full, wakes, the workers' time on jobs.
+// long, pushes that found the ring full, wakes, the workers' time on jobs. Never destroyed, as a worker owned by a
+// static can still write it during static destruction.
 struct Imx1GraphicsWorkerStats {
     std::atomic<uint64_t> jobs{0}, waits{0}, waitNs{0}, fullWaits{0}, wakes{0};
     alignas(64) std::atomic<uint64_t> busyNs{0};
-    ~Imx1GraphicsWorkerStats() {
-        if (std::getenv("FROND_ZODIAC_GFX_STATS"))
-            std::fprintf(stderr, "zodiac gfx thread: %llu jobs, %llu drains waited %.1f ms, %llu full waits, %llu wakes, "
-                         "worker ran %.1f ms\n", (unsigned long long)jobs.load(), (unsigned long long)waits.load(),
-                         waitNs.load() / 1e6, (unsigned long long)fullWaits.load(), (unsigned long long)wakes.load(),
-                         busyNs.load() / 1e6);
+    static Imx1GraphicsWorkerStats& make() {
+        auto* stats = new Imx1GraphicsWorkerStats;
+        if (std::getenv("FROND_ZODIAC_GFX_STATS")) std::atexit(print);
+        return *stats;
     }
+    static void print();
 };
-inline Imx1GraphicsWorkerStats imx1GraphicsWorkerStats;
+inline Imx1GraphicsWorkerStats& imx1GraphicsWorkerStats = Imx1GraphicsWorkerStats::make();
+inline void Imx1GraphicsWorkerStats::print() {
+    const auto& s = imx1GraphicsWorkerStats;
+    std::fprintf(stderr, "zodiac gfx thread: %llu jobs, %llu drains waited %.1f ms, %llu full waits, %llu wakes, "
+                 "worker ran %.1f ms\n", (unsigned long long)s.jobs.load(), (unsigned long long)s.waits.load(),
+                 s.waitNs.load() / 1e6, (unsigned long long)s.fullWaits.load(), (unsigned long long)s.wakes.load(),
+                 s.busyNs.load() / 1e6);
+}
 // Fast only: a host thread that runs the pixel work of the fills fastFill and fastTransform take, in queue order.
 // The emu thread keeps everything the guest sees (complete's checks, the engine, each fill's ranges) and queues the
 // fill after them; it applies each fill's noteWrites when it takes the result back. The fence (Imx1GraphicsFence)

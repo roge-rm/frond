@@ -374,16 +374,16 @@ struct Probe {
         // Already attached to this memory: nothing to bring back or upload.
         if (graphicsGpu.gpu->attachedMemory() == graphicsMemory.get()) return;
         // The GPU's residency and the fill worker don't go together.
-        if (graphicsWorker) graphicsWorker->attach(nullptr);
+        graphicsWorker.reset();
         graphicsGpu.gpu->attach(graphicsMemory.get());
     }
-    // Attaches the fill worker to graphics memory in Fast without a host GPU, or lets it go. A drain first, so
-    // leaving Fast or switching it off leaves every fill done.
+    // Attaches the fill worker to graphics memory in Fast without a host GPU, or stops it. Its destructor drains
+    // first, so leaving Fast or switching it off leaves every fill done and no thread behind.
     void attachGraphicsWorker() {
         const bool on = fastEngine && graphicsMemory && !graphicsMemory->gpuResidency() &&
                         Imx1GraphicsCommands::directFills && Imx1GraphicsWorker::enabledByEnvironment();
         if (!on) {
-            if (graphicsWorker) graphicsWorker->attach(nullptr);
+            graphicsWorker.reset();
             return;
         }
         if (!graphicsWorker) {

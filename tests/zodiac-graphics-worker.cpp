@@ -2,7 +2,6 @@
 // state and saved state at every sync point, with fills queued back to back, reading what earlier queued fills
 // wrote, and CPU accesses inside and outside the queued ranges. Also the memory going away with jobs queued, the
 // worker moving between memories and a full ring. Built with -fsanitize=thread too (test-zodiac-graphics-worker).
-#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -76,6 +75,11 @@ static void fail(const char* what, unsigned step) {
     std::fprintf(stderr, "FAIL: %s at step %u\n", what, step);
     std::abort();
 }
+// Checks that run with or without NDEBUG, as several of them do the work they check.
+static void require(bool ok, const char* what) {
+    if (!ok) fail(what, 0);
+}
+#define REQUIRE(x) require((x), #x)
 static void compareDirty(M& queued, M& direct, unsigned step, bool acknowledge) {
     for (unsigned c = 0; c < unsigned(M::Consumer::count); ++c)
         for (unsigned bank = 0; bank < 2; ++bank) {
@@ -104,8 +108,8 @@ static void fillBoth(M& queued, M& direct, unsigned step) {
 static void seedBoth(M& queued, M& direct) {
     for (uint32_t i = 0; i < regionBytes; i += 2) {
         uint32_t word = next(4) ? (next(3) ? 0 : 0xffff) : next(0x10000);
-        assert(queued.accessGpu(*state, eim, region + i, 2, true, word) == A::ok);
-        assert(direct.accessGpu(*state, eim, region + i, 2, true, word) == A::ok);
+        REQUIRE(queued.accessGpu(*state, eim, region + i, 2, true, word) == A::ok);
+        REQUIRE(direct.accessGpu(*state, eim, region + i, 2, true, word) == A::ok);
     }
 }
 
@@ -125,14 +129,14 @@ static void checkMixed() {
         } else if (op < 80) {
             uint32_t word = next(0x10000);
             const uint32_t at = region + next(regionBytes / 2) * 2;
-            assert(queued.accessGpu(*state, eim, at, 2, true, word) == A::ok);
-            assert(direct.accessGpu(*state, eim, at, 2, true, word) == A::ok);
+            REQUIRE(queued.accessGpu(*state, eim, at, 2, true, word) == A::ok);
+            REQUIRE(direct.accessGpu(*state, eim, at, 2, true, word) == A::ok);
             ++counts[1];
         } else if (op < 90) {
             uint32_t a = 0, b = 0;
             const uint32_t at = region + next(regionBytes / 4) * 4;
-            assert(queued.accessGpu(*state, eim, at, 4, false, a) == A::ok);
-            assert(direct.accessGpu(*state, eim, at, 4, false, b) == A::ok);
+            REQUIRE(queued.accessGpu(*state, eim, at, 4, false, a) == A::ok);
+            REQUIRE(direct.accessGpu(*state, eim, at, 4, false, b) == A::ok);
             if (a != b) fail("CPU read", step);
             ++counts[2];
         } else if (op < 94) {
@@ -165,7 +169,7 @@ static void checkMixed() {
     compareDirty(queued, direct, 60000, false);
     compareBanks(queued, direct, 60000);
     const uint64_t jobs = worker.jobs() - jobsBefore;
-    assert(jobs > 30000);
+    REQUIRE(jobs > 30000);
     std::printf("PASS: %llu queued fills match the direct ones through %u CPU writes, %u reads, %u spans, %u copies, "
                 "%u dirty reads and %u saved states\n", (unsigned long long)jobs, counts[1], counts[2], counts[3],
                 counts[4], counts[5], counts[6]);
@@ -193,11 +197,11 @@ static void checkFullRing() {
         if (C::completeFill(*state, eim, queued, fills.back()) != A::ok) fail("fill status", step);
     }
     release.join();
-    for (const auto& f : fills) assert(C::completeFill(*state, eim, direct, f) == A::ok);
+    for (const auto& f : fills) REQUIRE(C::completeFill(*state, eim, direct, f) == A::ok);
     compareDirty(queued, direct, 20000, false);
     compareBanks(queued, direct, 20000);
     const uint64_t full = imx1GraphicsWorkerStats.fullWaits.load() - fullBefore;
-    assert(full > 0);
+    REQUIRE(full > 0);
     std::printf("PASS: 20000 fills back to back match, %llu pushes found the ring full\n", (unsigned long long)full);
 }
 
@@ -209,12 +213,12 @@ static void checkLifetimes() {
     {
         auto first = std::make_unique<M>();
         worker->attach(first.get());
-        assert(first->graphicsFence() == worker.get());
+        REQUIRE(first->graphicsFence() == worker.get());
         seedBoth(*first, reference);
         for (unsigned step = 0; step < 3000; ++step) fillBoth(*first, reference, step);
         // Its destructor drains the worker before the bytes go.
         first.reset();
-        assert(!worker->attachedMemory());
+        REQUIRE(!worker->attachedMemory());
     }
     {
         static M reference2;
@@ -224,21 +228,21 @@ static void checkLifetimes() {
         for (unsigned step = 0; step < 3000; ++step) fillBoth(*second, reference2, step);
         // Moving on drains: the second memory holds every fill and lets the worker go.
         worker->attach(third.get());
-        assert(!second->graphicsFence() && third->graphicsFence() == worker.get());
+        REQUIRE(!second->graphicsFence() && third->graphicsFence() == worker.get());
         compareDirty(*second, reference2, 0, false);
         compareBanks(*second, reference2, 0);
         static M reference3;
         seedBoth(*third, reference3);
         for (unsigned step = 0; step < 3000; ++step) fillBoth(*third, reference3, step);
         worker.reset();
-        assert(!third->graphicsFence());
+        REQUIRE(!third->graphicsFence());
         compareDirty(*third, reference3, 0, false);
         compareBanks(*third, reference3, 0);
         worker = std::make_unique<Imx1GraphicsWorker>();
         worker->attach(third.get());
         for (unsigned step = 0; step < 3000; ++step) fillBoth(*third, reference3, step);
         worker->attach(nullptr);
-        assert(!third->graphicsFence());
+        REQUIRE(!third->graphicsFence());
         compareDirty(*third, reference3, 0, false);
         compareBanks(*third, reference3, 0);
     }
@@ -247,9 +251,9 @@ static void checkLifetimes() {
 
 int main() {
     uint32_t value = 0x3e00;
-    assert(eim.access(0x00220028, 4, true, value) == Imx1EimAccess::ok);
+    REQUIRE(eim.access(0x00220028, 4, true, value) == Imx1EimAccess::ok);
     value = 0x11111e01;
-    assert(eim.access(0x0022002c, 4, true, value) == Imx1EimAccess::ok);
+    REQUIRE(eim.access(0x0022002c, 4, true, value) == Imx1EimAccess::ok);
     state = std::make_unique<Imx1Cs5Configuration>(Imx1GraphicsProfile::virtual5744Compatible8MiB, false, false);
     configureGraphicsInterface(*state, eim);
     configureGraphicsController(*state, eim);
