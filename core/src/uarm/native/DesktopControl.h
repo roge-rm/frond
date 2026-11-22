@@ -490,7 +490,7 @@ class DesktopControl {
         const bool sdProtection = command == "sd-protection" || command == "sd2-protection";
         const bool sdReadOnly = command == "sd-read-only" || command == "sd2-read-only";
         if (sdProtection || sdReadOnly) {
-            if (ctx.soc->GetDeviceType() != deviceTypeZodiac2)
+            if (!deviceProfileSdWriteProtection5(ctx.soc->GetDeviceType()))
                 return {false, "unsupported", "Write protection isn't available on this SD slot."};
             const bool second = command.rfind("sd2-", 0) == 0;
             if (!sdCardStore(second ? 1 : 0).initialized()) return {false, "empty", "This session has no card in that slot."};

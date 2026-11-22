@@ -18,6 +18,7 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--device NAME` | Device for raw firmware: `palm-tx`, `palm-e2`, `palm-zire-72` or `sony-clie-tg50`. The E2 is also found from its NOR header. |
 | `--engine exact\|fast` | CPU engine: `exact` is the interpreter, `fast` is the JIT where it's built in. Default `exact`. `FROND_JIT` overrides it. |
 | `--battery SETTING` | Start with `max` (default), `level N` or `host N`, with N from 0 to 100. Quote settings with spaces. Add `charging` or `battery` for the charging state. |
+| `--headphones-in` | Start with headphones plugged in on the T\|X, Tungsten E2/E3 or Zire 72. |
 | `--run-for SECONDS` | Exit after this many wall-clock seconds and print execution diagnostics. Not with `--script` or `--desktop-socket`. |
 | `--framebuffer-output FILE` | Save the unrotated LCD as a PNG at the end of `--run-for`. Needs `--run-for`. |
 | `--input-replay FILE` | Replay timed pen and key events and snapshots, see [Input replay](#input-replay). |
@@ -352,7 +353,7 @@ The Zire 72 camera starts on the test pattern each run and goes back to it on a 
 
 ### Card commands
 
-On the Zodiac, `sd-protection` and `sd2-protection` read each slot's write-protect setting. Eject the card before changing it with `sd-read-only` or `sd2-read-only` and `on` or `off`. The reply code is `protection` with `read-only` or `writable`.
+On the T|X, Tungsten E2/E3, Zire 72 and Zodiac, `sd-protection` reads the SD card's write-protect setting. Eject the card before changing it with `sd-read-only on` or `sd-read-only off`. For the Zodiac's second slot, use `sd2-protection` and `sd2-read-only`. The reply code is `protection` with `read-only` or `writable`.
 
 | Command | Argument | Reply |
 | --- | --- | --- |

@@ -81,6 +81,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             val rows = MachineRows.of(draft.device)
             Header("Audio", Modifier.padding(top = 16.dp))
             MachineSoundRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
+            if (draft.device.headphonesSupported) MachineHeadphonesRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.audioPreview) {
                 MachineAudioPreviewRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             }

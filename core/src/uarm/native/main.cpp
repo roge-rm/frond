@@ -128,6 +128,7 @@ struct Options {
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
+    bool headphonesIn;       // --headphones-in
     BatteryPower battery;    // --battery
 };
 
@@ -797,6 +798,7 @@ bool gFastEngineMissing = false;
         // Before the load, which applies it again over the session's saved inputs.
         if (soc->BatterySupported()) soc->SetBattery(options.battery);
         else if (options.battery != BatteryPower{}) cerr << "this device's battery can't be set yet, it stays full" << endl;
+        if (options.headphonesIn && deviceProfileHasPalmBoardInputs5(soc->GetDeviceType())) soc->SetHeadphones(true);
 
         if (auto* chip = soc->GetNand()) {
             if (nandFromMalloc)
@@ -1780,6 +1782,10 @@ int main(int argc, char** argv) {
     program.add_argument("--framebuffer-output")
         .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
 
+    program.add_argument("--headphones-in")
+        .help("start with headphones plugged in on a supported ARM Palm")
+        .default_value(false).implicit_value(true);
+
     program.add_argument("--battery")
         .help("the battery: max, level N or host N (0-100), then charging or battery (not charging)")
         .metavar("<\"max|level N|host N [charging|battery]\">")
@@ -2059,7 +2065,8 @@ int main(int argc, char** argv) {
                        .cardProtected = program.get<bool>("--card-protected"),
                        .fastEngine = program.get("--engine") == "fast",
                        .viewFollowsWindow = program.get("--view-turn") == "window",
-                       .disableRumble = program.get<bool>("--no-rumble")};
+                       .disableRumble = program.get<bool>("--no-rumble"),
+                       .headphonesIn = program.get<bool>("--headphones-in")};
     BatteryPower::Parse(program.get("--battery"), options.battery);
 
     logEnable();

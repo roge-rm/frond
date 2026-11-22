@@ -361,7 +361,7 @@ open class FrondActivity : SDLActivity() {
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd,
-            touchHidden = launchTouchHidden())
+            touchHidden = launchTouchHidden(), headphonesSupported = launchDevice().headphonesSupported)
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
@@ -968,6 +968,20 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    fun applyHeadphones() {
+        if (!launchDevice().headphonesSupported || leaving || destroyed) return
+        link.whenConnected {
+            if (!link.connectedOnce) return@whenConnected
+            soundSender.execute {
+                if (leaving || destroyed) return@execute
+                // Read the latest saved setting in case several changes were waiting for the link.
+                val saved = Sessions.forPath(this, sessionPath)?.settings ?: return@execute
+                val reply = link.request("headphones", if (saved.headphonesIn) "in" else "out", timeoutSeconds = 10)
+                if (!reply.ok) Log.w(TAG, "headphones: ${reply.code} ${reply.message}")
+            }
+        }
+    }
+
     // Applies the running machine's Size, Smooth pixels and TG50 controls. The core changes the
     // window once the Palm shows again.
     fun applyDisplay() {
@@ -1106,6 +1120,7 @@ open class FrondActivity : SDLActivity() {
         startPendingMicrophone()
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
+        applyHeadphones()
         bar.sound = sound
         if (!leaving) applyDisplay()
         menuModel?.readMicrophone()

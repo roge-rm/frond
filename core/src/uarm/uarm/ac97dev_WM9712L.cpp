@@ -83,6 +83,7 @@ struct WM9712L {
 
     // gpio
     uint16_t gpioCfg, gpioPolTyp, gpioSticky, gpioWake, gpioStatus, gpioSharing;
+    bool headphoneInput, headphones;
 
     // rates
     uint16_t dacRate, auxDacRate, adcRate;
@@ -153,6 +154,12 @@ struct WM9712L {
     }
 };
 
+static constexpr uint16_t headphoneGpio = 1u << 1;
+
+static bool wm9712LprvHeadphoneActive(const WM9712L* wm) {
+    return wm->headphones == bool(wm->gpioPolTyp & headphoneGpio);
+}
+
 static void wm9712LprvGpioRecalc(struct WM9712L *wm) {
     // PRP=01 arms automatic digitiser wake-up on pen down (WM9712L table 26).
     if (wm->penDown && (wm->digiRegs[1] & 0xc000) == 0x4000)
@@ -164,6 +171,9 @@ static void wm9712LprvGpioRecalc(struct WM9712L *wm) {
     if (!(wm->gpioSticky & pen)) {
         wm->gpioStatus = (wm->gpioStatus & ~pen) | (active ? pen : 0);
     }
+    if (wm->headphoneInput && (wm->gpioCfg & headphoneGpio) && !(wm->gpioSticky & headphoneGpio))
+        wm->gpioStatus = (wm->gpioStatus & ~headphoneGpio) |
+                         (wm9712LprvHeadphoneActive(wm) ? headphoneGpio : 0);
     if (wm->penDownPin >= 0)
         pxaGpioSetState(wm->gpio, wm->penDownPin,
                        !(wm->gpioSharing & 8) && !(wm->gpioCfg & 8) && wm->penDown);
@@ -454,6 +464,10 @@ static bool wm9712LprvCodecRegW(void *userData, uint32_t regAddr, uint16_t val) 
             break;
 
         case GPIOWAKE:
+            // Report a jack already plugged in when the DAL enables its interrupt.
+            if (wm->headphoneInput && (wm->gpioCfg & wm->gpioSticky & val & ~wm->gpioWake & headphoneGpio)
+                && wm9712LprvHeadphoneActive(wm))
+                wm->gpioStatus |= headphoneGpio;
             wm->gpioWake = val;
             break;
 
@@ -902,6 +916,15 @@ void wm9712LsetAudioQueue(struct WM9712L *wm, struct AudioQueue *audioQueue) {
     wm->audioQueue = audioQueue;
 }
 
+void wm9712LsetHeadphones(WM9712L* wm, bool in) {
+    const bool changed = wm->headphones != in;
+    wm->headphoneInput = true;
+    wm->headphones = in;
+    if (changed && (wm->gpioCfg & wm->gpioSticky & headphoneGpio) && wm9712LprvHeadphoneActive(wm))
+        wm->gpioStatus |= headphoneGpio;
+    wm9712LprvGpioRecalc(wm);
+}
+
 template <typename T>
 void wm9712Lsave(struct WM9712L *wm, T &savestate) {
     auto chunk = savestate.GetChunk(ChunkType::wm9712L,
@@ -949,7 +972,13 @@ void wm9712Load(struct WM9712L *wm, T &loader, bool preserveInput) {
         }
     }
 
-    if (!preserveInput) wm9712LsetPen(wm, 0, 0, -1);
+    if (!preserveInput) {
+        // The loaded polarity arms the next edge. Reconcile the latched jack event with the live input.
+        if (wm->headphoneInput && (wm->gpioCfg & wm->gpioSticky & headphoneGpio))
+            wm->gpioStatus = (wm->gpioStatus & ~headphoneGpio) |
+                             (wm9712LprvHeadphoneActive(wm) ? headphoneGpio : 0);
+        wm9712LsetPen(wm, 0, 0, -1);
+    }
 }
 
 template void wm9712Lsave<Savestate<ChunkType>>(WM9712L *wm, Savestate<ChunkType> &savestate);

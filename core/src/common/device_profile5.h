@@ -451,6 +451,14 @@ inline bool deviceProfileIsE2Board5(int32_t deviceType) {
     return profile && profile->board == DeviceBoard5::pxa255E2;
 }
 
+inline bool deviceProfileHasPalmBoardInputs5(int32_t deviceType) {
+    return deviceType == deviceTypeTX || deviceType == deviceTypeZire72 || deviceProfileIsE2Board5(deviceType);
+}
+
+inline bool deviceProfileSdWriteProtection5(int32_t deviceType) {
+    return deviceType == deviceTypeZodiac2 || deviceProfileHasPalmBoardInputs5(deviceType);
+}
+
 inline bool deviceProfileNetworkHotSync5(const DeviceProfile5& profile) {
     const auto& caps = profile.capabilities;
     return profile.deviceType == deviceTypeTX || caps.modem || caps.irPhone || caps.usbWifi || caps.builtInWifi;

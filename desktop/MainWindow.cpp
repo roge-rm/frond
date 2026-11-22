@@ -446,6 +446,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     soundToggle = new QCheckBox(tr("On"), root);
     soundToggle->setObjectName("sound");
     label(tr("Sound"), 1, displayGrid); displayGrid->addWidget(soundToggle, 1, 1, 1, 2);
+    headphonesToggle = new QCheckBox(tr("Headphones in"), root);
+    headphonesToggle->setObjectName("headphonesIn");
+    displayGrid->addWidget(headphonesToggle, 14, 0, 1, 3);
+    connect(headphonesToggle, &QCheckBox::clicked, this, [this](bool in) {
+        if (!send("headphones", in ? "in" : "out")) refresh();
+    });
     microphoneToggle = new QCheckBox(tr("On"), root);
     microphoneToggle->setObjectName("microphone");
     microphoneLabel = label(tr("Microphone"), 2, displayGrid); displayGrid->addWidget(microphoneToggle, 2, 1, 1, 2);
@@ -906,7 +912,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
     linked2Watcher.reset(); linked2WatcherId.clear(); cardSlot = 0; secondStartPending = false;
         palmWifiInserted = false;
-        sdKnown = protectionKnown = protection2Known = protectionStartsSecond = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
+        sdKnown = protectionKnown = protection2Known = protectionStartPending = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         refresh();
         // The machine's card is free for Files and the rest once its lock is gone.
         if (cardsWindow) cardsWindow->refresh();
@@ -1114,12 +1120,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "ms-protection" || command == "ms-read-only" ||
                 command == "sd-protection" || command == "sd-read-only") { protectionKnown = false; refresh(); }
             if (command == "sd2-protection" || command == "sd2-read-only") { protection2Known = false; refresh(); }
-            if (!stopping && command == "sd-protection" && protectionStartsSecond) {
-                protectionStartsSecond = false;
-                secondStartPending = true;
-                send("sd2-state");
+            if (!stopping && command == "sd-protection" && protectionStartPending) {
+                protectionStartPending = false;
+                secondStartPending = secondSlot();
+                send(secondStartPending ? "sd2-state" : "network-state");
                 return;
             }
+            if (command == "headphones") refresh();
             if (!stopping && command == "sd2-protection") { send("network-state"); return; }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
             if (command == "camera-mode") { showCamera(message.startsWith("pattern") ? message : "pattern " + message); refresh(); }
@@ -1250,6 +1257,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "camera-state" || command == "camera-mode") { showCamera(message); refresh(); if (command == "camera-state") return; }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
         if (command == "gamepad") gamepadReply(message);
+        if (command == "headphones") {
+            runningPreferences.headphonesIn = message == "in";
+            if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
+        }
         if (command == "display" && contrastPending) {
             contrastPending = false;
             runningPreferences.contrast = contrast->value();
@@ -1297,12 +1308,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             firstDone = true;
         }
         const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
-        if (!stopping && zodiac && cardPresent && command == "sd-state" && send("sd-protection")) {
-            protectionStartsSecond = true;
+        const bool sdWriteProtection = deviceProfileSdWriteProtection5(int(runningDevice));
+        if (!stopping && sdWriteProtection && cardPresent && command == "sd-state" && send("sd-protection")) {
+            protectionStartPending = true;
             return;
         }
-        const bool protectedStart = command == "sd-protection" && protectionStartsSecond;
-        if (command == "sd-protection") protectionStartsSecond = false;
+        const bool protectedStart = command == "sd-protection" && protectionStartPending;
+        if (command == "sd-protection") protectionStartPending = false;
         if ((command == "sd-state" || protectedStart || firstDone) && !stopping && secondSlot()) {
             secondStartPending = true;
             send("sd2-state");
@@ -1319,15 +1331,18 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(zodiac && card2Present ? "sd2-protection" : "network-state");
             return;
         }
+        if (!stopping && sdWriteProtection && cardPresent &&
+            (command == "sd-create" || command == "sd-insert" || command == "sd-put-in")) {
+            send("sd-protection");
+            return;
+        }
         if (!stopping && zodiac) {
-            if (cardPresent && (command == "sd-create" || command == "sd-insert" || command == "sd-put-in"))
-                { send("sd-protection"); return; }
             if (card2Present && (command == "sd2-create" || command == "sd2-insert" || command == "sd2-put-in" ||
                                  command == "sd2-state"))
                 { send("sd2-protection"); return; }
             if (command == "sd2-protection") { send("network-state"); return; }
         }
-        if ((command == "sd-state" || command == "ms-state" || firstDone) && !stopping) {
+        if ((command == "sd-state" || command == "ms-state" || protectedStart || firstDone) && !stopping) {
             send(command == "ms-state" && cardPresent && !m68k ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
@@ -1499,6 +1514,10 @@ void MainWindow::refresh() {
     cameraBox->setEnabled(enabled && frondFirmware::profile(currentDevice()).frontend.camera);
     soundToggle->setEnabled(enabled && caps.sound);
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
+    const bool headphonesSupported = deviceProfileHasPalmBoardInputs5(int(currentDevice()));
+    headphonesToggle->setVisible(headphonesSupported);
+    headphonesToggle->setEnabled(enabled && headphonesSupported);
+    headphonesToggle->setChecked(running && runningPreferences.headphonesIn);
     showBattery();
     note(soundToggle, caps.sound, {});
     // A 68k device's missing hardware isn't shown at all; on the others it's greyed.
@@ -1626,7 +1645,8 @@ void MainWindow::refresh() {
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
     const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
-    sdRetry->setVisible(!known || ((memoryStick || zodiac) && cardPresent && !protectionKnown));
+    const bool sdWriteProtection = deviceProfileSdWriteProtection5(int(runningDevice));
+    sdRetry->setVisible(!known || ((memoryStick || sdWriteProtection) && cardPresent && !protectionKnown));
     cardPick->setVisible(known);
     cardPick->setText(known ? runningCardName() : tr("No card"));
     // A linked card held by another machine, or free to go in.
@@ -1697,7 +1717,7 @@ void MainWindow::refresh() {
     for (auto* b : {card2Pick, sd2Reinsert, sd2Exchange, sd2Eject, sd2Export, sd2Retry, linked2Insert}) b->setEnabled(enabled && second);
     if (oldPlace(1)) for (auto* b : {card2Pick, sd2Exchange}) b->setEnabled(false);
     // frond-68k's stick takes its protection from Cards when it goes in.
-    cardReadOnly->setVisible((memoryStick || zodiac) && supported && known && cardPresent && !m68k);
+    cardReadOnly->setVisible((memoryStick || sdWriteProtection) && supported && known && cardPresent && !m68k);
     cardReadOnly->setEnabled(enabled && protectionKnown && !cardInserted);
     card2ReadOnly->setVisible(zodiac && known2 && card2Present);
     card2ReadOnly->setEnabled(enabled && protection2Known && !card2Inserted);
@@ -2749,6 +2769,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     batteryChargingSupported = true;
     batterySent = batterySpec();
     arguments << "--battery" << batterySent;
+    if (runningPreferences.headphonesIn && deviceProfileHasPalmBoardInputs5(int(runningDevice)))
+        arguments << "--headphones-in";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
     if (!m68k && runningPreferences.fastAudio) {
         const auto option = frondAudio::lowLatencyOption(startDevice, sourceSession,

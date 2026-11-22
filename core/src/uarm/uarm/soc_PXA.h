@@ -91,6 +91,10 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool HoldSwitchSupported() const override;
     bool BatterySupported() const override;
     bool SetBattery(const BatteryPower&) override;
+    bool HeadphonesSupported() const override;
+    bool HeadphonesIn() const override { return headphones; }
+    bool SetHeadphones(bool in) override;
+    void SetSdWriteProtect(bool on) override;
     bool HoldSwitchOn() const override;
     bool SetHoldSwitch(bool on) override;
     bool PowerButtonSupported() const override { return !disableSleep; }
@@ -242,6 +246,12 @@ class SocPXA : public SocGeneric<SocPXA> {
     uint32_t TimerElapsedAt(uint32_t cycles) const;
 
    private:
+    int HeadphoneDetectPin() const;
+    void ApplyHeadphones();
+    void ApplySdWriteProtect(bool inserted);
+    bool headphones{false};
+    bool sdProtected{false};
+
     IrKeyboard irKeyboard;
     ClieGamepad gamepad;
     bool gamepadLineLow{};  // GPIO3 as the pad last drove it; wiring, follows the loaded pad

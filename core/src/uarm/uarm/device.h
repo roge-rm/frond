@@ -118,6 +118,7 @@ void deviceTg50SetConnectorEmpty(Device *);
 // load and reset. False on a board with no battery input modelled yet.
 bool deviceSetBattery(Device *, const BatteryPower &);
 bool deviceBatterySupported(Device *);
+void deviceSetCodecHeadphones(Device*, bool in);
 uint16_t deviceTg50AccessoryAuxCode(Device *);
 bool deviceTg50UsbCableAttached(Device *);
 bool deviceTg50UsbListening(Device *);

@@ -349,6 +349,8 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
 
     nand = sp.nand;
 
+    ApplyHeadphones();
+    ApplySdWriteProtect(false);
     pxaPwrClkConnectWakeSources(pwrClk, gpio, rtc, socRev == 2 ? kpc : nullptr);
 
     if (deviceType == DeviceType5::deviceTypeTX)
@@ -395,6 +397,32 @@ bool SocPXA::SetBattery(const BatteryPower& value) {
     battery = value;
     return true;
 }
+
+int SocPXA::HeadphoneDetectPin() const {
+    const auto type = deviceGetType(dev);
+    // The T|X DAL at 0x200960c8 and the E2 DAL at 0x200a3df6 read these pins.
+    if (type == deviceTypeTX) return 107;
+    if (deviceProfileIsE2Board5(type)) return 12;
+    return -1;
+}
+
+bool SocPXA::HeadphonesSupported() const {
+    return deviceProfileHasPalmBoardInputs5(deviceGetType(dev));
+}
+
+void SocPXA::ApplyHeadphones() {
+    const int pin = HeadphoneDetectPin();
+    if (pin >= 0) pxaGpioSetState(gpio, pin, headphones);
+    else if (deviceGetType(dev) == deviceTypeZire72) deviceSetCodecHeadphones(dev, headphones);
+}
+
+bool SocPXA::SetHeadphones(bool in) {
+    if (!HeadphonesSupported()) return false;
+    headphones = in;
+    ApplyHeadphones();
+    return true;
+}
+
 bool SocPXA::SetHoldSwitch(bool on) {
     if (!HoldSwitchSupported()) return false;
     // Host commands run on the owning SoC thread; this is a persistent external switch.
@@ -705,9 +733,24 @@ bool SocPXA::LoadPalmWifi(SavestateLoader<ChunkType>& loader) {
     return true;
 }
 
+void SocPXA::ApplySdWriteProtect(bool inserted) {
+    const auto type = GetDeviceType();
+    if (!deviceProfileHasPalmBoardInputs5(type)) return;
+    const bool locked = inserted && sdProtected;
+    vsdSetWriteProtect(vSD, locked);
+    // The SlotDrivers read active-high switches (T|X 0x208d3e10, E2 0x20182400, Zire 72 0x2011cd90).
+    pxaGpioSetState(gpio, deviceProfileIsE2Board5(type) ? 51 : 115, locked);
+}
+
+void SocPXA::SetSdWriteProtect(bool on) {
+    sdProtected = on;
+    ApplySdWriteProtect(cardInserted);
+}
+
 void SocPXA::OnSdInsert() {
     EjectPalmWifi();
     vsdReset(vSD, sdCardSectorCount());
+    ApplySdWriteProtect(true);
     pxaMmcInsert(mmc, vSD);
     deviceSetSdCardInserted(dev, true);
 }
@@ -722,6 +765,7 @@ std::optional<bool> SocPXA::SdRemovalHandled() {
 void SocPXA::OnSdEject() {
     vsdReset(vSD, 0);
     pxaMmcInsert(mmc, nullptr);
+    ApplySdWriteProtect(false);
     deviceSetSdCardInserted(dev, false);
 }
 
@@ -915,6 +959,8 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
         deviceSetSdCardInserted(dev, true);
         pxaMmcSdioIrqChanged(mmc);
     }
+    ApplyHeadphones();
+    ApplySdWriteProtect(cardInserted);
     // The loaded GPIO and AUX already match the loaded pad. The hooks are wiring: the pad takes them
     // unless a host endpoint holds the line, which leaves the connector empty instead.
     if (gamepad.Attached() && (!GamepadSupported() || (serialHostHooks.context && serialHostHooks.context != this) ||
