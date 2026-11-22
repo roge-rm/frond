@@ -3136,6 +3136,6 @@ test-linked-card-lock-wine:
 test: test-sony-ma2-fm
 test-sony-ma2-fm:
 	@mkdir -p $(OBJ_ROOT)
-	$(CXX) -std=c++17 -O2 -Icore/src/cloudpilot/emulator/hardware/clie \
-		tests/sony-ma2-fm.cpp core/src/cloudpilot/emulator/hardware/clie/SonyMa2Fm.cpp -o $(OBJ_ROOT)/test-sony-ma2-fm
+	$(CXX) -std=c++17 -O2 -Icore/src/common/audio \
+		tests/sony-ma2-fm.cpp core/src/common/audio/SonyMa2Fm.cpp -o $(OBJ_ROOT)/test-sony-ma2-fm
 	$(OBJ_ROOT)/test-sony-ma2-fm

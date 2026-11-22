@@ -11,6 +11,8 @@ SOURCE_C = 							\
 	sync/SynceRapi.c
 
 SOURCE_CXX = 						\
+	audio/SonyMa2Fm.cpp \
+	audio/SonyMa2Sound.cpp \
 	CardImage.cpp 					\
 	CardVolume.cpp 					\
 	CPCrc.cpp 						\

@@ -5,6 +5,7 @@
 #include "tg50-audio-fixture.h"
 #include "audio_queue.h"
 #include "CPU.h"
+#include "CPEndian.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -128,6 +129,96 @@ uint64_t hash(const std::vector<uint32_t>& pcm) {
     return h;
 }
 
+void enhancedSound() {
+    AudioMachine m;
+    m.loop();
+    auto* queue = audioQueueCreate(queueFrames);
+    attach(m, queue);
+    const auto read = [&m](uint32_t addr) {
+        uint32_t value{};
+        assert(memAccess(cpuGetMem(m.soc.GetCpu()), addr, 4, false, &value));
+        return value;
+    };
+    constexpr uint32_t uc = 0x08000000, gpio = 0x40e00000;
+    const auto select = [&m](unsigned reg) { m.wr(uc + 0x200, reg); };
+    const auto write = [&](unsigned reg, unsigned data) { select(reg); m.wr(uc + 0x204, data); };
+    select(0x0e);
+    assert(read(uc + 0x204) == 3);
+    assert(read(uc) & 0x100);
+    m.wr(uc + 0xa0, 0x100);
+    m.wr(uc + 0x120, 0x100);
+    write(0x0f, 1);
+    write(0x01, 0x0d);
+    write(0x10, 31);
+    write(0x21, 31);
+    write(0x22, 31);
+    write(0x25, 0x9f);
+    write(0x0f, 0);
+    for (unsigned i = 0; i < 256; ++i) write(5, 0x19);
+    const auto timerPacket = [&]() {
+        write(0, 0x01);
+        write(0, 0xff);
+        write(0, 0x00);
+    };
+    for (unsigned i = 0; i < 6; ++i) timerPacket();
+    write(6, 0x11);
+    m.run(21);
+    assert(!(read(uc) & 0x100));
+    assert(read(uc + 0xc0) & 0x100);
+    assert(!(read(gpio) & (1u << 13)));
+    assert(read(gpio) & (1u << 14));
+    audioQueueClear(queue);
+    auto mid = snapshot(m);
+    auto finish = [&]() {
+        select(8);
+        assert(read(uc + 0x204) == 1);
+        assert(read(uc + 0x204) == 1);
+        assert(!(read(uc) & 0x100));
+        timerPacket();
+        assert(read(uc) & 0x100);
+        select(8);
+        assert(read(uc + 0x204) == 0);
+        assert(!(read(gpio) & (1u << 13)));
+        m.wr(uc + 0xc0, 0x100);
+        assert(read(gpio) & (1u << 13));
+        m.run(50);
+        select(0x0a);
+        assert(read(uc + 0x204) == 5);
+        std::vector<uint32_t> pcm(4096);
+        pcm.resize(audioQueuePopChunk(queue, pcm.data(), pcm.size()));
+        assert(pcm.size() > 2000);
+        assert(std::any_of(pcm.begin(), pcm.end(), [](auto frame) { return frame != 0; }));
+        assert(pcm.back() == 0);
+        return pcm;
+    };
+    const auto expected = finish();
+
+    const auto word = [&mid](size_t offset) {
+        uint32_t value;
+        memcpy(&value, mid.state.data() + 4 * offset, 4);
+        return le32toh(value);
+    };
+    const auto chunks = word(0);
+    size_t soundOffset = 4 * (1 + 2 * chunks);
+    uint32_t i = 0;
+    while (i < chunks && word(1 + 2 * i) != uint32_t(ChunkType::sonyTg50Ma2))
+        soundOffset += 4 * word(2 + 2 * i++);
+    assert(i < chunks);
+    constexpr size_t registersOffset = 16;  // Board version, clock and chip version.
+    constexpr size_t sequenceCountOffset = registersOffset + 512 + 8;
+    auto invalid = mid.state;
+    invalid[soundOffset + sequenceCountOffset] = 96;
+    assert(!m.soc.Load(invalid.size(), invalid.data()));
+    invalid = mid.state;
+    invalid[soundOffset + registersOffset + 6] = 0;
+    assert(!m.soc.Load(invalid.size(), invalid.data()));
+
+    assert(restore(m, std::move(mid)));
+    assert(!(read(gpio) & (1u << 13)));
+    assert(finish() == expected);
+    m.soc.SetAudioQueue(nullptr);
+}
+
 void setup(AudioMachine& m) {
     m.configure(); m.reg(0, 0x80); m.reg(1, 0x61); m.reg(4, 0x6a); m.reg(6, 0x10);
     m.wr(0x40400004, 8);
@@ -143,6 +234,8 @@ int main(int argc, char** argv) {
     if (mode != "exact" && mode != "fast") { fprintf(stderr, "usage: %s exact|fast\n", argv[0]); return 2; }
     unsetenv("FROND_JIT");
     if (!cpuSetFastEngine(mode == "fast")) { puts("Fast engine not built in, skipped"); return 0; }
+
+    enhancedSound();
 
     AudioMachine m; setup(m);
     const uint32_t bound = cpuMaxOvershootCycles(m.soc.GetCpu());

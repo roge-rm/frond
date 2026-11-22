@@ -10,9 +10,14 @@
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
-#include "../../../../uarm/uarm/ymfm/ymfm_opl.cpp"
-#include "../../../../uarm/uarm/ymfm/ymfm_adpcm.cpp"
-#include "../../../../uarm/uarm/ymfm/ymfm_pcm.cpp"
+// The Zodiac builds a separate copy of ymfm in the ARM core.
+#define ymfm sony_ma2_ymfm
+#include "../../uarm/uarm/ymfm/ymfm_opl.cpp"
+#include "../../uarm/uarm/ymfm/ymfm_adpcm.cpp"
+#include "../../uarm/uarm/ymfm/ymfm_pcm.cpp"
+#undef ymfm
+
+namespace ymfm = sony_ma2_ymfm;
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
@@ -164,6 +169,8 @@ struct SonyMa2Fm::Core {
 
 SonyMa2Fm::SonyMa2Fm() : core(std::make_unique<Core>()) {}
 SonyMa2Fm::~SonyMa2Fm() = default;
+
+void SonyMa2Fm::Reset() { core = std::make_unique<Core>(); }
 
 void SonyMa2Fm::Write(unsigned page, unsigned index, uint8_t data) {
     const unsigned ch = index & 15;

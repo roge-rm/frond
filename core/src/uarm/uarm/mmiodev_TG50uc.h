@@ -20,6 +20,8 @@ void tg50ucSetKeyPressed(struct TG50uc* uc, uint32_t sdlKey, bool pressed);
 
 
 void tg50ucReset(TG50uc *);
+void tg50ucSetSoundAccess(TG50uc*, void (*)(void*, uint32_t, bool, uint32_t&), void*);
+void tg50ucRestoreSoundIrq(TG50uc*, bool high);
 // Destroy only after the owning SoC can no longer dispatch its bus callbacks.
 void tg50ucDestroy(TG50uc *);
 template <typename T> void tg50ucSave(TG50uc *, T &);
