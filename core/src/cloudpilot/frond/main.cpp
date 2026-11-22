@@ -52,7 +52,7 @@
 
 #include "../../uarm/native/DeviceControls.h"
 #include "../../uarm/native/ShortcutKeys.h"
-#include "../../uarm/native/DanaHostKeys.h"
+#include "DanaX11Keys.h"
 #include "../../uarm/native/WindowId.h"
 #include "../../uarm/native/WindowLayout.h"
 #include "../../uarm/native/DanaView.h"
@@ -3088,6 +3088,7 @@ class Runner {
             return;
         }
         CreateRenderer();
+        if (deviceTypeIsDana5(profile->deviceType)) danaX11Keys.Start(window);
 #ifndef __ANDROID__
         // On Android this would bring up the soft keyboard; keys still come in as key events.
         SDL_StartTextInput();
@@ -3316,6 +3317,22 @@ class Runner {
         keyboardGrabbed=want&&SDL_GetWindowKeyboardGrab(window)==SDL_TRUE;
         if(want&&!keyboardGrabbed)cerr<<"Keyboard grab refused: "<<SDL_GetError()<<endl;
     }
+    void ApplyDanaHostKey(SDL_Scancode scancode,bool down) {
+        string name=SDL_GetScancodeName(scancode);
+        for(char& c:name) c=char(std::tolower(static_cast<unsigned char>(c)));
+        switch(scancode) {
+            case SDL_SCANCODE_LSHIFT: name="lshift"; break;
+            case SDL_SCANCODE_RSHIFT: name="rshift"; break;
+            case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: name="ctrl"; break;
+            case SDL_SCANCODE_LGUI: case SDL_SCANCODE_RGUI: name="command"; break;
+            case SDL_SCANCODE_LALT: case SDL_SCANCODE_RALT: name="function"; break;
+            case SDL_SCANCODE_RETURN: name="enter"; break;
+            case SDL_SCANCODE_CAPSLOCK: name="caps"; break;
+            case SDL_SCANCODE_APPLICATION: name="apps"; break;
+            default: break;
+        }
+        ApplyDanaHost(danaHostKeys.Event(scancode,down,name));
+    }
     void ApplyDanaHost(const vector<DanaHostChange>& changes) {
         for(const auto& change:changes) {
             const auto scan=DanaScan5::Named(change.name);
@@ -3519,7 +3536,7 @@ class Runner {
         if (!keepReplay) replay=Replay();
         if(deviceTypeIsDana5(profile->deviceType)) {
             CancelDanaPointers();danaScreen.Clear();danaReleases.clear();
-            danaInput.Clear();danaHostKeys.Clear();danaRepeats.Clear();EmHAL::ReleaseDanaInput(cancel);
+            danaInput.Clear();danaHostKeys.Clear();danaRepeats.Clear();danaX11Keys.Clear();EmHAL::ReleaseDanaInput(cancel);
         }
         if (penDown) gSession->QueuePenEvent(PenEvent::up());
         penDown = false;
@@ -3623,6 +3640,9 @@ class Runner {
                     }
                     break;
                 }
+                case SDL_SYSWMEVENT:
+                    if (const auto scan = danaX11Keys.NativeEvent(event.syswm.msg)) ApplyDanaHostKey(*scan,false);
+                    break;
                 case SDL_TEXTINPUT: {
                     const auto c = static_cast<unsigned char>(event.text.text[0]);
                     if (deviceTypeIsDana5(profile->deviceType)) break;
@@ -3640,26 +3660,15 @@ class Runner {
                         }
                     }
                     if(deviceTypeIsDana5(profile->deviceType)) {
-                        // SDL on X11 can drop a quick key's release and report its next press as a repeat
-                        // when a burst shares a timestamp. A repeat sooner than any real auto-repeat
-                        // delay is that press, so it goes in as a release and a press.
+                        const auto native = danaX11Keys.Translated(event.key.keysym.scancode,keyDown);
+                        if (native) {
+                            if (*native) ApplyDanaHostKey(event.key.keysym.scancode,keyDown);
+                            break;
+                        }
                         const bool retap=keyDown && danaRepeats.Retap(event.key.keysym.scancode,event.key.repeat!=0,SDL_GetTicks());
                         if(event.key.repeat && !retap) break;
-                        string name=SDL_GetScancodeName(event.key.keysym.scancode);
-                        for(char& c:name) c=char(std::tolower(static_cast<unsigned char>(c)));
-                        switch(event.key.keysym.scancode) {
-                            case SDL_SCANCODE_LSHIFT: name="lshift"; break;
-                            case SDL_SCANCODE_RSHIFT: name="rshift"; break;
-                            case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: name="ctrl"; break;
-                            case SDL_SCANCODE_LGUI: case SDL_SCANCODE_RGUI: name="command"; break;
-                            case SDL_SCANCODE_LALT: case SDL_SCANCODE_RALT: name="function"; break;
-                            case SDL_SCANCODE_RETURN: name="enter"; break;
-                            case SDL_SCANCODE_CAPSLOCK: name="caps"; break;
-                            case SDL_SCANCODE_APPLICATION: name="apps"; break;
-                            default: break;
-                        }
-                        if(retap) ApplyDanaHost(danaHostKeys.Event(event.key.keysym.scancode,false,name));
-                        ApplyDanaHost(danaHostKeys.Event(event.key.keysym.scancode,keyDown,name));
+                        if(retap) ApplyDanaHostKey(event.key.keysym.scancode,false);
+                        ApplyDanaHostKey(event.key.keysym.scancode,keyDown);
                         break;
                     }
                     KeyId key = keyInvalid;
@@ -3747,6 +3756,7 @@ class Runner {
     map<pair<int,uint8_t>,DanaScan5> danaReleases;
     DanaHostKeys danaHostKeys;
     DanaRepeats danaRepeats;
+    DanaX11Keys danaX11Keys;
     // Fingers: held buttons and the pen, besides the mouse.
     struct TouchHost : TouchSink68k {
         explicit TouchHost(Runner& runner) : runner(runner) {}
