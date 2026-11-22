@@ -135,6 +135,8 @@ struct EmitConfig {
     // Frond: the data cache hint (A32::UserConfig::frond_cost_hint, A32 only).
     const u32* frond_cost_hint = nullptr;
     const bool* frond_cost_hint_on = nullptr;
+    // Frond: separate absolute-offset tables for loads (in Xpagetable) and stores (in Xfastmem), A32 only.
+    bool frond_split_page_tables = false;
     bool silently_mirror_page_table;
     bool absolute_offset_page_table;
     u8 detect_misaligned_access_via_page_table;

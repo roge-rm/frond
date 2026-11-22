@@ -517,7 +517,10 @@ void A32AddressSpace::EmitPrelude() {
         code.MOV(X19, X0);
         code.MOV(Xstate, X1);
         code.MOV(Xhalt, X2);
-        if (conf.page_table) {
+        if (conf.frond_read_page_table && conf.frond_write_page_table && !conf.fastmem_pointer) {
+            code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.frond_read_page_table));
+            code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.frond_write_page_table));
+        } else if (conf.page_table) {
             code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.page_table));
         }
         if (conf.fastmem_pointer) {
@@ -569,7 +572,10 @@ void A32AddressSpace::EmitPrelude() {
         code.MOV(X19, X0);
         code.MOV(Xstate, X1);
         code.MOV(Xhalt, X2);
-        if (conf.page_table) {
+        if (conf.frond_read_page_table && conf.frond_write_page_table && !conf.fastmem_pointer) {
+            code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.frond_read_page_table));
+            code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.frond_write_page_table));
+        } else if (conf.page_table) {
             code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.page_table));
         }
         if (conf.fastmem_pointer) {
@@ -729,6 +735,7 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .page_table_write_protect_bit = conf.page_table_write_protect_bit,
         .frond_cost_hint = conf.frond_cost_hint,
         .frond_cost_hint_on = conf.frond_cost_hint_on,
+        .frond_split_page_tables = conf.frond_read_page_table && conf.frond_write_page_table && !conf.fastmem_pointer,
         .silently_mirror_page_table = true,
         .absolute_offset_page_table = conf.absolute_offset_page_table,
         .detect_misaligned_access_via_page_table = conf.detect_misaligned_access_via_page_table,
