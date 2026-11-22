@@ -64,8 +64,13 @@ void curve() {
         assert(!(sample & 0x7f) && sample >= zodiacBatterySample(percent - 1));
         assert(zodiacBatteryMode1(percent) >= zodiacBatteryMode1(percent - 1));
     }
-    // 0% gives the ROM's "EXTREMELY low" alert, 1% an empty icon and 100% the fixed full sample.
-    assert(zodiacBatteryMode1(0) == 640 && zodiacBatteryMode1(1) == 644 && zodiacBatteryMode1(100) == 712);
+    // 0% gives the ROM's "EXTREMELY low" alert, 1-9% an empty icon (644-650), 10% the first fill (652), 90% and up
+    // full (684 and up) and 100% the fixed full sample.
+    assert(zodiacBatteryMode1(0) == 640 && zodiacBatteryMode1(100) == 712);
+    for (unsigned percent = 1; percent < 10; ++percent)
+        assert(zodiacBatteryMode1(percent) >= 644 && zodiacBatteryMode1(percent) <= 650);
+    assert(zodiacBatteryMode1(10) == 652 && zodiacBatteryMode1(89) < 684);
+    for (unsigned percent = 90; percent <= 100; ++percent) assert(zodiacBatteryMode1(percent) >= 684);
 }
 
 void machine() {

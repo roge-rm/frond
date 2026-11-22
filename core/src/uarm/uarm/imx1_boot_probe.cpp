@@ -3430,7 +3430,7 @@ Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine* machine, uint32_t sam
     auto* p = machine->probe;
     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.graphicsRawAuxKnown)
         return Imx1BootstrapAccess::sequence;
-    if (sample > 1023) return Imx1BootstrapAccess::sideEffect;
+    if (sample > 1023) return Imx1BootstrapAccess::argument;
     if (commit) p->cs5Configuration.setAcquisitionAuxInput(sample);
     return Imx1BootstrapAccess::ok;
 }
@@ -3443,7 +3443,7 @@ Imx1BootstrapAccess imx1MachineSetGraphicsMode1(Imx1Machine* machine, uint32_t s
     auto* p = machine->probe;
     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.graphicsRawMode1Known)
         return Imx1BootstrapAccess::sequence;
-    if (sample > 1023) return Imx1BootstrapAccess::sideEffect;
+    if (sample > 1023) return Imx1BootstrapAccess::argument;
     p->cs5Configuration.setAcquisitionMode1Input(sample);
     return Imx1BootstrapAccess::ok;
 }

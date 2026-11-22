@@ -1543,6 +1543,7 @@ const char* imx1BootstrapAccessName(Imx1BootstrapAccess access) {
         case Imx1BootstrapAccess::externalInput: return "external-input-unavailable";
         case Imx1BootstrapAccess::memoryUnavailable: return "external-memory-unavailable";
         case Imx1BootstrapAccess::sequence: return "unsupported-sdram-sequence";
+        case Imx1BootstrapAccess::argument: return "bad-argument";
     }
     return "unknown";
 }

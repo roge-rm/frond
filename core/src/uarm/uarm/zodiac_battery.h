@@ -24,12 +24,13 @@ constexpr int zodiacBatteryCentivolts(int count) {
 // The OS gauge doesn't take the ASP word: the DAL's power manager (20088658 through 20087382) reads the
 // graphics chip's mode 1 ADC, keeps bits 9..2 as the level (no factory 'TTbf' record) and moves its own copy
 // one step per check towards it. Measured on the launcher's battery icon from a cold boot: 640 and below give the
-// "EXTREMELY low" alert, 644 to 650 an empty icon, 652 a quarter, 684 and up full. 712 is the sample every Zodiac
-// state was made with.
+// "EXTREMELY low" alert, 644 to 650 an empty icon, then the fill grows with each level (4 counts) from a sliver at
+// 652 to full at 684 and up. 1-9% is the empty icon (level 162), each 10% after it one level more, so 10% shows
+// a sliver and 90% is full. 712 is the sample every Zodiac state was made with.
 constexpr uint32_t zodiacBatteryFullMode1 = 712;
 constexpr uint32_t zodiacBatteryMode1(unsigned percent) {
     if (percent >= 100) return zodiacBatteryFullMode1;
-    return percent ? 644 + 4 * (percent / 10) : 640;
+    return percent ? 648 + 4 * (percent / 10) : 640;
 }
 
 // The count whose voltage is nearest the curve's voltage for percent (the lower one on a tie), as the U

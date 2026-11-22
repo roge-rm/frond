@@ -23,7 +23,7 @@
 #include "imx1_rtc.h"
 #include "imx1_reference_time.h"
 
-enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence, resetRequest, possibleWatchdogTimeout, busTimeout };
+enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence, resetRequest, possibleWatchdogTimeout, busTimeout, argument };
 
 struct Imx1PcmState {
     uint32_t remaining = 0, source = 0, pendingSource = 0, fifoWords = 0, status = 0;
