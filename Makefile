@@ -2284,6 +2284,15 @@ test-zodiac-dma-channel: $(OBJ_ROOT)/zodiac-boot-probe
 		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-channel
 	$(OBJ_ROOT)/test-zodiac-dma-channel
 
+# Host-side SMF reader for the Zodiac music hooks, with ASan and UBSan.
+.PHONY: test-zodiac-smf
+test: test-zodiac-smf
+test-zodiac-smf:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-Icore/src/uarm/uarm tests/zodiac-smf.cpp -o $(OBJ_ROOT)/test-zodiac-smf
+	$(OBJ_ROOT)/test-zodiac-smf
+
 # ARM software exception entry, return and FIQ mask preservation.
 .PHONY: test-zodiac-exception
 test-zodiac-exception: $(OBJ_ROOT)/zodiac-boot-probe
