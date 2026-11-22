@@ -280,7 +280,8 @@ void A32EmitX64::GenTerminalHandlers() {
         code.mov(rcx, reinterpret_cast<u64>(code.GetReturnFromRunCodeAddress()));
         code.cmp(rax, rcx);
         code.jne(keep);
-        code.mov(qword[rbp + offsetof(FastDispatchEntry, location_descriptor)], 0);
+        code.mov(rcx, 0xFFFF'FFFF'FFFF'FFFFull);
+        code.mov(qword[rbp + offsetof(FastDispatchEntry, location_descriptor)], rcx);
         code.L(keep);
         code.jmp(rax);
         PerfMapRegister(terminal_handler_fast_dispatch_hint, code.getCurr(), "a32_terminal_handler_fast_dispatch_hint");

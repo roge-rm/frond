@@ -233,7 +233,11 @@ static void checkFullRingDone() {
     // The last push published the whole ring: wait until the worker has run all of it.
     if (worker.jobs() - before != 2048) fail("jobs queued", unsigned(worker.jobs() - before));
     Imx1GraphicsWorker::holdForTests = false;
-    while (worker.finished() != worker.jobs()) std::this_thread::yield();
+    // Only published jobs run: with a ring that doesn't end on a publish boundary this would never finish.
+    for (auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5); worker.finished() != worker.jobs();) {
+        if (std::chrono::steady_clock::now() > end) fail("worker didn't finish the published ring", unsigned(worker.finished()));
+        std::this_thread::yield();
+    }
     REQUIRE(C::completeFill(*state, eim, queued, fills[2048]) == A::ok);
     done = true;
     watchdog.join();
