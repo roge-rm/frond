@@ -1,5 +1,7 @@
 #include "EmRegsVZPalmM130.h"
 
+#include "EmBattery.h"
+
 #include "EmCommon.h"
 #include "EmRegsVZPrv.h"
 #include "EmSPISlaveADS784x.h"  // EmSPISlaveADS784x
@@ -92,7 +94,8 @@ EmUARTDeviceType EmRegsVZPalmM130::GetUARTDevice(int uartNum) {
 
 uint8 EmRegsVZPalmM130::GetPortInputValue(int port) {
     uint8 result = VZ::GetPortInputValue(port);
-
+    // The ROM's PrvPowerSignal reads PC6 low when the adapter is connected.
+    if (port == 'C' && !gBattery.ExternalPower()) result |= 0x40;
     return result;
 }
 
@@ -144,6 +147,10 @@ void EmRegsVZPalmM130::GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, Bo
 // ---------------------------------------------------------------------------
 //		� EmRegsVZPalmM130::GetSPI2Slave
 // ---------------------------------------------------------------------------
+
+void EmRegsVZPalmM130::SetUsbCradle(bool attached) {
+    static_cast<EmSPISlaveADS784x*>(fSPISlaveADC)->SetTwisterDocked(attached);
+}
 
 EmSPISlave* EmRegsVZPalmM130::GetSPI2Slave(void) {
     if ((READ_REGISTER(portGData) & hwrVZPalmM130PortGADC_CS_N) == 0) {

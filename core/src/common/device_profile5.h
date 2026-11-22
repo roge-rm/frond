@@ -293,7 +293,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // Palm m130: the m125's keys with a colour STN panel on a MediaQ MQ1100, 8 MiB of RAM and an SD/MMC slot.
     {deviceTypeM130, "palm-m130", "Palm m130", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x76686273 /* vhbs */, DeviceBoard5::vz328, DeviceArt::m130,
-     {false, false, true, false, false, true, false, true, false, false, true, true},
+     {false, false, true, true, false, true, false, true, false, false, true, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Note Pad",
@@ -302,7 +302,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // Palm m520: an unreleased m515 with a 320x320 colour panel on a MediaQ MQ1100 and 16 MiB of RAM.
     {deviceTypeM520, "palm-m520", "Palm m520", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x7366676f /* sfgo */, DeviceBoard5::vz328, DeviceArt::m520,
-     {false, false, true, false, false, true, false, true, false, false, true, true, false, false, false, 1, true},
+     {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix-hires", 320, 320, 120, 88, "Date Book|Address|To Do List|Note Pad",

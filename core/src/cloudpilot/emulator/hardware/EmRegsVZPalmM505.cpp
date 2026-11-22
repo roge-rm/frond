@@ -22,7 +22,7 @@
 //		� EmRegsVZPalmM505::EmRegsVZPalmM505
 // ---------------------------------------------------------------------------
 
-EmRegsVZPalmM505::EmRegsVZPalmM505(void) : EmRegsVZPalmM500() {}
+EmRegsVZPalmM505::EmRegsVZPalmM505(bool chargeOnPortK) : EmRegsVZPalmM500(chargeOnPortK) {}
 
 // ---------------------------------------------------------------------------
 //		� EmRegsVZPalmM505::~EmRegsVZPalmM505

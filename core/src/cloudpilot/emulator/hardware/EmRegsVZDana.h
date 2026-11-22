@@ -94,6 +94,9 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
     static uint16 MainBatteryCountNow();
    private:
     class AnalogueInputs : public EmSPISlaveADS784x {
+        EmRegsVZDana* board;
+        bool ChargerEnabled() const;
+
       public:
         // Raw 12-bit ADC counts, independent of any physical voltage or divider.
         // The ROM halves supply then subtracts 25 as an unsigned word.
@@ -102,16 +105,17 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
         bool packDetectHigh=true;
         // Set by SetVirtualAnalogueInputs: channel 2 reads mainBattery as is. Not saved.
         bool mainBatteryFixed=false;
-        AnalogueInputs() : EmSPISlaveADS784x(kChannelUnused, kChannelPenY,
+        explicit AnalogueInputs(EmRegsVZDana& board) : EmSPISlaveADS784x(kChannelUnused, kChannelPenY,
             kChannelVirtualInput, kChannelUnused, kChannelUnused, kChannelPenX,
-            kChannelVirtualInput, kChannelUnused) {}
+            kChannelVirtualInput, kChannelUnused), board(&board) {}
         uint16 ReadVirtualInput(unsigned channel) const override {
-            return channel==2 ? MainBattery() : channel==6 ? supply : 0;
+            return channel==2 ? MainBattery() : channel==6 ? Supply() : 0;
         }
         // The battery setting, read live, so it isn't saved and a load keeps the setting. mainBattery (saved,
         // 3072 in older states) is only read when the ROM has no battery data yet or a test fixed it.
         uint16 MainBattery() const;
-    } adc;
+        uint16 Supply() const;
+    } adc{*this};
    protected:
     void MigrateLegacyInput();
     // Queues the held keys again once the report pacing allows; called from CycleSlowly.

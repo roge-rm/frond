@@ -22,6 +22,12 @@
 #include "EmStructs.h"
 #include "Fifo.h"
 #include "MediaQFramebuffer.h"
+#include "UsbDevicePort.h"
+
+#include <functional>
+#include <memory>
+
+class MediaQUsbDevice;
 
 #define T_BASE 0x1F000000L   // 68KVZ for Palm platform
 #define MMIO_OFFSET 0x40000  // starts at 256K address
@@ -198,6 +204,9 @@ class EmRegsMediaQ11xx : public EmRegs, public MediaQFramebuffer<EmRegsMediaQ11x
    public:
     EmRegsMediaQ11xx(EmRegsFrameBuffer& framebuffer, emuptr baseRegsAddr, emuptr baseVideoAddr);
     virtual ~EmRegsMediaQ11xx();
+    void EnableUsb(std::function<void(bool)> dock, std::function<void(bool)> irq);
+    UsbDevicePort UsbPort();
+    void SetUsbCable(bool attached);
 
     // EmRegs overrides
     virtual void Initialize();
@@ -231,6 +240,10 @@ class EmRegsMediaQ11xx : public EmRegs, public MediaQFramebuffer<EmRegsMediaQ11x
     void MQWrite(emuptr address, int size, uint32 value);
 
    private:
+    bool UsbSwapped();
+    std::unique_ptr<MediaQUsbDevice> usb;
+    std::function<void(bool)> usbDock;
+
     uint32 CC01Read(emuptr address, int size);
 
     void DC00Write(emuptr address, int size, uint32 value);

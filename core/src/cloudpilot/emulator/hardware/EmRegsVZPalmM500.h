@@ -22,7 +22,7 @@
 class EmRegsVZPalmM500 : public EMPalmVZWithSD<EmRegsVZ> {
    public:
     void SetUsbCradle(bool docked);
-    EmRegsVZPalmM500(void);
+    explicit EmRegsVZPalmM500(bool chargeOnPortK = false);
     virtual ~EmRegsVZPalmM500(void);
 
     Bool GetLCDScreenOn(void) override;
@@ -38,6 +38,9 @@ class EmRegsVZPalmM500 : public EMPalmVZWithSD<EmRegsVZ> {
 
    protected:
     EmSPISlave* GetSPI2Slave(void) override;
+
+   private:
+    const bool chargeOnPortK;
 };
 
 #endif /* EmRegsVZPalmM500_h */

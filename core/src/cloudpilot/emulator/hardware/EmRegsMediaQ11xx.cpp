@@ -12,6 +12,7 @@
 \* ===================================================================== */
 
 #include "EmRegsMediaQ11xx.h"
+#include "MediaQUsbDevice.h"
 
 #include <algorithm>  // swap
 
@@ -1159,6 +1160,24 @@ EmRegsMediaQ11xx::EmRegsMediaQ11xx(EmRegsFrameBuffer& framebuffer, emuptr baseRe
 
 EmRegsMediaQ11xx::~EmRegsMediaQ11xx(void) {}
 
+void EmRegsMediaQ11xx::EnableUsb(std::function<void(bool)> dock, std::function<void(bool)> irq) {
+    usb = std::make_unique<MediaQUsbDevice>(std::move(irq));
+    usbDock = std::move(dock);
+}
+
+UsbDevicePort EmRegsMediaQ11xx::UsbPort() { return usb ? usb->Port() : UsbDevicePort{}; }
+
+void EmRegsMediaQ11xx::SetUsbCable(bool attached) {
+    if (!usb) return;
+    usb->SetCable(attached);
+    usbDock(attached);
+}
+
+bool EmRegsMediaQ11xx::UsbSwapped() {
+    // The Palm driver uses the low bit of the device configuration word to order USB register bytes.
+    return !(MQRead(fBaseRegsAddr + 0x380, 2) & 1);
+}
+
 // ---------------------------------------------------------------------------
 //		� EmRegsMediaQ11xx::Initialize
 // ---------------------------------------------------------------------------
@@ -1176,6 +1195,7 @@ void EmRegsMediaQ11xx::Initialize(void) {
 
 void EmRegsMediaQ11xx::Reset(Bool hardwareReset) {
     EmRegs::Reset(hardwareReset);
+    if (usb) usb->Reset();
 
     if (hardwareReset) {
         WRITE_REGISTER(ccREG[0x00], 0x00000000);
@@ -1363,6 +1383,13 @@ void EmRegsMediaQ11xx::Load(SavestateLoader<ChunkType>& loader) {
     this->PrvGetGEState(kAllRegisters);
 
     paletteDirty = true;
+    if (usb) {
+        usb->Reset();
+        if (loader.HasChunk(ChunkType::regsMQUsb)) {
+            auto* usbChunk = loader.GetChunk(ChunkType::regsMQUsb);
+            if (!usbChunk || !usb->Load(*usbChunk)) loader.NotifyError();
+        }
+    }
 }
 
 template <typename T>
@@ -1374,6 +1401,9 @@ void EmRegsMediaQ11xx::DoSave(T& savestate) {
 
     SaveChunkHelper helper(*chunk);
     DoSaveLoad(helper);
+    if (usb) {
+        if (auto* usbChunk = savestate.GetChunk(ChunkType::regsMQUsb)) usb->Save(*usbChunk);
+    }
 }
 
 template <typename T>
@@ -1655,30 +1685,52 @@ emuptr EmRegsMediaQ11xx::GetAddressStart(void) { return fBaseRegsAddr; }
 uint32 EmRegsMediaQ11xx::GetAddressRange(void) { return TOTAL_ADDRESS_SPACE_SIZE; }
 
 uint32 EmRegsMediaQ11xx::GetLong(emuptr address) {
+    if (usb && usb->Handles(address - fBaseRegsAddr, 4))
+        return usb->Read(address - fBaseRegsAddr, 4, UsbSwapped());
     return (address < fBaseRegsAddr + REGISTER_FILE_SIZE) ? EmRegs::GetLong(address) : 0;
 }
 
 uint32 EmRegsMediaQ11xx::GetWord(emuptr address) {
+    if (usb && usb->Handles(address - fBaseRegsAddr, 2))
+        return usb->Read(address - fBaseRegsAddr, 2, UsbSwapped());
+    if (usb && address - fBaseRegsAddr == MediaQUsbDevice::interruptStatus) {
+        const uint16_t status = usb->InterruptStatus();
+        return EmRegs::GetWord(address) | (UsbSwapped() ? (status >> 8) | (status << 8) : status);
+    }
     return (address < fBaseRegsAddr + REGISTER_FILE_SIZE) ? EmRegs::GetWord(address) : 0;
 }
 
 uint32 EmRegsMediaQ11xx::GetByte(emuptr address) {
+    if (usb && usb->Handles(address - fBaseRegsAddr, 1))
+        return usb->Read(address - fBaseRegsAddr, 1, UsbSwapped());
     return (address < fBaseRegsAddr + REGISTER_FILE_SIZE) ? EmRegs::GetByte(address) : 0;
 }
 
 void EmRegsMediaQ11xx::SetLong(emuptr address, uint32 value) {
+    if (usb && usb->Handles(address - fBaseRegsAddr, 4)) {
+        usb->Write(address - fBaseRegsAddr, 4, value, UsbSwapped());
+        return;
+    }
     if (address < fBaseRegsAddr + REGISTER_FILE_SIZE) {
         EmRegs::SetLong(address, value);
     }
 }
 
 void EmRegsMediaQ11xx::SetWord(emuptr address, uint32 value) {
+    if (usb && usb->Handles(address - fBaseRegsAddr, 2)) {
+        usb->Write(address - fBaseRegsAddr, 2, value, UsbSwapped());
+        return;
+    }
     if (address < fBaseRegsAddr + REGISTER_FILE_SIZE) {
         EmRegs::SetWord(address, value);
     }
 }
 
 void EmRegsMediaQ11xx::SetByte(emuptr address, uint32 value) {
+    if (usb && usb->Handles(address - fBaseRegsAddr, 1)) {
+        usb->Write(address - fBaseRegsAddr, 1, value, UsbSwapped());
+        return;
+    }
     if (address < fBaseRegsAddr + REGISTER_FILE_SIZE) {
         EmRegs::SetByte(address, value);
     }

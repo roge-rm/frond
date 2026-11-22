@@ -6,12 +6,16 @@
 
 #include "EmBattery.h"
 #include "EmDevice.h"
+#include "EmRegsEZPalmIIIc.h"
+#include "EmRegsEZPalmV.h"
 #include "EmRegsMB86189.h"
 #include "EmRegsSZNaples.h"
 #include "EmRegsSZRedwood.h"
 #include "EmRegsSonyDSP.h"
 #include "EmRegsVZPegVenice.h"
+#include "EmRegsVZPalmM130.h"
 #include "EmRegsVZPalmM500.h"
+#include "EmRegsVZPalmM505.h"
 #include "EmSPISlaveADS784x.h"
 
 static void check(bool success, const char* what) {
@@ -21,9 +25,14 @@ static void check(bool success, const char* what) {
     }
 }
 
-class M500 : public EmRegsVZPalmM500 {
+class PalmV : public EmRegsEZPalmV {
    public:
-    uint8 PortK() { return GetPortInputValue('K'); }
+    uint8 DockId() {
+        auto* adc = GetSPISlave();
+        check(adc != nullptr, "Palm V ADC");
+        adc->DoExchange(7, 0xec);
+        return (adc->DoExchange(15, 0) >> 7) & 0xff;
+    }
 };
 
 template <class Board, class Chip>
@@ -67,13 +76,21 @@ int main() {
         last = count;
     }
 
-    M500 board;
-    gBattery = BatteryPower{};
-    check(board.PortK() & 0x04, "AC_PWR# high on battery");
-    check(BatteryPower::Parse("level 30 charging", gBattery), "parse");
-    check(!(board.PortK() & 0x04), "AC_PWR# low on external power");
-    check(BatteryPower::Parse("level 30 battery", gBattery), "parse");
-    check(board.PortK() & 0x04, "AC_PWR# high again");
+    EmRegsVZPalmM500 m500;
+    EmRegsVZPalmM505 m520(true);
+    EmRegsVZPalmM130 m130;
+    EmRegsEZPalmIIIc iiic;
+    PalmV palmV;
+    for (bool charging : {false, true, false}) {
+        check(BatteryPower::Parse(charging ? "level 30 charging" : "level 30 battery", gBattery), "parse");
+        check(bool(m500.GetPortInputValue('K') & 0x04) != charging, "m500 PK2 AC_PWR#");
+        check(bool(m500.GetPortInputValue('E') & 0x40) != charging, "m500 PE6 CHARGING#");
+        check(bool(m520.GetPortInputValue('K') & 0x04) != charging, "m520 PK2 AC_PWR#");
+        check(bool(m520.GetPortInputValue('K') & 0x02) != charging, "m520 PK1 CHARGING#");
+        check(bool(m130.GetPortInputValue('C') & 0x40) != charging, "m130 PC6 power");
+        check(bool(iiic.GetPortInputValue('D') & 0x40) != charging, "IIIc PD6 adapter detect");
+        check(palmV.DockId() == (charging ? 96 : 0), "Palm V/Vx charger ID");
+    }
 
     EmRegsMB86189 mb86189(0x10800000);
     EmRegsSonyDSP dsp(0x11000000);
@@ -82,9 +99,10 @@ int main() {
     dcIn<EmRegsSzNaples>(dsp, 'P', 0x80, "Naples PP7 DC_IN");
 
     // Charging reaches the guest through the dock status patch or a modelled input, and nowhere else.
-    for (const char* id : {"PalmIIIx", "PalmV", "PalmM125", "PEG-N700C/N710C"})
+    for (const char* id : {"PalmIIIx", "PalmM125", "PEG-N700C/N710C"})
         check(!EmDevice(id).BatteryChargingSupported(), id);
-    for (const char* id : {"PalmM500", "PalmM130", "PEG-T400", "NR70", "YSX1230"})
+    for (const char* id : {"PalmIIIc", "PalmV", "PalmVx", "PalmM500", "PalmM130", "PalmM520", "AlphaSmartDana",
+                           "DanaWireless", "PEG-T400", "NR70", "YSX1230"})
         check(EmDevice(id).BatteryChargingSupported(), id);
 
     std::puts("68k battery: ok");

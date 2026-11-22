@@ -37,10 +37,24 @@ uint16 EmRegsVZDana::MainBatteryCountNow() {
     return MainBatteryCount(curve,offset,gBattery.Percent());
 }
 
+bool EmRegsVZDana::AnalogueInputs::ChargerEnabled() const {
+    // The ROM releases PJ6 to enable charging and drives it low to measure the settled voltage.
+    return gBattery.ExternalPower() && !(board->StdRead(0xfffff438, 1) & 0x40);
+}
+
 uint16 EmRegsVZDana::AnalogueInputs::MainBattery() const {
-    if(mainBatteryFixed) return mainBattery;
-    const uint16 count=MainBatteryCountNow();
-    return count ? count : mainBattery;
+    if (mainBatteryFixed) return mainBattery;
+    const uint16 count = MainBatteryCountNow();
+    const unsigned settled = count ? count : mainBattery;
+    // HwrBatMasterRead checks for a rise of more than 10 counts while charging.
+    return std::min(4095u, settled + (ChargerEnabled() ? 16u : 0u));
+}
+
+uint16 EmRegsVZDana::AnalogueInputs::Supply() const {
+    if (mainBatteryFixed || !gBattery.ExternalPower()) return supply;
+    // After halving AUX, the ROM expects more than 25 counts above VBAT to see supply,
+    // and up to 65 counts above VBAT to identify the rechargeable pack.
+    return std::min(4095u, 2u * (MainBattery() + 40u));
 }
 
 Bool EmRegsVZDana::GetLCDScreenOn() { return (StdRead(0xfffff441,1)&0x80)!=0; }
@@ -74,7 +88,11 @@ uint8 EmRegsVZDana::GetPortInternalValue(int port) {
 uint8 EmRegsVZDana::GetPortInputValue(int port) {
     if(port=='D') return (EmRegsVZ::GetPortInputValue(port)&~0x60) | (dcIrqHigh?0x20:0) | (hcIrqHigh?0x40:0);
     if(port=='J') return EmRegsVZ::GetPortInputValue(port) | 2; // MISO is ready between SPI transfers.
-    if (port=='G') return (EmRegsVZ::GetPortInputValue(port)&~2) | (adc.packDetectHigh ? 2 : 0);
+    if (port == 'G') {
+        // The charge setting assumes a rechargeable pack. Keep explicit test inputs as supplied.
+        const bool packDetectHigh = adc.packDetectHigh && (!gBattery.ExternalPower() || adc.mainBatteryFixed);
+        return (EmRegsVZ::GetPortInputValue(port) & ~2) | (packDetectHigh ? 2 : 0);
+    }
     if(port=='F') {
         auto* first=gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard);
         auto* second=gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard2);
@@ -324,7 +342,7 @@ void EmRegsVZDana::Reset(Bool hardware) {
     resetReply=true; resetAsserted=false; versionCommand=versionReply=0;
     heldKeys=packetKeys=0; heldCount=queueHead=queueCount=0;
     std::memset(heldScan,0,sizeof heldScan); std::memset(packets,0,sizeof packets); packetIndex=0; keysDirty=false; irqPinHigh=true; irqLatched=false; UpdateStIrq();
-    adc=AnalogueInputs();
+    adc=AnalogueInputs(*this);
     SetDcIrqPin(true);
     SetHcIrqPin(true);
 }
