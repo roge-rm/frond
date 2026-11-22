@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -86,6 +87,9 @@ class ZodiacMusicSynth {
 
     // The hooks to take events from (enabled); they must outlive the synth. Before start and any pump.
     void attach(zodiac_music::Hooks* hooks) { hooks_ = hooks; }
+    // Called on the helper thread with each event taken, before the synth's own use of it (a MIDI out's offer).
+    // Before start.
+    void tap(std::function<void(const zodiac_music::Event&)> f) { tap_ = std::move(f); }
 
     // The helper's work, once: frees what the audio thread sent back, then moves the hooks' events to it as cues.
     // Only the helper thread calls this (or a test, with no helper running). True when it moved anything.
@@ -93,7 +97,10 @@ class ZodiacMusicSynth {
         drainReturns();
         if (!hooks_) return false;
         bool moved = false;
-        for (zodiac_music::Event e; hooks_->take(e);) wait(std::move(e));
+        for (zodiac_music::Event e; hooks_->take(e);) {
+            if (tap_) tap_(e);
+            wait(std::move(e));
+        }
         while (!waiting_.empty() && !cues_.full() && prep_.outstanding() < maxHeld) {
             cues_.push(prep_.prepare(std::move(waiting_.front())));
             waiting_.pop_front();
@@ -245,6 +252,7 @@ class ZodiacMusicSynth {
 
     tsf* font_ = nullptr;
     zodiac_music::Hooks* hooks_ = nullptr;
+    std::function<void(const zodiac_music::Event&)> tap_;
     // Helper side.
     zodiac_music::Preparer prep_;
     std::deque<zodiac_music::Event> waiting_;

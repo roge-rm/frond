@@ -2298,6 +2298,19 @@ test-zodiac-music-synth:
 	$(CXX) $(ZODIAC_MUSIC_SYNTH_FLAGS) -fsanitize=thread -o $(OBJ_ROOT)/test-zodiac-music-synth-tsan
 	TSAN_OPTIONS=halt_on_error=1 setarch -R $(OBJ_ROOT)/test-zodiac-music-synth-tsan
 
+# The Zodiac music's MIDI out engine against a fake port, with ASan and UBSan, then with TSan for its thread.
+.PHONY: test-zodiac-midi-out
+test: test-zodiac-midi-out
+ZODIAC_MIDI_OUT_FLAGS = -std=c++17 -O1 -g -Wall -Wextra -Werror \
+	-Icore/src/uarm/native -Icore/src/uarm/uarm tests/zodiac-midi-out.cpp -pthread
+test-zodiac-midi-out:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) $(ZODIAC_MIDI_OUT_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-o $(OBJ_ROOT)/test-zodiac-midi-out
+	$(OBJ_ROOT)/test-zodiac-midi-out
+	$(CXX) $(ZODIAC_MIDI_OUT_FLAGS) -fsanitize=thread -o $(OBJ_ROOT)/test-zodiac-midi-out-tsan
+	TSAN_OPTIONS=halt_on_error=1 setarch -R $(OBJ_ROOT)/test-zodiac-midi-out-tsan
+
 # The Zodiac music hooks' host sequencer, with ASan and UBSan.
 .PHONY: test-zodiac-music-player
 test: test-zodiac-music-player
