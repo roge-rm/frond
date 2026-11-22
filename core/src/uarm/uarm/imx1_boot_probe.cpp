@@ -1860,15 +1860,16 @@ struct Probe {
                 return status;
             }
             // A preview works on a copy. A commit works on the chip in place and puts the copy back unless
-            // the result is taken (accept), as it would have dropped a refused candidate. A commit that only
-            // reaches the engine (a ring submit) keeps just the engine and the acquisition source.
-            const bool engineOnly = !preview && write && p.cs5Configuration.engineSubmitWrite(p.result.trace.pc, address);
+            // the result is taken (accept), as it would have dropped a refused candidate. A write that only reaches
+            // the engine (a ring submit) works on the chip in place in both, keeping just the engine and the
+            // acquisition source, which a preview always puts back.
+            const bool engineOnly = write && p.cs5Configuration.engineSubmitWrite(p.result.trace.pc, address);
             std::optional<Imx1Cs5Configuration> saved;
             Imx1Cs5Configuration::EngineUndo engineSaved{};
             if (engineOnly) engineSaved = p.cs5Configuration.engineUndo();
             else saved.emplace(p.cs5Configuration);
-            auto& candidate = preview ? *saved : p.cs5Configuration;
-            bool kept = preview;
+            auto& candidate = preview && !engineOnly ? *saved : p.cs5Configuration;
+            bool kept = preview && !engineOnly;
             struct Restore {
                 bool& kept; Imx1Cs5Configuration& chip; const std::optional<Imx1Cs5Configuration>& saved;
                 const Imx1Cs5Configuration::EngineUndo& engineSaved;
