@@ -3,11 +3,15 @@
 #include <SDL.h>
 #include <jni.h>
 
+#include <atomic>
 #include <memory>
 
 #include "ZodiacMidiOut.h"
 
 namespace {
+// Set by the app when the MidiManager device didn't open or went away (ZodiacMidiNative.setFailed).
+std::atomic<bool> portFailed{false};
+
 class JniPort : public ZodiacMidiOut::Port {
    public:
     JniPort(jobject activity, jmethodID send) : activity_(activity), send_(send) {}
@@ -29,6 +33,7 @@ class JniPort : public ZodiacMidiOut::Port {
         if (env->ExceptionCheck()) env->ExceptionClear();
         env->DeleteLocalRef(message);
     }
+    bool failed() const override { return portFailed.load(std::memory_order_relaxed); }
 
    private:
     const jobject activity_;
@@ -49,4 +54,9 @@ std::unique_ptr<ZodiacMidiOut::Port> zodiacAndroidMidiPort() {
     if (send) port = std::make_unique<JniPort>(env->NewGlobalRef(activity), send);
     env->DeleteLocalRef(activity);
     return port;
+}
+
+// FrondActivity's UI thread (ZodiacMidi.kt).
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacMidiNative_setFailed(JNIEnv*, jclass, jboolean failed) {
+    portFailed.store(failed, std::memory_order_relaxed);
 }

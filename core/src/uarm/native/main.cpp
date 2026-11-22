@@ -1115,6 +1115,8 @@ bool gFastEngineMissing = false;
         }
         // The SoundFont or the MIDI output plays the music, so the guest's FM is left out of the sound.
         if (zodiacMusic && (synthTakes || midiOut)) zodiacMusic->SetFmMuted(true);
+        // Only the MIDI output plays the music: when its port fails, the FM comes back.
+        bool fmBackOnPortFail = zodiacMusic && midiOut && !synthTakes;
         // MIDI out waits for the audio queue: the frames queued and the one period the device is playing, smoothed.
         double midiDelayFrames = 0;
 
@@ -1457,6 +1459,10 @@ bool gFastEngineMissing = false;
                             midiOut->setDelay(uint64_t(midiDelayFrames * 1e9 / 44100));
                         }
                         midiOut->poke();
+                        if (fmBackOnPortFail && midiOut->portFailed()) {
+                            zodiacMusic->SetFmMuted(false);
+                            fmBackOnPortFail = false;
+                        }
                     }
                 }
                 if (sdlEventHandler.InBackground() && !headless) {

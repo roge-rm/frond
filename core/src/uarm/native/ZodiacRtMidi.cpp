@@ -1,5 +1,6 @@
 #include "ZodiacRtMidi.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 
@@ -24,12 +25,15 @@ class RtPort : public ZodiacMidiOut::Port {
         try {
             out_->sendMessage(bytes, size);
         } catch (const RtMidiError&) {
-            // A port that went away: the music stops, the emulator goes on.
+            // A port that went away: the music goes back to the FM, the emulator goes on.
+            failed_.store(true, std::memory_order_relaxed);
         }
     }
+    bool failed() const override { return failed_.load(std::memory_order_relaxed); }
 
    private:
     std::unique_ptr<RtMidiOut> out_;
+    std::atomic<bool> failed_{false};
 };
 
 std::unique_ptr<RtMidiOut> makeOut(std::string& error) {
@@ -79,8 +83,17 @@ std::unique_ptr<ZodiacMidiOut::Port> zodiacOpenMidiPort(const std::string& spec,
         if (number) {
             found = index < count ? unsigned(index) : count;
         } else {
+            std::vector<std::string> names;
+            for (unsigned i = 0; i < count; ++i) names.push_back(out->getPortName(i));
+            const std::string key = zodiacMidiPortKey(spec);
             for (unsigned i = 0; i < count && found == count; ++i)
-                if (lower(out->getPortName(i)).find(lower(spec)) != std::string::npos) found = i;
+                if (names[i] == spec) found = i;
+            for (unsigned i = 0; i < count && found == count; ++i)
+                if (zodiacMidiPortKey(names[i]) == key) found = i;
+            for (unsigned i = 0; i < count && found == count; ++i)
+                if (!key.empty() && zodiacMidiPortKey(names[i]).find(key) != std::string::npos) found = i;
+            for (unsigned i = 0; i < count && found == count; ++i)
+                if (lower(names[i]).find(lower(spec)) != std::string::npos) found = i;
         }
         if (found == count) {
             error = count ? "no MIDI output port " + spec : "no MIDI output ports";

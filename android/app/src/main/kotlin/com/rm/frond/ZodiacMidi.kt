@@ -37,35 +37,62 @@ object ZodiacMidiChoice {
         name.takeIf { it.isNotEmpty() }?.let { n -> devices.firstOrNull { it.second == n }?.first }
 }
 
+// In libmain.so: tells the core the device didn't open or went away, so it turns the FM music back on.
+object ZodiacMidiNative {
+    @JvmStatic external fun setFailed(failed: Boolean)
+
+    fun report(failed: Boolean) {
+        try {
+            setFailed(failed)
+        } catch (e: UnsatisfiedLinkError) {
+            // Another core, without the Zodiac.
+        }
+    }
+}
+
 // The Zodiac's music to a MIDI device through MidiManager: USB devices and Bluetooth MIDI devices
 // already paired. The core's MIDI out thread calls send with each message and the System.nanoTime
-// it's due; messages before the device opens are dropped.
+// it's due; messages before the device opens are dropped. Made after the core's library loads.
 class ZodiacMidi(context: Context, deviceId: Int) {
     @Volatile private var port: MidiInputPort? = null
     private var device: MidiDevice? = null
     private var closed = false
+    @Volatile private var failed = false
     private val lock = Any()
 
     init {
+        ZodiacMidiNative.report(false)
         val manager = context.getSystemService(Context.MIDI_SERVICE) as? MidiManager
         @Suppress("DEPRECATION")
         val info = manager?.devices?.firstOrNull { it.id == deviceId }
         val number = info?.let { i -> ZodiacMidiChoice.inputPort(i.ports.map { it.type to it.portNumber }) }
         if (manager == null || info == null || number == null) {
             Log.w(FrondActivity.TAG, "MIDI out: no device $deviceId with an input port")
+            ZodiacMidiNative.report(true)
         } else {
             manager.openDevice(info, { opened ->
                 if (opened == null) {
                     Log.w(FrondActivity.TAG, "MIDI out: couldn't open device $deviceId")
+                    ZodiacMidiNative.report(true)
                     return@openDevice
                 }
-                synchronized(lock) {
+                val ok = synchronized(lock) {
                     if (closed) {
                         opened.close()
                         return@openDevice
                     }
                     device = opened
-                    port = opened.openInputPort(number)
+                    port = try {
+                        opened.openInputPort(number)
+                    } catch (e: RuntimeException) {
+                        null
+                    }
+                    port != null
+                }
+                if (!ok) {
+                    Log.w(FrondActivity.TAG, "MIDI out: couldn't open port $number of device $deviceId")
+                    ZodiacMidiNative.report(true)
+                    return@openDevice
                 }
                 Log.i(FrondActivity.TAG, "MIDI out: ${ZodiacMidiChoice.name(info)} port $number")
             }, Handler(Looper.getMainLooper()))
@@ -77,7 +104,11 @@ class ZodiacMidi(context: Context, deviceId: Int) {
         try {
             port?.send(bytes, 0, bytes.size, timestampNs)
         } catch (e: IOException) {
-            // A device that went away: the music stops, the machine goes on.
+            // A device that went away: the music goes back to the FM, the machine goes on.
+            if (!failed) {
+                failed = true
+                ZodiacMidiNative.report(true)
+            }
         } catch (e: IllegalStateException) {
             // Closed meanwhile.
         }

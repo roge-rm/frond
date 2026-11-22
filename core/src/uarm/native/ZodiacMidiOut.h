@@ -33,6 +33,8 @@ class ZodiacMidiOut {
        public:
         virtual ~Port() = default;
         virtual void send(uint64_t hostNs, const uint8_t* bytes, size_t size) = 0;
+        // True once the output can't take the music (it didn't open or went away). Any thread, without blocking.
+        virtual bool failed() const { return false; }
     };
     using Clock = std::function<uint64_t()>;
 
@@ -130,12 +132,17 @@ class ZodiacMidiOut {
                 now = c.timeNs;
                 due = now > passDelayNs_ ? now - passDelayNs_ : 0;
                 player_.skipBefore(due);
-            } else if (c.timeNs + maxDriftNs < now) {
+                // The cue that moved the offset waits for the delay like any other.
+                continue;
+            }
+            if (c.timeNs + maxDriftNs < now) {
                 offsetNs_ = int64_t(c.timeNs) - int64_t(music);
                 now = c.timeNs;
                 due = now > passDelayNs_ ? now - passDelayNs_ : 0;
                 player_.skipBefore(0);
-            } else if (c.timeNs > due) {
+                continue;
+            }
+            if (c.timeNs > due) {
                 break;
             }
             const zodiac_music::Cue cue = c;
@@ -197,6 +204,8 @@ class ZodiacMidiOut {
         wakeUp_.notify_all();
         thread_.join();
     }
+    // The port's failed, for the run loop. Any thread.
+    bool portFailed() const { return port_->failed(); }
     // Passes the engine's thread has made, for tests.
     uint64_t passes() const { return passes_.load(std::memory_order_relaxed); }
 

@@ -265,7 +265,6 @@ open class FrondActivity : SDLActivity() {
         display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd, touchHidden = launchTouchHidden())
         requestedOrientation = orientationRequest()
         midiOutId = midiOutDevice()
-        midiOutId?.let { zodiacMidi = ZodiacMidi(this, it) }
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
@@ -295,6 +294,8 @@ open class FrondActivity : SDLActivity() {
         // A btvirt and sockets left by an emulator that was killed.
         BtLink.cleanLater(applicationContext)
         super.onCreate(savedInstanceState)
+        // After the core's library loads, which ZodiacMidi tells when the device fails.
+        midiOutId?.let { zodiacMidi = ZodiacMidi(this, it) }
         fitInsideSystemBars()
         requestFrameRate()
         addSavingNote()

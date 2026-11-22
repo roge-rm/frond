@@ -4,6 +4,7 @@
 // jump dropping skipped note-ons, a late event moving the clock back, and the hooks, engine thread and a
 // steady clock together, with notes off at the end. Built with ASan and UBSan, and with TSan.
 #include "ZodiacMidiOut.h"
+#include "ZodiacRtMidi.h"
 
 #include <atomic>
 #include <cassert>
@@ -264,6 +265,51 @@ void delayed() {
     assert(out->delay() == ZodiacMidiOut::maxDelayNs);
 }
 
+// With a delay, the event that moves the clock, forward or back, waits for the delay too.
+void driftDelayed() {
+    Log log;
+    fakeNow = 10000 * ms;
+    auto out = make(log);
+    out->setDelay(50 * ms);
+    out->offer(message(100 * ms, 0x90, 0x3c, 0x64));
+    out->work();
+    runTo(*out, 10050 * ms);
+    assert(log.copy().size() == 1);
+    runTo(*out, 10100 * ms);
+    // 5 s ahead: the offset moves, the message goes out 50 ms on.
+    out->offer(message(5000 * ms, 0x91, 0x40, 0x7f));
+    out->work();
+    assert(log.copy().size() == 1 && out->nextWakeNs() == 10150 * ms);
+    runTo(*out, 10149 * ms);
+    assert(log.copy().size() == 1);
+    runTo(*out, 10150 * ms);
+    auto s = log.copy();
+    assert(s.size() == 2 && s[1].at == 10150 * ms && s[1].hostNs == 10150 * ms && s[1].b == (Bytes{0x91, 0x40, 0x7f}));
+    // 2 s on, the guest only 100 ms further: back to it, again after the delay.
+    fakeNow = 12150 * ms;
+    out->offer(message(5100 * ms, 0x81, 0x40, 0));
+    out->work();
+    assert(log.copy().size() == 2);
+    runTo(*out, 12199 * ms);
+    assert(log.copy().size() == 2);
+    runTo(*out, 12200 * ms);
+    s = log.copy();
+    assert(s.size() == 3 && s[2].at == 12200 * ms && s[2].hostNs == 12200 * ms);
+}
+
+// Port names without the numbers that change with plug order.
+void portKeys() {
+    assert(zodiacMidiPortKey("Midi Through:Midi Through Port-0 14:0") == "midi through:midi through port-0");
+    assert(zodiacMidiPortKey("FLUID Synth (4321):Synth input port (4321:0) 128:0") == "fluid synth:synth input port");
+    assert(zodiacMidiPortKey("FLUID Synth (987):Synth input port (987:0) 129:0") ==
+           zodiacMidiPortKey("FLUID Synth (4321):Synth input port (4321:0) 128:0"));
+    assert(zodiacMidiPortKey("Roland SC-88 (2)") == "roland sc-88");
+    assert(zodiacMidiPortKey("Port (A)") == "port (a)");
+    assert(zodiacMidiPortKey("IAC Driver Bus 1") == "iac driver bus 1");
+    assert(zodiacMidiPortKey("Bus 12:") == "bus 12:");
+    assert(zodiacMidiPortKey("") == "");
+}
+
 // The engine's thread sleeps with nothing due, and wakes for each message of a song on time.
 void sleeps() {
     Log log;
@@ -336,9 +382,12 @@ int main() {
     jumpForward();
     lateEvent();
     delayed();
+    driftDelayed();
+    portKeys();
     sleeps();
     threads();
     std::puts("PASS: Zodiac MIDI out (event stream, song times, never early, stop, hold, lookahead, forward jump, late event, delay, "
+              "drift after the delay, port names, "
               "sleeping thread, hooks and engine thread, notes off at the end)");
     return 0;
 }
