@@ -855,6 +855,10 @@ struct Env final : public A32::UserCallbacks {
         stats.NoteCallback(va, true);
         if constexpr (sizeof(T) <= 4) {
             if (arm920) {
+                if (!memoryCost && cpuJitCodePageWrite(cpu, va, sizeof(T), uint32_t(v))) {
+                    AfterIo();
+                    return;
+                }
                 if (const int device = cpuJitLeanDeviceWrite(cpu, va, sizeof(T), uint32_t(v), RanNow())) {
                     if (device < 0) {
                         AccessFailed(va, sizeof(T), true, 0);

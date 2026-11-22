@@ -412,6 +412,10 @@ struct ArmCpu {
     // RAM pages and lines it has translated code from, as leanCode.
     bool jitLoopOnly, jitBlocks;
     Arm920CodeMap *jitCode;
+    // Fast blocks: RAM pages holding code whose stores came through the lean slow path, keyed as the host TLB
+    // is, with their host page and physical page (cpuJitCodePageWrite). A store there that meets no code goes
+    // straight to the page. The epoch too, as a wrapped generation empties the host TLB but not these.
+    struct { uint64_t key; uint8_t *host; uint32_t pa, epoch; bool counted; } jitCodeWrite[16];
 #endif
 
     template <typename T>
@@ -1455,11 +1459,23 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     cpu->leanBus += counted;
     // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
     if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision) &&
-        !(uintptr_t(page) & 1) && !codePage) {
+        !(uintptr_t(page) & 1)) {
         struct HostTlb &t = cpu->mem->hostTlb;
-        struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
-        e.key = hostTlbKey(t.gen, va, privileged);
-        e.addend = (uintptr_t(page) - (va & ~0xfffu)) | uintptr_t(counted);
+        if (!codePage) {
+            struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
+            e.key = hostTlbKey(t.gen, va, privileged);
+            e.addend = (uintptr_t(page) - (va & ~0xfffu)) | uintptr_t(counted);
+        }
+#ifdef FROND_DYNARMIC
+        else if (write && cpu->leanJit) {
+            auto &e = cpu->jitCodeWrite[(va >> 12) & 15];
+            e.key = hostTlbKey(t.gen, va, privileged);
+            e.host = page;
+            e.pa = MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu;
+            e.epoch = t.epoch;
+            e.counted = counted;
+        }
+#endif
     }
     return true;
 }
@@ -5981,6 +5997,27 @@ int cpuJitLeanDeviceWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t valu
     e = {};
     cpu->leanExit = true;
     return -1;
+}
+
+// An ARM920T Fast blocks store to a RAM page holding code that an earlier store took through the lean slow path:
+// when it meets no translated or decoded code it is written straight to the page, as that path would, and true is
+// returned. False leaves it to cpuJitWrite. The entry holds while the host TLB generation and privilege do.
+bool cpuJitCodePageWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value) {
+    if (!cpu->leanRun || !cpu->leanJit || cpu->nativeCallDepth || size > 4 || (va & (size - 1))) return false;
+    auto &e = cpu->jitCodeWrite[(va >> 12) & 15];
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    if (e.key != hostTlbKey(t.gen, va, cpu->privileged) || e.epoch != t.epoch || !e.host) return false;
+    const uint32_t pa = e.pa | (va & 0xfffu);
+    const bool jitPage = cpu->jitCode && cpu->jitCode->page(pa), leanPage = cpu->leanCode && cpu->leanCode->page(pa);
+    if (!jitPage && !leanPage) {
+        // No code left: the slow path fills a host TLB write entry instead.
+        e = {};
+        return false;
+    }
+    if ((jitPage && cpu->jitCode->hitWords(pa, size)) || (leanPage && cpu->leanCode->hit(pa, size))) return false;
+    memcpy(e.host + (va & 0xfffu), &value, size);
+    cpu->leanBus += e.counted;
+    return true;
 }
 
 bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_fast8_t *fsr) {
