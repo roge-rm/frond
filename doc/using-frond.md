@@ -26,6 +26,7 @@ Which ROM each 68k device and the Zodiac take:
 - The m100 and m105 take the OS 3.5.1 ROM (2 MiB). Frond offers the m100 when it sees one, so choose the m105 yourself.
 - The m125 takes its OS 4.0.1 ROM (3 MiB), the m130 its OS 4.0 ROM (4 MiB), the m500 its OS 4.1 ROM (2,424,832 bytes) and the c500 the WorkPad ROM (2,621,440 bytes) or the m500's, so choose the c500 yourself.
 - The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's.
+- The CLIÉ T415 takes the retail T415 ROM, including the 8 MiB dump with two identical copies of its 4 MiB flash. The Sony T400 ROM from POSE also works.
 - Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana.
 - For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 

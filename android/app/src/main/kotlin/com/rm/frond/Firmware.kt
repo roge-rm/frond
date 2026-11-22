@@ -189,7 +189,7 @@ object Firmware {
     private const val ROM68K_VZ_MAX_SIZE = 4L shl 20
 
     fun inspectRom68k(rom: File, devices: List<Device> = Device.entries): Rom68kInfo = RandomAccessFile(rom, "r").use { file ->
-        val size = file.length()
+        var size = file.length()
         if (size < 0x100) return@use Rom68kInfo()
         val h = ByteArray(0x100)
         file.readFully(h)
@@ -226,7 +226,26 @@ object Firmware {
         }
         // 0x0040 runs on the 68VZ328: a version 5 header whose company and HAL IDs name the device.
         if (version == 5 && flags and 0x0040 != 0 && flags and 0x0021 == 0) {
-            if (size > ROM68K_VZ_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
+            val mirroredT415 = size > ROM68K_VZ_MAX_SIZE
+            if (mirroredT415) {
+                val t415 = devices.firstOrNull { it.id == "sony-clie-t415" }
+                if (size != 2 * ROM68K_VZ_MAX_SIZE || t415 == null ||
+                    company != t415.companyId || hal != t415.halId) return@use header
+                // The retail T415 dump can contain two copies of its 4 MiB flash.
+                val first = ByteArray(0x10000)
+                val mirror = ByteArray(first.size)
+                var at = 0L
+                while (at < ROM68K_VZ_MAX_SIZE) {
+                    file.seek(at)
+                    file.readFully(first)
+                    file.seek(at + ROM68K_VZ_MAX_SIZE)
+                    file.readFully(mirror)
+                    if (!first.contentEquals(mirror)) return@use header
+                    at += first.size
+                }
+                size = ROM68K_VZ_MAX_SIZE
+            }
+            if (size % 0x1000 != 0L || cardBytes > size) return@use header
             if (reset < DANA_BASE || reset - DANA_BASE >= size) return@use header
             // A ROM split into a small card and a big one (m515, m130, m520) names its device in the big
             // card's header; the m520's small card carries the m505's IDs.
@@ -245,7 +264,7 @@ object Firmware {
                 }
             }
             val device = devices.firstOrNull {
-                it.detectKind == 3 && isVzPalm(it) && it.companyId == vzCompany && it.halId == vzHal
+                it.detectKind == 3 && isVzPalm(it) && (!mirroredT415 || it.id == "sony-clie-t415") && it.companyId == vzCompany && it.halId == vzHal
             }
             return@use Rom68kInfo(device, true)
         }

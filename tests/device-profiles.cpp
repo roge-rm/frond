@@ -1072,6 +1072,12 @@ static void t415() {
         assert(!deviceProfileTakes68kRom5(*p, Device68kRomInfo5{deviceProfileNamed5(name), true}));
     // Header checks: the VZ board's base and size, Sony's IDs on both halves, the VZ flag.
     assert(inspect68k(rom68k(0x400000, 5, vz, sony, vnce, base + 0x2a2, 0x8000)).profile == p);
+    auto retail = rom68k(0x400000, 5, vz, sony, vnce, base + 0x2a2, 0x8000);
+    auto mirrored = retail;
+    mirrored.insert(mirrored.end(), retail.begin(), retail.end());
+    assert(inspect68k(mirrored).profile == p);
+    mirrored.back() ^= 1;
+    assert(!inspect68k(mirrored).profile);
     assert(!inspect68k(rom68k(0x401000, 5, vz, sony, vnce, base + 0x2a2, 0x8000)).profile);
     assert(!inspect68k(rom68k(0x320800, 5, vz, sony, vnce, base + 0x2a2, 0x8000)).profile);
     assert(!inspect68k(rom68k(0x320000, 5, vz, sony, vnce, 0x10c002a2, 0x8000)).profile);
