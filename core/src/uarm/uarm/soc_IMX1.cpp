@@ -1086,6 +1086,8 @@ void SocIMX1::ApplyCodeHooks() {
             music.on = false;
             music.log = false;
             music.hooks.reset(GetTime());
+            // Nothing else plays the music now.
+            if (fmMuted) SetFmMuted(false);
         } else {
             pcs.insert(pcs.end(), std::begin(music.library.pcs), std::end(music.library.pcs));
         }
@@ -1137,6 +1139,7 @@ bool SocIMX1::SetMusicHooks(bool on, bool log) {
     if (on) music.hooks.enable();
     music.on = on;
     music.hooks.reset(machine ? GetTime() : 0);
+    if (!on && fmMuted) SetFmMuted(false);
     if (machine) ApplyCodeHooks();
     return music.on;
 }

@@ -254,8 +254,12 @@ class SocIMX1 : public SoC {
     bool SetMusicHooks(bool on, bool log = false);
     bool MusicHooksOn() const { return music.on; }
     // The guest's FM music left out of the sound played, while a SoundFont or MIDI output plays it instead. Only
-    // the host's copy of the sound changes.
-    void SetFmMuted(bool muted) { imx1MachineSetFmOutputMuted(machine, muted); }
+    // the host's copy of the sound changes. Turned off again when the music hooks go off.
+    void SetFmMuted(bool muted) {
+        fmMuted = muted;
+        if (machine) imx1MachineSetFmOutputMuted(machine, muted);
+    }
+    bool FmMuted() const { return fmMuted; }
     // The events caught, for the player and tests.
     zodiac_music::Hooks& MusicHooks() { return music.hooks; }
     const zodiac_music::Library& MusicLibrary() const { return music.library; }
@@ -293,6 +297,8 @@ class SocIMX1 : public SoC {
         zodiac_music::Library library;
         zodiac_music::Hooks hooks;
     } music;
+    // SetFmMuted's setting, host only.
+    bool fmMuted{false};
     void MusicHook(uint32_t pc, const uint32_t (&r)[16]);
     // The Bluetooth shim (zodiac_bluetooth.cpp). Host only: the guest's side of it is in guest memory.
     // started: the guest's start went to the backend and no stop came since, so the hooks stay on while it runs
