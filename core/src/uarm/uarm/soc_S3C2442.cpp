@@ -952,6 +952,13 @@ uint32_t* SocS3C2442::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDi
     S3cLcd::Layout layout;
     std::string why;
     const bool on = LcdEnabled() && machine->lcd.layout(layout, why);
+    // The panel takes a new frame about 60 times a guest second; scanning SDRAM much more often than that
+    // only repeats the compare, so it's left until 1/120 s of guest time has passed.
+    const uint64_t now = machine->nanoseconds();
+    if (!redraw && on == scannedOn && now >= scannedNs && now - scannedNs < 1000000000 / 120)
+        return lcdView.take(firstDirtyLine, lastDirtyLine);
+    scannedNs = now;
+    scannedOn = on;
     lcdView.scan(displayConfiguration.width, displayConfiguration.height, on ? &layout : nullptr,
                  [&](uint32_t pa, size_t n) { return machine->sdramSpan(pa, n); });
     if (redraw) {

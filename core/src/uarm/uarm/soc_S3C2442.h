@@ -154,6 +154,8 @@ class SocS3C2442 : public SoC {
     // The frame handed out, and its dirty rows since the last ResetPendingFrame.
     S3cLcdView lcdView;
     bool redraw{true};
+    uint64_t scannedNs{0};  // guest time of the last LCD scan, and whether the LCD was on then
+    bool scannedOn{false};
     // Guest ns Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};
     bool headphones{false};
