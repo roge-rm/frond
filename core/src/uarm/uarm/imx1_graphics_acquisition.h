@@ -30,6 +30,7 @@ class Imx1GraphicsAcquisition {
         auxInput = sample; auxInputKnown = true; return true;
     }
     uint32_t auxSample() const { return auxInput; }
+    uint32_t mode1Sample() const { return mode1Input; }
     bool setMode2Route(Imx1GraphicsMode2Route route) {
         if (!imx1GraphicsMode2RouteValid(route)) return false;
         mode2Route = route; return true;

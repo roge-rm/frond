@@ -62,7 +62,10 @@ void curve() {
     for (unsigned percent = 1; percent <= 100; ++percent) {
         const auto sample = zodiacBatterySample(percent);
         assert(!(sample & 0x7f) && sample >= zodiacBatterySample(percent - 1));
+        assert(zodiacBatteryMode1(percent) >= zodiacBatteryMode1(percent - 1));
     }
+    // 0% gives the ROM's "EXTREMELY low" alert, 1% an empty icon and 100% the fixed full sample.
+    assert(zodiacBatteryMode1(0) == 640 && zodiacBatteryMode1(1) == 644 && zodiacBatteryMode1(100) == 712);
 }
 
 void machine() {
@@ -71,22 +74,22 @@ void machine() {
     SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), why);
     assert(soc && soc->BatterySupported());
     assert(soc->Battery() == BatteryPower{} && soc->BatterySample() == zodiacBatteryFullSample);
+    assert(soc->BatteryGaugeSample() == zodiacBatteryFullMode1);
     const auto atMaximum = save(*soc);
 
-    // Live, and not in the state: a save at another level is byte for byte the one at Maximum.
+    // Live: both inputs follow the setting at once.
     assert(soc->SetBattery(battery("level 0")));
-    assert(soc->BatterySample() == 303 << 7);
-    assert(save(*soc) == atMaximum);
+    assert(soc->BatterySample() == 303 << 7 && soc->BatteryGaugeSample() == 640);
 
-    // A load and a reset put the setting back over the state's fixed word.
+    // A load and a reset put the setting back over the state's fixed inputs.
     load(*soc, atMaximum);
-    assert(soc->BatterySample() == 303 << 7);
+    assert(soc->BatterySample() == 303 << 7 && soc->BatteryGaugeSample() == 640);
     soc->Reset();
-    assert(soc->BatterySample() == 303 << 7);
+    assert(soc->BatterySample() == 303 << 7 && soc->BatteryGaugeSample() == 640);
     assert(soc->SetBattery(battery("level 30")) && soc->BatterySample() == 304 << 7);
+    assert(soc->BatteryGaugeSample() == zodiacBatteryMode1(30));
     assert(soc->SetBattery(battery("max")) && soc->BatterySample() == zodiacBatteryFullSample);
-    const auto afterReset = save(*soc);
-    assert(soc->SetBattery(battery("level 70")) && save(*soc) == afterReset);
+    assert(soc->BatteryGaugeSample() == zodiacBatteryFullMode1);
 
     // Charging pulls B14 low, through a load and a reset as well. Off the charger it's high.
     assert(!soc->ChargerInputLow());
@@ -97,12 +100,12 @@ void machine() {
     assert(soc->ChargerInputLow() && soc->BatterySample() == zodiacBatterySample(40));
     assert(soc->SetBattery(battery("level 40")) && !soc->ChargerInputLow());
 
-    // A state made at another level carries no level: it loads at the setting the machine has.
+    // A state made at another level loads at the setting the machine has.
     assert(soc->SetBattery(battery("level 5")));
     const auto atLevel = save(*soc);
     assert(soc->SetBattery(battery("max")));
     load(*soc, atLevel);
-    assert(soc->BatterySample() == zodiacBatteryFullSample);
+    assert(soc->BatterySample() == zodiacBatteryFullSample && soc->BatteryGaugeSample() == zodiacBatteryFullMode1);
 
     // Headphones: B16 high while in, put back after a load and a reset. B14 stays as set.
     assert(soc->HeadphonesSupported() && !soc->HeadphonesIn() && !soc->HeadphoneInputHigh());

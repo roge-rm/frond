@@ -691,12 +691,15 @@ bool SocIMX1::SetBattery(const BatteryPower& value) {
     return true;
 }
 
-// The level as the ASP U word the DAL's battery read takes (zodiac_battery.h); Maximum is the fixed 0x9b00
-// every Zodiac state was made with. Charging pulls B14 low.
+// The level as the graphics chip's mode 1 sample the OS gauge reads and the ASP U word the DAL's voltage
+// read takes (zodiac_battery.h); Maximum is the fixed 712 and 0x9b00 every Zodiac state was made with.
+// Charging pulls B14 low.
 bool SocIMX1::ApplyBattery() {
     if (halted) return false;
     if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
         std::cerr << "zodiac: the battery level could not be set" << std::endl;
+    if (imx1MachineSetGraphicsMode1(machine, zodiacBatteryMode1(battery.Percent())) != Imx1BootstrapAccess::ok)
+        std::cerr << "zodiac: the battery gauge input could not be set" << std::endl;
     // The charger and the headphones go in separately, so one refused pin doesn't hold back the other.
     uint32_t values[4]{}, masks[4]{};
     masks[1] = chargerPinB;

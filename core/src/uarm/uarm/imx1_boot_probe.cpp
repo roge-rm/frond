@@ -3438,6 +3438,19 @@ uint32_t imx1MachineGraphicsAux(const Imx1Machine* machine) {
     return machine ? machine->probe->cs5Configuration.acquisitionState().auxSample() : 0;
 }
 
+Imx1BootstrapAccess imx1MachineSetGraphicsMode1(Imx1Machine* machine, uint32_t sample) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.graphicsRawMode1Known)
+        return Imx1BootstrapAccess::sequence;
+    if (sample > 1023) return Imx1BootstrapAccess::sideEffect;
+    p->cs5Configuration.setAcquisitionMode1Input(sample);
+    return Imx1BootstrapAccess::ok;
+}
+uint32_t imx1MachineGraphicsMode1(const Imx1Machine* machine) {
+    return machine ? machine->probe->cs5Configuration.acquisitionState().mode1Sample() : 0;
+}
+
 Imx1UsbFunctionState imx1MachineUsbState(const Imx1Machine* machine) {
     if (!machine) return {};
     const auto& usb = machine->probe->cs5Configuration.usbState();

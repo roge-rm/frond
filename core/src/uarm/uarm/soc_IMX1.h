@@ -127,11 +127,14 @@ class SocIMX1 : public SoC {
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}
     bool LcdEnabled() override;
-    // The battery level reaches the guest through the ASP's U input, set again after every load and reset.
+    // The battery level reaches the guest through the graphics chip's mode 1 ADC and the ASP's U input, set
+    // again after every load and reset.
     bool BatterySupported() const override { return true; }
     bool SetBattery(const BatteryPower& value) override;
-    // The battery inputs the machine has now, for tests: the ASP U word and GPIO B14 (low on the charger).
+    // The battery inputs the machine has now, for tests: the ASP U word, the mode 1 sample and GPIO B14 (low
+    // on the charger).
     uint16_t BatterySample() const { return imx1MachineAspUInput(machine); }
+    uint32_t BatteryGaugeSample() const { return imx1MachineGraphicsMode1(machine); }
     bool ChargerInputLow() const { return !(imx1MachineGpioInput(machine, 1) & (1u << 14)); }
     bool HeadphoneInputHigh() const { return imx1MachineGpioInput(machine, 1) & (1u << 16); }
     bool CradleInputLow() const { return !(imx1MachineGpioInput(machine, 3) & (1u << 22)); }

@@ -430,6 +430,10 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first,
 // On the Zodiac it's the accessory ID line the DAL's 200876b6 reads; the options' graphicsRawAux starts it.
 Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine*, uint32_t sample, bool commit = true);
 uint32_t imx1MachineGraphicsAux(const Imx1Machine*);
+// The graphics chip's mode 1 ADC input, 0-1023, saved with the state. On the Zodiac it's the battery the DAL's
+// 20087382 reads; the options' graphicsRawMode1 starts it.
+Imx1BootstrapAccess imx1MachineSetGraphicsMode1(Imx1Machine*, uint32_t sample);
+uint32_t imx1MachineGraphicsMode1(const Imx1Machine*);
 // The W4200's USB function from the host side (Imx1GraphicsUsb), between runs. Each change also drives the
 // chip's interrupt line. A stopped machine or a refused line change answers Timeout (false for the reset).
 struct Imx1UsbFunctionState { bool listening = false; uint32_t enableCount = 0; uint8_t address = 0; };
