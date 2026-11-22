@@ -338,6 +338,12 @@ class ControllerInput(var map: ControllerMap, private val send: (PalmButton, Boo
         holds.keys.toList().forEach { unhold(it) }
     }
 
+    // Swaps the map after letting go of everything held under the old one.
+    fun replaceMap(newMap: ControllerMap) {
+        releaseAll()
+        map = newMap
+    }
+
     val held: Set<PalmButton> get() = holds.values.toSet()
 
     companion object {

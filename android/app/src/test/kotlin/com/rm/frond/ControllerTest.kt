@@ -146,6 +146,17 @@ class ControllerTest {
     }
 
     @Test
+    fun replacingTheMapReleasesHeldButtons() {
+        val (c, sent) = input()
+        c.key(1, KeyEvent.KEYCODE_BUTTON_A, true)
+        c.replaceMap(ControllerMap.defaults(Device.TX).assign(PalmButton.UP, KeyEvent.KEYCODE_BUTTON_C))
+        assertEquals(listOf("+centre", "-centre"), sent)
+        assertTrue(c.key(1, KeyEvent.KEYCODE_BUTTON_C, true))
+        assertTrue(c.key(1, KeyEvent.KEYCODE_BUTTON_A, false))
+        assertEquals("+up", sent.last())
+    }
+
+    @Test
     fun twoKeysOnOneButtonReleaseAfterTheLast() {
         val (c, sent) = input()
         c.key(1, KeyEvent.KEYCODE_BUTTON_A, true)
