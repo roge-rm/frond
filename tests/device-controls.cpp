@@ -3094,6 +3094,28 @@ static void zodiacControls() {
     }
 }
 
+// A view without the button bar art: its keys can't be pressed, the host keys still work, and the bar is back after SetView.
+static void barHidden() {
+    Guest guest(deviceTypeTX);auto display=guest.display();
+    DeviceControlView bare;bare.bare=true;
+    TouchInput input(&guest,1,display,Rotation::portrait_0,bare);
+    const auto& profile=deviceControls(deviceTypeTX);
+    const int width=display.width,height=display.height+display.graffitiHeight;
+    const auto home=deviceButtonRect(profile,profile.buttons[0],width,height);
+    const int x=home.x+10,y=home.y+10;
+    key(SDLK_F1,true);input.HandleEvents();guest.expect({{keyIdHard1,true}});
+    key(SDLK_F1,false);input.HandleEvents();guest.expect({{keyIdHard1,false}});
+    mouse(SDL_MOUSEBUTTONDOWN,x,y);input.HandleEvents();guest.expect({});
+    mouse(SDL_MOUSEBUTTONUP,x,y);input.HandleEvents();guest.expect({});assert(!input.PressedButtons());
+    input.SetView(DeviceControlView{},1);
+    mouse(SDL_MOUSEBUTTONDOWN,x,y);input.HandleEvents();guest.expect({{profile.buttons[0].key,true}});
+    mouse(SDL_MOUSEBUTTONUP,x,y);input.HandleEvents();guest.expect({{profile.buttons[0].key,false}});
+    input.SetView(bare,1);
+    mouse(SDL_MOUSEBUTTONDOWN,x,y);input.HandleEvents();guest.expect({});
+    mouse(SDL_MOUSEBUTTONUP,x,y);input.HandleEvents();guest.expect({});
+    key(SDLK_F1,true);input.HandleEvents();guest.expect({{keyIdHard1,true}});
+    key(SDLK_F1,false);input.HandleEvents();guest.expect({{keyIdHard1,false}});
+}
 int main(int argc,char** argv) {
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)==0);
     if(argc==2 && std::strcmp(argv[1],"--tg50-visibility")==0) {
@@ -3111,6 +3133,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;
     }
+    barHidden();
     firmwarePowerInput();
     const auto& profile=deviceControls(deviceTypeTX);
     assert(profile.count==9 && profile.style==DeviceControlStyle::tx && profile.height==84);

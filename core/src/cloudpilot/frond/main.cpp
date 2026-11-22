@@ -215,12 +215,13 @@ struct Options {
     int audioPeriod{512};
     // Where a jog side panel goes (T415): hidden, left of the LCD, or beside the silkscreen and buttons.
     optional<JogPlacement> jog;
+    bool hideButtons{false};  // start without the button bar art
 };
 
 void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
-            "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--no-rumble] [--audio-output WAV]\n"
+            "                 [--contrast 0-100] [--window-scale 1-4] [--hide-buttons] [--no-sound] [--no-rumble] [--audio-output WAV]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
@@ -1017,6 +1018,7 @@ class Runner {
         fit = options.fit;
         if (deviceControls(profile.art).sideTabWidth > 0)
             view = deviceControlView(false, options.jog.value_or(JogPlacement::screen));
+        view.bare = options.hideButtons && profile.art != DeviceArt::none;
         if(deviceTypeIsDana5(profile.deviceType)) {
 #ifndef __ANDROID__
             danaView.keyboard="hidden";danaView.physical=true;
@@ -2920,7 +2922,7 @@ class Runner {
         return true;
     }
 
-    // contrast=0..100, smooth=on|off, fit= and jog=hidden|screen|keyboard for a device with a jog panel.
+    // contrast=0..100, smooth=on|off, buttons=on|off, fit= and jog=hidden|screen|keyboard.
     bool DesktopDisplay(const string& text, string& error) {
         istringstream words(text);
         string word;
@@ -2928,6 +2930,7 @@ class Runner {
         optional<bool> smoothing;
         optional<WindowFit> fitting;
         optional<JogPlacement> jogging;
+        optional<bool> buttons;
         while (words >> word) {
             const auto equals = word.find('=');
             const string name = word.substr(0, equals), value = equals == string::npos ? "" : word.substr(equals + 1);
@@ -2937,6 +2940,8 @@ class Runner {
                 contrast = int(number);
             } else if (name == "smooth" && (value == "on" || value == "off")) {
                 smoothing = value == "on";
+            } else if (name == "buttons" && (value == "on" || value == "off")) {
+                buttons = value == "on";
             } else if (WindowFit parsed; name == "fit" && parseWindowFit(value, parsed)) {
                 fitting = parsed;
             } else if (equals != string::npos && name == "jog" && deviceControls(profile->art).sideTabWidth > 0) {
@@ -2954,8 +2959,8 @@ class Runner {
                 return false;
             }
         }
-        if (!contrast && !smoothing && !fitting && !jogging) {
-            error = "Use contrast=, smooth=, fit= or jog=.";
+        if (!contrast && !smoothing && !fitting && !jogging && !buttons) {
+            error = "Use contrast=, smooth=, fit=, jog= or buttons=.";
             return false;
         }
         if (contrast) {
@@ -2966,8 +2971,10 @@ class Runner {
             smooth = *smoothing;
             if (lcdTexture) SDL_SetTextureScaleMode(lcdTexture, smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
         }
-        if (jogging) {
-            view = deviceControlView(false, *jogging);
+        const bool bare = buttons ? !*buttons : view.bare;
+        if (jogging || (bare != view.bare && profile->art != DeviceArt::none)) {
+            if (jogging) view = deviceControlView(false, *jogging);
+            view.bare = bare;
             // A fixed-scale window takes the new device size; a fitted one keeps its size.
             if (window && fit == WindowFit::none)
                 SDL_SetWindowSize(window, int(DeviceWidth() * options.windowScale), int(DeviceHeight() * options.windowScale));
@@ -3110,22 +3117,27 @@ class Runner {
         CreateRenderer();
     }
 
+    // The button bar's profile: none while its art is left out (--hide-buttons, display buttons=off).
+    const DeviceControlProfile& ShownControls() const {
+        return view.bare ? deviceControls(DeviceArt::none, false) : deviceControls(profile->art);
+    }
+
     int InputHeight() const { return lcd.Height() + profile->frontend.silkscreenHeight; }
 
     // The window's width and the LCD's left edge, which a jog panel left of the LCD moves.
-    int ScreenLeft() const { return deviceScreenLeft(deviceControls(profile->art), view); }
-    int DeviceWidth() const { return deviceControlsWidth(deviceControls(profile->art), lcd.Width(), view); }
-    int StripHeight() const { return deviceControlsHeight(deviceControls(profile->art), lcd.Width(), view); }
+    int ScreenLeft() const { return deviceScreenLeft(ShownControls(), view); }
+    int DeviceWidth() const { return deviceControlsWidth(ShownControls(), lcd.Width(), view); }
+    int StripHeight() const { return deviceControlsHeight(ShownControls(), lcd.Width(), view); }
     int DeviceHeight() const { return InputHeight() + StripHeight(); }
     // Rows from the input area's bottom to the strip's top: negative beside the buttons, where the
     // strip starts under the shrunken silkscreen.
     int StripTop() const {
-        return DeviceControlTransform(deviceControls(profile->art), lcd.Width(), view).top;
+        return DeviceControlTransform(ShownControls(), lcd.Width(), view).top;
     }
-    bool BesideButtons() const { return deviceSideTabBesideButtons(deviceControls(profile->art), view); }
+    bool BesideButtons() const { return deviceSideTabBesideButtons(ShownControls(), view); }
     SDL_Rect SilkscreenRect() const {
         const auto& silkscreen = deviceSilkscreen(profile->art);
-        if (BesideButtons()) return deviceSilkscreenRect(deviceControls(profile->art), silkscreen, lcd.Width(), InputHeight(), view);
+        if (BesideButtons()) return deviceSilkscreenRect(ShownControls(), silkscreen, lcd.Width(), InputHeight(), view);
         return {ScreenLeft(), lcd.Height(), lcd.Width(), InputHeight() - lcd.Height()};
     }
 
@@ -3134,7 +3146,7 @@ class Runner {
     struct Hit { KeyId key{keyInvalid}; bool pen{false}; int x{0}, y{0}; };
     Hit HitAt(int x, int y, bool dragging = false) const {
         Hit hit;
-        const auto& controls = deviceControls(profile->art);
+        const auto& controls = ShownControls();
         if (!dragging && (y >= InputHeight() || controls.sideTabWidth > 0)) {
             hit.key = deviceControlAt(controls, lcd.Width(), InputHeight(), x, y, view);
             if (hit.key != keyInvalid) return hit;
@@ -3209,7 +3221,7 @@ class Runner {
         DeviceStick artState;
         artState.lamp = attention.Shown().ledColour;
         artState.lampShown = profile->capabilities.ledColours != 0;
-        const auto& controls = deviceControls(profile->art);
+        const auto& controls = ShownControls();
         lcd.Update();
         SDL_RenderSetViewport(renderer, nullptr);
         SDL_RenderSetScale(renderer, 1, 1);
@@ -3917,6 +3929,8 @@ bool parseOptions(int argc, char** argv, Options& options) {
             return false;
         } else if (arg == "--hide-jog-controls") {
             options.jog = JogPlacement::hidden;
+        } else if (arg == "--hide-buttons") {
+            options.hideButtons = true;
         } else if (arg == "--fast-audio" || arg == "--hide-keyboard") {
             cout << "frond-68k: ignoring " << arg << endl;
         } else if (!arg.empty() && arg[0] != '-' && options.image.empty()) {
