@@ -173,7 +173,7 @@ On Debian 13 (Trixie):
 
 ```sh
 sudo apt install git build-essential python3 cmake ninja-build libboost-dev qt6-base-dev qt6-wayland \
-  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev libslirp-dev pkg-config mtools
+  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev libslirp-dev libasound2-dev pkg-config mtools
 git clone https://github.com/roge-rm/frond.git
 cd frond
 make -j4

@@ -18,7 +18,7 @@ jobs:
           apt-get install -y --no-install-recommends ca-certificates git build-essential \
             python3 cmake ninja-build libboost-dev pkg-config dpkg-dev binutils qt6-base-dev qt6-qpa-plugins \
             qt6-wayland libqt6svg6 hicolor-icon-theme libsdl2-dev libsdl2-image-dev \
-            libreadline-dev libcurl4-openssl-dev libslirp-dev mtools gdb-multiarch
+            libreadline-dev libcurl4-openssl-dev libslirp-dev libasound2-dev mtools gdb-multiarch
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
