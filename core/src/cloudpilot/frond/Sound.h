@@ -22,9 +22,14 @@ class Piezo68k {
     // From EmHAL::onPwmChange: a frequency under 0 turns the tone off.
     void Change(uint64_t cycle, double frequency, double duty) {
         if (cycle < rendered) cycle = rendered;
-        changes.push_back({cycle, frequency, duty});
+        QueueChange({cycle, frequency, duty});
         ++changeCount;
         if (frequency > 0) lastFrequency = frequency;
+    }
+
+    void ChangePcm(uint64_t cycle, int16_t sample, bool fm = false) {
+        if (cycle < rendered) cycle = rendered;
+        QueueChange({cycle, 0, 0, sample, fm ? Source::fm : Source::adpcm});
     }
 
     // Samples from the last call up to cycle, at clocksPerSecond guest clocks a second. With no
@@ -44,8 +49,14 @@ class Piezo68k {
             if (until == cycle && (changes.empty() || changes.front().cycle > cycle)) break;
             const auto change = changes.front();
             changes.pop_front();
-            frequency = change.frequency;
-            duty = change.duty < 0 ? 0 : change.duty > 1 ? 1 : change.duty;
+            if (change.source == Source::adpcm) {
+                pcm = change.sample;
+            } else if (change.source == Source::fm) {
+                fmPcm = change.sample;
+            } else {
+                frequency = change.frequency;
+                duty = std::clamp(change.duty, 0.0, 1.0);
+            }
         }
     }
 
@@ -54,23 +65,39 @@ class Piezo68k {
         changes.clear();
         rendered = cycle;
         frequency = -1;
+        pcm = fmPcm = 0;
         fraction = 0;
     }
 
-    bool Playing() const { return frequency > 0 || !changes.empty(); }
+    bool Playing() const { return frequency > 0 || pcm != 0 || fmPcm != 0 || !changes.empty(); }
     uint64_t Changes() const { return changeCount; }
     double LastFrequency() const { return lastFrequency; }
 
    private:
+    enum class Source { pwm, adpcm, fm };
+
     struct ToneChange {
         uint64_t cycle;
         double frequency, duty;
+        int16_t sample{0};
+        Source source{Source::pwm};
     };
+
+    void QueueChange(const ToneChange& change) {
+        if (changes.empty() || changes.back().cycle <= change.cycle) {
+            changes.push_back(change);
+            return;
+        }
+        // The ADPCM decoder can report a sample from before the last PWM write.
+        const auto position = std::upper_bound(changes.begin(), changes.end(), change.cycle,
+            [](uint64_t cycle, const ToneChange& next) { return cycle < next.cycle; });
+        changes.insert(position, change);
+    }
 
     int16_t Sample() {
         if (frequency <= 0) {
             phase = 0;
-            return 0;
+            return int16_t(std::clamp(int(pcm) + fmPcm, -32768, 32767));
         }
         phase += frequency / kRate;
         phase -= std::floor(phase);
@@ -80,13 +107,15 @@ class Piezo68k {
         const double narrow = duty < 0.5 ? duty : 1 - duty;
         const double loudness = std::min(1.0, std::sqrt(8 * narrow));
         const double span = duty < 0.5 ? 1 - duty : duty;
-        return int16_t(kLevel * loudness * ((phase < duty ? 1.0 : 0.0) - duty) / span);
+        const int tone = int(kLevel * loudness * ((phase < duty ? 1.0 : 0.0) - duty) / span);
+        return int16_t(std::clamp(tone + pcm + fmPcm, -32768, 32767));
     }
 
     std::deque<ToneChange> changes;
     uint64_t rendered{0};
     uint64_t changeCount{0};
     double fraction{0};
+    int16_t pcm{0}, fmPcm{0};
     double frequency{-1}, duty{0.5}, phase{0};
     double lastFrequency{0};
 };

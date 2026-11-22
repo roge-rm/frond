@@ -38,14 +38,17 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     // HwrDockStatus reads the cable ID resistor on ADC input 6.
     void SetUsbCradle(bool docked);
     void SetSerialCable(bool attached);
+    void SetPa1Irq(bool asserted, bool restoring);
 
    protected:
+    bool OtherIrq3Asserted() const override { return pa1Irq; }
     virtual EmSPISlave* GetSPI2Slave(void);
     // Jog Dial push and Back as matrix keys.
     uint16 ButtonToBits(ButtonEvent::Button btn) override;
 
    private:
     void UpdateDockLevel();
+    bool pa1Irq{false};
     bool usbCradle{false};
     bool serialCable{false};
     EmRegsMB86189& mb86189;

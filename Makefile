@@ -1055,7 +1055,7 @@ test-frond-68k-gdb: out/frond-68k
 test-frond-68k-boot-save: out/frond-68k
 	python3 tests/frond-68k-boot-save.py
 
-$(OBJ_ROOT)/test-frond-68k-sound: tests/frond-68k-sound.cpp
+$(OBJ_ROOT)/test-frond-68k-sound: tests/frond-68k-sound.cpp core/src/cloudpilot/frond/Sound.h
 	$(CXX) -std=c++17 -O1 -g -Icore/src/cloudpilot/frond tests/frond-68k-sound.cpp -o $@
 
 CPU68K_UAE = core/src/cloudpilot/emulator/uae
@@ -3131,3 +3131,11 @@ test-linked-card-lock:
 
 test-linked-card-lock-wine:
 	bash tests/linked-card-lock.sh wine
+
+.PHONY: test-sony-ma2-fm
+test: test-sony-ma2-fm
+test-sony-ma2-fm:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O2 -Icore/src/cloudpilot/emulator/hardware/clie \
+		tests/sony-ma2-fm.cpp core/src/cloudpilot/emulator/hardware/clie/SonyMa2Fm.cpp -o $(OBJ_ROOT)/test-sony-ma2-fm
+	$(OBJ_ROOT)/test-sony-ma2-fm

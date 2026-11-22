@@ -6,6 +6,7 @@
 #include "UsbDanaPort.h"
 #include "EmRegsUsbD12.h"
 #include "EmRegsMediaQ11xx.h"
+#include "EmRegsFMSound.h"
 #include "EmRegsVZPegVenice.h"
 #include "UsbPrinterRuntime.h"
 #include "UsbWifiRuntime.h"
@@ -191,6 +192,7 @@ struct Options {
     bool disableRumble{false};
     optional<string> audioOutput;
     bool toneLog{false};
+    optional<string> pa1TracePath;
     string serial{"off"};
     string irda{"off"};
     // The USB cradle's host side (T415): where pilot-link reaches the HotSync port.
@@ -222,6 +224,7 @@ void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--hide-buttons] [--no-sound] [--no-rumble] [--audio-output WAV]\n"
+            "                 [--pa1-trace NEW_CSV (T415 development)]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
@@ -999,10 +1002,14 @@ constexpr int64_t kHeadlessEpoch = 1792972800;
 const double* headlessGuestSeconds = nullptr;
 int64 HeadlessClock() { return kHeadlessEpoch + (headlessGuestSeconds ? int64_t(*headlessGuestSeconds) : 0); }
 
+EmRegsFMSound* pa1Sound() {
+    return dynamic_cast<EmRegsFMSound*>(EmBankRegs::GetSubBank(FMSound_BaseAddress, 2));
+}
+
 class Runner {
    public:
-    Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
-        : options(options), profile(&profile), metadata(metadata),
+    Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata, FILE* pa1Trace)
+        : options(options), profile(&profile), metadata(metadata), pa1Trace(pa1Trace),
           lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
               profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
@@ -1037,6 +1044,7 @@ class Runner {
         serialTransport->SessionLoaded(metadata.modemCall);
         irTransport->SessionLoaded(metadata.phoneCall);
         piezo.Restart(gSession->GetSystemCycles());
+        BindPa1Audio();
         usbWifi.clock=[this] { return UsbTime(); };
         usbPrinter.clock=[this] { return UsbTime(); };
         moduleWifi.clock=[this] { return UsbTime(); };
@@ -1057,6 +1065,10 @@ class Runner {
     }
 
     ~Runner() {
+        if (auto* sound = pa1Sound()) {
+            sound->onSample = nullptr;
+            sound->SetTrace(nullptr);
+        }
         usbPrinter.detach();
         usbWifi.detach();
         moduleWifi.detach();
@@ -1767,6 +1779,15 @@ class Runner {
             return;
         }
         SDL_PauseAudioDevice(audio, 0);
+    }
+
+    void BindPa1Audio() {
+        if (profile->deviceType != deviceTypeT415) return;
+        auto* sound = pa1Sound();
+        if (!sound) return;
+        sound->onSample = [this](uint64 cycle, int16 sample, bool fm) { piezo.ChangePcm(cycle, sample, fm); };
+        sound->SetTrace(pa1Trace);
+        sound->RestoreOutput(gSession->GetSystemCycles());
     }
 
     // The piezo's samples since the last slice, to the WAV file and the audio device. The
@@ -3051,6 +3072,7 @@ class Runner {
             if(moduleBefore) { pendingModule=moduleStateBefore; pendingModuleBus=moduleBusBefore; }
             RestoreUsb();
             piezo.Restart(gSession->GetSystemCycles());
+            BindPa1Audio();
             serialTransport->SessionLoaded("");
             irTransport->SessionLoaded("");
             SyncDTR();
@@ -3064,6 +3086,7 @@ class Runner {
         lcd.SetContrast(metadata.contrast);
         SetSpeed(speed);
         piezo.Restart(gSession->GetSystemCycles());
+        BindPa1Audio();
         serialTransport->SessionLoaded(metadata.modemCall);
         irTransport->SessionLoaded(metadata.phoneCall);
         SyncDTR();
@@ -3706,6 +3729,7 @@ class Runner {
     const Options& options;
     const DeviceProfile5* profile;
     SessionMetadata metadata;
+    FILE* pa1Trace;
     Lcd68k lcd;
     Replay replay;
     Console console;
@@ -3878,6 +3902,10 @@ bool parseOptions(int argc, char** argv, Options& options) {
         } else if (arg == "--gdb") {
             if (!number(1, 65535, n) || n != int(n)) return false;
             options.gdbPort = uint16_t(n);
+        } else if (arg == "--pa1-trace") {
+            const char* v = value();
+            if (!v || !*v) return false;
+            options.pa1TracePath = v;
         } else if (arg == "--tone-log") {
             options.toneLog = true;
         } else if (arg == "--smooth-lcd") {
@@ -3960,6 +3988,10 @@ int main(int argc, char** argv) {
         cerr << "--desktop-socket cannot be combined with --run-for or --check-rom" << endl;
         return 2;
     }
+    if (options.pa1TracePath && options.checkOnly) {
+        cerr << "--pa1-trace needs a running T415" << endl;
+        return 2;
+    }
     if (options.runFor > 0) Platform::SetClock(HeadlessClock);
     if (options.saveOnDisconnect && !options.desktopSocket) {
         cerr << "--save-on-disconnect needs --desktop-socket" << endl;
@@ -4029,6 +4061,19 @@ int main(int argc, char** argv) {
     if(options.danaView&&!deviceTypeIsDana5(profile->deviceType)) {
         cerr<<"--dana-view requires a Dana"<<endl;return 1;
     }
+    unique_ptr<FILE, decltype(&fclose)> pa1Trace(nullptr, fclose);
+    if (options.pa1TracePath) {
+        if (profile->deviceType != deviceTypeT415 || !pa1Sound()) {
+            cerr << "--pa1-trace requires a T415" << endl;
+            return 1;
+        }
+        pa1Trace.reset(fopen(options.pa1TracePath->c_str(), "wx"));
+        if (!pa1Trace) {
+            cerr << "cannot create Pa1Lib trace: " << strerror(errno) << endl;
+            return 1;
+        }
+        fputs("cycle,access,page,index,value\n", pa1Trace.get());
+    }
     image.clear();
     image.shrink_to_fit();
     cerr << "frond-68k: " << profile->name << " (" << profile->displayName << ") from "
@@ -4043,7 +4088,7 @@ int main(int argc, char** argv) {
     RawFingers::Install();
     int status;
     {
-        Runner runner(options, *profile, metadata);
+        Runner runner(options, *profile, metadata, pa1Trace.get());
         try {
             status = options.runFor > 0 ? runner.RunHeadless() : runner.RunWindow();
         } catch (const exception& error) {
@@ -4051,6 +4096,13 @@ int main(int argc, char** argv) {
             status = 1;
         }
         headlessGuestSeconds = nullptr;
+    }
+    if (pa1Trace) {
+        const bool writeFailed = ferror(pa1Trace.get());
+        if (fclose(pa1Trace.release()) != 0 || writeFailed) {
+            cerr << "cannot write Pa1Lib trace" << endl;
+            status = 1;
+        }
     }
     runtimeCards.Install(RuntimeCards::Pair{});
     cout.flush();

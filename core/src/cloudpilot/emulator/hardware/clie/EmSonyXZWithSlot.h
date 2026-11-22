@@ -16,6 +16,9 @@ class EmSonyXzWithSlot : public XZ {
 
     uint8 GetPortInternalValue(int) override;
 
+   protected:
+    virtual bool OtherIrq3Asserted() const { return false; }
+
    private:
     EmRegsMB86189& mb86189;
 };
@@ -26,7 +29,9 @@ class EmSonyXzWithSlot : public XZ {
 
 template <class XZ>
 EmSonyXzWithSlot<XZ>::EmSonyXzWithSlot(EmRegsMB86189& mb86189) : mb86189(mb86189) {
-    mb86189.irqChange.AddHandler([=](bool newState) { XZ::UpdateIRQ3(newState ? 0x40 : 0x00); });
+    mb86189.irqChange.AddHandler([this](bool asserted) {
+        if (!OtherIrq3Asserted()) XZ::UpdateIRQ3(asserted ? 0x40 : 0x00);
+    });
 }
 
 template <class XZ>
@@ -55,7 +60,7 @@ uint8 EmSonyXzWithSlot<XZ>::GetPortInternalValue(int port) {
         else
             result &= ~0x08;
 
-        if (mb86189.GetIrq())
+        if (mb86189.GetIrq() || OtherIrq3Asserted())
             result &= ~0x40;
         else
             result |= 0x40;

@@ -1320,7 +1320,9 @@ void EmDevice::CreateRegs(void) const {
             EmBankRegs::AddSubBank(venice);
             EmBankRegs::AddSubBank(mb86189);
             EmBankRegs::AddSubBank(usb);
-            EmBankRegs::AddSubBank(new EmRegsFMSound(FMSound_BaseAddress));
+            auto* fm = new EmRegsFMSound(FMSound_BaseAddress, true);
+            fm->onInterrupt = [venice](bool asserted, bool restoring) { venice->SetPa1Irq(asserted, restoring); };
+            EmBankRegs::AddSubBank(fm);
             break;
         }
 

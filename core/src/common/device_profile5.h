@@ -336,8 +336,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}},
 
     // Sony CLIE T415: DragonBall VZ with 8 MiB of RAM, a 320x320 16-grey panel and the silkscreen below it,
-    // a classic Memory Stick slot (4 to 128 MB, no Pro), IrDA and a USB cradle (a PDIUSBD12). Sony's sampled sound is not
-    // emulated: the T415 has the piezo beeper.
+    // a classic Memory Stick slot (4 to 128 MB, no Pro), IrDA, USB cradle and Sony FM and ADPCM sound.
     {deviceTypeT415, "sony-clie-t415", "Sony CLIÉ T415", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x736f6e79 /* sony */, 0x766e6365 /* vnce */, DeviceBoard5::vz328, DeviceArt::t415,
      {false, false, true, true, false, true, false, true, false, false, false, true, false, false, false, 3, true},

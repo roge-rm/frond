@@ -11,6 +11,7 @@
 #include "EmPatchMgr.h"
 #include "EmSession.h"
 #include "EmSystemState.h"
+#include "EmRegsFMSound.h"
 #include "Feature.h"
 #include "Logging.h"
 #include "Marshal.h"
@@ -341,6 +342,7 @@ namespace {
 
         if (gSession->GetDevice().IsClie() && libType == sysResTLibrary &&
             (libCreator == 'SlMa' || libCreator == 'yP1L')) {
+            if (libCreator == 'yP1L' && EmRegsFMSound::Enabled()) return kExecuteROM;
             PUT_RESULT_VAL(Err, sysErrLibNotFound);
             return kSkipROM;
         }
