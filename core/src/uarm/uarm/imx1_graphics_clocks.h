@@ -116,6 +116,13 @@ class Imx1GraphicsClocks {
         return next;
     }
     bool automaticNormal() const { return automaticRouted() && normal; }
+    // Ticks from the busy level going low to the automatic clock switch it schedules (scheduleAutomatic); UINT64_MAX
+    // where it schedules none.
+    uint64_t idleAutomaticTicks() const {
+        if (!automaticRouted() || normal || !(word(0x98) & 0x40)) return UINT64_MAX;
+        const auto timer = (word(0x98) >> 16) & 255;
+        return ((uint64_t(timer) + 1) * 16 * timeHz + referenceHz - 1) / referenceHz;
+    }
     bool gpuBusyValue() const { return gpuBusy; }
     void setGpuBusy(bool value) {
         if (gpuBusy==value) return;

@@ -105,22 +105,39 @@ class Imx1Cs5Configuration {
     // Fast: idleQuietSteps with the engine's bound at the completion of its last queued batch, not its first.
     // front is idleQuietSteps; the two differ only when batches complete before the bound. Only with the clocks
     // programmed and no SD or acquisition work due, as graphicsCommitted runs card work before completions.
-    uint64_t idleQuietStepsThrough(uint64_t numerator, uint64_t denominator, uint64_t& front) const {
+    // pastLast: the bound goes on past the last completion, where the engine going idle changes nothing but the
+    // busy level, to the automatic clock switch that schedules (if any), the clocks and the display. The probe
+    // takes the completions and the busy level at the last one's time in its charge (cpuStepsThroughLast).
+    uint64_t idleQuietStepsThrough(uint64_t numerator, uint64_t denominator, uint64_t& front,
+                                   bool pastLast = false) const {
         front = idleQuietSteps(numerator, denominator);
         if (front == UINT64_MAX || front <= 1 || !clocks.programmed() || engine.idleQuietTicks() == UINT64_MAX ||
             acquisition.deadlineRemaining() || sd.idleQuietTicks() != UINT64_MAX)
             return front;
         uint64_t ticks = clocks.nextEvent() ? clocks.nextEvent() : UINT64_MAX;
-        ticks = std::min(ticks, engine.idleQuietTicksThrough());
+        const uint64_t last = engine.idleQuietTicksThrough();
+        if (!pastLast) ticks = std::min(ticks, last);
+        else if (const uint64_t idle = clocks.idleAutomaticTicks(); idle != UINT64_MAX)
+            ticks = std::min(ticks, idle < UINT64_MAX - last ? last + idle : UINT64_MAX - 1);
         ticks = std::min(ticks, display.idleQuietTicks());
         if (ticks <= engine.idleQuietTicks()) return front;
+        if (ticks == UINT64_MAX) return UINT64_MAX;
         return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, numerator * 390625, denominator * 64, ticks);
     }
+    // CPU cycles of this period after which the last queued batch has finished; 0 with none queued or where the
+    // count can't be worked out.
+    uint64_t cpuStepsThroughLast(Imx1PllRatio period) const {
+        if (!clocks.programmed() || controller.delayRunning() || engine.idleQuietTicks() == UINT64_MAX ||
+            !timeFraction.supports(uint64_t(period.denominator) * 64))
+            return 0;
+        return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, uint64_t(period.numerator) * 390625,
+                              uint64_t(period.denominator) * 64, engine.idleQuietTicksThrough());
+    }
     // quietCpuCycles with idleQuietStepsThrough; front is quietCpuCycles.
-    uint64_t quietCpuCyclesThrough(Imx1PllRatio period, uint64_t& front) const {
+    uint64_t quietCpuCyclesThrough(Imx1PllRatio period, uint64_t& front, bool pastLast = false) const {
         if (controller.delayRunning() || !clocks.programmed()) return front = quietCpuCycles(period);
         uint64_t frontSteps;
-        const uint64_t steps = idleQuietStepsThrough(period.numerator, period.denominator, frontSteps);
+        const uint64_t steps = idleQuietStepsThrough(period.numerator, period.denominator, frontSteps, pastLast);
         front = frontSteps == UINT64_MAX ? UINT64_MAX : frontSteps - 1;
         return steps == UINT64_MAX ? UINT64_MAX : steps - 1;
     }

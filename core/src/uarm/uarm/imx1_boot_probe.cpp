@@ -118,6 +118,13 @@ bool crossCompletions = [] {
     const char* v = std::getenv("FROND_ZODIAC_CROSS");
     return !(v && *v && !std::strcmp(v, "0"));
 }();
+// A crossing span also runs past the last queued batch's completion where the engine going idle changes no rate
+// (Imx1Cs5Configuration::idleQuietStepsThrough's pastLast), to the next board, clock or display event or submit.
+// FROND_ZODIAC_CROSS_END=0 turns that part off, for measuring.
+bool crossEnd = [] {
+    const char* v = std::getenv("FROND_ZODIAC_CROSS_END");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
 bool spanCrosses = false, crossBlocked = false;
 // Fast blocks: a ring submit inside the quiet span leaves the board behind the chip (pendingBoardCycles) and works out
 // only the graphics side of the new span, capped at the rest of the old one and its boardSlack, the board's quiet time
@@ -128,7 +135,7 @@ bool submitLag = [] {
     const char* v = std::getenv("FROND_ZODIAC_SUBMIT_LAG");
     return !(v && *v && !std::strcmp(v, "0"));
 }();
-uint64_t lagSubmits = 0, lagBoundaries = 0;  // for tests and traces
+uint64_t lagSubmits = 0, lagBoundaries = 0, crossEnds = 0;  // for tests and traces
 uint64_t crossSpans = 0, crossRefusals = 0;  // for tests and traces
 uint64_t aspPollSkips = 0, aspPollRounds = 0, aspPollCycles = 0;  // for tests and traces
 // The loop at 20096d92 (Thumb): ldr r3, [r0, #52] (FIFO_PTR); lsls r3, #28; lsrs r3, #28; cmp r3, #3; bcc back.
@@ -450,7 +457,7 @@ struct Probe {
         const auto cpuPeriod = peripherals.cpuReferencePeriod(mode);
         uint64_t front = UINT64_MAX;
         cross = cross && withGraphics && crossAllowed();
-        uint64_t cycles = !withGraphics ? UINT64_MAX : cross ? cs5Configuration.quietCpuCyclesThrough(cpuPeriod, front) :
+        uint64_t cycles = !withGraphics ? UINT64_MAX : cross ? cs5Configuration.quietCpuCyclesThrough(cpuPeriod, front, crossEnd) :
                                                                 cs5Configuration.quietCpuCycles(cpuPeriod);
         if (!cycles) return 0;
         if (cross && cycles > front) {
@@ -521,7 +528,7 @@ struct Probe {
         const auto period = peripherals.cpuReferencePeriod(quietMode);
         uint64_t front = UINT64_MAX;
         const bool cross = crossAllowed();
-        const uint64_t cycles = cross ? cs5Configuration.quietCpuCyclesThrough(period, front) :
+        const uint64_t cycles = cross ? cs5Configuration.quietCpuCyclesThrough(period, front, crossEnd) :
                                         cs5Configuration.quietCpuCycles(period);
         if (cross && cycles > front && std::min(cycles, cap) > front) {
             spanCrosses = true;
@@ -569,13 +576,34 @@ struct Probe {
             if (graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
         }
         quietCycles = boardSlack = 0;
-        spanCrosses = false;
+        const bool crossed = std::exchange(spanCrosses, false);
         linesPending = false;
         if (!deferredCycles && !deferredHclk) return true;
-        const uint32_t cycles = uint32_t(deferredCycles);
+        uint32_t cycles = uint32_t(deferredCycles);
         const uint32_t hclk = uint32_t(deferredHclk);
         deferredCycles = deferredHclk = 0;
         const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
+        Imx1BootstrapAccess status = Imx1BootstrapAccess::ok;
+        if (crossed && crossEnd) {
+            // A span past the last queued batch's completion (crossEnd): the cycles up to it go first, with the
+            // completions, and the busy level is taken at its time, as a span boundary there would.
+            const uint64_t last = cs5Configuration.cpuStepsThroughLast(cpuPeriod);
+            if (last && last < cycles) {
+                status = chargeCycles(uint32_t(last), 0, keepBoard, cpuPeriod);
+                if (status == Imx1BootstrapAccess::ok) {
+                    cs5Configuration.takeBusyLevel();
+                    cycles -= uint32_t(last);
+                    ++crossEnds;
+                }
+            }
+        }
+        if (status == Imx1BootstrapAccess::ok) status = chargeCycles(cycles, hclk, keepBoard, cpuPeriod);
+        if (status == Imx1BootstrapAccess::ok) return true;
+        if (graphicsWireStatus == Imx1BootstrapAccess::ok) graphicsWireStatus = status;
+        return false;
+    }
+    // chargeDeferred's charge of cycles and then hclk wait clocks: the chip, then the board (kept back with keepBoard).
+    Imx1BootstrapAccess chargeCycles(uint32_t cycles, uint32_t hclk, bool keepBoard, Imx1PllRatio cpuPeriod) {
         Imx1BootstrapAccess status;
         if (!hclk) {
             status = advanceGraphicsCpu(cycles, cpuPeriod);
@@ -608,9 +636,7 @@ struct Probe {
                 if (!keepBoard) status = peripherals.clockStatus();
             }
         }
-        if (status == Imx1BootstrapAccess::ok) return true;
-        if (graphicsWireStatus == Imx1BootstrapAccess::ok) graphicsWireStatus = status;
-        return false;
+        return status;
     }
     // Fast: the end of a quiet span in the JIT loop, taken without a step. The step there would charge the span, look
     // at the clock boundary and the interrupt lines and start a new span, which this does without an instruction.
@@ -2959,6 +2985,7 @@ uint64_t imx1MachineCrossRefusals(const Imx1Machine*) { return crossRefusals; }
 void imx1SetCrossCompletions(bool on) { crossCompletions = on; crossBlocked = spanCrosses = false; }
 uint64_t imx1MachineLagSubmits(const Imx1Machine*) { return lagSubmits; }
 uint64_t imx1MachineLagBoundaries(const Imx1Machine*) { return lagBoundaries; }
+uint64_t imx1MachineCrossEnds(const Imx1Machine*) { return crossEnds; }
 void imx1SetSubmitLag(bool on) { submitLag = on; }
 bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on) {
     auto* p = machine->probe;

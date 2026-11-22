@@ -262,6 +262,7 @@ void imx1SetCrossCompletions(bool on);
 // FROND_ZODIAC_SUBMIT_LAG=0; imx1SetSubmitLag sets it, for tests.
 uint64_t imx1MachineLagSubmits(const Imx1Machine*);
 uint64_t imx1MachineLagBoundaries(const Imx1Machine*);
+uint64_t imx1MachineCrossEnds(const Imx1Machine*);
 void imx1SetSubmitLag(bool on);
 // Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
 // ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
