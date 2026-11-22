@@ -450,7 +450,9 @@ void imx1MachineSetUsbHostPending(Imx1Machine*, bool pending);
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,
 // and in landscape the rotation at 20084d26 turns them one place, so top is D10, right D9, bottom D8, left D14.
-// ASSUMPTION "Zodiac Function and Bluetooth pins": D12 and D13 by elimination, the ROM has no key code for them.
+// The scan reads D12 as key bit 0x8000 and D13 as 0x01000000. D12 is Function: the ROM's stick calibration
+// ("press and hold the function button") goes on only for it. D13 is Bluetooth: a press in the launcher shows
+// "Discoverable for 3 minutes".
 // Not wired: D22 (the cradle's HotSync button, active low, idle high) and B23 (the scan's other stick click input).
 enum class Imx1ZodiacControl {
     home, triggerLeft, triggerRight, power, stickClick, actionRight, actionUp, actionLeft, function, bluetooth,
