@@ -140,7 +140,7 @@ data class MachineSettings(
         if (tg50Controls && !showKeyboard) add("--hide-keyboard")
         if (jogControls) addAll(listOf("--jog-controls", if (touchHidden) JogControls.HIDDEN.arg else this@MachineSettings.jogControls.arg))
         if (gamepadSupported) addAll(listOf("--jog-controls-landscape", if (touchHidden) JogLandscape.HIDDEN.arg else jogLandscape.arg))
-        if (touchHidden) add("--hide-buttons")
+        if (touchHidden && !m68k) add("--hide-buttons")
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
@@ -164,7 +164,7 @@ data class MachineSettings(
         if (jogControls) append(" jog=${if (touchHidden) JogControls.HIDDEN.arg else this@MachineSettings.jogControls.arg}")
         if (gamepadSupported) append(" jog-landscape=${if (touchHidden) JogLandscape.HIDDEN.arg else jogLandscape.arg}")
         if (m68k && !colourLcd) append(" contrast=$contrast")
-        append(" buttons=${if (touchHidden) "off" else "on"}")
+        if (!m68k) append(" buttons=${if (touchHidden) "off" else "on"}")
     }
 
     // The pad state the core reports, as the setting, so a session loaded with its own state starts

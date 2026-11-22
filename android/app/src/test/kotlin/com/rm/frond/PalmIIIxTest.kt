@@ -222,14 +222,15 @@ class PalmIIIxTest {
         assertFalse("--engine" in s.arguments(m68k = true))
         // A colour LCD has no contrast, so none is passed.
         assertFalse("--contrast" in s.arguments(m68k = true, colourLcd = true))
-        assertEquals("fit=fit smooth=off buttons=on", s.displayArgument(m68k = true, colourLcd = true))
+        assertFalse("--hide-buttons" in s.arguments(m68k = true, touchHidden = true))
+        assertEquals("fit=fit smooth=off", s.displayArgument(m68k = true, colourLcd = true, touchHidden = true))
         // Without a chosen contrast the session's own stays.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments(m68k = true))
         assertFalse("contrast" in MachineSettings().json().keys().asSequence().toList())
         assertEquals(listOf("--window-fit", "fit", "--engine", "fast", "--speed", "uncapped"), s.arguments())
         // Original passes no --speed, so the core follows the device's own clock.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments())
-        assertEquals("fit=fit smooth=off contrast=30 buttons=on", s.displayArgument(m68k = true))
+        assertEquals("fit=fit smooth=off contrast=30", s.displayArgument(m68k = true))
         assertEquals("fit=fit smooth=off buttons=on", s.displayArgument())
         val back = MachineSettings.from(s.json())
         assertEquals(30, back.contrast)

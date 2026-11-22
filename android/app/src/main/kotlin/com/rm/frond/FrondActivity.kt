@@ -271,7 +271,7 @@ open class FrondActivity : SDLActivity() {
         addKeyboard()
         addController()
         if (device.isDana()) {
-            keyboardButton?.visibility = View.VISIBLE
+            readKeyboard()
             link.whenConnected { if (link.connectedOnce) updateDanaEnvironment() }
         }
         SdCard.clean(this)
