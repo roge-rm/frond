@@ -159,7 +159,8 @@ struct OpenDbInfo {
 // the line failed (see LinkError()).
 class DlpClient {
    public:
-    explicit DlpClient(PacketLink& link, int timeoutMs = 20000) : link(link), timeoutMs(timeoutMs) {}
+    static constexpr int defaultTimeoutMs = 20000;
+    explicit DlpClient(PacketLink& link, int timeoutMs = defaultTimeoutMs) : link(link), timeoutMs(timeoutMs) {}
 
     // One request and its answer.
     int Call(uint8_t function, const std::vector<DlpArg>& args, std::vector<DlpArg>& answer);

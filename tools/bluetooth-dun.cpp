@@ -31,6 +31,8 @@ struct frond_dun* frond_dun_create(const char* sync_folder, const char* sync_pro
         options.root = sync_folder;
         if (sync_profile) options.profile = sync_profile;
         options.network = true;
+        // Allow the Palm's TCP retransmission backoff on the 33.6 kbit/s Bluetooth modem.
+        options.networkReplyIdleMs = 45000;
         auto& manager = frondSync::SyncManager::Get();
         manager.Configure(options);
         manager.SetListener([](const std::string& status) {

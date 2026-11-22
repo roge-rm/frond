@@ -15,7 +15,9 @@
 #include "src/shared/mainloop.h"
 #include "src/shared/timeout.h"
 #include "emulator/bthost.h"
+#include "bluetooth-rfcomm-stream.h"
 #include "bluetooth-dun.h"
+#include "bluetooth-hotsync.h"
 #include <time.h>
 #include <stdint.h>
 #define CHANNEL 9
@@ -27,13 +29,15 @@ static uint16_t rfhandle,rfcid;
 static unsigned rfchannel=CHANNEL;
 static bool push_mode,hold_put,client_held,spp_mode,spp_waiting_disconnect;
 /* DUN: a phone's Dial-up Networking service, the channel's bytes going to a Hayes modem and PPP (bluetooth-dun.h). */
-static bool dun_mode;
+static bool dun_mode, hotsync_mode;
 /* The phone's BD_ADDR, 02:46:52:4E:44:50 (wire order here). Locally administered, so it can't
    clash with a guest's factory address or btvirt's own 00:AA:01:00:00:xx. */
 static const uint8_t phone_address[6]={0x50,0x44,0x4e,0x52,0x46,0x02};
-static bool phone_address_set,phone_named,dun_disc_hangup;
+static const uint8_t hotsync_address[6]={0x53,0x44,0x4e,0x52,0x46,0x02};
+static bool address_set,peer_named,dun_disc_hangup;
+static const uint8_t* server_address(void){return hotsync_mode?hotsync_address:phone_address;}
 static uint16_t service_uuid(void){return dun_mode?0x1103:spp_mode?0x1101:0x1105;}
-static const char* service_name(void){return dun_mode?"Dial-up Networking":spp_mode?"Frond SPP endpoint":"Frond OPP endpoint";}
+static const char* service_name(void){return dun_mode?"Dial-up Networking":hotsync_mode?"Frond HotSync":spp_mode?"Frond SPP endpoint":"Frond OPP endpoint";}
 static const char* gate_path;
 static uint8_t remote_address[6];
 static const char* output_path;
@@ -153,48 +157,118 @@ static void rfcomm_data(const void*data,uint16_t length,void*p){
  if(length>sizeof(obex)-obex_size){obex_status(0xc0);return;}memcpy(obex+obex_size,data,length);obex_size+=length;
  while(obex_size>=3){size_t want=be16(obex+1);if(want<3||want>OPP_MTU){obex_status(0xc0);obex_size=0;return;}if(obex_size<want)return;obex_packet(obex,want);memmove(obex,obex+want,obex_size-want);obex_size-=want;}
 }
-/* DUN server: one call at a time. The channel's bytes go to the modem, and what it sends back goes
-   out in UIH frames small enough for any RFCOMM frame size the guest picked. */
+/* One modem or HotSync session per peer. bthost keeps each channel hook until its ACL link closes. */
 static struct frond_dun* dun;
-static bool dun_open;
-/* Links whose channel 9 has our hook. bthost frees a link's hooks with the link and btvirt reuses
-   its handle, so a handle leaves the list when its link goes. */
-static uint16_t dun_hooked[32];static unsigned dun_hooked_count;
+static bool stream_open;
+static uint16_t stream_hooked[32];
+static unsigned stream_hooked_count;
 static char dun_state[32]="off";
-static struct bytes dun_sent;
+static struct bytes selftest_output;
+
 static uint64_t monotonic_ns(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;}
 static void dun_report(void){const char* now=frond_dun_state(dun);if(strcmp(now,dun_state)){snprintf(dun_state,sizeof(dun_state),"%s",now);printf("DUN_STATE %s\n",dun_state);fflush(stdout);}}
-static void dun_flush(void){
- uint8_t out[120];size_t n;
- while((n=frond_dun_output(dun,out,sizeof(out),monotonic_ns()))>0){
-  if(selftest){add(&dun_sent,out,n);continue;}
-  struct bytes frame=uih_frame(out,n);bthost_send_cid(host,rfhandle,rfcid,frame.b,frame.n);
+
+static void stream_flush(void) {
+ uint8_t out[FROND_RFCOMM_MAX_FRAME];
+ if (dun) {
+  size_t n;
+  while ((n = frond_dun_output(dun, out, 120, monotonic_ns())) > 0) {
+   if (selftest) { add(&selftest_output, out, n); continue; }
+   struct bytes frame = uih_frame(out, n);
+   bthost_send_cid(host, rfhandle, rfcid, frame.b, frame.n);
+  }
+ } else if (stream_open) {
+  size_t space, n;
+  while ((space = selftest ? sizeof(out) : frond_rfcomm_stream_space(host, rfhandle, rfcid)) &&
+         (n = frond_bt_sync_output(out, space))) {
+   if (selftest) add(&selftest_output, out, n);
+   else if (!frond_rfcomm_stream_send(host, rfhandle, rfcid, out, n)) abort();
+  }
  }
- dun_report();
+ if (dun) dun_report();
 }
-/* The hook's user data is its link's handle; only the call's link reaches the modem. */
-static void dun_data(const void*data,uint16_t length,void*p){if(dun_open&&(uint16_t)(uintptr_t)p==rfhandle){frond_dun_input(dun,data,length,monotonic_ns());dun_flush();}}
-static bool dun_tick(void*p){dun_flush();return true;}
-static bool dun_is_hooked(uint16_t h){for(unsigned i=0;i<dun_hooked_count;++i)if(dun_hooked[i]==h)return true;return false;}
-static void dun_connected(uint16_t h,uint16_t c){
- /* Another link while a call is up gets nothing: its bytes are dropped and the call goes on. */
- if(dun_open&&h!=rfhandle){printf("DUN_BUSY handle=%04x\n",h);fflush(stdout);return;}
- rfhandle=h;rfcid=c;if(dun_open)frond_dun_close(dun,monotonic_ns());dun_open=true;frond_dun_open(dun,monotonic_ns());
- /* bthost takes the first hook for a channel, so one per ACL link is enough. */
- if(!dun_is_hooked(h)){assert(dun_hooked_count<32);bthost_add_rfcomm_chan_hook(host,h,CHANNEL,dun_data,(void*)(uintptr_t)h);dun_hooked[dun_hooked_count++]=h;}
- printf("DUN_CONNECTED channel=%u handle=%04x\n",CHANNEL,h);fflush(stdout);dun_report();
+
+static void stream_closed(uint16_t handle, const char* reason) {
+ if (!stream_open || handle != rfhandle) return;
+ stream_open = false;
+ if (dun) frond_dun_close(dun, monotonic_ns());
+ else frond_bt_sync_close();
+ printf("%s_CLOSED %s\n", dun ? "DUN" : "HOTSYNC", reason);
+ fflush(stdout);
+ if (dun) dun_report();
 }
-/* The call ends on RFCOMM DISC (disc), L2CAP close (l2cap) or the link going (link). */
-static void dun_closed(uint16_t h,const char*why){if(!dun_open||h!=rfhandle)return;dun_open=false;frond_dun_close(dun,monotonic_ns());printf("DUN_CLOSED %s\n",why);fflush(stdout);dun_report();}
-static void dun_link_gone(uint16_t h){for(unsigned i=0;i<dun_hooked_count;++i)if(dun_hooked[i]==h){dun_hooked[i]=dun_hooked[--dun_hooked_count];break;}dun_closed(h,"link");}
-/* bthost answers a DISC itself without telling us, so look for one on the call's channel (or the
-   multiplexer's, DLCI 0) in the incoming ACL. */
-static void dun_watch_disc(const uint8_t*p,size_t n){
- if(!dun_open||n<11||p[0]!=2||((p[1]|p[2]<<8)&0x0fff)!=rfhandle||((p[2]>>4)&3)==1||(p[7]|p[8]<<8)!=rfcid)return;
- if((p[10]&~0x10)==0x43&&((p[9]>>3)==CHANNEL||(p[9]>>2)==0))dun_closed(rfhandle,"disc");
+
+static void stream_data(const void* data, uint16_t length, void* context) {
+ if (!stream_open || (uint16_t)(uintptr_t)context != rfhandle) return;
+ if (dun) frond_dun_input(dun, data, length, monotonic_ns());
+ else if (!frond_bt_sync_input(data, length)) {
+  stream_closed(rfhandle, "receive queue full");
+  bthost_hci_disconnect(host, rfhandle, 0x13);
+  return;
+ }
+ stream_flush();
 }
-static void rfcomm_connected(uint16_t h,uint16_t c,void*p,bool ok){assert(ok);if(dun_mode){dun_connected(h,c);return;}rfhandle=h;rfcid=c;bthost_add_rfcomm_chan_hook(host,h,CHANNEL,rfcomm_data,NULL);printf("RFCOMM_CONNECTED channel=%u handle=%04x\n",CHANNEL,h);fflush(stdout);}
-static void rfcomm_closed(uint16_t h,uint16_t c,void*p){if(dun_mode){dun_closed(h,"l2cap");return;}printf("RFCOMM_L2CAP_CLOSED complete=%u\n",completed);fflush(stdout);}
+
+static bool stream_tick(void* context) {
+ stream_flush();
+ return true;
+}
+
+static bool stream_is_hooked(uint16_t handle) {
+ for (unsigned i = 0; i < stream_hooked_count; ++i)
+  if (stream_hooked[i] == handle) return true;
+ return false;
+}
+
+static void stream_connected(uint16_t handle, uint16_t cid) {
+ const char* mode = dun ? "DUN" : "HOTSYNC";
+ if (stream_open && handle != rfhandle) {
+  printf("%s_BUSY handle=%04x\n", mode, handle);
+  fflush(stdout);
+  if (hotsync_mode) bthost_hci_disconnect(host, handle, 0x13);
+  return;
+ }
+ // A retried SABM on the same HotSync channel must not restart its session.
+ if (stream_open && hotsync_mode && cid == rfcid) return;
+ if (stream_open) stream_closed(handle, "reopen");
+ rfhandle = handle;
+ rfcid = cid;
+ stream_open = true;
+ if (dun) frond_dun_open(dun, monotonic_ns());
+ else frond_bt_sync_open();
+ if (!selftest && !stream_is_hooked(handle)) {
+  assert(stream_hooked_count < sizeof(stream_hooked) / sizeof(stream_hooked[0]));
+  bthost_add_rfcomm_chan_hook(host, handle, CHANNEL, stream_data, (void*)(uintptr_t)handle);
+  stream_hooked[stream_hooked_count++] = handle;
+ }
+ printf("%s_CONNECTED channel=%u handle=%04x\n", mode, CHANNEL, handle);
+ fflush(stdout);
+ if (dun) dun_report();
+}
+
+static void stream_link_gone(uint16_t handle) {
+ for (unsigned i = 0; i < stream_hooked_count; ++i) {
+  if (stream_hooked[i] != handle) continue;
+  stream_hooked[i] = stream_hooked[--stream_hooked_count];
+  break;
+ }
+ stream_closed(handle, "link");
+}
+
+static void hotsync_disc(uint16_t handle, uint16_t cid) {
+ if (cid == rfcid) stream_closed(handle, "disc");
+}
+
+/* The DUN peer watches DISC on the mirrored L2CAP CID. */
+static void stream_watch_disc(const uint8_t* p, size_t n) {
+ if (!stream_open || n < 11 || p[0] != 2 || ((p[1] | p[2] << 8) & 0x0fff) != rfhandle ||
+     ((p[2] >> 4) & 3) == 1 || (p[7] | p[8] << 8) != rfcid) return;
+ if ((p[10] & ~0x10) == 0x43 && ((p[9] >> 3) == CHANNEL || (p[9] >> 2) == 0))
+  stream_closed(rfhandle, "disc");
+}
+
+static void rfcomm_connected(uint16_t h,uint16_t c,void*p,bool ok){assert(ok);if(dun_mode||hotsync_mode){stream_connected(h,c);return;}rfhandle=h;rfcid=c;bthost_add_rfcomm_chan_hook(host,h,CHANNEL,rfcomm_data,NULL);printf("RFCOMM_CONNECTED channel=%u handle=%04x\n",CHANNEL,h);fflush(stdout);}
+static void rfcomm_closed(uint16_t h,uint16_t c,void*p){if(dun_mode||hotsync_mode){if(c==rfcid)stream_closed(h,"l2cap");return;}printf("RFCOMM_L2CAP_CLOSED complete=%u\n",completed);fflush(stdout);}
 static void send_h4(const struct iovec*iov,int n,void*p){
  uint8_t packet[65540];size_t count=0;for(int i=0;i<n;++i){assert(iov[i].iov_len<=sizeof(packet)-count);memcpy(packet+count,iov[i].iov_base,iov[i].iov_len);count+=iov[i].iov_len;}
  size_t at=0;while(at<count){ssize_t z=send(sk,packet+at,count-at,MSG_NOSIGNAL);if(z<0&&errno==EINTR)continue;assert(z>0);at+=z;}
@@ -313,27 +387,28 @@ static void client_sdp_open(uint8_t code,const void*data,uint16_t length,void*p)
 static void client_connected(uint16_t h,void*p){sdp_handle=h;const uint8_t request[]={1,0,0x4f,0};assert(bthost_l2cap_req(host,h,2,request,sizeof(request),client_sdp_open,NULL));}
 static bool deadline(void*p){fprintf(stderr,"Owned OPP peer deadline\n");mainloop_quit();return false;}
 
-static void send_name(void){uint8_t cmd[252]={1,0x13,0x0c,248};const char*name=dun_mode?"Frond Phone":"Frond OPP endpoint";memcpy(cmd+4,name,strlen(name)+1);assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
+static void send_name(void){uint8_t cmd[252]={1,0x13,0x0c,248};const char*name=dun_mode?"Frond Phone":hotsync_mode?"Frond HotSync":"Frond OPP endpoint";memcpy(cmd+4,name,strlen(name)+1);assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
 static void command(uint16_t op,uint8_t status,const void*data,uint8_t len,void*p){
  printf("CMD opcode=%04x status=%u len=%u\n",op,status,len);
  if(op==0x1009&&len>=7){const uint8_t*b=(const uint8_t*)data+1;printf("BDADDR_LE ");for(unsigned i=0;i<6;++i)printf("%02x",b[i]);puts("");}
- /* After the address write, read it back (bthost keeps it), then name the phone. */
- if(op==0xfc01&&dun_mode&&!push_mode){assert(!status);phone_address_set=true;const uint8_t cmd[]={1,0x09,0x10,0};assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
- if(op==0x1009&&phone_address_set&&!phone_named){assert(!status&&len>=7&&!memcmp((const uint8_t*)data+1,phone_address,6));phone_named=true;send_name();}
+ /* Read back the stable address before naming the server. */
+ if(op==0xfc01&&(dun_mode||hotsync_mode)&&!push_mode){assert(!status);address_set=true;const uint8_t cmd[]={1,0x09,0x10,0};assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
+ if(op==0x1009&&address_set&&!peer_named){assert(!status&&len>=7&&!memcmp((const uint8_t*)data+1,server_address(),6));peer_named=true;send_name();}
  if(op==0x0c13&&dun_mode){assert(!status);/* Class of device: a phone (smartphone) with networking, object transfer and telephony. */uint8_t cmd[]={1,0x24,0x0c,3,0x0c,0x02,0x52};assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
+ else if(op==0x0c13&&hotsync_mode){assert(!status);/* Desktop computer. */uint8_t cmd[]={1,0x24,0x0c,3,0x04,0x01,0x00};assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
  else if(op==0x0c13||op==0x0c24){assert(!status);bthost_write_scan_enable(host,3);}
  if(op==0x0c1a){assert(!status);printf("READY %s channel=9\n",service_name());}fflush(stdout);
 }
 static void ready(void){
  if(push_mode){bthost_hci_connect(host,remote_address,0);return;}
- /* The phone keeps one address whatever order links join btvirt in, so a Palm's pairing with it holds. */
- if(dun_mode){uint8_t cmd[10]={1,0x01,0xfc,6};memcpy(cmd+4,phone_address,6);assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));return;}
+ /* Keep pairings across runs, regardless of which controller joins btvirt first. */
+ if(dun_mode||hotsync_mode){uint8_t cmd[10]={1,0x01,0xfc,6};memcpy(cmd+4,server_address(),6);assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));return;}
  send_name();
 }
 static void read_h4(int fd,uint32_t events,void*p){
  static uint8_t data[65540];static size_t count;if(events&(EPOLLERR|EPOLLHUP)){mainloop_quit();return;}
  ssize_t n=recv(fd,data+count,sizeof(data)-count,MSG_DONTWAIT);if(n<0&&(errno==EAGAIN||errno==EINTR))return;if(n<=0){mainloop_quit();return;}count+=n;
- for(;;){if(!count)break;size_t want;if(data[0]==4){if(count<3)break;want=3+data[2];}else if(data[0]==2){if(count<5)break;want=5+data[3]+((size_t)data[4]<<8);}else if(data[0]==3){if(count<4)break;want=4+data[3];}else{fprintf(stderr,"Unexpected H4 type %u\n",data[0]);exit(2);}assert(want<=sizeof(data));if(count<want)break;bool disconnected_link=push_mode && client_state==5 && want==7 && data[0]==4 && data[1]==5 && data[2]==4 && !data[3] && (data[4]|data[5]<<8)==rfhandle;if(spp_mode&&!push_mode&&completed&&want==7&&data[0]==4&&data[1]==5&&data[2]==4&&!data[3]&&(data[4]|data[5]<<8)==rfhandle){disconnected=true;puts("SPP_HCI_DISCONNECT_COMPLETE");mainloop_quit();}if(!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])sdp_link_gone(data[4]|data[5]<<8);if(dun&&!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])dun_link_gone(data[4]|data[5]<<8);if(dun&&!push_mode)dun_watch_disc(data,want);map_cids(data,want);bthost_receive_h4(host,data,want);if(disconnected_link){if(spp_mode)disconnected=true;push_link_closed=true;puts("HCI_DISCONNECT_COMPLETE");fflush(stdout);mainloop_quit();}memmove(data,data+want,count-want);count-=want;}
+ for(;;){if(!count)break;size_t want;if(data[0]==4){if(count<3)break;want=3+data[2];}else if(data[0]==2){if(count<5)break;want=5+data[3]+((size_t)data[4]<<8);}else if(data[0]==3){if(count<4)break;want=4+data[3];}else{fprintf(stderr,"Unexpected H4 type %u\n",data[0]);exit(2);}assert(want<=sizeof(data));if(count<want)break;bool disconnected_link=push_mode && client_state==5 && want==7 && data[0]==4 && data[1]==5 && data[2]==4 && !data[3] && (data[4]|data[5]<<8)==rfhandle;if(spp_mode&&!push_mode&&completed&&want==7&&data[0]==4&&data[1]==5&&data[2]==4&&!data[3]&&(data[4]|data[5]<<8)==rfhandle){disconnected=true;puts("SPP_HCI_DISCONNECT_COMPLETE");mainloop_quit();}if(!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])sdp_link_gone(data[4]|data[5]<<8);if((dun||hotsync_mode)&&!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])stream_link_gone(data[4]|data[5]<<8);if(dun&&!push_mode)stream_watch_disc(data,want);map_cids(data,want);bthost_receive_h4(host,data,want);if(disconnected_link){if(spp_mode)disconnected=true;push_link_closed=true;puts("HCI_DISCONNECT_COMPLETE");fflush(stdout);mainloop_quit();}memmove(data,data+want,count-want);count-=want;}
 }
 static void stopped(int sig,void*p){mainloop_quit();}
 static void debug(const char*line,void*p){printf("H4 %s\n",line);fflush(stdout);}
@@ -350,25 +425,63 @@ static void dun_tests(void){
  dun_mode=true;selftest=true;struct selection s={.lo={0},.hi={0xffff},.n=1};struct bytes r=record(&s);
  assert(has_uuid(r.b,r.n,0x1103,0)&&has_uuid(r.b,r.n,0x1201,0)&&!has_uuid(r.b,r.n,0x1105,0)&&!has_uuid(r.b,r.n,8,0)&&find_channel(r.b,r.n,0)==CHANNEL);
  dun=frond_dun_create(NULL,NULL);assert(dun);assert(!strcmp(frond_dun_state(dun),"off"));
- dun_open=true;frond_dun_open(dun,monotonic_ns());dun_flush();assert(!strcmp(dun_state,"idle"));
- const char at[]="AT\r";dun_data(at,3,NULL);add(&dun_sent,"",1);assert(strstr((char*)dun_sent.b,"OK"));dun_sent.n=0;
- const char dial[]="ATDT*99#\r";dun_data(dial,sizeof(dial)-1,NULL);assert(!strcmp(dun_state,"dialling"));
+ stream_open=true;frond_dun_open(dun,monotonic_ns());stream_flush();assert(!strcmp(dun_state,"idle"));
+ const char at[]="AT\r";stream_data(at,3,NULL);add(&selftest_output,"",1);assert(strstr((char*)selftest_output.b,"OK"));selftest_output.n=0;
+ const char dial[]="ATDT*99#\r";stream_data(dial,sizeof(dial)-1,NULL);assert(!strcmp(dun_state,"dialling"));
  /* A second link's connect and bytes don't touch the call. */
- dun_sent.n=0;dun_connected(rfhandle+1,0x40);assert(dun_open&&rfhandle==0);dun_data(at,3,(void*)(uintptr_t)1);dun_flush();assert(!dun_sent.n&&!strcmp(dun_state,"dialling"));
+ selftest_output.n=0;stream_connected(rfhandle+1,0x40);assert(stream_open&&rfhandle==0);stream_data(at,3,(void*)(uintptr_t)1);stream_flush();assert(!selftest_output.n&&!strcmp(dun_state,"dialling"));
  /* A DISC on the call's channel ends it. */
- rfcid=0x40;uint8_t acl[13]={2,0,0x20,8,0,4,0,0x40,0,(CHANNEL*2<<2)|3,0x53,1,0};dun_watch_disc(acl,sizeof(acl));assert(!dun_open&&!strcmp(dun_state,"off"));
- dun_open=true;frond_dun_open(dun,monotonic_ns());dun_flush();dun_link_gone(rfhandle);assert(!dun_open&&!strcmp(dun_state,"off"));frond_dun_destroy(dun);dun=NULL;
+ rfcid=0x40;uint8_t acl[13]={2,0,0x20,8,0,4,0,0x40,0,(CHANNEL*2<<2)|3,0x53,1,0};stream_watch_disc(acl,sizeof(acl));assert(!stream_open&&!strcmp(dun_state,"off"));
+ stream_open=true;frond_dun_open(dun,monotonic_ns());stream_flush();stream_link_gone(rfhandle);assert(!stream_open&&!strcmp(dun_state,"off"));frond_dun_destroy(dun);dun=NULL;
  /* Each dial opens an SDP session: closed ones and ones on a lost link give their slot back. */
  host=bthost_create();assert(host);for(unsigned i=0;i<100;++i){sdp_connected(1,0x40,NULL);sdp_closed(1,0x40,NULL);}
  for(unsigned round=0;round<10;++round){for(unsigned i=0;i<8;++i)sdp_connected(2,0x40+i,NULL);sdp_link_gone(2);}for(unsigned i=0;i<32;++i)assert(!links[i].used);bthost_destroy(host);host=NULL;
  puts("PASS DUN UUID1103 record on channel 9, modem commands, one call at a time, DISC and link loss end the call, SDP sessions freed");
 }
+static void hotsync_tests(void) {
+ hotsync_mode = spp_mode = selftest = true;
+ struct selection all = {.lo = {0}, .hi = {0xffff}, .n = 1};
+ struct bytes advertisement = record(&all);
+ assert(has_uuid(advertisement.b, advertisement.n, 0x1101, 0));
+ assert(!has_uuid(advertisement.b, advertisement.n, 0x1103, 0));
+ assert(find_channel(advertisement.b, advertisement.n, 0) == CHANNEL);
+
+ // An SLP/PADP CMP wakeup from the handheld, split across several serial reads.
+ const uint8_t wakeup[] = {0xbe, 0xef, 0xed, 0x03, 0x03, 0x02, 0x00, 0x0e, 0xff, 0xaf, 0x01, 0xc0, 0x00, 0x0a, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0xe1, 0x00, 0x3a, 0xb6};
+ for (unsigned i = 0; i < 2; ++i) {
+  stream_connected(1, 0x40);
+  selftest_output.n = 0;
+  stream_data(wakeup, 5, (void*)(uintptr_t)1);
+  stream_connected(1, 0x40);
+  stream_data(wakeup + 5, 9, (void*)(uintptr_t)1);
+  stream_data(wakeup + 14, sizeof(wakeup) - 14, (void*)(uintptr_t)1);
+  const uint64_t until = monotonic_ns() + 2000000000ull;
+  while (selftest_output.n < 42 && monotonic_ns() < until) {
+   usleep(1000);
+   stream_flush();
+  }
+  const uint8_t* reply = selftest_output.b;
+  assert(selftest_output.n == 42);
+  assert(!memcmp(reply, wakeup, 3) && reply[10] == 2);  // PADP ACK
+  assert(!memcmp(reply + 16, wakeup, 3) && reply[26] == 1 && reply[30] == 2);  // CMP INIT
+  if (i == 0) {
+   hotsync_disc(1, 0x40);
+  } else {
+   stream_link_gone(1);
+  }
+  assert(!stream_open);
+ }
+ puts("PASS SPP HotSync SDP, fragmented CMP wakeup and reconnect");
+}
+
 int main(int argc,char**argv){
+ if(argc==2&&!strcmp(argv[1],"--selftest-hotsync")){hotsync_tests();return 0;}
  if(argc==2&&!strcmp(argv[1],"--selftest-spp")){spp_tests();return 0;}
  if(argc==2&&!strcmp(argv[1],"--selftest-dun")){dun_tests();return 0;}
  if(argc==2&&!strcmp(argv[1],"--selftest")){tests();return 0;}assert(argc>=3);
  /* SOCKET OUTPUT [options] for OPP and SPP; SOCKET --dun [--pin PIN] [--sync-folder DIR [--sync-profile NAME]]
-    for the phone; SOCKET --dun-dial ADDRESS for its test client. */
+    for the phone; SOCKET --spp-hotsync --sync-folder DIR [--sync-profile NAME] [--pin PIN]
+    for the HotSync desktop; SOCKET --dun-dial ADDRESS for the phone test client. */
  const char *sync_folder=NULL, *sync_profile=NULL;
  int first=3;if(!strncmp(argv[2],"--",2))first=2;else output_path=argv[2];
  for(int at=first;at<argc;++at){
@@ -380,14 +493,25 @@ int main(int argc,char**argv){
    if(!strcmp(option,"--sync-folder"))sync_folder=argv[at];else sync_profile=argv[at];
    continue;
   }
+  if(!strcmp(argv[at],"--spp-hotsync")){hotsync_mode=true;continue;}
   if(!strcmp(argv[at],"--spp-echo")){spp_mode=true;continue;}if(!strcmp(argv[at],"--dun")){dun_mode=true;continue;}if(!strcmp(argv[at],"--disc-hangup")){dun_disc_hangup=true;continue;}if(!strcmp(argv[at],"--hold-put")){hold_put=true;continue;}if(!strcmp(argv[at],"--pin")){assert(++at<argc && strlen(argv[at])>=1 && strlen(argv[at])<=16);pin_code=argv[at];continue;}if(!strcmp(argv[at],"--gate")){assert(++at<argc);gate_path=argv[at];assert(access(gate_path,F_OK)!=0);continue;}bool spp_arg=!strcmp(argv[at],"--spp-push"),dun_arg=!strcmp(argv[at],"--dun-dial");assert((!strcmp(argv[at],"--push")||spp_arg||dun_arg) && ++at<argc && strlen(argv[at])==12);spp_mode|=spp_arg;dun_mode|=dun_arg;push_mode=true;for(unsigned i=0;i<6;++i){unsigned value;assert(sscanf(argv[at]+2*i,"%2x",&value)==1);remote_address[i]=value;}}
- if((sync_profile&&!sync_folder)||(sync_folder&&(!dun_mode||push_mode))){
-  fputs("--sync-folder is for the DUN phone and is required with --sync-profile\n",stderr);return 2;
+ if (hotsync_mode && (dun_mode || spp_mode || push_mode || output_path || hold_put || gate_path ||
+                      dun_disc_hangup || !sync_folder)) {
+  fputs("Use SOCKET --spp-hotsync --sync-folder DIR [--sync-profile NAME] [--pin PIN]\n", stderr);
+  return 2;
  }
- assert(!hold_put||!push_mode);assert(!dun_disc_hangup||(dun_mode&&push_mode));assert(!gate_path||push_mode);assert(dun_mode!=!!output_path&&!(dun_mode&&spp_mode));if(output_path)assert(access(output_path,F_OK)!=0);
+ if ((sync_profile && !sync_folder) || (sync_folder && ((!dun_mode && !hotsync_mode) || push_mode))) {
+  fputs("--sync-folder is for a HotSync server and is required with --sync-profile\n", stderr);
+  return 2;
+ }
+ if (hotsync_mode) {
+  spp_mode = true;
+  frond_bt_sync_configure(sync_folder, sync_profile);
+ }
+ assert(!hold_put||!push_mode);assert(!dun_disc_hangup||(dun_mode&&push_mode));assert(!gate_path||push_mode);assert((dun_mode||hotsync_mode)!=!!output_path&&!(dun_mode&&spp_mode));if(output_path)assert(access(output_path,F_OK)!=0);
  if(dun_mode&&!push_mode){dun=frond_dun_create(sync_folder,sync_profile);if(!dun){fprintf(stderr,"slirp did not start\n");return 2;}}
  sk=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);assert(sk>=0);struct sockaddr_un a={.sun_family=AF_UNIX};assert(strlen(argv[1])<sizeof(a.sun_path));strcpy(a.sun_path,argv[1]);
  /* The phone may start beside a btvirt that hasn't made its socket yet. */
- for(int tries=dun_mode&&!push_mode?50:1;connect(sk,(void*)&a,sizeof(a));){assert(--tries>0);usleep(100000);}
- mainloop_init();host=bthost_create();assert(host);bthost_set_send_handler(host,send_h4,NULL);bthost_set_debug(host,debug,NULL,NULL);bthost_set_cmd_complete_cb(host,command,NULL);bthost_notify_ready(host,ready);bthost_set_pin_code(host,(const uint8_t*)pin_code,strlen(pin_code));if(push_mode)bthost_set_connect_cb(host,client_connected,NULL);else{bthost_add_l2cap_server(host,1,sdp_connected,sdp_closed,NULL);bthost_add_l2cap_server(host,3,NULL,rfcomm_closed,NULL);bthost_add_rfcomm_server(host,CHANNEL,rfcomm_connected,NULL);}assert(!mainloop_add_fd(sk,EPOLLIN,read_h4,NULL,NULL));bthost_start(host);if(push_mode)timeout_add(60000,deadline,NULL,NULL);if(gate_path)timeout_add(20,check_gate,NULL,NULL);if(dun&&!push_mode)timeout_add(5,dun_tick,NULL,NULL);mainloop_run_with_signal(stopped,NULL);printf("RESULT put_complete=%u disconnect_seen=%u bytes=%zu\n",completed,disconnected,payload_size);bthost_destroy(host);close(sk);if(dun_mode&&!push_mode){frond_dun_destroy(dun);return 0;}return completed && disconnected && (!push_mode || push_link_closed) && !client_failed?0:2;
+ for(int tries=(dun_mode||hotsync_mode)&&!push_mode?50:1;connect(sk,(void*)&a,sizeof(a));){assert(--tries>0);usleep(100000);}
+ mainloop_init();host=bthost_create();assert(host);bthost_set_send_handler(host,send_h4,NULL);bthost_set_debug(host,debug,NULL,NULL);bthost_set_cmd_complete_cb(host,command,NULL);bthost_notify_ready(host,ready);bthost_set_pin_code(host,(const uint8_t*)pin_code,strlen(pin_code));if(push_mode)bthost_set_connect_cb(host,client_connected,NULL);else{bthost_add_l2cap_server(host,1,sdp_connected,sdp_closed,NULL);bthost_add_l2cap_server(host,3,NULL,rfcomm_closed,NULL);bthost_add_rfcomm_server(host,CHANNEL,rfcomm_connected,NULL);if(hotsync_mode)frond_rfcomm_stream_enable(host,CHANNEL,hotsync_disc);}assert(!mainloop_add_fd(sk,EPOLLIN,read_h4,NULL,NULL));bthost_start(host);if(push_mode)timeout_add(60000,deadline,NULL,NULL);if(gate_path)timeout_add(20,check_gate,NULL,NULL);if((dun||hotsync_mode)&&!push_mode)timeout_add(5,stream_tick,NULL,NULL);mainloop_run_with_signal(stopped,NULL);printf("RESULT put_complete=%u disconnect_seen=%u bytes=%zu\n",completed,disconnected,payload_size);bthost_destroy(host);close(sk);if(hotsync_mode){frond_bt_sync_close();return 0;}if(dun_mode&&!push_mode){frond_dun_destroy(dun);return 0;}return completed && disconnected && (!push_mode || push_link_closed) && !client_failed?0:2;
 }

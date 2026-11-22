@@ -467,10 +467,10 @@ inline bool deviceProfileHasPalmSdioWifi5(int32_t deviceType) {
     return deviceType == deviceTypeZire72 || deviceProfileIsE2Board5(deviceType);
 }
 
-// The cradle or connector has a separate HotSync button on these boards.
+// The Zodiac's button is on the cradle. The ROM only counts it while docked.
 inline bool deviceProfileHasHotSyncButton5(int32_t deviceType) {
     const auto* profile = deviceProfile5(deviceType);
-    return profile && (profile->board == DeviceBoard5::pxa255E2 ||
+    return profile && (profile->board == DeviceBoard5::pxa255E2 || profile->board == DeviceBoard5::imx1Zodiac ||
                        profile->board == DeviceBoard5::pxa270Tx || profile->board == DeviceBoard5::ez328 ||
                        (profile->board == DeviceBoard5::vz328 && !deviceTypeIsDana5(deviceType)));
 }

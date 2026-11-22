@@ -311,7 +311,7 @@ State commands take no argument. Mode commands change the setting and reply with
 | --- | --- | --- |
 | `hold-state` | | `hold`: `on`, `off` or `unavailable` |
 | `hold` | `on` or `off` | `hold` |
-| `hotsync` | | `hotsync`: pulls the connector's HotSync line low for 500 ms (T|X GPIO10, E2 GPIO4); `unsupported` elsewhere, or while another key is held |
+| `hotsync` | | `hotsync`: pulls the connector's HotSync line low for 500 ms (T|X GPIO10, E2 GPIO4, Zodiac D22). With both the Zodiac cradle and cable detached, returns `cradle`. |
 | `keyboard-state` | | `keyboard`: `attached` or `detached` |
 | `keyboard-attach` | `on` or `off` | `keyboard`; `infrared` error if an infrared peer owns the UART |
 | `keyboard-key` | hex scan code, space, `d` or `u` | `keyboard` |
@@ -733,6 +733,8 @@ IR printer details: `irda-mode printer` (or `--irda printer`) on any device with
 
 Bluetooth phone (desktop only, any `bluetooth` device): the settings value `bluetooth` `phone` is This Frond's radio with `"phone": true` in the hub's `bt-attach`. While any machine asks for it the hub runs `bluetooth-opp-peer RADIO-SOCKET --dun` beside `btvirt` (`FROND_BT_PHONE`, else `../lib/frond/bluetooth-phone`, `bluetooth-phone` beside the binary, then the build tree; installed by `make deb` as `/usr/lib/frond/bluetooth-phone`). The hub's state is `nophone` when it's missing. The peer prints `DUN_STATE idle|dialling|online SPEED|off` lines; the hub passes the last one on as `call` in the attach status (`off` as `idle`). The peer is "Frond Phone" (class of device 0x52020C, address 02:46:52:4E:44:50 written with 0xfc01 at start, so a pairing holds whatever order radios join) with PIN 1234 and an SDP record for Dial-up Networking (0x1103, 0x1201) on RFCOMM channel 9. It takes one call at a time: another link's connect is ignored while a call is up, and the call ends on an RFCOMM DISC, L2CAP close or the link going. The channel's bytes go to `tools/bluetooth-dun.cpp`, a C shim over the same `HayesModem`, `PppServer` and `SlirpIp` on monotonic time, powered while the channel is open. `make test-bluetooth-dun` runs a scripted client through a private `btvirt`: the phone's address, then SDP, RFCOMM, `ATDT*99#`, CONNECT 33600, LCP and IPCP up, twice on the same handle (hung up by dropping the link, then by DISC).
 
+For local HotSync over Bluetooth, run `bluetooth-opp-peer RADIO-SOCKET --spp-hotsync --sync-folder DIR` beside `btvirt`. Pair with **Frond HotSync** from a Palm connection set to PC via Bluetooth and use that connection in HotSync. The peer advertises Serial Port (0x1101) on RFCOMM channel 9 and runs the Sync Manager's serial protocol on it. The peer sends up to the negotiated RFCOMM frame size and waits for credits when the link uses credit-based flow control. Use `--sync-profile NAME` to select a profile and `--pin PIN` to set the passkey (default 1234).
+
 ## Using an IDE
 
 Frond has no IDE plugin. An IDE runs your build, then the [developer runner](#developer-runner) to install and try the app, and attaches GDB to a core started with `--gdb`.
@@ -1022,7 +1024,7 @@ All in `tools/`. Most take `--help`.
 | `check-compatibility.py`, `compatibility-results.py`, `app-compatibility.py` | App and system compatibility runs and their result decoding. |
 | `build-palm-probe.py` | Builds a Palm probe app from `tests/palm/` with a local SDK (`--probe NAME`, `--sdk PATH`). |
 | `build-bluetooth-provider.py`, `build-bluetooth-opp-peer.py` | Build the BlueZ H4 provider (`btvirt`, also installed by `make deb` as `/usr/lib/frond/btvirt`) and the virtual peer (OPP and SPP test peer, and the Bluetooth phone, installed as `/usr/lib/frond/bluetooth-phone`). |
-| `bluetooth-opp-peer.c`, `bluetooth-dun.cpp`, `bluez-bdaddr.patch`, `bluez-bthost-config.patch` | Sources and patches for those. |
+| `bluetooth-opp-peer.c`, `bluetooth-dun.cpp`, `bluetooth-hotsync.cpp`, `bluetooth-rfcomm-stream.h`, `bluez-bdaddr.patch`, `bluez-bthost-config.patch`, `bluez-bthost-stream.patch` | Sources and patches for those. |
 | `palm-pppd.sh DEVICE` | Runs slirp (or pppd with `--pppd`) on a 68k Palm's serial PTY or `tcp:PORT`, see 68k Palm serial and PPP. `slirp-select-fix.c` is the shim it preloads. |
 | `link-pty.py ENDPOINT` | Puts a PTY in front of a TCP endpoint (`PORT`, `HOST:PORT` or `listen:PORT`) for programs that only open serial devices. `--link PATH`, `--seconds N`. |
 | `link-irda.py FIRST SECOND` | Joins two infrared endpoints. `--seconds N`. |
@@ -1165,7 +1167,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-stop-mode` | Stop mode: both PLLs off, CLK32 only, wake on the GPIO lines and the RTC. Outside `make test`. |
 | `test-zodiac-trace-window` | The trace window through the probe. Outside `make test`. |
 | `test-zodiac-video` | The W4200 video overlay as player code drives it: ring, window, YUV planes and format bits. Outside `make test`. |
-| `bluetooth-opp-peer` | Build the OPP test peer and Bluetooth phone. |
+| `bluetooth-opp-peer` | Build the OPP test peer, Bluetooth phone and SPP HotSync peer. |
 
 Tests in `make test`, by area:
 

@@ -62,7 +62,10 @@ struct Session {
     HotSyncResult result;
 
     Session(PacketLink& link, const SyncOptions& options, SyncManager& manager, Transport transport)
-        : link(link), dlp(link), options(options), manager(manager), transport(transport) {}
+        : link(link),
+          dlp(link, transport == Transport::network && options.networkReplyIdleMs > 0
+                        ? options.networkReplyIdleMs : DlpClient::defaultTimeoutMs),
+          options(options), manager(manager), transport(transport) {}
 
     void Stage(const char* stage, int total = 0) {
         manager.Update([&](SyncStatus& s) {

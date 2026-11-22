@@ -182,7 +182,7 @@ class DeviceDataTest(unittest.TestCase):
         # The ROM has no Bluetooth stack, and its Fake Net Library links to BtLib, so no network either.
         for key in ('bluetooth', 'ir_phone', 'modem', 'network'):
             self.assertFalse(e3[key], key)
-        for name in ('palm-tx', 'palm-e2', 'palm-iiix'):
+        for name in ('palm-tx', 'palm-e2', 'palm-iiix', 'tapwave-zodiac-2'):
             self.assertTrue(profiles[name]['hot_sync_button'], name)
         for name in ('palm-zire-72', 'sony-clie-tg50', 'repalm'):
             self.assertFalse(profiles[name]['hot_sync_button'], name)

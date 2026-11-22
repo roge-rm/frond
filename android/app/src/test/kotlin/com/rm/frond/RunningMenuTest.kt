@@ -23,6 +23,11 @@ class RunningMenuTest {
         val tx = ids(Device.TX)
         assertEquals(tx.indexOf(RunningMenu.Id.NETWORK) + 1, tx.indexOf(RunningMenu.Id.SYNC_MANAGER))
         assertEquals(SyncProtocol.HOT_SYNC, SyncProtocol.forDevice(Device.E2))
+        // The Zodiac syncs through its cradle: USB HotSync, a HotSync press and the Sync Manager.
+        val zodiac = Device.byId("tapwave-zodiac-2")!!
+        assertEquals(SyncProtocol.HOT_SYNC, SyncProtocol.forDevice(zodiac))
+        assertTrue(RunningMenu.Id.SYNC_MANAGER in ids(zodiac))
+        assertTrue(RunningSheets.ConnRow.HOTSYNC in RunningSheets.connectionRows(zodiac, NetRelay.Phase.OFF, false))
         val rx1950 = Device.entries.first { it.rx1950 }
         assertEquals("activesync-start", SyncProtocol.forDevice(rx1950)?.startCommand)
         assertTrue(RunningMenu.Id.SYNC_MANAGER in ids(rx1950))

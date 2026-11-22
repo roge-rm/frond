@@ -2201,7 +2201,7 @@
       "explicit_raw_nand": false,
       "runner_eligible": true,
       "runs_68k": false,
-      "hot_sync_button": false,
+      "hot_sync_button": true,
       "pending_usb": "",
       "colour_lcd": false,
       "os": "palm-os",

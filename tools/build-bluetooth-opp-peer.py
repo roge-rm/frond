@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the virtual Bluetooth peer (OPP and SPP test peer, and the DUN phone) from the pinned provider's test host."""
+"""Build the virtual Bluetooth peer (OPP, SPP HotSync and tests, and the DUN phone) from the pinned provider's test host."""
 import argparse
 import hashlib
 import os
@@ -39,25 +39,29 @@ def main():
     stage = output / 'emulator'
     stage.mkdir(exist_ok=True)
     (stage / 'bthost.c').write_bytes(original)
-    run('patch', '--batch', '-p1', '-i', ROOT / 'tools/bluez-bthost-config.patch', cwd=output)
+    for patch in ('bluez-bthost-config.patch', 'bluez-bthost-stream.patch'):
+        run('patch', '--batch', '-p1', '-i', ROOT / 'tools' / patch, cwd=output)
     patched = output / 'frond-bthost.c'
     shutil.copyfile(stage / 'bthost.c', patched)
     flags = ['-std=gnu11', '-O2', '-g', '-DHAVE_CONFIG_H', '-I' + str(source),
-             '-I' + str(source / 'lib'), '-I' + str(source / 'emulator'), '-I' + str(output)]
+             '-I' + str(source / 'lib'), '-I' + str(source / 'emulator'), '-I' + str(output), '-I' + str(ROOT / 'tools')]
     objects = [source / 'emulator/smp.o', source / 'src/.libs/libshared-mainloop.a',
                source / 'lib/.libs/libbluetooth-internal.a']
     run('cc', *flags, '-c', patched, '-o', output / 'bthost.o')
     slirp = subprocess.check_output(['pkg-config', '--cflags', '--libs', 'slirp'], text=True).split()
     run('c++', '-std=c++17', '-O2', '-g', '-pthread', '-I' + str(ROOT / 'core/src/common'), *slirp, '-c', ROOT / 'tools/bluetooth-dun.cpp',
         '-o', output / 'bluetooth-dun.o')
-    run('cc', *flags, '-I' + str(ROOT / 'tools'), '-c', ROOT / 'tools/bluetooth-opp-peer.c', '-o', output / 'peer.o')
-    run('c++', '-pthread', output / 'peer.o', output / 'bluetooth-dun.o', output / 'bthost.o', *objects,
+    run('c++', '-std=c++17', '-O2', '-g', '-pthread', '-I' + str(ROOT / 'core/src/common'),
+        '-c', ROOT / 'tools/bluetooth-hotsync.cpp', '-o', output / 'bluetooth-hotsync.o')
+    run('cc', *flags, '-c', ROOT / 'tools/bluetooth-opp-peer.c', '-o', output / 'peer.o')
+    run('c++', '-pthread', output / 'peer.o', output / 'bluetooth-dun.o', output / 'bluetooth-hotsync.o', output / 'bthost.o', *objects,
         common / 'libcommon-net.a', common / 'libcommon.a', *slirp, '-o', output / 'bluetooth-opp-peer')
     if args.test:
         run('cc', *flags, ROOT / 'tests/bluetooth-bthost-config.c', *objects,
             '-o', output / 'config-test')
         run(output / 'config-test')
         run(output / 'bluetooth-opp-peer', '--selftest-dun')
+        run(output / 'bluetooth-opp-peer', '--selftest-hotsync')
     print('Built peer:', output / 'bluetooth-opp-peer')
     print('Provider source and executable unchanged; upstream bthost SHA256:', hashlib.sha256(original).hexdigest())
 
