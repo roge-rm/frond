@@ -417,7 +417,15 @@ void A32AddressSpace::CompileJob(CompileThread::Job& job) {
     const A32::LocationDescriptor descriptor{ir_block.Location()};
     const A32::LocationDescriptor end_location{ir_block.EndLocation()};
     Common::FrondBlockTargets(ir_block, job.targets);
-    std::lock_guard lock{code_mutex};
+    // The guest thread holds code_mutex for short installs. Trying a few times before sleeping on it saves
+    // the guest thread a futex wake when it unlocks.
+    std::unique_lock lock{code_mutex, std::defer_lock};
+    for (int i = 0; i < 64 && !lock.try_lock(); i++) {
+        std::this_thread::yield();
+    }
+    if (!lock.owns_lock()) {
+        lock.lock();
+    }
     if (job.epoch != compile_thread->Epoch()) {
         job.status = CompileThread::Status::Cancelled;
         return;
