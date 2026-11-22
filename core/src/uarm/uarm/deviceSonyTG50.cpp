@@ -22,6 +22,7 @@
 #include "Tg50Audio.h"
 #include "Microwire64x16.h"
 #include "audio_queue.h"
+#include "audio/SonyMa2Sound.h"
 #include "pxa_PWM.h"
 #include "pxa_PwrClk.h"
 
@@ -35,6 +36,11 @@ constexpr uint32_t tg50SramSize = 1024;
 struct Tg50Board {
     CsrBcspRadio* radio{};
     Tg50Audio audio{};
+    // ARM Pa1Lib reads status again inside its FIFO refill loop.
+    SonyMa2Sound enhancedAudio{SonyMa2Sound::SequenceStatus::fifoLevel};
+    // The 20 us board audio clock pauses while the PXA is in power sleep.
+    uint64_t soundTime{1};
+    GetEmuTime emulationTime{};
     Microwire64x16 configuration{};
     AudioQueue *queue{};
     PxaPwm *pwm{};
@@ -77,6 +83,20 @@ template <typename H> static void tg50ConfigurationFields(H &h, Microwire64x16::
         .Do32(s.pending).Do32(s.pendingAddress).Do32(s.pendingValue).Do64(s.remainingNs);
 }
 
+static constexpr uint64_t soundClockHz = 1000000000;
+
+static void tg50SoundAccess(void* context, uint32_t offset, bool write, uint32_t& value) {
+    auto* board = static_cast<Tg50Board*>(context);
+    auto& sound = board->enhancedAudio;
+    if (offset == 0x200) {
+        if (write) sound.SelectRegister(uint8_t(value));
+    } else if (write) {
+        sound.Write(board->soundTime, soundClockHz, uint8_t(value));
+    } else {
+        value = sound.Read(board->soundTime, soundClockHz);
+    }
+}
+
 static void tg50AudioRegisters(void *context) {
     auto *b = static_cast<Tg50Board *>(context);
     const auto pwm = pxaPwmRegisters(b->pwm);
@@ -97,7 +117,10 @@ void tg50BoardAudioAdvance(Tg50Board *b, uint64_t ns) {
     tg50ConfigurationOutput(b);
     b->audio.SetMuxOutput(!pxaGpioIsInput(b->gpio, 16) &&
                           pxaGpioAlternateFunction(b->gpio, 16) == 2);
-    b->audio.Advance(ns, [b](uint32_t frame) { if (b->queue) audioQueuePush(b->queue, frame); });
+    b->soundTime += ns;
+    b->enhancedAudio.Advance(b->soundTime, soundClockHz);
+    b->audio.Advance(ns, [b](uint32_t frame) { if (b->queue) audioQueuePush(b->queue, frame); },
+                     b->enhancedAudio.MixedSample());
 }
 
 template <typename H> static void tg50AudioFields(H &h, Tg50Audio::State &s) {
@@ -126,6 +149,7 @@ static std::array<uint32_t, 64> tg50KeyMap() {
 
 Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp,Reschedule reschedule,GetEmuTime time) {
     auto *board = new Tg50Board{};
+    board->emulationTime = time;
     board->mem = sp->mem;
     board->gpio = sp->gpio;
     board->pwm = sp->pwm0;
@@ -141,6 +165,13 @@ Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp,Reschedule reschedule,GetEm
     board->pmic = an32502aInit(board->i2c);
     const auto keys = tg50KeyMap();
     board->uc = tg50ucInit(board->mem, board->gpio, 14, keys.data(), 13);
+    tg50ucSetSoundAccess(board->uc, tg50SoundAccess, board);
+    board->enhancedAudio.onInterrupt = [board](bool asserted, bool restoring) {
+        // The MA-2 drives UC A8 low. The UC forwards port A and B interrupts to GPIO13.
+        if (restoring) tg50ucRestoreSoundIrq(board->uc, !asserted);
+        else tg50ucGpioSetInState(board->uc, 0, 8, !asserted);
+    };
+    tg50ucRestoreSoundIrq(board->uc, true);
     board->ms = msCtrlrInit(board->mem, tg50MsBase,board->gpio,sp->dma,reschedule);
     // MemoryBuffer owns whole pages, only the physical 1 KiB is mapped and saved.
     if (!memoryBufferAllocate(&board->sramBuffer, MEMORY_BUFFER_GRANULARITY))
@@ -169,6 +200,8 @@ void tg50BoardReset(Tg50Board *board, bool clearSram) {
     an32502aReset(board->pmic);
     msCtrlrReset(board->ms);
     tg50ucReset(board->uc);
+    board->soundTime = 1;
+    board->enhancedAudio.Reset(board->soundTime);
     board->jogHeld[0] = board->jogHeld[1] = false;
     pxaGpioSetState(board->gpio, 21, true);
     pxaGpioSetState(board->gpio, 22, true);
@@ -241,6 +274,10 @@ template <typename T> void tg50BoardSave(Tg50Board *board, T &savestate) {
     SaveChunkHelper audioHelper(*audioChunk);
     auto audioState = board->audio.GetState();
     tg50AudioFields(audioHelper, audioState);
+    auto* soundChunk = savestate.GetChunk(ChunkType::sonyTg50Ma2, 0);
+    if (!soundChunk) ERR("cannot allocate TG50 enhanced sound state");
+    soundChunk->Put64(board->soundTime);
+    board->enhancedAudio.Save(*soundChunk);
     auto *configurationChunk = savestate.GetChunk(ChunkType::sonyTg50Configuration, 0);
     if (!configurationChunk) ERR("cannot allocate TG50 serial configuration state");
     SaveChunkHelper configurationHelper(*configurationChunk);
@@ -319,6 +356,21 @@ template <typename T> bool tg50BoardLoad(Tg50Board *board, T &loader, bool prese
         // Older TG50 sessions start an empty host timeline from the saved PWM registers.
         board->audio.Reset();
         tg50AudioRegisters(board);
+    }
+    if (!board->restoringReset && loader.HasChunk(ChunkType::sonyTg50Ma2)) {
+        auto* soundChunk = loader.GetChunkOrFail(ChunkType::sonyTg50Ma2, 0, "TG50 enhanced sound");
+        if (!soundChunk) return false;
+        const auto time = soundChunk->Get64();
+        const auto now = board->emulationTime.getTimeF(board->emulationTime.userdata);
+        if (!time || time - 1 > now || time > UINT64_MAX - soundClockHz ||
+            !board->enhancedAudio.Load(*soundChunk, time)) {
+            loader.NotifyError();
+            return false;
+        }
+        board->soundTime = time;
+    } else {
+        board->soundTime = 1;
+        board->enhancedAudio.Reset(board->soundTime, true);
     }
     if (board->queue) audioQueueClear(board->queue);
     if (!preserveInput) board->jogHeld[0] = board->jogHeld[1] = false;

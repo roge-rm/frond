@@ -11,6 +11,7 @@ public:
     SonyMa2Fm();
     ~SonyMa2Fm();
 
+    void Reset();
     void Write(unsigned page, unsigned index, uint8_t data);
     void Advance(uint64_t cycles, uint32_t clock);
     void Output(int32_t& left, int32_t& right) const;

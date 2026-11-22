@@ -71,7 +71,7 @@ public:
             (!next.running || next.clock || next.stopping) &&
             (next.running || !next.pwmPhase);
     }
-    template <typename Emit> void Advance(uint64_t ns, Emit emit) {
+    template <typename Emit> void Advance(uint64_t ns, Emit emit, int enhanced = 0) {
         // Scheduler quanta are 20 us; bounding slices also makes direct tests safe.
         while (ns) {
             const auto slice = std::min<uint64_t>(ns, 1000000);
@@ -79,15 +79,15 @@ public:
             state.hostPhase += slice * rate;
             while (state.hostPhase >= 1000000000) {
                 state.hostPhase -= 1000000000;
-                const int32_t beep = NextPwmSample();
+                const int32_t mono = NextPwmSample() + enhanced;
                 uint32_t dac{};
                 if (state.dacCount) {
                     dac = state.dac[0];
                     for (unsigned i = 1; i < state.dacCount; ++i) state.dac[i-1] = state.dac[i];
                     state.dac[--state.dacCount] = 0;
                 }
-                const auto left = Saturate(int32_t(int16_t(dac)) + beep);
-                const auto right = Saturate(int32_t(int16_t(dac >> 16)) + beep);
+                const auto left = Saturate(int32_t(int16_t(dac)) + mono);
+                const auto right = Saturate(int32_t(int16_t(dac >> 16)) + mono);
                 emit(uint16_t(left) | (uint32_t(uint16_t(right)) << 16));
             }
         }

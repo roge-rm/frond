@@ -68,6 +68,8 @@ struct TG50uc {
 
 	struct TG50ucGpioPort port[4];			//gpio[3] has revision straps on low 4 bits
 
+    void (*soundAccess)(void*, uint32_t, bool, uint32_t&);
+    void* soundContext;
     void (*outputObserver)(void *);
     void *outputContext;
     uint16_t observedMask[4], observedDirection[4], observedHigh[4];
@@ -287,9 +289,12 @@ static bool tg50ucPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, 
 
 			case 0x140:
 			case 0x164:
+			case 0x210:		//same as reset ???
+				break;
+
 			case 0x200:
 			case 0x204:
-			case 0x210:		//same as reset ???
+                if (uc->soundAccess) uc->soundAccess(uc->soundContext, pa, write, val);
 				break;
 
 			default:
@@ -372,6 +377,21 @@ struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t g
 		ERR("cannot add TG50's UC to MEM\n");
 
 	return uc;
+}
+
+void tg50ucSetSoundAccess(TG50uc* uc, void (*access)(void*, uint32_t, bool, uint32_t&), void* context) {
+    uc->soundAccess = access;
+    uc->soundContext = context;
+}
+
+void tg50ucRestoreSoundIrq(TG50uc* uc, bool high) {
+    constexpr uint16_t mask = 1u << 8;
+    auto& port = uc->port[0];
+    if (bool(port.inputs & mask) == high) return;
+    port.inputs = (port.inputs & ~mask) | (high ? mask : 0);
+    const auto value = ((port.latches & port.direction) | (port.inputs & ~port.direction)) & mask;
+    port.curState = (port.curState & ~mask) | value;
+    port.prevState = (port.prevState & ~mask) | value;
 }
 
 void tg50ucGpioSetInState(struct TG50uc *uc, unsigned port, unsigned pin, bool hi)

@@ -15,12 +15,11 @@
 #define EmRegsFMSound_h
 
 #include <cstdio>
-#include <deque>
 #include <functional>
-#include <memory>
 
 #include "EmPalmStructs.h"
 #include "EmRegs.h"
+#include "audio/SonyMa2Sound.h"
 
 #define FMSound_BaseAddress 0x10980000
 #define FMSound_Range 0x0000FFFF
@@ -28,8 +27,6 @@
 typedef struct tagHwrFMSound {
     UInt8 _filler01[FMSound_Range];  // 0x000-FFFF
 } HwrFMSoundType;
-
-class SonyMa2Fm;
 
 class EmRegsFMSound : public EmRegs {
    public:
@@ -65,35 +62,10 @@ class EmRegsFMSound : public EmRegs {
     int ValidAddress(emuptr iAddress, uint32 iSize);
 
     template <typename T> void SaveState(T& state);
-    void OutputSample(uint64 cycles, int sample, bool isFm);
-    static void TraceCycle(void* context, uint64 cycles, Bool sleeping);
-    void AdvanceTrace(uint64 cycles);
-    void UpdateTraceIrq(uint64 cycles);
-    void AdvanceAdpcm(uint64 cycles);
-    void ResetAdpcm(uint64 cycles);
-    uint8 AdpcmStatus() const;
-    void AdvanceFm(uint64 cycles);
-    void WriteFm(uint64 cycles, uint8 data);
-    void ResetTrace(uint64 cycles);
-    void LogTrace(uint64 cycles, char operation, unsigned page, unsigned index, unsigned value);
+    static void Cycle(void* context, uint64 cycles, Bool sleeping);
 
     const bool enabled;
-    FILE* trace{nullptr};
-    uint8 registers[2][256]{};
-    unsigned page{0}, index{0}, sequenceBytes{0};
-    uint64 sequenceDeadline{0}, sequencePeriod{0};
-    bool sequencePending{false}, irqAsserted{false};
-
-    std::deque<uint8> adpcmFifo;
-    uint64 adpcmDeadline{0};
-    int adpcmLevel{0}, adpcmStep{127};
-    uint8 adpcmByte{0};
-    bool adpcmSecondNibble{false}, adpcmSampleHeld{false};
-
-    std::unique_ptr<SonyMa2Fm> fm;
-    int16 adpcmSample{0}, fmSample{0};
-    uint64 fmDeadline{0}, fmCycle{0};
-
+    SonyMa2Sound sound;
     HwrFMSoundType fRegs;
     emuptr fBaseAddr;
 };
