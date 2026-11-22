@@ -163,6 +163,7 @@ data class MachineSettings(
         if (jogControls) append(" jog=${if (touchHidden) JogControls.HIDDEN.arg else this@MachineSettings.jogControls.arg}")
         if (gamepadSupported) append(" jog-landscape=${if (touchHidden) JogLandscape.HIDDEN.arg else jogLandscape.arg}")
         if (m68k && !colourLcd) append(" contrast=$contrast")
+        if (touchHidden) append(" buttons=off")
     }
 
     // The pad state the core reports, as the setting, so a session loaded with its own state starts

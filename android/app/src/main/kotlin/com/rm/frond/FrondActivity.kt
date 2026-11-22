@@ -77,6 +77,9 @@ open class FrondActivity : SDLActivity() {
     private var imeVisible = false
     // The setting is on and a game controller is connected: the on-screen controls are away.
     private var touchHidden = false
+    // The bar is open over the Palm only because Back asked for it while touchHidden.
+    private var barPeek = false
+    private var barShownBeforePeek = true
     @Volatile private var pendingMicrophone = false
     @Volatile private var foreground = false
     @Volatile private var microphoneResume = 0L
@@ -495,6 +498,7 @@ open class FrondActivity : SDLActivity() {
     private fun applyTouchOverlay() {
         val hidden = RunningBar.touchHidden(settings.hideTouchWithController, controllerConnected())
         if (hidden == touchHidden) return
+        if (barPeek) peekBar(false)
         touchHidden = hidden
         if (!leaving) barView?.visibility = if (hidden) View.GONE else View.VISIBLE
         syncCorner()
@@ -762,7 +766,30 @@ open class FrondActivity : SDLActivity() {
     // returns. Also runs when SDL asks the core to close (the core sends a "close" event).
     // Back closes the bar's menu first, then leaves the machine.
     private fun back() {
-        if (bar.sheet != null) openSheet(null) else if (bar.menuOpen) bar.menuOpen = false else leave()
+        when (RunningBar.backAction(touchHidden, barPeek, bar.sheet != null, bar.menuOpen)) {
+            RunningBar.BackAction.CLOSE_SHEET -> openSheet(null)
+            RunningBar.BackAction.CLOSE_MENU -> bar.menuOpen = false
+            RunningBar.BackAction.SHOW_BAR -> peekBar(true)
+            RunningBar.BackAction.HIDE_BAR -> peekBar(false)
+            RunningBar.BackAction.LEAVE -> leave()
+        }
+    }
+
+    // Shows the bar over the Palm while the touch controls are hidden, so the menu can be reached, and
+    // puts it back as it was when closed. The shown state isn't saved.
+    private fun peekBar(open: Boolean) {
+        if (leaving || barPeek == open) return
+        barPeek = open
+        if (open) {
+            barShownBeforePeek = bar.shown
+            bar.shown = true
+            barView?.visibility = View.VISIBLE
+        } else {
+            bar.menuOpen = false
+            bar.shown = barShownBeforePeek
+            barView?.visibility = if (touchHidden) View.GONE else View.VISIBLE
+        }
+        layoutBar()
     }
 
     // Opens a sheet over the Palm, or closes it. The view covers the screen while one is open.
@@ -1348,6 +1375,10 @@ open class FrondActivity : SDLActivity() {
 
     // remember is false when Auto-hide hides the bar, so the machine still starts with it shown.
     private fun setBarShown(shown: Boolean, remember: Boolean = true) {
+        if (barPeek) {
+            if (!shown) peekBar(false)
+            return
+        }
         if (bar.shown == shown) return
         bar.shown = shown
         layoutBar()

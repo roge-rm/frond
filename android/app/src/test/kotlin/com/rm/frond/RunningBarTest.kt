@@ -100,7 +100,22 @@ class RunningBarTest {
         assertFalse(RunningBar.touchHidden(true, false))
         assertFalse(RunningBar.touchHidden(false, true))
         assertEquals(0, RunningBar.surfaceTopMargin(BarMode.OWN_SPACE, true, 100, 800, 200, 96, touchHidden = true))
-        assertEquals("fit=fit smooth=off jog=hidden jog-landscape=hidden",
+        assertEquals("fit=fit smooth=off jog=hidden jog-landscape=hidden buttons=off",
             MachineSettings().displayArgument(jogControls = true, gamepadSupported = true, touchHidden = true))
+    }
+
+    @Test fun touchHiddenDisplayArgumentTurnsTheButtonBarOffOnAnyDevice() {
+        assertEquals("fit=fit smooth=off buttons=off", MachineSettings().displayArgument(touchHidden = true))
+        assertEquals("fit=fit smooth=off", MachineSettings().displayArgument())
+    }
+
+    @Test fun backOpensTheBarWhileTouchControlsAreHidden() {
+        val b = RunningBar.BackAction.values().associateBy { it.name }
+        assertEquals(b["LEAVE"], RunningBar.backAction(false, false, false, false))
+        assertEquals(b["SHOW_BAR"], RunningBar.backAction(true, false, false, false))
+        assertEquals(b["HIDE_BAR"], RunningBar.backAction(true, true, false, false))
+        assertEquals(b["CLOSE_MENU"], RunningBar.backAction(true, true, false, true))
+        assertEquals(b["CLOSE_SHEET"], RunningBar.backAction(true, true, true, true))
+        assertEquals(b["CLOSE_SHEET"], RunningBar.backAction(false, false, true, false))
     }
 }

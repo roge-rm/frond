@@ -1886,6 +1886,23 @@ static void tg50LiveDisplay() {
     for(const char* bad : {"","fit=big","smooth=yes","keyboard","jog=left","size=fit","fit=fit extra"})
         assert(!parseDisplayChange(bad,true,change,error) && !error.empty());
     assert(!parseDisplayChange("keyboard=on",false,change,error) && !parseDisplayChange("jog=hidden",false,change,error));
+    // buttons= works on any device and leaves the button bar art out of the layout, except the TG50's.
+    assert(parseDisplayChange("buttons=off",false,change,error) && change.buttons==false);
+    assert(parseDisplayChange("buttons=on fit=fit",false,change,error) && change.buttons==true);
+    assert(!parseDisplayChange("buttons=maybe",false,change,error));
+    {
+        DisplaySettings shown;assert(shown.buttons);
+        DisplayChange off;assert(parseDisplayChange("buttons=off",false,off,error));
+        shown.Apply(off);assert(!shown.buttons);
+        for(DeviceType5 device : {deviceTypeZodiac2,deviceTypeTX,deviceTypeTG50}) {
+            DeviceControlView view;
+            const bool barBefore=deviceControls(device,view).count>0;
+            view.bare=true;
+            const auto& after=deviceControls(device,view);
+            if(device==deviceTypeTG50) assert(after.count>0);
+            else assert(barBefore && after.count==0 && deviceControlsHeight(after,320,view)==0 && deviceScreenLeft(after,view)==0);
+        }
+    }
     DisplaySettings settings{WindowFit::fit,false,true,JogPlacement::screen};
     DisplayChange first,second;
     assert(parseDisplayChange("fit=whole keyboard=off",true,first,error) && parseDisplayChange("fit=fill jog=hidden",true,second,error));

@@ -953,6 +953,7 @@ bool gFastEngineMissing = false;
         DeviceControlView controlView = deviceType == deviceTypeTG50
             ? deviceControlView(display.keyboard, display.jog) : DeviceControlView{};
         controlView.gamepad = display.gamepad;
+        controlView.bare = !display.buttons;
         if (deviceType == deviceTypeTG50) controlView.jogLandscape = display.jogLandscape;
         // A device with two arrangements starts with its controls around the screen; a fitted
         // window then puts them around when landscape and below when portrait, again after each resize.
@@ -1653,6 +1654,7 @@ bool gFastEngineMissing = false;
                         controlView.gamepad = display.gamepad;
                         controlView.jogLandscape = display.jogLandscape;
                     }
+                    controlView.bare = !display.buttons;
                     arrangeForRotation(shownRotation);
                     const bool wasFitted = fitted;
                     fitted = display.fit != WindowFit::none;
