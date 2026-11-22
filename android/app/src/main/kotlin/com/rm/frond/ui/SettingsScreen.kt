@@ -79,10 +79,12 @@ private fun SettingsList(model: HomeModel) {
             Choice("Orientation", s.orientation, Orientation.entries, { it.label }) { v ->
                 model.update(s.copy(orientation = v))
             }
+            SwitchRow("Immersive mode", s.immersive) { v -> model.update(s.copy(immersive = v)) }
             Header("Debugger", Modifier.padding(top = 16.dp))
             SwitchRow("gdb server", s.debugger) { v -> model.update(s.copy(debugger = v)) }
             if (s.debugger) DebuggerPort(s.debuggerPort) { v -> model.update(s.copy(debuggerPort = v)) }
             Header("Controller", Modifier.padding(top = 16.dp))
+            SwitchRow("Hide touch controls with a controller", s.hideTouchWithController) { v -> model.update(s.copy(hideTouchWithController = v)) }
             val added = model.added
             if (added.isEmpty()) EmptyNote("Add a device to set its controls.")
             for (device in added) {

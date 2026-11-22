@@ -1049,7 +1049,7 @@ static void t415() {
     // The 4.1 setup and launcher at 160x160, pixel-doubled, as on the m520.
     assert(std::string(p->frontend.setup) == "iiix-hires" && std::string(p->frontend.launcher) == "iiix-hires");
     const auto& caps = p->capabilities;
-    assert(!caps.network && !caps.keyboard && !caps.serial && caps.usb && caps.infrared && caps.irPhone &&
+    assert(!caps.network && !caps.keyboard && caps.serial && caps.usb && caps.infrared && caps.irPhone &&
            !caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);
     assert(!*deviceProfilePendingUsb5(p->deviceType));
     assert(deviceProfileLinkedStick5(*p) && !deviceProfileLinkedStick5(*deviceProfile5(deviceTypeNamed5("palm-m125"))));

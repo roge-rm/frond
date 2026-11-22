@@ -103,7 +103,7 @@ class ClieGamepadTest {
             val args = MachineSettings(jogLandscape = jog).arguments(tg50Controls = true, gamepadSupported = true)
             assertEquals(jog.arg, args[args.indexOf("--jog-controls-landscape") + 1])
             assertTrue(MachineSettings(jogLandscape = jog).displayArgument(tg50Controls = true, gamepadSupported = true)
-                .endsWith("jog=keyboard jog-landscape=${jog.arg}"))
+                .endsWith("jog=keyboard jog-landscape=${jog.arg} buttons=on"))
         }
         assertEquals(listOf("hidden", "beside", "under", "over"), JogLandscape.entries.map { it.arg })
         // Only devices that take the pad get it.

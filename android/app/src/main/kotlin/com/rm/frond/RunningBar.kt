@@ -45,8 +45,31 @@ object RunningBar {
 
     // How far the Palm's surface is moved down: the bar's height when it takes its own space, and at least
     // the corner button's height while the soft keyboard is up.
-    fun surfaceTopMargin(mode: BarMode, shown: Boolean, barPx: Int, availablePx: Int, minPalmPx: Int, imeButtonsPx: Int) =
-        maxOf(imeButtonsPx, if (takesSpace(mode, shown, barPx, availablePx, minPalmPx)) barPx else 0)
+    fun surfaceTopMargin(mode: BarMode, shown: Boolean, barPx: Int, availablePx: Int, minPalmPx: Int, imeButtonsPx: Int, touchHidden: Boolean = false) =
+        if (touchHidden) 0 else maxOf(imeButtonsPx, if (takesSpace(mode, shown, barPx, availablePx, minPalmPx)) barPx else 0)
+
+    // Whether an input device is a connected game controller: a gamepad or joystick, not an on-screen one
+    // and, where Android says, not built into the machine (so a handheld's own pad keeps the controls).
+    fun isGameController(sources: Int, virtual: Boolean, keyboardType: Int = android.view.InputDevice.KEYBOARD_TYPE_NONE, external: Boolean = true): Boolean {
+        if (virtual || !external) return false
+        return ControllerMap.fromControllerSource(sources, keyboardType, dpad = false)
+    }
+
+    // The on-screen controls (the bar, its handle, the keyboard button and the core's jog panels) go away
+    // while the setting is on and a controller is connected.
+    fun touchHidden(setting: Boolean, controllerConnected: Boolean) = setting && controllerConnected
+
+    enum class BackAction { CLOSE_SHEET, CLOSE_MENU, SHOW_BAR, HIDE_BAR, LEAVE }
+
+    // What Back does. With the touch controls hidden it opens the bar (the way to the menu) and closes it
+    // again, and doesn't leave the machine.
+    fun backAction(touchHidden: Boolean, peeking: Boolean, sheetOpen: Boolean, menuOpen: Boolean) = when {
+        sheetOpen -> BackAction.CLOSE_SHEET
+        menuOpen -> BackAction.CLOSE_MENU
+        touchHidden && peeking -> BackAction.HIDE_BAR
+        touchHidden -> BackAction.SHOW_BAR
+        else -> BackAction.LEAVE
+    }
 
     // The bar hides by itself only in Auto-hide mode, and not while a menu, sheet or dialog is open.
     fun autoHides(mode: BarMode, shown: Boolean, menuOpen: Boolean, sheetOpen: Boolean, dialogOpen: Boolean) =

@@ -244,6 +244,15 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             return "$stick ${StickDirection.entries[n % 4].name.lowercase()}"
         }
 
+        // Whether a source is a game controller. A d-pad counts only when asked (events), and not on a
+        // device with letter keys; a device that is connected counts by its gamepad or joystick source.
+        fun fromControllerSource(source: Int, keyboardType: Int, dpad: Boolean): Boolean {
+            if (source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD) return true
+            if (source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK) return true
+            if (dpad && source and InputDevice.SOURCE_DPAD == InputDevice.SOURCE_DPAD) return keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC
+            return false
+        }
+
         // Events from a gamepad, joystick or d-pad device, as opposed to a keyboard. A keyboard's
         // arrows often say they come from a d-pad too, so a device with letter keys counts only
         // for gamepad buttons. Back and the system keys stay with Android.
@@ -256,13 +265,7 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
                 }
                 if (KeyEvent.isGamepadButton(event.keyCode)) return true
             }
-            val source = event.source
-            if (source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD) return true
-            if (source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK) return true
-            if (source and InputDevice.SOURCE_DPAD == InputDevice.SOURCE_DPAD) {
-                return event.device?.keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC
-            }
-            return false
+            return fromControllerSource(event.source, event.device?.keyboardType ?: InputDevice.KEYBOARD_TYPE_NONE, dpad = true)
         }
     }
 }

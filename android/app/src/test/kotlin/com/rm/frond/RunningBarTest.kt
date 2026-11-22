@@ -85,4 +85,43 @@ class RunningBarTest {
         assertFalse(BarResults.isPermissionRequest("android.intent.action.OPEN_DOCUMENT"))
         assertFalse(BarResults.isPermissionRequest(null))
     }
+
+    @Test fun controllerDetectionIgnoresOnScreenDevices() {
+        val pad = android.view.InputDevice.SOURCE_GAMEPAD or android.view.InputDevice.SOURCE_KEYBOARD
+        assertTrue(RunningBar.isGameController(pad, false))
+        assertTrue(RunningBar.isGameController(android.view.InputDevice.SOURCE_JOYSTICK, false))
+        assertFalse(RunningBar.isGameController(pad, true))
+        assertFalse(RunningBar.isGameController(android.view.InputDevice.SOURCE_TOUCHSCREEN, false))
+        assertFalse(RunningBar.isGameController(android.view.InputDevice.SOURCE_KEYBOARD, false))
+        assertFalse(RunningBar.isGameController(android.view.InputDevice.SOURCE_DPAD, false))
+        assertFalse(RunningBar.isGameController(pad, false, external = false))
+    }
+
+    @Test fun touchControlsGoOnlyWithTheSettingAndAController() {
+        assertTrue(RunningBar.touchHidden(true, true))
+        assertFalse(RunningBar.touchHidden(true, false))
+        assertFalse(RunningBar.touchHidden(false, true))
+        assertEquals(0, RunningBar.surfaceTopMargin(BarMode.OWN_SPACE, true, 100, 800, 200, 96, touchHidden = true))
+        assertEquals("fit=fit smooth=off jog=hidden jog-landscape=hidden buttons=off",
+            MachineSettings().displayArgument(jogControls = true, gamepadSupported = true, touchHidden = true))
+        val launch = MachineSettings().arguments(jogControls = true, gamepadSupported = true, touchHidden = true)
+        assertTrue("--hide-buttons" in launch)
+        assertEquals("hidden", launch[launch.indexOf("--jog-controls") + 1])
+        assertFalse("--hide-buttons" in MachineSettings().arguments())
+    }
+
+    @Test fun touchHiddenDisplayArgumentTurnsTheButtonBarOffOnAnyDevice() {
+        assertEquals("fit=fit smooth=off buttons=off", MachineSettings().displayArgument(touchHidden = true))
+        assertEquals("fit=fit smooth=off buttons=on", MachineSettings().displayArgument())
+    }
+
+    @Test fun backOpensTheBarWhileTouchControlsAreHidden() {
+        val b = RunningBar.BackAction.values().associateBy { it.name }
+        assertEquals(b["LEAVE"], RunningBar.backAction(false, false, false, false))
+        assertEquals(b["SHOW_BAR"], RunningBar.backAction(true, false, false, false))
+        assertEquals(b["HIDE_BAR"], RunningBar.backAction(true, true, false, false))
+        assertEquals(b["CLOSE_MENU"], RunningBar.backAction(true, true, false, true))
+        assertEquals(b["CLOSE_SHEET"], RunningBar.backAction(true, true, true, true))
+        assertEquals(b["CLOSE_SHEET"], RunningBar.backAction(false, false, true, false))
+    }
 }

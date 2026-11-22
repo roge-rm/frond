@@ -1886,6 +1886,35 @@ static void tg50LiveDisplay() {
     for(const char* bad : {"","fit=big","smooth=yes","keyboard","jog=left","size=fit","fit=fit extra"})
         assert(!parseDisplayChange(bad,true,change,error) && !error.empty());
     assert(!parseDisplayChange("keyboard=on",false,change,error) && !parseDisplayChange("jog=hidden",false,change,error));
+    // buttons= works on any device and leaves the button bar art out of the layout, except the TG50's.
+    assert(parseDisplayChange("buttons=off",false,change,error) && change.buttons==false);
+    assert(parseDisplayChange("buttons=on fit=fit",false,change,error) && change.buttons==true);
+    assert(!parseDisplayChange("buttons=maybe",false,change,error));
+    {
+        DisplaySettings shown;assert(shown.buttons);
+        DisplayChange off;assert(parseDisplayChange("buttons=off",false,off,error));
+        shown.Apply(off);assert(!shown.buttons);
+        for(DeviceType5 device : {deviceTypeZodiac2,deviceTypeTX,deviceTypeTG50}) {
+            DeviceControlView view;
+            const bool barBefore=deviceControls(device,view).count>0;
+            view.bare=true;
+            const auto& after=deviceControls(device,view);
+            if(device==deviceTypeTG50) assert(after.count>0);
+            else assert(barBefore && after.count==0 && deviceControlsHeight(after,320,view)==0 && deviceScreenLeft(after,view)==0);
+        }
+        // Input keeps the device's own profile while its art is left out.
+        DeviceControlView bareZodiac;bareZodiac.bare=true;
+        const auto& drawn=deviceControls(deviceTypeZodiac2,bareZodiac);
+        const auto& input=deviceControls(deviceArt(deviceTypeZodiac2),bareZodiac.gamepad);
+        assert(drawn.count==0 && drawn.style!=DeviceControlStyle::zodiac);
+        assert(input.style==DeviceControlStyle::zodiac && input.count>0);
+        bool hasFunction=false,hasStick=false;
+        for(size_t i=0;i<input.count;++i) {
+            if(input.buttons[i].key>=keyIdFunction)hasFunction=true;
+            if(input.buttons[i].icon==DeviceControlIcon::stick)hasStick=true;
+        }
+        assert(hasFunction && hasStick);
+    }
     DisplaySettings settings{WindowFit::fit,false,true,JogPlacement::screen};
     DisplayChange first,second;
     assert(parseDisplayChange("fit=whole keyboard=off",true,first,error) && parseDisplayChange("fit=fill jog=hidden",true,second,error));

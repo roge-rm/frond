@@ -104,6 +104,9 @@ struct DeviceControlView {
     bool gamepad{false};
     // The side tab in the around arrangement, where sideTab and sideTabBesideKeyboard don't apply.
     JogLandscape jogLandscape{JogLandscape::hidden};
+    // The button bar art and its keys are left out (the host hides them while a controller is used).
+    // The TG50 keeps its keyboard, so it ignores this.
+    bool bare{false};
 };
 // Where the CLIE jog controls go: hidden, left of the LCD, or left of the keyboard. keyboard is
 // the saved name; on a CLIE without a keyboard it puts them beside the silkscreen and buttons.
@@ -583,7 +586,9 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {return deviceC
 inline const DeviceControlProfile& deviceControls(DeviceType5 device) {return deviceControls(deviceArt(device));}
 // The profile a view shows: with the game controller when it is attached.
 inline const DeviceControlProfile& deviceControls(DeviceType5 device, const DeviceControlView& view) {
-    return deviceControls(deviceArt(device),view.gamepad);
+    const auto& profile=deviceControls(deviceArt(device),view.gamepad);
+    if(view.bare && profile.style!=DeviceControlStyle::tg50)return deviceControls(DeviceArt::none,false);
+    return profile;
 }
 inline bool deviceControlShown(const DeviceButton& button, const DeviceControlView& view) {
     switch(button.section) {

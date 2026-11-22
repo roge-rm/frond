@@ -113,6 +113,8 @@ class SdlEventHandler {
     std::array<Finger,16> fingers{};
     // The shown profile; one made from the device follows the view's game controller.
     const DeviceControlProfile* shownControls;
+    // The profile for keys, the stick and the game controller: the device's own, even while its art is left out.
+    const DeviceControlProfile* inputControls;
     bool followsDevice{false};
     DeviceControlView controlView;
     KeyId pointerKey{keyInvalid};

@@ -98,11 +98,12 @@ SdlEventHandler::SdlEventHandler(SoC* soc, float scale,
                                  Rotation rotation, DeviceControlView controlView)
     : SdlEventHandler(soc, deviceControls(soc->GetDeviceType(), controlView), scale, deviceDisplayConfiguration, rotation, controlView) {
     followsDevice = true;
+    inputControls = &deviceControls(deviceArt(soc->GetDeviceType()), controlView.gamepad);
 }
 
 SdlEventHandler::SdlEventHandler(SoC* soc, const DeviceControlProfile& controls, float scale,
                                  DisplayConfiguration& deviceDisplayConfiguration, Rotation rotation, DeviceControlView controlView)
-    : soc(soc), shownControls(&controls), controlView(controlView), scale(scale), rotation(rotation) {
+    : soc(soc), shownControls(&controls), inputControls(&controls), controlView(controlView), scale(scale), rotation(rotation) {
     width = deviceDisplayConfiguration.width;
     height = deviceDisplayConfiguration.height + deviceDisplayConfiguration.graffitiHeight;
 }
@@ -222,8 +223,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 enum KeyId key = mapKey(event.key.keysym.sym);
-                if (key >= keyIdFunction && !hasKey((*shownControls), key)) break;
-                if (stickKeyBit(key) && hasStick(*shownControls)) {
+                if (key >= keyIdFunction && !hasKey((*inputControls), key)) break;
+                if (stickKeyBit(key) && hasStick(*inputControls)) {
                     stickKeys |= stickKeyBit(key);
                     UpdateStick();
                     break;
@@ -259,7 +260,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 enum KeyId key = mapKey(event.key.keysym.sym);
-                if (stickKeyBit(key) && hasStick(*shownControls)) {
+                if (stickKeyBit(key) && hasStick(*inputControls)) {
                     stickKeys &= uint8_t(~stickKeyBit(key));
                     UpdateStick();
                     break;
@@ -274,7 +275,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
 
             // A game controller, for the Zodiac and the CLIÉ game controller. It is opened so SDL reports its buttons and axes.
             case SDL_CONTROLLERDEVICEADDED:
-                if (shownControls->style == DeviceControlStyle::zodiac || soc->GamepadSupported())
+                if (inputControls->style == DeviceControlStyle::zodiac || soc->GamepadSupported())
                     SDL_GameControllerOpen(event.cdevice.which);
                 break;
 
@@ -366,7 +367,10 @@ void SdlEventHandler::SetRotation(Rotation rotation) {
 }
 void SdlEventHandler::SetView(DeviceControlView controlView, float scale) {
     ReleaseFingers(); ReleasePointer(); this->controlView = controlView; this->scale = scale; redrawRequested=true;
-    if (followsDevice) shownControls = &deviceControls(soc->GetDeviceType(), controlView);
+    if (followsDevice) {
+        shownControls = &deviceControls(soc->GetDeviceType(), controlView);
+        inputControls = &deviceControls(deviceArt(soc->GetDeviceType()), controlView.gamepad);
+    }
 }
 void SdlEventHandler::SetLayout(const WindowLayout& layout, bool fitted) {
     ReleaseFingers(); ReleasePointer(); this->layout = layout; this->fitted = fitted;
@@ -620,9 +624,9 @@ GamepadState SdlEventHandler::CombinedPads() const {
 }
 void SdlEventHandler::UpdateGamepad() {
     const bool clie = soc->GamepadAttached();
-    if (shownControls->style != DeviceControlStyle::zodiac && !clie && !padKeys) return;
+    if (inputControls->style != DeviceControlStyle::zodiac && !clie && !padKeys) return;
     if (!padFocused) return;
-    const GamepadInput input = shownControls->style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads(), &rightHeld)
+    const GamepadInput input = inputControls->style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads(), &rightHeld)
                                : clie ? clieGamepadInput(CombinedPads()) : GamepadInput{};
     for (unsigned key = 1; key < keyIdCount; ++key) {
         const DeviceKeyMask bit = deviceKeyBit(KeyId(key));
