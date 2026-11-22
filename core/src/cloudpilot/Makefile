@@ -174,6 +174,7 @@ SOURCE_CXX_FROND = \
 	frond/HostByteLink.cpp \
 	$(SOURCE_CXX) \
 	frond/main.cpp \
+	frond/DanaX11Keys.cpp \
 	frond/DeviceControls.cpp \
 	frond/HostLink.cpp \
 	native/GdbStub.cpp \

@@ -3,7 +3,10 @@
 
 #include <SDL.h>
 
+#include <algorithm>
+#include <array>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,6 +45,50 @@ public:
 
 private:
     std::map<SDL_Scancode, uint32_t> downAt;
+};
+
+// Match translated SDL key presses with native X11 transitions. SDL can swallow releases
+// while looking for auto-repeat, so the native release keeps its place in the key sequence.
+class DanaNativeKeys {
+public:
+    std::optional<SDL_Scancode> Transition(unsigned code, bool down) {
+        pending.reset();
+        if (code >= held.size()) return std::nullopt;
+        pending = Pending{code, down, SDL_SCANCODE_UNKNOWN};
+        if (down || held[code] == SDL_SCANCODE_UNKNOWN) return std::nullopt;
+        const auto scancode = held[code];
+        pending->released = scancode;
+        held[code] = SDL_SCANCODE_UNKNOWN;
+        return scancode;
+    }
+
+    std::optional<bool> Translated(SDL_Scancode scancode, bool down) {
+        const auto key = pending;
+        pending.reset();
+        if (!down) {
+            if (scancode != SDL_SCANCODE_UNKNOWN && key && key->released == scancode) return false;
+            // SDL can reconcile a stale press without a native release.
+            std::replace(held.begin(), held.end(), scancode, SDL_SCANCODE_UNKNOWN);
+            return std::nullopt;
+        }
+        if (!key || !key->down) return std::nullopt;
+        auto& scan = held[key->code];
+        if (scan != SDL_SCANCODE_UNKNOWN) return false;
+        scan = scancode;
+        return true;
+    }
+
+    void ClearPending() { pending.reset(); }
+
+    void Clear() {
+        ClearPending();
+        held.fill(SDL_SCANCODE_UNKNOWN);
+    }
+
+private:
+    struct Pending { unsigned code; bool down; SDL_Scancode released; };
+    std::optional<Pending> pending;
+    std::array<SDL_Scancode, 256> held{};
 };
 
 class DanaHostKeys {

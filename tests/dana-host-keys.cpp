@@ -166,6 +166,33 @@ int main() {
         r.Retap(space, false, 2000);
         if (r.Retap(space, true, 2400) || r.Retap(space, true, 2430)) { std::printf("FAIL held repeat is a retap\n"); ++failures; }
     }
+    {
+        // SDL drops the raw O release while looking ahead to the next O.
+        DanaNativeKeys keys;
+        const auto o = SDL_SCANCODE_O, x = SDL_SCANCODE_X;
+        const auto check = [&](bool condition, const char* why) {
+            if (!condition) { std::printf("FAIL %s\n", why); ++failures; }
+        };
+        check(!keys.Transition(32, true) && keys.Translated(o, true) == true, "native O press");
+        check(keys.Transition(32, false) == o, "native O release before X");
+        check(!keys.Transition(53, true) && keys.Translated(x, true) == true, "native X press");
+        check(keys.Transition(53, false) == x && keys.Translated(x, false) == false,
+              "SDL's X release already delivered");
+        check(!keys.Transition(32, true) && keys.Translated(o, true) == true,
+              "native O retap marked as SDL repeat");
+        check(!keys.Transition(32, true) && keys.Translated(o, true) == false, "detectable auto-repeat");
+        check(!keys.Translated(o, false), "SDL-only release");
+        check(!keys.Transition(32, true) && keys.Translated(o, true) == true, "press after SDL-only release");
+        check(keys.Transition(32, false) == o, "next suppressed native O release");
+        check(!keys.Translated(x, false), "unmatched SDL-only X release");
+        check(!keys.Transition(32, true) && keys.Translated(o, true) == true, "native O again");
+        check(keys.Transition(32, false) == o, "native O release before non-key event");
+        keys.ClearPending();
+        check(!keys.Translated(o, false), "release after an unrelated native event");
+        keys.Clear();
+        check(!keys.Transition(32, false) && !keys.Translated(o, false), "release after focus loss");
+        check(!keys.Translated(o, true), "SDL-only press");
+    }
     std::printf(failures ? "dana-host-keys: FAIL\n" : "dana-host-keys: ok\n");
     return failures ? 1 : 0;
 }
