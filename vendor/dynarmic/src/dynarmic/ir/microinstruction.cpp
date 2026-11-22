@@ -544,7 +544,6 @@ bool Inst::IsSetCheckBitOperation() const {
 bool Inst::MayHaveSideEffects() const {
     return op == Opcode::PushRSB
         || op == Opcode::CallHostFunction
-        || op == Opcode::A32SlowPathSetRegister
         || op == Opcode::A64DataCacheOperationRaised
         || op == Opcode::A64InstructionCacheOperationRaised
         || IsSetCheckBitOperation()

@@ -294,17 +294,6 @@ public:
         (rs.Realize(), ...);
     }
 
-    // Frond: where a value is held now, for code placed elsewhere (a slow path) that runs with the
-    // registers and spill slots as they are here. StoreHeld32 stores its low 32 bits to [base, offset],
-    // using Wscratch0 for an immediate, a spill slot or an fpr.
-    struct Held {
-        bool immediate;
-        u64 value;
-        HostLoc loc;
-    };
-    Held HeldValue(const IR::Value& value) const;
-    static void StoreHeld32(oaknut::CodeGenerator& code, const Held& held, oaknut::XReg base, size_t offset);
-
     void UpdateAllUses();
     void AssertAllUnlocked() const;
     void AssertNoMoreUses() const;

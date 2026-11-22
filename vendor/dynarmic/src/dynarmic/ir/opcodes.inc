@@ -14,7 +14,6 @@ A32OPC(GetExtendedRegister32,                               U32,            A32E
 A32OPC(GetExtendedRegister64,                               U64,            A32ExtReg                                                       )
 A32OPC(GetVector,                                           U128,           A32ExtReg                                                       )
 A32OPC(SetRegister,                                         Void,           A32Reg,         U32                                             )
-A32OPC(SlowPathSetRegister,                                 Void,           A32Reg,         U32                                             )
 A32OPC(SetExtendedRegister32,                               Void,           A32ExtReg,      U32                                             )
 A32OPC(SetExtendedRegister64,                               Void,           A32ExtReg,      U64                                             )
 A32OPC(SetVector,                                           Void,           A32ExtReg,      U128                                            )

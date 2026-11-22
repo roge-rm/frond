@@ -334,11 +334,6 @@ void A32EmitX64::EmitA32GetVector(A32EmitContext& ctx, IR::Inst* inst) {
     ctx.reg_alloc.DefineValue(inst, result);
 }
 
-// Frond: the x64 backend doesn't take slow-path sets (slow_path_sets is off there); store as a set.
-void A32EmitX64::EmitA32SlowPathSetRegister(A32EmitContext& ctx, IR::Inst* inst) {
-    EmitA32SetRegister(ctx, inst);
-}
-
 void A32EmitX64::EmitA32SetRegister(A32EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     const A32::Reg reg = inst->GetArg(0).GetA32RegRef();

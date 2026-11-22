@@ -531,41 +531,6 @@ int RegAlloc::FindFreeSpill() const {
     return static_cast<int>(iter - spills.begin());
 }
 
-RegAlloc::Held RegAlloc::HeldValue(const IR::Value& value) const {
-    if (value.IsImmediate()) {
-        return {.immediate = true, .value = value.GetImmediateAsU64(), .loc = {}};
-    }
-    const auto loc = ValueLocation(value.GetInst());
-    ASSERT(loc && loc->kind != HostLoc::Kind::Flags);
-    return {.immediate = false, .value = 0, .loc = *loc};
-}
-
-void RegAlloc::StoreHeld32(oaknut::CodeGenerator& code, const Held& held, oaknut::XReg base, size_t offset) {
-    if (held.immediate) {
-        if (u32(held.value) == 0) {
-            code.STR(WZR, base, offset);
-            return;
-        }
-        code.MOV(Wscratch0, u32(held.value));
-        code.STR(Wscratch0, base, offset);
-        return;
-    }
-    switch (held.loc.kind) {
-    case HostLoc::Kind::Gpr:
-        code.STR(oaknut::WReg{held.loc.index}, base, offset);
-        break;
-    case HostLoc::Kind::Fpr:
-        code.STR(oaknut::SReg{held.loc.index}, base, offset);
-        break;
-    case HostLoc::Kind::Spill:
-        code.LDR(Wscratch0, SP, spill_offset + held.loc.index * spill_slot_size);
-        code.STR(Wscratch0, base, offset);
-        break;
-    case HostLoc::Kind::Flags:
-        ASSERT_FALSE("A held 32-bit value in the flags");
-    }
-}
-
 void RegAlloc::LoadCopyInto(const IR::Value& value, oaknut::XReg reg) {
     if (value.IsImmediate()) {
         code.MOV(reg, value.GetImmediateAsU64());

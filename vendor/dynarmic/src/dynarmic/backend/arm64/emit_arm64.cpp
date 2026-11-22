@@ -222,13 +222,6 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     for (auto iter = block.begin(); iter != block.end(); ++iter) {
         IR::Inst* inst = &*iter;
 
-        ctx.slow_path_sets.clear();
-        if (inst->IsMemoryReadOrWrite()) {
-            for (auto next = std::next(iter); next != block.end() && next->GetOpcode() == IR::Opcode::A32SlowPathSetRegister; ++next) {
-                ctx.slow_path_sets.push_back(&*next);
-            }
-        }
-
         switch (inst->GetOpcode()) {
 #define OPCODE(name, type, ...)                    \
     case IR::Opcode::name:                         \

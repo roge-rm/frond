@@ -4,8 +4,6 @@
  */
 
 #include <mcl/bit/bit_field.hpp>
-#include <algorithm>
-
 #include <oaknut/oaknut.hpp>
 
 #include "dynarmic/backend/arm64/a32_jitstate.h"
@@ -373,21 +371,6 @@ void EmitIR<IR::Opcode::A32SetRegister>(oaknut::CodeGenerator& code, EmitContext
 
     // TODO: Detect if Gpr vs Fpr is more appropriate
 
-    code.STR(Wvalue, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * static_cast<size_t>(reg));
-}
-
-// Frond: a set the memory access before it stores on its callback path only. One no access took
-// (A32ConstantMemoryReads can drop a read) stores here as A32SetRegister would.
-template<>
-void EmitIR<IR::Opcode::A32SlowPathSetRegister>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-    const auto& taken = ctx.taken_slow_path_sets;
-    if (std::find(taken.begin(), taken.end(), inst) != taken.end()) {
-        return;
-    }
-    const A32::Reg reg = inst->GetArg(0).GetA32RegRef();
-    auto Wvalue = ctx.reg_alloc.ReadW(args[1]);
-    RegAlloc::Realize(Wvalue);
     code.STR(Wvalue, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * static_cast<size_t>(reg));
 }
 
