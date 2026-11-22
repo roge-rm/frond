@@ -85,4 +85,22 @@ class RunningBarTest {
         assertFalse(BarResults.isPermissionRequest("android.intent.action.OPEN_DOCUMENT"))
         assertFalse(BarResults.isPermissionRequest(null))
     }
+
+    @Test fun controllerDetectionIgnoresOnScreenDevices() {
+        val pad = android.view.InputDevice.SOURCE_GAMEPAD or android.view.InputDevice.SOURCE_KEYBOARD
+        assertTrue(RunningBar.isGameController(pad, false))
+        assertTrue(RunningBar.isGameController(android.view.InputDevice.SOURCE_JOYSTICK, false))
+        assertFalse(RunningBar.isGameController(pad, true))
+        assertFalse(RunningBar.isGameController(android.view.InputDevice.SOURCE_TOUCHSCREEN, false))
+        assertFalse(RunningBar.isGameController(android.view.InputDevice.SOURCE_KEYBOARD, false))
+    }
+
+    @Test fun touchControlsGoOnlyWithTheSettingAndAController() {
+        assertTrue(RunningBar.touchHidden(true, true))
+        assertFalse(RunningBar.touchHidden(true, false))
+        assertFalse(RunningBar.touchHidden(false, true))
+        assertEquals(0, RunningBar.surfaceTopMargin(BarMode.OWN_SPACE, true, 100, 800, 200, 96, touchHidden = true))
+        assertEquals("fit=fit smooth=off jog=hidden jog-landscape=hidden",
+            MachineSettings().displayArgument(jogControls = true, gamepadSupported = true, touchHidden = true))
+    }
 }

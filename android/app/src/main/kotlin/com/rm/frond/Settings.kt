@@ -36,6 +36,10 @@ data class Settings(
     val smoothing: Boolean = false,
     val orientation: Orientation = Orientation.PROGRAM,
     val sound: Boolean = true,
+    // Hides the status and navigation bars while a machine runs.
+    val immersive: Boolean = true,
+    // Hides the on-screen controls while a game controller is connected.
+    val hideTouchWithController: Boolean = false,
     // The core's gdb server, relayed by DebugLink on debuggerPort. The Palm waits for gdb before it runs.
     val debugger: Boolean = false,
     val debuggerPort: Int = DebugLink.DEFAULT_PORT,
@@ -46,6 +50,8 @@ data class Settings(
         .putExtra(EXTRA_SMOOTHING, smoothing)
         .putExtra(EXTRA_ORIENTATION, orientation.name)
         .putExtra(EXTRA_SOUND, sound)
+        .putExtra(EXTRA_IMMERSIVE, immersive)
+        .putExtra(EXTRA_HIDE_TOUCH, hideTouchWithController)
         .putExtra(EXTRA_DEBUGGER, debugger)
         .putExtra(EXTRA_DEBUGGER_PORT, debuggerPort)
 
@@ -55,6 +61,8 @@ data class Settings(
         private const val EXTRA_SMOOTHING = "smoothing"
         private const val EXTRA_ORIENTATION = "orientation"
         private const val EXTRA_SOUND = "sound"
+        private const val EXTRA_IMMERSIVE = "immersive"
+        private const val EXTRA_HIDE_TOUCH = "hideTouchWithController"
         private const val EXTRA_FAST_AUDIO = "fastAudio"
         private const val FAST_AUDIO_PREFIX = "fastAudio."
         private const val FAST_AUDIO_MIGRATED = "fastAudioPerDevice"
@@ -71,6 +79,8 @@ data class Settings(
                 smoothing = p.getBoolean(EXTRA_SMOOTHING, false),
                 orientation = enumOr(p.getString(EXTRA_ORIENTATION, null), Orientation.PROGRAM),
                 sound = p.getBoolean(EXTRA_SOUND, true),
+                immersive = p.getBoolean(EXTRA_IMMERSIVE, true),
+                hideTouchWithController = p.getBoolean(EXTRA_HIDE_TOUCH, false),
                 debugger = p.getBoolean(EXTRA_DEBUGGER, false),
                 debuggerPort = NetRelay.port(p.getInt(EXTRA_DEBUGGER_PORT, DebugLink.DEFAULT_PORT).toString()) ?: DebugLink.DEFAULT_PORT,
             )
@@ -102,6 +112,8 @@ data class Settings(
         fun save(context: Context, settings: Settings) {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
                 .putString(EXTRA_ORIENTATION, settings.orientation.name)
+                .putBoolean(EXTRA_IMMERSIVE, settings.immersive)
+                .putBoolean(EXTRA_HIDE_TOUCH, settings.hideTouchWithController)
                 .putBoolean(EXTRA_DEBUGGER, settings.debugger)
                 .putInt(EXTRA_DEBUGGER_PORT, settings.debuggerPort)
                 .apply()
@@ -116,6 +128,8 @@ data class Settings(
                 smoothing = extras.getBoolean(EXTRA_SMOOTHING, saved.smoothing),
                 orientation = enumOr(extras.getString(EXTRA_ORIENTATION), saved.orientation),
                 sound = extras.getBoolean(EXTRA_SOUND, saved.sound),
+                immersive = extras.getBoolean(EXTRA_IMMERSIVE, saved.immersive),
+                hideTouchWithController = extras.getBoolean(EXTRA_HIDE_TOUCH, saved.hideTouchWithController),
                 debugger = extras.getBoolean(EXTRA_DEBUGGER, saved.debugger),
                 debuggerPort = extras.getInt(EXTRA_DEBUGGER_PORT, saved.debuggerPort),
             )

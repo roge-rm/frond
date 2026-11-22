@@ -45,8 +45,20 @@ object RunningBar {
 
     // How far the Palm's surface is moved down: the bar's height when it takes its own space, and at least
     // the corner button's height while the soft keyboard is up.
-    fun surfaceTopMargin(mode: BarMode, shown: Boolean, barPx: Int, availablePx: Int, minPalmPx: Int, imeButtonsPx: Int) =
-        maxOf(imeButtonsPx, if (takesSpace(mode, shown, barPx, availablePx, minPalmPx)) barPx else 0)
+    fun surfaceTopMargin(mode: BarMode, shown: Boolean, barPx: Int, availablePx: Int, minPalmPx: Int, imeButtonsPx: Int, touchHidden: Boolean = false) =
+        if (touchHidden) 0 else maxOf(imeButtonsPx, if (takesSpace(mode, shown, barPx, availablePx, minPalmPx)) barPx else 0)
+
+    // Whether an input device is a game controller: gamepad or joystick buttons, and not an on-screen one.
+    fun isGameController(sources: Int, virtual: Boolean): Boolean {
+        if (virtual) return false
+        val pad = android.view.InputDevice.SOURCE_GAMEPAD
+        val stick = android.view.InputDevice.SOURCE_JOYSTICK
+        return sources and pad == pad || sources and stick == stick
+    }
+
+    // The on-screen controls (the bar, its handle, the keyboard button and the core's jog panels) go away
+    // while the setting is on and a controller is connected.
+    fun touchHidden(setting: Boolean, controllerConnected: Boolean) = setting && controllerConnected
 
     // The bar hides by itself only in Auto-hide mode, and not while a menu, sheet or dialog is open.
     fun autoHides(mode: BarMode, shown: Boolean, menuOpen: Boolean, sheetOpen: Boolean, dialogOpen: Boolean) =

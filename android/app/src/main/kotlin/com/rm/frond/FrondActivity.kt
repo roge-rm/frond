@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.hardware.input.InputManager
 import android.view.InputDevice
+import android.view.WindowManager
 import android.media.AudioManager
 import android.system.Os
 import android.view.Gravity
@@ -74,6 +75,8 @@ open class FrondActivity : SDLActivity() {
     // The core's USB port state read after the start request, for a running bar made after it came back.
     private var startUsbPort: PrintJob.Port? = null
     private var imeVisible = false
+    // The setting is on and a game controller is connected: the on-screen controls are away.
+    private var touchHidden = false
     @Volatile private var pendingMicrophone = false
     @Volatile private var foreground = false
     @Volatile private var microphoneResume = 0L
@@ -446,6 +449,14 @@ open class FrondActivity : SDLActivity() {
             window.navigationBarColor = Color.TRANSPARENT
         }
         if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
+        // With the bars hidden the window reaches into the cutout; the cutout inset below keeps the device clear of it.
+        if (settings.immersive && Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 30) WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        applyImmersive()
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
@@ -462,6 +473,35 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    // Hides the status and navigation bars; a swipe from the edge shows them for a moment over the device
+    // without resizing it, as hidden bars give no inset.
+    private fun applyImmersive() {
+        if (!settings.immersive) return
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    // Whether a game controller is connected.
+    private fun controllerConnected(): Boolean {
+        val manager = inputDevices ?: return false
+        return manager.inputDeviceIds.any { id ->
+            manager.getInputDevice(id)?.let { RunningBar.isGameController(it.sources, it.isVirtual) } == true
+        }
+    }
+
+    // Hides or brings back the bar, the keyboard button and the core's jog panels as controllers come and go.
+    private fun applyTouchOverlay() {
+        val hidden = RunningBar.touchHidden(settings.hideTouchWithController, controllerConnected())
+        if (hidden == touchHidden) return
+        touchHidden = hidden
+        if (!leaving) barView?.visibility = if (hidden) View.GONE else View.VISIBLE
+        syncCorner()
+        updateSurfaceMargin()
+        applyDisplay()
+    }
+
     // Moves the Palm's surface down for a bar that takes its own space, and for the corner keyboard button
     // while the soft keyboard is up.
     private fun updateSurfaceMargin() {
@@ -472,7 +512,7 @@ open class FrondActivity : SDLActivity() {
         val parent = SDLActivity.getContentView()
         val available = if (parent == null) 0 else parent.height - parent.paddingTop - parent.paddingBottom
         val imeButtons = if (imeVisible && keyboardButton?.visibility == View.VISIBLE) (48 * density).toInt() else 0
-        val margin = RunningBar.surfaceTopMargin(bar.mode, bar.shown, barPx, available, (RunningBar.MIN_PALM_DP * density).toInt(), imeButtons)
+        val margin = RunningBar.surfaceTopMargin(bar.mode, bar.shown, barPx, available, (RunningBar.MIN_PALM_DP * density).toInt(), imeButtons, touchHidden)
         (SDLActivity.mSurface?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
             if (it.topMargin != margin) {
                 it.topMargin = margin
@@ -663,16 +703,24 @@ open class FrondActivity : SDLActivity() {
         }
         inputDevices = getSystemService(InputManager::class.java)
         inputListener = object : InputManager.InputDeviceListener {
-            override fun onInputDeviceAdded(deviceId: Int) = updateDanaEnvironment()
-            override fun onInputDeviceChanged(deviceId: Int) = updateDanaEnvironment()
+            override fun onInputDeviceAdded(deviceId: Int) {
+                applyTouchOverlay()
+                updateDanaEnvironment()
+            }
+            override fun onInputDeviceChanged(deviceId: Int) {
+                applyTouchOverlay()
+                updateDanaEnvironment()
+            }
             override fun onInputDeviceRemoved(deviceId: Int) {
                 controller.release(deviceId)
                 zodiacPad?.release(deviceId)
                 rumble?.forget(deviceId)
+                applyTouchOverlay()
                 updateDanaEnvironment()
             }
         }
         inputDevices?.registerInputDeviceListener(inputListener!!, null)
+        applyTouchOverlay()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -682,6 +730,7 @@ open class FrondActivity : SDLActivity() {
             zodiacPad?.releaseAll()
         }
         super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyImmersive()
     }
 
     override fun onPause() {
@@ -882,7 +931,7 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().isDana() && saved.danaView != (danaState?.view ?: machineSettings.danaView)) {
             changeDanaView(saved.danaView) { _, error -> if (error != null) Log.w(TAG, "dana-view: $error") }
         }
-        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd, touchHidden = touchHidden)
         if (wanted == display) return
         display = wanted
         link.whenConnected {
@@ -979,7 +1028,7 @@ open class FrondActivity : SDLActivity() {
     // the control link first, which with the debugger on can be a long time.
     private fun readKeyboard() {
         if (launchDevice().isDana()) {
-            keyboardButton?.visibility = if (leaving) View.GONE else View.VISIBLE
+            keyboardButton?.visibility = if (leaving || touchHidden) View.GONE else View.VISIBLE
             return
         }
         if (!link.connectedOnce) {
@@ -1006,6 +1055,8 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        applyImmersive()
+        applyTouchOverlay()
         if (!leaving) rumble?.set(guestVibrate)
         startPendingMicrophone()
         if (!leaving) readKeyboard()
@@ -1077,6 +1128,7 @@ open class FrondActivity : SDLActivity() {
             }
         }
         barView = view
+        if (touchHidden) view.visibility = View.GONE
         // Compose makes its window recomposer from the content view's owners, so SDL's layout needs them too.
         layout.setViewTreeLifecycleOwner(owner)
         layout.setViewTreeViewModelStoreOwner(owner)
@@ -1271,7 +1323,7 @@ open class FrondActivity : SDLActivity() {
 
     // The corner keyboard button shows only while the bar is hidden.
     private fun syncCorner() {
-        val corner = RunningBar.cornerButtons(bar.shown) && !leaving
+        val corner = RunningBar.cornerButtons(bar.shown) && !leaving && !touchHidden
         keyboardButton?.visibility = if (corner && bar.keyboardKey) View.VISIBLE else View.GONE
     }
 
