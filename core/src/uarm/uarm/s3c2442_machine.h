@@ -307,8 +307,10 @@ class S3c2442Machine {
                           uint32_t* cost);
     static bool leanGuard(uint32_t instruction, const uint32_t* registers, uint32_t cpsr, uint32_t spsr);
     // CPU cycles to the next event; with wakeOnly, only events that can wake an idle CPU: interrupts
-    // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset.
-    uint64_t cyclesToEvent(bool wakeOnly = false) const;
+    // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset. With openTimers, a PWM timer
+    // whose interrupt INTMSK holds back isn't an event (Fast spans): advance() applies its underflows
+    // later just the same, and every guest look at it (SFR access, lean PWM read) settles time first.
+    uint64_t cyclesToEvent(bool wakeOnly = false, bool openTimers = false) const;
     // Sleep: the sources that wake it, pending now; time asleep, which moves only the RTC.
     uint32_t wakeSources() const;
     void sleepAdvance(uint64_t cpuCycles);

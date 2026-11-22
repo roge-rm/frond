@@ -586,7 +586,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
 }
 
 // CPU cycles until the next timer, watchdog, frame or RTC event, UINT64_MAX with none due.
-uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
+uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly, bool openTimers) const {
     const uint64_t cpuHz = this->cpuHz();
     uint64_t best = UINT64_MAX;
     auto consider = [&](uint64_t ticks, uint64_t hz, uint64_t rest) {
@@ -604,7 +604,8 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     if (hostNextNs != UINT64_MAX && hostService)
         consider(hostNextNs <= elapsedNs ? 0 : hostNextNs - elapsedNs, 1000000000, nsRest);
     if (!wakeOnly) {
-        consider(std::min({pwm.ticksToEvent(), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
+        const uint32_t timers = openTimers ? (~intc.intmsk >> s3cIrq::timer0) & 0x1f : 0x1f;
+        consider(std::min({pwm.ticksToEvent(timers), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
         consider(rtc.ticksToEvent(), 32768, rtcRest);
         return std::min(best, audioCyclesToEvent(false));
@@ -1065,7 +1066,7 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             continue;
         }
         const bool fast = fastOn && history.empty();
-        uint64_t n = history.empty() ? std::min<uint64_t>({fast ? fastSpan : batch, cyclesToEvent(), target - used}) : 1;
+        uint64_t n = history.empty() ? std::min<uint64_t>({fast ? fastSpan : batch, cyclesToEvent(false, fast), target - used}) : 1;
         if (irqHeld) {
             if (retiredCount >= irqHeldUntil) {
                 irqHeld = false;
