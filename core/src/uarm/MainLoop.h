@@ -43,6 +43,12 @@ class MainLoop {
     std::string SpeedName() const;
     static constexpr uint32_t UNCAPPED_MHZ = 3000;
     void SetEmulatedTime(bool emulatedTime) { this->emulatedTime = emulatedTime; }
+    // How far the guest may fall behind real time and still catch up later; past it the lag is
+    // dropped. 0 is three timeslices. A guest that idles between bursts the host can't keep up with
+    // (the rx1950) makes the time up in its idle stretches.
+    void SetCatchUpUsec(uint64_t usec) { catchUpUsec = usec; }
+    // Real time dropped as lag so far, in us.
+    uint64_t DroppedUsec() const { return uint64_t(droppedUsec); }
 
    private:
     uint64_t CalculateCyclesPerSecond(uint64_t safetyMargin, uint64_t limit);
@@ -57,6 +63,8 @@ class MainLoop {
 
     double virtualTimeUsec{0};
     double lastDeltaUsec{0};
+    double droppedUsec{0};
+    uint64_t catchUpUsec{0};
 
     uint64_t currentIps{0};
     uint64_t currentIpsMax{0};
