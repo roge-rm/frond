@@ -1134,11 +1134,12 @@ void S3c2442Machine::runFast(uint64_t n) {
             int stop = arm920JitExit;
             uint32_t instructions = 0;
             const uint32_t budget = uint32_t(std::min<uint64_t>(left / 2 - slack + 1, UINT32_MAX / 2));
+            leanAdvanced = 0;
             cpuArm920RunJit(cpuCore, budget, &stop, budget, &instructions);
             if (instructions) {
                 retiredCount += instructions;
                 jitRetiredCount += instructions;
-                fastOwed += instructions;
+                fastOwed += instructions - std::min(instructions, leanAdvanced);
                 left -= std::min<uint64_t>(left, instructions);
                 if (stop == arm920JitBudget || stop == arm920JitHalt) continue;
             }
@@ -1292,11 +1293,17 @@ uint64_t S3c2442Machine::skipDelay(uint64_t left) {
     return n;
 }
 
+// PWM reads translated code answers (leanRead), as marked access pcs that start their block.
+static constexpr uint32_t tickReadPcs[] = {
+    0x8004aef4,  // WM5 kernel tick count: ldr r1, [r3] of TCNTO4
+};
+
 bool S3c2442Machine::setFastEngine(bool fast) {
     if (fast == fastOn) return true;
     cpuArm920SetLean(cpuCore, fast ? leanPage : nullptr, fast ? leanGuard : nullptr, this);
     cpuArm920SetLeanRead(cpuCore, fast ? leanRead : nullptr);
     cpuArm920SetLeanWrite(cpuCore, fast ? leanWrite : nullptr);
+    cpuArm920SetJitAccessPcs(cpuCore, tickReadPcs, sizeof tickReadPcs / sizeof tickReadPcs[0], true);
     if (fast && !cpuArm920SetJit(cpuCore, true)) {
         cpuArm920SetLean(cpuCore, nullptr, nullptr, this);
         return false;
@@ -1326,7 +1333,8 @@ uint8_t* S3c2442Machine::leanPage(void* context, uint32_t pa, bool, bool* counte
 // and the NAND controller, which has no timing and raises no interrupt.
 // For the timers the machine's time is first brought up to the reading instruction, as the interpreter does
 // (mmio); with no event due in the span that changes nothing else. Translated code leaves WTCNT to the lean
-// path, as its ran counts clocks, not instructions; so do the PWM reads.
+// path (skipDelay takes its delay loops at the run's exit), and PWM reads too, as its ran counts clocks, except
+// at a tick read pc (tickReadPcs): that starts its block, so the run's instructions so far are exact there.
 bool S3c2442Machine::leanRead(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t, bool,
                               uint32_t* value, uint32_t* cost) {
     auto& m = *static_cast<S3c2442Machine*>(context);
@@ -1341,8 +1349,12 @@ bool S3c2442Machine::leanRead(void* context, uint32_t pa, uint32_t size, uint32_
             if (m.nand.read(pa & 0x3c, 4, got) != S3cAccess::ok) return false;
             *value = size == 4 ? got : (got >> ((pa & 3) * 8)) & ((1u << (8 * size)) - 1);
         }
-    } else if ((pa == 0x53000008 || (pa >= 0x51000000 && pa <= 0x51000040)) && size == 4 && !(pa & 3) &&
-               !cpuArm920LeanInJit(m.cpuCore)) {
+    } else if ((pa == 0x53000008 || (pa >= 0x51000000 && pa <= 0x51000040)) && size == 4 && !(pa & 3)) {
+        if (cpuArm920LeanInJit(m.cpuCore)) {
+            // pc is only set at a marked pc (cpuArm920SetJitAccessPcs).
+            if (pa == 0x53000008 || !pc) return false;
+            ran = cpuArm920JitInstructionsNow(m.cpuCore);
+        }
         m.settleFast();
         if (ran > m.leanAdvanced) {
             m.advance(ran - m.leanAdvanced);

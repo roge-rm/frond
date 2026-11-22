@@ -56,6 +56,8 @@ uint32_t jitMaxUnchecked(const FrondJit *jit);
 // Inside jitRun, from a memory read callback: the cycles the run has charged so far, its
 // finished blocks (a block's cycles count at its end).
 uint32_t jitRanNow(const FrondJit *jit);
+// The same in instructions (ARM920T ticks' low half; clocks elsewhere).
+uint32_t jitRanInstructionsNow(const FrondJit *jit);
 // MRC and MCR p15 c3 (domain access control) run in privileged mode from generated code, in
 // every JIT so far (tests).
 uint64_t jitDomainCalls();
@@ -184,6 +186,7 @@ uint32_t *cpuJitSpsr(ArmCpu *cpu);
 // ARM920T Fast blocks: where generated code notes an access pc (cpuArm920SetJitAccessPcs), and whether pc is one.
 uint32_t *cpuJitAccessPcSlot(ArmCpu *cpu);
 bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc);
+bool cpuJitAccessPcsStartBlocks(const ArmCpu *cpu);
 uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value);
 // For the fork's in-place MSR CPSR (psr_inline_interrupt_mask): the waiting IRQ and FIQ
 // counts as one word, 0 when none is waiting, and the word whose bytes 2 and 3 are the

@@ -441,7 +441,12 @@ uint32_t cpuArm920LeanGeneration(const ArmCpu*);
 uint64_t cpuArm920LeanCodeDrops(const ArmCpu*);
 // Fast blocks: generated code notes the pc of these instructions for the lean read callback's pc, which the
 // graphics model keys some register reads on. The list stays the caller's and is set before the JIT compiles.
-void cpuArm920SetJitAccessPcs(ArmCpu*, const uint32_t* pcs, uint32_t count);
+// With startBlocks each one starts its block, so at its access cpuArm920JitInstructionsNow is exact, and only
+// an unconditional one sets the pc.
+void cpuArm920SetJitAccessPcs(ArmCpu*, const uint32_t* pcs, uint32_t count, bool startBlocks = false);
+// Fast blocks, from a lean read or write hook: the instructions of the run's finished blocks (a Thumb pair
+// counts 2), 0 outside a JIT run.
+uint32_t cpuArm920JitInstructionsNow(const ArmCpu*);
 // Fast: code hooks, pcs (bit 0 ignored) the lean path and translated code never run, so the guarded step runs
 // every instruction at one of them and its caller can act there first. Setting replaces the ones before and drops
 // translated code when they change. False on another model or for more than ARM920_MAX_CODE_HOOKS. None set

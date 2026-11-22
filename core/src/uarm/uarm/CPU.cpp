@@ -398,6 +398,7 @@ struct ArmCpu {
     uint32_t jitCharged;
     const uint32_t *jitAccessPcs;
     uint32_t jitAccessPcCount;
+    bool jitAccessPcsStartBlocks;  // each access pc starts its block (cpuArm920SetJitAccessPcs)
     // Fast: code hooks (cpuArm920SetCodeHooks). The lean path and translated code stop before these pcs and leave
     // them to the step. Host only, never saved.
     uint32_t codeHooks[ARM920_MAX_CODE_HOOKS];
@@ -5900,9 +5901,17 @@ void cpuArm920JitCharge(ArmCpu *cpu, uint32_t cycles, uint32_t span) {
 
 uint32_t cpuArm920JitCharged(const ArmCpu *cpu) { return cpu->jitCharged; }
 
-void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
+void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count, bool startBlocks) {
     cpu->jitAccessPcs = pcs;
     cpu->jitAccessPcCount = count;
+    cpu->jitAccessPcsStartBlocks = startBlocks;
+}
+
+uint32_t cpuArm920JitInstructionsNow(const ArmCpu *cpu) {
+#ifdef FROND_DYNARMIC
+    if (cpu->leanJit) return jitRanInstructionsNow(cpu->jit);
+#endif
+    return 0;
 }
 
 bool cpuArm920SetCodeHooks(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
@@ -6304,6 +6313,8 @@ bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc) {
         if (cpu->jitAccessPcs[i] == pc) return true;
     return false;
 }
+
+bool cpuJitAccessPcsStartBlocks(const ArmCpu *cpu) { return cpu->jitAccessPcsStartBlocks; }
 
 bool cpuJitPrivileged(ArmCpu *cpu) { return cpu->privileged; }
 

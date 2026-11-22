@@ -1244,13 +1244,24 @@ struct Env final : public A32::UserCallbacks {
             ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
             return false;
         }
+        // Access pcs that start their block (cpuJitAccessPcsStartBlocks): the block before them links to them, so
+        // only finished blocks' ticks come before their access.
+        const bool marked = arm920 && cpuJitAccessPcMarked(cpu, pc);
+        const bool startsBlock = marked && cpuJitAccessPcsStartBlocks(cpu);
+        if (startsBlock && pc != A32::LocationDescriptor{ir.block.Location()}.PC()) {
+            ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
+            return false;
+        }
+        uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             const bool plain = cpuJitFetch(cpu, at & ~3u, &w) && cpuJitPlain(cpu, at, w, thumb);
             if (plain && pc == A32::LocationDescriptor{ir.block.Location()}.PC()) blocks++;
+            word = w;
             return plain;
         });
-        // An access pc: its value goes to cpuJitAccessPcSlot before the instruction (psr slot, opc1 3).
-        if (ok && arm920 && cpuJitAccessPcMarked(cpu, pc))
+        // An access pc: its value goes to cpuJitAccessPcSlot before the instruction (psr slot, opc1 3). One that
+        // starts its block is only noted unconditional, as a failed one would leave the slot set.
+        if (ok && marked && (!startsBlock || thumb || word >> 28 == 14))
             ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
         return ok;
     }
@@ -2062,6 +2073,13 @@ uint32_t jitRanNow(const FrondJit *j) {
     if (!e) return 0;
     const int64_t ran = (int64_t(e->budget) - e->jit->TicksRemainingNow()) >> e->model.shift;
     return ran <= 0 ? 0 : uint32_t(std::min<int64_t>(ran, UINT32_MAX));
+}
+
+uint32_t jitRanInstructionsNow(const FrondJit *j) {
+    const Env *e = j->running;
+    if (!e || !e->model.shift) return jitRanNow(j);
+    const int64_t ran = int64_t(e->budget) - e->jit->TicksRemainingNow();
+    return ran <= 0 ? 0 : uint32_t(ran);
 }
 
 void jitExecutionCounts(const FrondJit *j, uint64_t *blocks, uint64_t *instructions) {
