@@ -2264,10 +2264,14 @@ class Imx1GraphicsWorker final : public Imx1GraphicsFence {
     Job& next() {
         if (pushed - applied == capacity) {
             imx1GraphicsWorkerStats.fullWaits.fetch_add(1, std::memory_order_relaxed);
+            // publish collects what the worker has done, which may be every job, so it only waits when that left
+            // the ring full: the worker then still has jobs to do.
             publish();
-            wakeWorker();
-            for (unsigned i = 1; tail.load(std::memory_order_acquire) == applied; ++i) spin(i);
-            collect();
+            if (pushed - applied == capacity) {
+                wakeWorker();
+                for (unsigned i = 1; tail.load(std::memory_order_acquire) == applied; ++i) spin(i);
+                collect();
+            }
         }
         return slots[pushed % capacity];
     }

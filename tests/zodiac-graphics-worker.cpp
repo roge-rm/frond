@@ -2,6 +2,8 @@
 // state and saved state at every sync point, with fills queued back to back, reading what earlier queued fills
 // wrote, and CPU accesses inside and outside the queued ranges. Also the memory going away with jobs queued, the
 // worker moving between memories and a full ring. Built with -fsanitize=thread too (test-zodiac-graphics-worker).
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -205,6 +207,39 @@ static void checkFullRing() {
     std::printf("PASS: 20000 fills back to back match, %llu pushes found the ring full\n", (unsigned long long)full);
 }
 
+// A full ring whose jobs the worker has all done before the next push: the push takes their results and goes on.
+static void checkFullRingDone() {
+    static M queued, direct;
+    Imx1GraphicsWorker worker;
+    worker.attach(&queued);
+    seedBoth(queued, direct);
+    // One pixel each, so the jobs are published 128 at a time and the last one fills the ring.
+    std::vector<C::Fill> fills(2049);
+    for (unsigned i = 0; i < fills.size(); ++i) {
+        C::Fill& f = fills[i];
+        f.width = f.height = 1;
+        f.pitch = 2;
+        f.base = region + 64 + (i % 0x1000) * 2;
+        f.colour = i * 7919 & 0xffff;
+    }
+    std::atomic<bool> done{false};
+    std::thread watchdog([&] {
+        for (unsigned i = 0; i < 1000 && !done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!done) fail("push after the worker emptied a full ring", 2048);
+    });
+    Imx1GraphicsWorker::holdForTests = true;
+    for (unsigned i = 0; i < 2048; ++i) REQUIRE(C::completeFill(*state, eim, queued, fills[i]) == A::ok);
+    Imx1GraphicsWorker::holdForTests = false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    REQUIRE(C::completeFill(*state, eim, queued, fills[2048]) == A::ok);
+    done = true;
+    watchdog.join();
+    for (const auto& f : fills) REQUIRE(C::completeFill(*state, eim, direct, f) == A::ok);
+    compareDirty(queued, direct, 2049, false);
+    compareBanks(queued, direct, 2049);
+    std::printf("PASS: a push after the worker finished a full ring goes on\n");
+}
+
 // The memory destroyed with jobs queued, the worker moved to another memory with jobs queued, the worker destroyed
 // with jobs queued, and attach(nullptr): each finishes every job first.
 static void checkLifetimes() {
@@ -259,6 +294,7 @@ int main() {
     configureGraphicsController(*state, eim);
     checkMixed();
     checkFullRing();
+    checkFullRingDone();
     checkLifetimes();
     std::printf("PASS: %llu jobs, %llu drains waited, %llu wakes\n",
                 (unsigned long long)imx1GraphicsWorkerStats.jobs.load(),
