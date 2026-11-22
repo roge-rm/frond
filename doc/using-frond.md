@@ -369,7 +369,7 @@ A relay waits again after its peer goes, and Connect again retries.
 
 ### Network
 
-The T|X has built-in Wi-Fi. On Desktop, the Tungsten E2 and Zire 72 can use the Palm Wi-Fi Card. In Storage, eject any memory card and choose **Insert Palm Wi-Fi Card**. Install the original Palm Wi-Fi Card driver in Palm OS. In Network, choose **Virtual Wi-Fi (Frond)**, then open Wi-Fi in Palm OS Preferences to join Frond. The card stays in the slot when you reopen the machine.
+The T|X has built-in Wi-Fi. On desktop and Android, the Tungsten E2 and Zire 72 can use the Palm Wi-Fi Card. In Storage, eject any memory card and choose **Insert Palm Wi-Fi Card**. Install the original Palm Wi-Fi Card driver in Palm OS. In Network, choose **Virtual Wi-Fi (Frond)**, then open Wi-Fi in Palm OS Preferences to join Frond. The card stays in the slot when you reopen the machine.
 
 Tungsten E3 with the CloudPilot E3 v2 ROM uses the same card. Prepare its driver files with `python3 tools/prepare-e3-wifi.py WiFi_Installer1.2.prc e3-wifi-driver`. Install all the numbered PRCs from that folder, then soft reset Palm OS. Insert the card and join Frond as on the E2.
 

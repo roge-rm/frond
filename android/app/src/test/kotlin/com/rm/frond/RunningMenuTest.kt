@@ -66,7 +66,7 @@ class RunningMenuTest {
             val byId = rows(device, RunningMenu.State(keyboard = false, network = NetworkMode.DISABLED)).associateBy { it.id }
             assertEquals(device.id, device.keyboard, byId.getValue(RunningMenu.Id.KEYBOARD).enabled)
             assertEquals(device.id, device.microphone, byId.getValue(RunningMenu.Id.MICROPHONE).enabled)
-            assertEquals(device.id, device.network, byId.getValue(RunningMenu.Id.NETWORK).enabled)
+            assertEquals(device.id, device.networkSupported, byId.getValue(RunningMenu.Id.NETWORK).enabled)
         }
     }
 

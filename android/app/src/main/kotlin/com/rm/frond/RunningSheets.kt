@@ -44,19 +44,20 @@ object RunningSheets {
 
     // In the Palm, ejected for the file view, out (the slot is empty and its linked card waits in Cards), or none.
     fun cardIcon(state: SdCard.State, linkedOut: Boolean) = when (state) {
-        SdCard.State.INSERTED -> CardIcon.IN
+        SdCard.State.INSERTED, SdCard.State.PALM_WIFI -> CardIcon.IN
         SdCard.State.EJECTED -> CardIcon.EJECTED
         SdCard.State.NONE -> if (linkedOut) CardIcon.OUT else CardIcon.NONE
         SdCard.State.UNKNOWN -> CardIcon.NONE
     }
 
-    enum class CardRow { SLOT, LINKED, INSERT_LINKED, FILES, EJECT, INSERT, EXPORT_IMAGE, TRY_AGAIN, WRITE_PROTECT }
+    enum class CardRow { SLOT, LINKED, INSERT_LINKED, FILES, EJECT, INSERT, EXPORT_IMAGE, TRY_AGAIN, WRITE_PROTECT, INSERT_PALM_WIFI, EJECT_PALM_WIFI }
 
     // linked: the empty slot has a linked card; linkedFree: that card can go in now.
     // `n` is the slot: 1 for the second SD slot. `oldPlace`: a frond-68k card not in Cards yet,
     // which doesn't open in Files.
     fun cardRows(device: Device, state: SdCard.State, linked: Boolean, linkedFree: Boolean, n: Int = 0, oldPlace: Boolean = false): List<CardRow> {
         if (!device.cardSupported || !Cards.hasSlot(device, n)) return emptyList()
+        if (state == SdCard.State.PALM_WIFI) return listOf(CardRow.SLOT, CardRow.EJECT_PALM_WIFI)
         val rows = mutableListOf(CardRow.SLOT)
         if (state == SdCard.State.NONE && linked) {
             rows += CardRow.LINKED
@@ -69,18 +70,20 @@ object RunningSheets {
                 rows += CardRow.FILES
                 rows += CardRow.EXPORT_IMAGE
             }
-            SdCard.State.NONE -> Unit
+            SdCard.State.NONE, SdCard.State.PALM_WIFI -> Unit
             SdCard.State.UNKNOWN -> rows += CardRow.TRY_AGAIN
         }
         if (oldPlace) rows -= CardRow.FILES
         // frond-68k's stick takes its protection from Cards when it goes in.
         if (((device.memoryStick && !device.runs68k && n == 0) || device.sdWriteProtection) &&
             state != SdCard.State.NONE && state != SdCard.State.UNKNOWN) rows += CardRow.WRITE_PROTECT
+        if (n == 0 && device.palmWifiCard && (state == SdCard.State.NONE || state == SdCard.State.EJECTED))
+            rows += CardRow.INSERT_PALM_WIFI
         return rows
     }
 
     // The card row opens the picker when the card state is known and nothing is running.
-    fun slotUsable(state: SdCard.State, busy: Boolean, pending: Boolean) = state != SdCard.State.UNKNOWN && !busy && !pending
+    fun slotUsable(state: SdCard.State, busy: Boolean, pending: Boolean) = state != SdCard.State.UNKNOWN && state != SdCard.State.PALM_WIFI && !busy && !pending
 
     // ---- Display and audio ----
 

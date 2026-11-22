@@ -31,7 +31,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         val op = if (!m68k) operation else when (operation) { "reinsert" -> "insert"; "put-in" -> "attach"; else -> operation }
         return (if (n != 0) "sd2-" else if (stickDevice) "ms-" else "sd-") + op
     }
-    enum class State { NONE, INSERTED, EJECTED, UNKNOWN }
+    enum class State { NONE, INSERTED, EJECTED, PALM_WIFI, UNKNOWN }
 
     class Failed(message: String, val code: String? = null) : Exception(message)
     @Volatile private var jobCancelled = false
@@ -86,13 +86,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun stateOf(n: Int): State {
         val reply = link.request(command("state", n), timeoutSeconds = 30)
         if (!reply.ok) return State.UNKNOWN
-        // frond-68k's replies go on with the card's key and flags: the first word says it.
-        return when (if (m68k) reply.message.substringBefore(' ') else reply.message) {
-            "inserted" -> State.INSERTED
-            "ejected" -> State.EJECTED
-            "none" -> State.NONE
-            else -> State.UNKNOWN
-        }
+        return parseState(reply.message, m68k)
     }
 
     private fun run(command: String, argument: String = "") {
@@ -103,6 +97,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     fun eject() = run(command("eject"))
     fun reinsert() = run(command("reinsert"))
+    fun insertPalmWifi() = run("sd-wifi-insert")
+    fun ejectPalmWifi() = run("sd-wifi-eject")
 
     // A library card the core left out at start (changed while the machine was off), slot `n`:
     // `argument` is Cards.secondPutIn's, or Cards.attachArgument's on frond-68k.
@@ -419,6 +415,15 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     } ?: uri.lastPathSegment?.substringAfterLast('/')
 
     companion object {
+        internal fun parseState(message: String, m68k: Boolean): State =
+            when (if (m68k) message.substringBefore(' ') else message) {
+                "inserted" -> State.INSERTED
+                "ejected" -> State.EJECTED
+                "none" -> State.NONE
+                "inserted wifi", "inserted wifi ejected" -> State.PALM_WIFI
+                else -> State.UNKNOWN
+            }
+
         // The core's candidate card file (uarm/SdCandidate.h), live while its machine runs.
         const val LIVE_CANDIDATE = ".frondsd.tmp-live-"
         fun joined(path: String, name: String) = if (path.endsWith("/")) path + name else "$path/$name"

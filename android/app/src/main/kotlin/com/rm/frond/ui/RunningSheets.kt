@@ -247,11 +247,11 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
             ListItem(
                 headlineContent = {
                     Text(if (state == SdCard.State.UNKNOWN) "Not known" else shown.name,
-                        color = if (usable || state == SdCard.State.UNKNOWN) Color.Unspecified else Faded)
+                        color = if (usable || state == SdCard.State.UNKNOWN || state == SdCard.State.PALM_WIFI) Color.Unspecified else Faded)
                 },
                 supportingContent = if (state == SdCard.State.EJECTED) ({ Text("Ejected") }) else null,
                 leadingContent = {
-                    Marker(if (state == SdCard.State.INSERTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
+                    Marker(if (RunningSheets.cardIcon(state, false) == RunningSheets.CardIcon.IN) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
                 },
                 colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
                 modifier = if (usable) Modifier.clickableRow { model.openPicker(n = n) } else Modifier,
@@ -273,6 +273,12 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
             // frond-68k exports a card file.
             val ext = if (device.runs68k) "frondsd" else "img"
             saveImage.launch(if (n != 0) "SD card 2.$ext" else if (model.memoryStickPro) "Memory Stick Pro.img" else if (stick) "Memory Stick.frondms" else "SD card.$ext")
+        }
+        CardRow.INSERT_PALM_WIFI -> SheetAction("Insert Palm Wi-Fi Card", R.drawable.ic_card_in) {
+            if (model.selectSlot(n)) model.job("Inserting", "Couldn't insert the Palm Wi-Fi Card") { it.insertPalmWifi() }
+        }
+        CardRow.EJECT_PALM_WIFI -> SheetAction("Eject Palm Wi-Fi Card", R.drawable.ic_card_ejected) {
+            if (model.selectSlot(n)) model.job("Ejecting", "Couldn't eject the Palm Wi-Fi Card") { it.ejectPalmWifi() }
         }
         CardRow.TRY_AGAIN -> SheetAction("Try again", icon = Icons.Default.Refresh) { model.refresh() }
         CardRow.WRITE_PROTECT -> {

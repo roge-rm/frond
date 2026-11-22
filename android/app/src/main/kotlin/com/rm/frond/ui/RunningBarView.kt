@@ -293,7 +293,7 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
             state.dialog = null
             model.hardReset(saveFirst)
         }
-        RunningMenu.Id.NETWORK -> NetworkDialog(model.network, NetworkMode.offered(device.wifiOnlyNetwork), { state.dialog = null }) { mode ->
+        RunningMenu.Id.NETWORK -> NetworkDialog(model.network, NetworkMode.offered(device.networkWifiOnly), { state.dialog = null }) { mode ->
             state.dialog = null
             model.changeNetwork(mode)
         }
