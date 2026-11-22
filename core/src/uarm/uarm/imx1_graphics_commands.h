@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 #if defined(__linux__)
 #include <pthread.h>
 #endif
@@ -2166,26 +2167,40 @@ inline void Imx1GraphicsCommands::undo(const Undo& u) {
     ticks = u.ticks;
     refused = u.refused;
 }
-// Stats over every worker, printed at exit with FROND_ZODIAC_GFX_STATS: jobs, drains that waited and for how
-// long, pushes that found the ring full, wakes, the workers' time on jobs. Never destroyed, as a worker owned by a
-// static can still write it during static destruction.
+// Stats over every worker, printed with FROND_ZODIAC_GFX_STATS once the process exits and every worker has gone:
+// jobs, drains that waited and for how long, pushes that found the ring full, wakes, the workers' time on jobs.
+// Constant initialised and trivially destroyed, so a worker owned by a static can use it at any point.
 struct Imx1GraphicsWorkerStats {
     std::atomic<uint64_t> jobs{0}, waits{0}, waitNs{0}, fullWaits{0}, wakes{0};
     alignas(64) std::atomic<uint64_t> busyNs{0};
-    static Imx1GraphicsWorkerStats& make() {
-        auto* stats = new Imx1GraphicsWorkerStats;
-        if (std::getenv("FROND_ZODIAC_GFX_STATS")) std::atexit(print);
-        return *stats;
+    std::atomic<uint32_t> live{0};
+    std::atomic<bool> registered{false}, exiting{false}, printed{false};
+    // A worker starts: the first one registers the exit print.
+    void started() {
+        live.fetch_add(1, std::memory_order_acq_rel);
+        if (!registered.exchange(true, std::memory_order_acq_rel) && std::getenv("FROND_ZODIAC_GFX_STATS"))
+            std::atexit(atExit);
     }
-    static void print();
+    // A worker has stopped and written its last counts: the last one after exit prints.
+    void stopped() {
+        if (live.fetch_sub(1, std::memory_order_acq_rel) == 1 && exiting.load(std::memory_order_acquire)) print();
+    }
+    static void atExit();
+    void print();
 };
-inline Imx1GraphicsWorkerStats& imx1GraphicsWorkerStats = Imx1GraphicsWorkerStats::make();
+inline Imx1GraphicsWorkerStats imx1GraphicsWorkerStats;
+static_assert(std::is_trivially_destructible<Imx1GraphicsWorkerStats>::value, "kept usable during static destruction");
+inline void Imx1GraphicsWorkerStats::atExit() {
+    auto& s = imx1GraphicsWorkerStats;
+    s.exiting.store(true, std::memory_order_release);
+    if (s.live.load(std::memory_order_acquire) == 0) s.print();
+}
 inline void Imx1GraphicsWorkerStats::print() {
-    const auto& s = imx1GraphicsWorkerStats;
+    if (printed.exchange(true, std::memory_order_acq_rel)) return;
     std::fprintf(stderr, "zodiac gfx thread: %llu jobs, %llu drains waited %.1f ms, %llu full waits, %llu wakes, "
-                 "worker ran %.1f ms\n", (unsigned long long)s.jobs.load(), (unsigned long long)s.waits.load(),
-                 s.waitNs.load() / 1e6, (unsigned long long)s.fullWaits.load(), (unsigned long long)s.wakes.load(),
-                 s.busyNs.load() / 1e6);
+                 "worker ran %.1f ms\n", (unsigned long long)jobs.load(), (unsigned long long)waits.load(),
+                 waitNs.load() / 1e6, (unsigned long long)fullWaits.load(), (unsigned long long)wakes.load(),
+                 busyNs.load() / 1e6);
 }
 // Fast only: a host thread that runs the pixel work of the fills fastFill and fastTransform take, in queue order.
 // The emu thread keeps everything the guest sees (complete's checks, the engine, each fill's ranges) and queues the
@@ -2202,7 +2217,9 @@ class Imx1GraphicsWorker final : public Imx1GraphicsFence {
         const char* value = std::getenv("FROND_ZODIAC_GFX_THREAD");
         return !value || std::strcmp(value, "0") != 0;
     }
-    Imx1GraphicsWorker() : slots(capacity), results(capacity), thread([this] { run(); }) {}
+    Imx1GraphicsWorker() : slots(capacity), results(capacity), thread([this] { run(); }) {
+        imx1GraphicsWorkerStats.started();
+    }
     Imx1GraphicsWorker(const Imx1GraphicsWorker&) = delete;
     Imx1GraphicsWorker& operator=(const Imx1GraphicsWorker&) = delete;
     ~Imx1GraphicsWorker() override {
@@ -2213,6 +2230,7 @@ class Imx1GraphicsWorker final : public Imx1GraphicsFence {
         }
         wake.notify_one();
         thread.join();
+        imx1GraphicsWorkerStats.stopped();
     }
     // Moves to memory (or none), draining and letting go of the one before.
     void attach(Imx1GraphicsMemory* to) {
@@ -2241,8 +2259,9 @@ class Imx1GraphicsWorker final : public Imx1GraphicsFence {
         }
         collect();
     }
-    // Jobs queued, for tests.
+    // Jobs queued and jobs the worker has run, for tests.
     uint64_t jobs() const { return pushed; }
+    uint64_t finished() const { return tail.load(std::memory_order_acquire); }
     // Tests: the worker waits while this holds, before each run of jobs.
     static inline std::atomic<bool> holdForTests{false};
     // What the emu thread hands over; the worker only reads it. For a transform, its results too.

@@ -228,9 +228,12 @@ static void checkFullRingDone() {
         if (!done) fail("push after the worker emptied a full ring", 2048);
     });
     Imx1GraphicsWorker::holdForTests = true;
+    const uint64_t before = worker.jobs();
     for (unsigned i = 0; i < 2048; ++i) REQUIRE(C::completeFill(*state, eim, queued, fills[i]) == A::ok);
+    // The last push published the whole ring: wait until the worker has run all of it.
+    if (worker.jobs() - before != 2048) fail("jobs queued", unsigned(worker.jobs() - before));
     Imx1GraphicsWorker::holdForTests = false;
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    while (worker.finished() != worker.jobs()) std::this_thread::yield();
     REQUIRE(C::completeFill(*state, eim, queued, fills[2048]) == A::ok);
     done = true;
     watchdog.join();
