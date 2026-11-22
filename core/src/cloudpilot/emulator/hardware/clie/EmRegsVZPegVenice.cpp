@@ -173,6 +173,12 @@ uint8 EmRegsVzPegVenice::GetPortInternalValue(int port) {
     return result;
 }
 
+void EmRegsVzPegVenice::SetPa1Irq(bool asserted, bool restoring) {
+    const auto oldPins = GetPortInternalValue('D');
+    pa1Irq = asserted;
+    if (!restoring && ((oldPins ^ GetPortInternalValue('D')) & 0x40)) UpdateIRQ3(oldPins);
+}
+
 // ---------------------------------------------------------------------------
 //		� EmRegsVzPegVenice::GetKeyInfo
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 #include "PatchModuleClieStubAll.h"
 
+#include "EmRegsFMSound.h"
 #include "Marshal.h"
 
 namespace {
@@ -22,7 +23,7 @@ Err PatchModuleClieStubAll::GetTailpatch(uint16 index, TailpatchProc &procP) {
 }
 
 bool PatchModuleClieStubAll::HandlesLibrary(const string &libname) {
-    if (libname == "Sony Sound Library") return true;
+    if (libname == "Sony Sound Library") return !EmRegsFMSound::Enabled();
     if (libname == "Sony Irc Library") return true;
     if (libname == "Sony MgSys Library") return true;
 

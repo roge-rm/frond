@@ -144,6 +144,8 @@ On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is R
 
 The 68k Palms have the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on the silkscreen, each drawn after its own device. The m520's screen is 320×320. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync in the Connections panel (Linux) or in the Connections sheet (Android). On the CLIÉ T415, F1 to F4 are the app buttons and, while its jog controls are shown, Page Up and Page Down turn the Jog Dial, End presses it and Home is Back.
 
+The CLIÉ T415 plays FM MIDI and sampled audio through its Sony Sound Library. Sound controls in the app cover that audio and the Palm OS beeper.
+
 **Hold** (TG50) latches the device's Hold switch, which turns off the screen and controls, and audio keeps playing. It's saved with the machine.
 
 On Android a game controller presses the device's buttons. The d-pad and left stick are the five-way, A is select, L1, X, Y and R1 are the four app buttons and Select is Menu. To change them go to Settings → Controller → Set controls, tap a device button, then press the controller key. Reset to defaults puts them back.

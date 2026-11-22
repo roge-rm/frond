@@ -72,6 +72,23 @@ int main() {
     piezo.Change(at(1.1), 1000, 0.5);
     piezo.Render(at(1.2), clock, nullptr);
     check(piezo.Playing(), "skipped render applies a tone change");
+    // A decoded sample can arrive after a PWM write with a later cycle.
+    piezo.Restart(at(2.0));
+    piezo.Change(at(2.05), 440, 0.04);
+    piezo.ChangePcm(at(2.01), 4000);
+    piezo.ChangePcm(at(2.03), 0);
+    piezo.ChangePcm(at(2.015), 200, true);
+    piezo.ChangePcm(at(2.025), 0, true);
+    out.clear();
+    piezo.Render(at(2.1), clock, &out);
+    check(out.size() >= size_t(0.09 * rate), "mixed sample count follows guest time");
+    if (out.size() >= size_t(0.09 * rate)) {
+        check(out[size_t(0.012 * rate)] == 4000, "PCM arrives before the first PWM write");
+        check(out[size_t(0.02 * rate)] == 4200, "ADPCM and FM mix while both play");
+        check(out[size_t(0.027 * rate)] == 4000, "stopping FM leaves ADPCM playing");
+        check(out[size_t(0.04 * rate)] == 0, "PCM stops at the recorded cycle");
+        check(measure(out, size_t(0.06 * rate), out.size()).edges > 0, "PWM still renders after PCM");
+    }
     if (failures) return 1;
     std::puts("frond-68k sound: ok");
     return 0;
