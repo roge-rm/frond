@@ -669,6 +669,109 @@ static void lcdFormatTests() {
     }
 }
 
+// S3cLcdView's dirty rows: a partial change, rows collecting until reset, a layout change, the LCD off.
+static void lcdViewTests() {
+    S3cIntc intc;
+    intc.reset();
+    uint8_t mem[2 * 3 * 64];
+    uint32_t seed = 777;
+    for (auto& b : mem) b = uint8_t((seed = seed * 1103515245 + 12345) >> 16);
+    auto span = [&](uint32_t pa, size_t n) -> const uint8_t* {
+        if (pa < 0x30100000 || pa + n > 0x30100000 + sizeof mem) return nullptr;
+        return mem + (pa - 0x30100000);
+    };
+    S3cLcd lcd;
+    lcd.reset();
+    lcd.write(0x04, 2u << 14, intc);
+    lcd.write(0x08, 7u << 8, intc);
+    lcd.write(0x10, 1u << 11, intc);
+    lcd.write(0x14, 0x30100000 >> 1, intc);
+    lcd.write(0x1c, 32, intc);
+    lcd.write(0x00, (0x3u << 5) | (0xcu << 1) | 1, intc);
+    S3cLcd::Layout layout;
+    std::string why;
+    assert(lcd.layout(layout, why) && layout.width == 8 && layout.height == 3);
+    S3cLcdView view;
+    uint32_t first = 99, last = 99;
+    auto scan = [&](bool on) {
+        assert(lcd.layout(layout, why));
+        view.scan(8, 3, on ? &layout : nullptr, span);
+    };
+    auto matches = [&] {
+        std::vector<uint32_t> pixels;
+        unsigned w, h;
+        auto memory = [&](uint32_t pa, void* out, size_t n) {
+            const uint8_t* p = span(pa, n);
+            if (p) std::memcpy(out, p, n);
+            return p != nullptr;
+        };
+        assert(lcd.frame(memory, pixels, w, h, why));
+        for (size_t i = 0; i < pixels.size(); ++i) {
+            const uint32_t c = pixels[i];
+            assert(view.pixels[i] == (0xff000000u | (c & 0xff) << 16 | (c & 0xff00) | ((c >> 16) & 0xff)));
+        }
+    };
+    // First frame: every row.
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 2);
+    matches();
+    view.reset();
+    scan(true);
+    assert(!view.take(first, last));
+    // One line changed: that row only.
+    mem[64 + 3] ^= 0xff;
+    scan(true);
+    assert(view.take(first, last) && first == 1 && last == 1);
+    matches();
+    // Not reset: the next change adds to the range.
+    mem[2 * 64] ^= 0xff;
+    scan(true);
+    assert(view.take(first, last) && first == 1 && last == 2);
+    scan(true);
+    assert(view.take(first, last) && first == 1 && last == 2);
+    view.reset();
+    assert(!view.take(first, last));
+    // Bytes past the line (lineBytes 16 of a 64-byte stride) aren't scanned.
+    mem[40] ^= 0xff;
+    scan(true);
+    assert(!view.take(first, last));
+    // LCDSADDR moved to a frame with other bytes on every line: every row.
+    lcd.write(0x14, (0x30100000 + 3 * 64) >> 1, intc);
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 2);
+    matches();
+    view.reset();
+    // A changed pixel format with the same bytes converts every line again.
+    lcd.write(0x10, 0, intc);
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 2);
+    matches();
+    view.reset();
+    // Back to the first frame with only line 0 differing: only row 0 is dirty after its own change.
+    std::memcpy(mem + 3 * 64, mem, 3 * 64);
+    mem[3 * 64 + 1] ^= 0x55;
+    scan(true);
+    view.reset();
+    mem[3 * 64 + 1] ^= 0x55;
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 0);
+    view.reset();
+    // LCD off: black, and the rows that weren't black are dirty.
+    std::memset(mem + 3 * 64 + 128, 0, 64);
+    scan(true);
+    matches();
+    view.reset();
+    scan(false);
+    assert(view.take(first, last) && first == 0 && last == 1);
+    for (uint32_t p : view.pixels) assert(p == 0xff000000u);
+    view.reset();
+    scan(false);
+    assert(!view.take(first, last));
+    // A size change marks every row pending.
+    view.scan(8, 4, &layout, span);
+    assert(view.take(first, last) && first == 0 && last == 3);
+}
+
 static void lcdTests() {
     S3cIntc intc;
     intc.reset();
@@ -728,6 +831,7 @@ static void lcdTests() {
     small.write(0x10, 1u << 11, intc);
     assert(small.frame(memory, pixels, w, h, why) && pixels[0] == 0x00ff00 && pixels[1] == 0xff0000);
     lcdFormatTests();
+    lcdViewTests();
 }
 
 // The host's erase for a hard reset: whole blocks back to 0xff and marked dirty, the blocks either side kept.

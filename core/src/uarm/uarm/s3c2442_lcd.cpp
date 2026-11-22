@@ -1,5 +1,6 @@
 #include "s3c2442_blocks.h"
 #include <cstring>
+#include <algorithm>
 
 void S3cLcd::reset() {
     for (auto& r : lcdcon) r = 0;
@@ -204,4 +205,70 @@ bool S3cLcd::frame(const std::function<bool(uint32_t, void*, size_t)>& memory, s
         convertLine(l, line.data(), pixels.data() + size_t(y) * width, false);
     }
     return true;
+}
+
+void S3cLcdView::dirty(unsigned y) {
+    dirtyFirst = std::min<uint32_t>(dirtyFirst, y);
+    dirtyLast = std::max<uint32_t>(dirtyLast, y);
+    pending = true;
+}
+
+void S3cLcdView::all() {
+    dirtyFirst = 0;
+    dirtyLast = height ? height - 1 : 0;
+    pending = true;
+}
+
+void S3cLcdView::scan(unsigned w, unsigned h, const S3cLcd::Layout* lcd,
+                      const std::function<const uint8_t*(uint32_t, size_t)>& span) {
+    if (w != width || h != height || pixels.size() != size_t(w) * h) {
+        width = w;
+        height = h;
+        pixels.assign(size_t(w) * h, 0xff000000);
+        source.clear();
+        all();
+    }
+    bool scanned = lcd && lcd->width == w && lcd->height == h;
+    for (unsigned y = 0; scanned && y < h; ++y)
+        if (!span(lcd->lineAddress(y), lcd->lineBytes)) scanned = false;
+    if (scanned) {
+        const size_t lineBytes = lcd->lineBytes;
+        const bool fresh = source.size() != lineBytes * h || *lcd != layout;
+        if (fresh) {
+            source.resize(lineBytes * h);
+            layout = *lcd;
+        }
+        row.resize(w);
+        for (unsigned y = 0; y < h; ++y) {
+            const uint8_t* line = span(lcd->lineAddress(y), lineBytes);
+            uint8_t* last = source.data() + y * lineBytes;
+            if (!fresh && std::memcmp(line, last, lineBytes) == 0) continue;
+            std::memcpy(last, line, lineBytes);
+            S3cLcd::convertLine(*lcd, line, row.data(), true);
+            uint32_t* out = pixels.data() + size_t(y) * w;
+            if (std::memcmp(out, row.data(), w * 4) != 0) {
+                std::memcpy(out, row.data(), w * 4);
+                dirty(y);
+            }
+        }
+        return;
+    }
+    source.clear();
+    for (unsigned y = 0; y < h; ++y) {
+        uint32_t* out = pixels.data() + size_t(y) * w;
+        bool changed = false;
+        for (unsigned x = 0; x < w; ++x)
+            if (out[x] != 0xff000000u) {
+                out[x] = 0xff000000u;
+                changed = true;
+            }
+        if (changed) dirty(y);
+    }
+}
+
+uint32_t* S3cLcdView::take(uint32_t& first, uint32_t& last) {
+    if (!pending) return nullptr;
+    first = dirtyFirst <= dirtyLast ? dirtyFirst : 0;
+    last = dirtyFirst <= dirtyLast ? dirtyLast : 0;
+    return pixels.data();
 }

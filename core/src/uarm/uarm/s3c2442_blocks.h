@@ -597,4 +597,31 @@ class S3cLcd {
     void interrupts(S3cIntc& intc);
 };
 
+// The frame handed to the frontend, 0xffBBGGRR, width x height, kept from one scan to the next. scan()
+// converts only the lines whose bytes changed since they were last converted (all of them after a layout
+// change) and adds the rows whose pixels changed to the dirty range; without a layout of that size, or with a
+// line outside SDRAM, the frame is black. The dirty range collects until take() hands it out with reset().
+struct S3cLcdView {
+    std::vector<uint32_t> pixels, row;
+    // Each line's bytes as last converted into pixels, in layout; empty when pixels aren't from them.
+    std::vector<uint8_t> source;
+    S3cLcd::Layout layout{};
+    unsigned width = 0, height = 0;
+    uint32_t dirtyFirst = UINT32_MAX, dirtyLast = 0;  // none when dirtyFirst > dirtyLast
+    bool pending = false;
+
+    // span: the host bytes of SDRAM at a physical address, or null. lcd null: the LCD is off.
+    void scan(unsigned width, unsigned height, const S3cLcd::Layout* lcd,
+              const std::function<const uint8_t*(uint32_t, size_t)>& span);
+    void dirty(unsigned y);
+    void all();
+    // The frame and its dirty rows (0 to 0 when only pending), or null when nothing changed.
+    uint32_t* take(uint32_t& first, uint32_t& last);
+    void reset() {
+        pending = false;
+        dirtyFirst = UINT32_MAX;
+        dirtyLast = 0;
+    }
+};
+
 #endif

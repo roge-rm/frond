@@ -724,7 +724,7 @@ bool SocS3C2442::SetHeadphones(bool in) {
 void SocS3C2442::StateChanged() {
     const auto stop = machine->stopInfo().stop;
     halted = stop != S3c2442Stop::running && stop != S3c2442Stop::budget;
-    framePending = false;
+    lcdView.pending = false;
     redraw = true;
     jams.clear();
     keys.clear();
@@ -947,70 +947,19 @@ SoC::Attention SocS3C2442::GuestAttention() {
 
 bool SocS3C2442::LcdEnabled() { return !machine->asleep() && machine->lcd.enabled(); }
 
-// The panel as the LCD controller scans it, 0xRRGGBB, to the frontend's ABGR8888. Black with the LCD off.
-// Only lines whose bytes changed since they were last converted are converted again, and only rows of view
-// that changed are reported dirty.
+// The panel as the LCD controller scans it, to the frontend's ABGR8888 (S3cLcdView). Black with the LCD off.
 uint32_t* SocS3C2442::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) {
-    const unsigned width = displayConfiguration.width, height = displayConfiguration.height;
-    if (view.size() != size_t(width) * height) {
-        view.assign(size_t(width) * height, 0xff000000);
-        lcdSource.clear();
-        dirtyFirst = 0;
-        dirtyLast = height - 1;
-        framePending = true;
-    }
-    auto dirty = [&](unsigned y) {
-        dirtyFirst = std::min<uint32_t>(dirtyFirst, y);
-        dirtyLast = std::max<uint32_t>(dirtyLast, y);
-        framePending = true;
-    };
     S3cLcd::Layout layout;
     std::string why;
-    bool scanned = LcdEnabled() && machine->lcd.layout(layout, why) && layout.width == width &&
-                   layout.height == height;
-    for (unsigned y = 0; scanned && y < height; ++y)
-        if (!machine->sdramSpan(layout.lineAddress(y), layout.lineBytes)) scanned = false;
-    if (scanned) {
-        const size_t lineBytes = layout.lineBytes;
-        const bool fresh = lcdSource.size() != lineBytes * height || layout != lcdLayout;
-        if (fresh) {
-            lcdSource.resize(lineBytes * height);
-            lcdLayout = layout;
-        }
-        row.resize(width);
-        for (unsigned y = 0; y < height; ++y) {
-            const uint8_t* line = machine->sdramSpan(layout.lineAddress(y), lineBytes);
-            uint8_t* last = lcdSource.data() + y * lineBytes;
-            if (!fresh && std::memcmp(line, last, lineBytes) == 0) continue;
-            std::memcpy(last, line, lineBytes);
-            S3cLcd::convertLine(layout, line, row.data(), true);
-            uint32_t* out = view.data() + size_t(y) * width;
-            if (std::memcmp(out, row.data(), width * 4) != 0) {
-                std::memcpy(out, row.data(), width * 4);
-                dirty(y);
-            }
-        }
-    } else {
-        lcdSource.clear();
-        for (unsigned y = 0; y < height; ++y) {
-            uint32_t* out = view.data() + size_t(y) * width;
-            bool changed = false;
-            for (unsigned x = 0; x < width; ++x)
-                if (out[x] != 0xff000000u) { out[x] = 0xff000000u; changed = true; }
-            if (changed) dirty(y);
-        }
-    }
+    const bool on = LcdEnabled() && machine->lcd.layout(layout, why);
+    lcdView.scan(displayConfiguration.width, displayConfiguration.height, on ? &layout : nullptr,
+                 [&](uint32_t pa, size_t n) { return machine->sdramSpan(pa, n); });
     if (redraw) {
         redraw = false;
         ClearFramebufferDirty();
-        dirtyFirst = 0;
-        dirtyLast = height - 1;
-        framePending = true;
+        lcdView.all();
     }
-    if (!framePending) return nullptr;
-    firstDirtyLine = dirtyFirst <= dirtyLast ? dirtyFirst : 0;
-    lastDirtyLine = dirtyFirst <= dirtyLast ? dirtyLast : 0;
-    return view.data();
+    return lcdView.take(firstDirtyLine, lastDirtyLine);
 }
 
 void SocS3C2442::JamKey(enum KeyId key, uint32_t durationMsec) {

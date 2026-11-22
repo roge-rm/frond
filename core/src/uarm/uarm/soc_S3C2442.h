@@ -55,11 +55,7 @@ class SocS3C2442 : public SoC {
     bool InstallsToCard() const override { return true; }
     uint64_t GetTime() override { return machine->nanoseconds(); }
     uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
-    void ResetPendingFrame() override {
-        framePending = false;
-        dirtyFirst = UINT32_MAX;
-        dirtyLast = 0;
-    }
+    void ResetPendingFrame() override { lcdView.reset(); }
     Attention GuestAttention() override;
     DeviceType5 GetDeviceType() override { return deviceTypeRx1950; }
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_240x320; }
@@ -155,14 +151,9 @@ class SocS3C2442 : public SoC {
     std::vector<Jam> jams;
     S3cPenPacer pen;
     S3cKeyPacer keys;
-    // view is the frame handed out; row is one line converted. lcdSource holds each line's bytes as last
-    // converted into view, in lcdLayout; empty when view isn't from them. Rows view changed in since the
-    // last ResetPendingFrame are dirtyFirst to dirtyLast (none when dirtyFirst > dirtyLast).
-    std::vector<uint32_t> view, row;
-    std::vector<uint8_t> lcdSource;
-    S3cLcd::Layout lcdLayout{};
-    uint32_t dirtyFirst{UINT32_MAX}, dirtyLast{0};
-    bool framePending{false}, redraw{true};
+    // The frame handed out, and its dirty rows since the last ResetPendingFrame.
+    S3cLcdView lcdView;
+    bool redraw{true};
     // Guest ns Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};
     bool headphones{false};
