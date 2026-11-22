@@ -338,7 +338,14 @@ class HomeModel(private val activity: HomeActivity) {
         runJob("Copying", "Couldn't use the SoundFont", null, cancellable = true, reload = false) { cancelled, progress ->
             val path = SoundFonts.import(app, uri, cancelled, progress)
             HomeWork.scope.launch {
-                HomeWork.model?.let { m -> m.machineDraft = m.machineDraft?.let { d -> d.copy(settings = d.settings.copy(soundFont = path)) } }
+                val m = HomeWork.model
+                // A copy that finished after the copy or the draft was cancelled goes, unless a machine uses it.
+                if (m == null || m.machineDraft == null || cancelled()) {
+                    val keep = Sessions.list(app).map { it.settings.soundFont }.filter { it.isNotEmpty() }.toSet()
+                    if (path !in keep && m?.machineDraft?.settings?.soundFont != path) File(path).delete()
+                } else {
+                    m.machineDraft = m.machineDraft?.let { d -> d.copy(settings = d.settings.copy(soundFont = path)) }
+                }
             }
             null
         }

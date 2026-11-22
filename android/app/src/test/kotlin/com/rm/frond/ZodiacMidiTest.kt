@@ -50,6 +50,33 @@ class ZodiacMidiTest {
         assertEquals("SoundFont.sf2", SoundFonts.cleanName(null))
     }
 
+    @Test fun soundFontSameNameOtherContents() {
+        val folder = java.nio.file.Files.createTempDirectory("soundfonts").toFile()
+        try {
+            fun part(text: String): Pair<java.io.File, Long> {
+                val f = java.io.File(folder, ".GM.sf2.part")
+                f.writeText(text)
+                return f to SoundFonts.crcOf(f)
+            }
+            val (a, crcA) = part("first")
+            val first = SoundFonts.keep(folder, "GM.sf2", a, crcA)
+            assertEquals("GM.sf2", first.name)
+            // Other contents: a name of its own, the first kept.
+            val (b, crcB) = part("second")
+            val second = SoundFonts.keep(folder, "GM.sf2", b, crcB)
+            assertEquals(SoundFonts.hashedName("GM.sf2", crcB), second.name)
+            assertEquals("first", first.readText())
+            assertEquals("second", second.readText())
+            // The same contents again: the copy already there.
+            val (c, crcC) = part("first")
+            assertEquals(first, SoundFonts.keep(folder, "GM.sf2", c, crcC))
+            assertFalse(c.exists())
+            assertEquals("GM-0000002a.sf2", SoundFonts.hashedName("GM.sf2", 42))
+        } finally {
+            folder.deleteRecursively()
+        }
+    }
+
     @Test fun flagOnlyWithADevice() {
         assertEquals(listOf("--music-midi-out", "7"), ZodiacMidiChoice.arguments(7))
         assertEquals(emptyList<String>(), ZodiacMidiChoice.arguments(null))
