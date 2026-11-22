@@ -32,16 +32,25 @@ namespace {
 std::mutex perf_map_mutex;
 std::FILE* perf_map_file = nullptr;
 std::FILE* perf_code_file = nullptr;
+bool perf_map_failed = false;
 
 void PerfMapRegister(IR::LocationDescriptor location, const EmittedBlockInfo& info) {
     static const char* const dir = std::getenv("FROND_JIT_PERF_MAP");
     if (!dir || !*dir) return;
     std::lock_guard lock{perf_map_mutex};
+    if (perf_map_failed) return;
     if (!perf_map_file) {
         const std::string base = std::string(dir) + "/perf-" + std::to_string(getpid());
         perf_map_file = std::fopen((base + ".map").c_str(), "w");
         perf_code_file = std::fopen((base + ".code").c_str(), "wb");
-        if (!perf_map_file || !perf_code_file) return;
+        if (!perf_map_file || !perf_code_file) {
+            // Either failed to open: close the other and don't try again.
+            if (perf_map_file) std::fclose(perf_map_file);
+            if (perf_code_file) std::fclose(perf_code_file);
+            perf_map_file = perf_code_file = nullptr;
+            perf_map_failed = true;
+            return;
+        }
     }
     const u64 start = mcl::bit_cast<u64>(info.entry_point), size = info.size, value = location.Value();
     std::fprintf(perf_map_file, "%016llx %llx a32_%08x_%08x\n", (unsigned long long)start, (unsigned long long)size,
