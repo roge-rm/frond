@@ -98,6 +98,7 @@ static QString siblingCore68k(const QString& core) {
 MainWindow::MainWindow(const QString& core, const QString& core68k)
     : core(core), core68k(core68k.isEmpty() ? siblingCore68k(core) : core68k) {
     frondCards::defaultCore() = core;
+    setMidiPortsCore(core);
     setWindowTitle(tr("Frond"));
     resize(620, 650);
     restoreGeometry(settings.value("windowGeometry").toByteArray());
@@ -2767,6 +2768,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     if (!runningPreferences.rumble) arguments << "--no-rumble";
+    if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac) arguments << frondSessions::musicArguments(runningPreferences);
     // Nothing is known about this machine yet; the core's answer to battery-state sets it right.
     batteryKnown = batterySupported = false;
     batteryChargingSupported = true;
