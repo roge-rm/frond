@@ -456,6 +456,10 @@ inline bool deviceProfileNetworkHotSync5(const DeviceProfile5& profile) {
     return profile.deviceType == deviceTypeTX || caps.modem || caps.irPhone || caps.usbWifi || caps.builtInWifi;
 }
 
+inline bool deviceProfileHasPalmSdioWifi5(int32_t deviceType) {
+    return deviceType == deviceTypeZire72 || deviceProfileIsE2Board5(deviceType);
+}
+
 // The cradle or connector has a separate HotSync button on these boards.
 inline bool deviceProfileHasHotSyncButton5(int32_t deviceType) {
     const auto* profile = deviceProfile5(deviceType);

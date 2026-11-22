@@ -38,6 +38,18 @@ bool SdioCard::IrqAsserted() const {
 
 void SdioCard::AbortTransfer() { transfer = {}; }
 
+bool SdioCard::StateValid() const {
+    if ((enabled & ~functionMask) || (interruptEnable & ~(functionMask | 1)) ||
+        (pending & ~functionMask) || (busWidth & ~0x82) || (addressed && !ready) ||
+        (selected && !addressed)) return false;
+    if (!transfer.blocks) return true;
+
+    return selected && transfer.function <= count && transfer.length > 0 &&
+           transfer.length <= 2048 && transfer.blocks <= 511 &&
+           transfer.address < addressLimit &&
+           (!transfer.increment || transfer.blocks * transfer.length <= addressLimit - transfer.address);
+}
+
 bool SdioCard::Read(unsigned function, uint32_t address, uint8_t& value) {
     if (function) return functions.Read(function, address, value);
 
@@ -149,7 +161,7 @@ uint32_t SdioCard::Extended(uint32_t arg) {
     // Open-ended transfers need host stop handling. This bus supports finite transfers.
     if (!blocks || !length || length > 2048) return r5Command | r5Range;
     if (increment && blocks * length > addressLimit - address) return r5Command | r5Range;
-    transfer = {address, uint16_t(length), uint16_t(blocks), function, bool(arg & writeFlag), increment};
+    transfer = {address, uint16_t(length), uint16_t(blocks), uint8_t(function), bool(arg & writeFlag), increment};
     return r5Command;
 }
 

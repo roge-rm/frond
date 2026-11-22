@@ -82,6 +82,26 @@ static uint32_t sdioCommand(unsigned command, uint32_t arg, unsigned cmdat = 1,
     return (high << 24) | (mid << 8) | (low >> 8);
 }
 
+struct SdioMmcState {
+    PxaMmc* mmc;
+    SdioCard& card;
+
+    template <typename S>
+    void Save(S& state) {
+        pxaMmcSave(mmc, state);
+        SaveChunkHelper helper(*state.GetChunk(ChunkType::palmSdioWifi, 0));
+        card.TransferState(helper);
+    }
+
+    void Load(SavestateLoader<ChunkType>& loader) {
+        LoadChunkHelper helper(*loader.GetChunkOrFail(ChunkType::palmSdioWifi, 0, "SDIO"));
+        card.TransferState(helper);
+        assert(card.StateValid());
+        pxaMmcRestoreSdio(mmc, &card);
+        pxaMmcLoad(mmc, loader);
+    }
+};
+
 static void testSdio(bool pxa27x, VSD* memoryCard) {
     const unsigned fifoWidth = pxa27x ? 1 : 4;
     TestSdioFunctions functions;
@@ -173,10 +193,20 @@ static void testSdio(bool pxa27x, VSD* memoryCard) {
     direct(0, 4, write | 3);
     writeReg(0x28, 0x37f);
     sdioCommand(52, 5 << 9, 0x801);
+    bool sdioLine = false;
+    pxaMmcSetSdioIrq(mmc, [](void* context, bool asserted) {
+        *static_cast<bool*>(context) = asserted;
+    }, &sdioLine);
     card.SetPending(2);
     assert(card.IrqAsserted());
     pxaMmcSdioIrqChanged(mmc);
-    assert(icLevel == pxa27x);
+    assert(sdioLine && icLevel == pxa27x);
+    if (!pxa27x) {
+        direct(0, 4, write | 2);
+        assert(!sdioLine);
+        direct(0, 4, write | 3);
+        assert(sdioLine);
+    }
     if (pxa27x) {
         assert(readReg(0x2c) & 0x800);
         writeReg(0x28, 0xb7f);
@@ -205,6 +235,20 @@ static void testSdio(bool pxa27x, VSD* memoryCard) {
     direct(0, 2, write | 2);
     sdioCommand(53, write | fn1 | increment | 4, 13, 4, 1);
     writeReg(0x44, 0xab, fifoWidth);
+    SdioMmcState state{mmc, card};
+    Savestate<ChunkType> snapshot;
+    assert(snapshot.Save(state));
+    pxaMmcInsertSdio(mmc, nullptr);
+    card.Reset();
+    SavestateLoader<ChunkType> loader;
+    assert(loader.Load(snapshot.GetBuffer(), snapshot.GetSize(), state));
+    for (uint8_t byte : {0xcdu, 0xefu, 0x12u}) writeReg(0x44, byte, fifoWidth);
+    assert((readReg(4) & 0x1804) == 0x1800);
+    assert(functions.registers[0] == 0xab && functions.registers[1] == 0xcd &&
+           functions.registers[2] == 0xef && functions.registers[3] == 0x12);
+
+    sdioCommand(53, write | fn1 | increment | 4, 13, 4, 1);
+    writeReg(0x44, 0x99, fifoWidth);
     const unsigned beforeRemoval = functions.writes;
     pxaMmcInsertSdio(mmc, nullptr);
     assert(functions.writes == beforeRemoval);
@@ -213,6 +257,7 @@ static void testSdio(bool pxa27x, VSD* memoryCard) {
     initCard(memoryCard);
     command(17, 0, 512, false);
     assert(readReg(0x40, fifoWidth) == sector[0]);
+    pxaMmcSetSdioIrq(mmc, nullptr, nullptr);
 }
 
 int main(){

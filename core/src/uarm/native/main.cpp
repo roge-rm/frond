@@ -113,6 +113,7 @@ struct Options {
     optional<string> inputReplay;
     bool emulatedTime;  // --emulated-time
     optional<string> desktopSocket;
+    bool testPalmWifi;
     optional<string> saveOnDisconnect;
     optional<string> workFolder;
     optional<string> serial;
@@ -460,6 +461,10 @@ bool gFastEngineMissing = false;
         }
         if (options.desktopSocket && (options.runFor || options.script)) {
             cerr << "--desktop-socket cannot be combined with --run-for or --script" << endl;
+            return false;
+        }
+        if (options.testPalmWifi && (!options.desktopSocket || options.saveOnDisconnect)) {
+            cerr << "--test-palm-wifi needs --desktop-socket and disables session saves" << endl;
             return false;
         }
         if (options.saveOnDisconnect && (!options.desktopSocket || !frondPosix::IsAbsolutePath(*options.saveOnDisconnect))) {
@@ -883,6 +888,7 @@ bool gFastEngineMissing = false;
             // flag an older save kept from that store is dropped instead of checked against it.
             soc->SdEject();
         } else if (sdSwapped) {
+            if (socPxa && sdCardInitialized()) socPxa->EjectPalmWifi();
             // The saved card is gone: eject it as a hot eject would; the one there now goes in later.
             soc->SdEject();
             sdInsertPending = sdCardInitialized();
@@ -897,7 +903,7 @@ bool gFastEngineMissing = false;
                 cerr << "failed to remount SD card: session and card image do not match" << endl;
                 return false;
             }
-        } else if (sdCardInitialized() && !embeddedCard) {
+        } else if (sdCardInitialized() && !embeddedCard && !(socPxa && socPxa->PalmWifiInserted())) {
             soc->SdInsert();
         }
         const uint64_t ejectedAt = soc->GetTime();
@@ -1037,6 +1043,7 @@ bool gFastEngineMissing = false;
             .replay = replay, .replayStartedAt = replayStartedAt, .emulatedTime = options.emulatedTime,
             .screenWidth = displayConfiguration.width,
             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+        commandContext.testPalmWifi = options.testPalmWifi;
         commandContext.replayClockLast = replayStartedAt;
         if (rx1950Soc) commandContext.speedLimitHz = soc->FollowHz();
         commandContext.speedPending = zodiac != nullptr;
@@ -1939,6 +1946,10 @@ int main(int argc, char** argv) {
 
     program.add_argument("--desktop-socket").help("private desktop control socket");
 
+    program.add_argument("--test-palm-wifi")
+        .help("enable test-only Palm Wi-Fi Card commands on the desktop socket")
+        .default_value(false).implicit_value(true);
+
     program.add_argument("--save-on-disconnect")
         .help("save the session here if the desktop's control socket goes without a quit")
         .metavar("<session file>");
@@ -2031,6 +2042,7 @@ int main(int argc, char** argv) {
                        .inputReplay = program.present("--input-replay"),
                        .emulatedTime = program.get<bool>("--emulated-time"),
                        .desktopSocket = program.present("--desktop-socket"),
+                       .testPalmWifi = program.get<bool>("--test-palm-wifi"),
                        .saveOnDisconnect = program.present("--save-on-disconnect"),
                        .workFolder = program.present("--work-folder"),
                        .serial = program.present("--serial"),

@@ -54,7 +54,9 @@
 #include "syscall_dispatch.h"
 #include "deviceSonyTG50.h"
 #include "md5.h"
+#include "sync/Sha256.h"
 #include "audio_queue.h"
+#include "PalmSdioWifi.h"
 
 #define SAVESTATE_VERSION 2
 
@@ -124,6 +126,20 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
                                                      : PATCH_FEATURE_ALL);
 
     ram = ramInit(mem, this, RAM_BASE, ramBackingSize, &bufferMemory, true);
+    if (deviceType == deviceTypeFrankenE2 && romSize == 0x800000) {
+        constexpr size_t loopbackExportCount = 0x5178e0;
+        const auto* bytes = static_cast<const uint8_t*>(romData);
+        const auto digest = frondSync::Sha256Hex(bytes, romSize);
+        if (digest == "e3b8f76070f9e58942aa5b6d730c2b9fb3f3ba670dcee292aaac894305fd62ee") {
+            // Loopback NetIF uses only exports present in the E3's 68-entry Net Library.
+            e3WifiRom.assign(bytes, bytes + romSize);
+            e3WifiRom[loopbackExportCount] = 0x44;
+            romData = e3WifiRom.data();
+            e3WifiCompatible = true;
+        } else {
+            e3WifiCompatible = digest == "e89a61e98807e5b1a2a61df4f761520b3cb93a2e13a55330833d637a50aefefa";
+        }
+    }
     rom = romInit(mem, ROM_BASE, romData, romSize);
 
     void *peepholeBuffer = romGetPeepholeBuffer(rom);
@@ -259,6 +275,12 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     }
 
     mmc = pxaMmcInit(mem, ic, dma, socRev == 2);
+    if (deviceProfileIsE2Board5(deviceType)) {
+        // The slot driver re-arms the active-low GPIO40 interrupt by toggling CCCR master enable.
+        pxaMmcSetSdioIrq(mmc, [](void* context, bool asserted) {
+            pxaGpioSetState(static_cast<PxaGpio*>(context), 40, !asserted);
+        }, gpio);
+    }
 
     displayConfiguration =
         deviceConfigurationDisplayConfigForDevice(deviceType, deviceConfigurationDefaultDisplayMode(deviceType));
@@ -495,6 +517,7 @@ void SocPXA::LoadSleepReset(SavestateLoader<ChunkType>& loader) {
     for (unsigned i = 0; i < 4; ++i) pxaPwmLoad(pwm[i], loader, i);
     if (!(pxaPwrClkSleepRetention(pwrClk) & 0x0c)) pxaTimrLoad(tmr, loader);
     pxaMmcLoad(mmc, loader);
+    if (palmSdioWifi) palmSdioWifi->Card().AbortTransfer();
     pxaLcdLoad(lcd, loader);
     pxaImcLoad(imc, loader);
     pxa270UdcLoad(udc2, loader);
@@ -573,6 +596,7 @@ void SocPXA::LoadSleepReset25x(SavestateLoader<ChunkType>& loader) {
     deviceAudioSleepReset(dev);
     pxaTimrLoad(tmr, loader);
     pxaMmcLoad(mmc, loader);
+    if (palmSdioWifi) palmSdioWifi->Card().AbortTransfer();
     pxaLcdLoad(lcd, loader);
     pxa255dspLoad(dsp, loader);
     pxa255UdcLoad(udc1, loader);
@@ -633,7 +657,56 @@ void SocPXA::OnSetPcmSuspended() {
     if (!pcmSuspended) cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
 }
 
+bool SocPXA::SupportsPalmWifi() {
+    const auto type = GetDeviceType();
+    return type == deviceTypeZire72 || type == deviceTypeE2 || e3WifiCompatible;
+}
+
+bool SocPXA::InsertPalmWifi() {
+    if (SdInserted() || palmSdioWifi || !SupportsPalmWifi()) return false;
+    palmSdioWifi = std::make_unique<PalmSdioWifi>(networkSimulation, e3WifiCompatible);
+    pxaMmcInsertSdio(mmc, &palmSdioWifi->Card());
+    deviceSetSdCardInserted(dev, true);
+    return true;
+}
+
+void SocPXA::EjectPalmWifi() {
+    if (!palmSdioWifi) return;
+    pxaMmcInsertSdio(mmc, nullptr);
+    palmSdioWifi.reset();
+    deviceSetSdCardInserted(dev, false);
+}
+
+bool SocPXA::Save() {
+    // Ejection removes the chunk, and BAP records change its size.
+    if (SupportsPalmWifi()) savestate->Reset();
+    return SocGeneric<SocPXA>::Save();
+}
+
+bool SocPXA::LoadPalmWifi(SavestateLoader<ChunkType>& loader) {
+    if (loader.HasChunk(ChunkType::palmSdioWifi)) {
+        if (!SupportsPalmWifi() || SdInserted()) {
+            loader.NotifyError();
+            return false;
+        }
+        auto restored = std::make_unique<PalmSdioWifi>(networkSimulation, e3WifiCompatible);
+        if (!restored->Load(loader)) return false;
+        if (palmSdioWifi) restored->TakeHost(*palmSdioWifi);
+        else if (displacedPalmSdioWifi) restored->TakeHost(*displacedPalmSdioWifi);
+        palmSdioWifi = std::move(restored);
+        displacedPalmSdioWifi.reset();
+        pxaMmcRestoreSdio(mmc, &palmSdioWifi->Card());
+    } else if (palmSdioWifi) {
+        // A later load callback can still fail. Keep the router until the load commits.
+        displacedPalmSdioWifi = std::move(palmSdioWifi);
+        pxaMmcRestoreSdio(mmc, nullptr);
+        if (SdInserted()) pxaMmcInsert(mmc, vSD);
+    }
+    return true;
+}
+
 void SocPXA::OnSdInsert() {
+    EjectPalmWifi();
     vsdReset(vSD, sdCardSectorCount());
     pxaMmcInsert(mmc, vSD);
     deviceSetSdCardInserted(dev, true);
@@ -727,10 +800,19 @@ void SocPXA::SetCameraSource(const CameraSource *source) {
     if (PowerSleeping()) deviceDisarmInput(dev);
 }
 
-void SocPXA::OnBeforeReset() { if (!checkpointFenceDepth && !irReplacementDepth) deviceDisarmInput(dev); else microphoneInvalidatePending = true; resetRtc = pxaRtcRetained(rtc); resetHold = deviceHoldSwitchOn(dev); deviceBeginReset(dev); }
+void SocPXA::OnBeforeReset() {
+    reinsertPalmWifi = PalmWifiInserted();
+    EjectPalmWifi();
+    if (!checkpointFenceDepth && !irReplacementDepth) deviceDisarmInput(dev);
+    else microphoneInvalidatePending = true;
+    resetRtc = pxaRtcRetained(rtc);
+    resetHold = deviceHoldSwitchOn(dev);
+    deviceBeginReset(dev);
+}
 
 void SocPXA::OnReset() {
     deviceEndReset(dev);
+    if (std::exchange(reinsertPalmWifi, false)) InsertPalmWifi();
     if (resetHold) deviceKey(dev, keyIdHold, true);
     pxaLcdResetPaletteBuffer(lcd);
     if (nand) nandResetPageBuffer(nand);
@@ -811,6 +893,7 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     }
 
     pxaTimrLoad(tmr, loader);
+    if (!LoadPalmWifi(loader)) return;
     pxaMmcLoad(mmc, loader);
     pxaRtcLoad(rtc, loader);
     pxaLcdLoad(lcd, loader);
@@ -828,6 +911,10 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     if (pxaI2sHasCodec(i2s))
         pxaI2sSetClockEnabled(i2s, pxaPwrClkI2sClock(pwrClk), false);
     deviceLoad(dev, loader, RestoringCheckpoint());
+    if (palmSdioWifi) {
+        deviceSetSdCardInserted(dev, true);
+        pxaMmcSdioIrqChanged(mmc);
+    }
     // The loaded GPIO and AUX already match the loaded pad. The hooks are wiring: the pad takes them
     // unless a host endpoint holds the line, which leaves the connector empty instead.
     if (gamepad.Attached() && (!GamepadSupported() || (serialHostHooks.context && serialHostHooks.context != this) ||
@@ -894,6 +981,7 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
 
 template <typename T>
 void SocPXA::OnSave(T &savestate) {
+    if (palmSdioWifi) palmSdioWifi->Save(savestate);
     vsdSave(vSD, savestate);
 
     pxaUartSave(ffUart, savestate, 0);
@@ -1082,7 +1170,9 @@ void SocPXA::StateReplacementRefused(const std::function<void()>& restore) {
 }
 
 void SocPXA::StateReplaced() {
+    displacedPalmSdioWifi.reset();
     if (!RestoringCheckpoint()) {
+        if (palmSdioWifi) palmSdioWifi->DropHost();
         if (checkpointFenceDepth) microphoneInvalidatePending = true;
         else { deviceDisarmInput(dev); microphoneInvalidatePending = false; }
     }
@@ -1128,6 +1218,10 @@ uint64_t SocPXA::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         serialResumePending = false;
         for (auto* uart : {ffUart, stUart, btUart, hwUart})
             if (uart) pxaUartKick(uart);
+    }
+    if (palmSdioWifi) {
+        palmSdioWifi->Poll(GetTime());
+        pxaMmcSdioIrqChanged(mmc);
     }
     return SocGeneric<SocPXA>::Run(maxCycles, cyclesPerSecond);
 }
@@ -1517,6 +1611,7 @@ void SocPXA::ReleaseKeyboard() {
 bool SocPXA::SetBluetooth(const std::string& path,std::string& error) {return deviceSetBluetooth(dev,path,error);}
 std::string SocPXA::BluetoothState() {return deviceBluetoothState(dev);}
 SocPXA::~SocPXA() {
+    EjectPalmWifi();
     checkpointLifetime.reset();
     deviceStopBluetooth(dev);
     cpuSetEarlyAudioHook(cpu,nullptr,nullptr,0,0);

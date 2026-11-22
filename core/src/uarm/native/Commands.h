@@ -65,6 +65,7 @@ namespace commands {
         std::string speedDetail{};
         // The Zodiac before its first window: speed-state gives "- MIPS" so the unit doesn't change once it has one.
         bool speedPending{false};
+        bool testPalmWifi{false};
     };
 
     // The input replay's clock in us: guest time under --emulated-time, else host time. A reset

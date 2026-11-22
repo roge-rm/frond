@@ -41,6 +41,8 @@ struct PxaMmc {
 
     struct VSD *vsd;
     SdioCard *sdio;
+    PxaMmcSdioIrq sdioIrq;
+    void* sdioIrqContext;
     bool wordFifo;  // PXA27x transfers 1/2/4 bytes per FIFO access; PXA25x uses the low byte.
     // The guest stopped the clock since the card was taken out (pxaMmcClockStoppedSinceRemoval). Not saved.
     bool stoppedSinceRemoval;
@@ -91,10 +93,11 @@ struct PxaMmc {
 
 static void pxaMmcPrvIrqUpdate(struct PxaMmc *mmc) {
     mmc->iReg &= ~I_SDIO;
+    const bool sdioAsserted = mmc->sdio && mmc->sdio->IrqAsserted();
+    if (mmc->sdioIrq) mmc->sdioIrq(mmc->sdioIrqContext, sdioAsserted);
     // DAT1 carries data during a 4-bit transfer. Sample its IRQ between transfers.
     const bool irqWindow = !(mmc->cmdat & CMDAT_SD_4DAT) || !mmc->dataXferOngoing;
-    if (mmc->wordFifo && irqWindow && (mmc->cmdat & CMDAT_SDIO_INT_EN) &&
-        mmc->sdio && mmc->sdio->IrqAsserted())
+    if (sdioAsserted && mmc->wordFifo && irqWindow && (mmc->cmdat & CMDAT_SDIO_INT_EN))
         mmc->iReg |= I_SDIO;
     uint32_t irqs = mmc->iReg;
 
@@ -656,7 +659,18 @@ void pxaMmcInsertSdio(PxaMmc *mmc, SdioCard *card) {
     pxaMmcPrvIrqUpdate(mmc);
 }
 
+void pxaMmcRestoreSdio(PxaMmc *mmc, SdioCard *card) {
+    mmc->sdio = card;
+    if (card) mmc->vsd = nullptr;
+}
+
 void pxaMmcSdioIrqChanged(PxaMmc *mmc) { pxaMmcPrvIrqUpdate(mmc); }
+
+void pxaMmcSetSdioIrq(PxaMmc* mmc, PxaMmcSdioIrq irq, void* context) {
+    mmc->sdioIrq = irq;
+    mmc->sdioIrqContext = context;
+    pxaMmcPrvIrqUpdate(mmc);
+}
 
 template <typename T>
 void pxaMmcSave(struct PxaMmc *mmc, T &savestate) {

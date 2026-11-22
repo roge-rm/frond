@@ -31,6 +31,16 @@ class SdioCard {
     SdDataReplyType WriteBlock(const void* data, uint32_t length);
     void AbortTransfer();
 
+    template <typename H>
+    void TransferState(H& state) {
+        state.Do8(enabled).Do8(interruptEnable).Do8(pending).Do8(busWidth)
+            .DoBool(ready).DoBool(addressed).DoBool(selected);
+        for (auto& size : blockSize) state.Do16(size);
+        state.Do32(transfer.address).Do16(transfer.length).Do16(transfer.blocks)
+            .Do8(transfer.function).DoBool(transfer.write).DoBool(transfer.increment);
+    }
+    bool StateValid() const;
+
    private:
     bool Read(unsigned function, uint32_t address, uint8_t& value);
     bool Write(unsigned function, uint32_t address, uint8_t value);
@@ -47,7 +57,7 @@ class SdioCard {
     struct Transfer {
         uint32_t address;
         uint16_t length, blocks;
-        unsigned function;
+        uint8_t function;
         bool write, increment;
     } transfer{};
 };

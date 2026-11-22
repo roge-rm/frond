@@ -637,6 +637,23 @@ appimage:
 appimage-arm64:
 	$(call build-appimage,aarch64,arm64)
 
+.PHONY: test-palm-sdio-wifi
+test-palm-sdio-wifi: $(COMMON_NET_LIB) $(COMMON_LIB)
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/palm-sdio-wifi.cpp core/src/uarm/uarm/PalmSdioWifi.cpp \
+		core/src/uarm/uarm/SdioCard.cpp core/src/uarm/uarm/vSD.cpp \
+		core/src/uarm/uarm/NetworkSimulation.cpp core/src/uarm/uarm/HostNetwork.cpp \
+		$(COMMON_NET_LIB) $(COMMON_LIB) $(shell pkg-config --libs slirp) -pthread \
+		-Wl,--gc-sections -o $(OBJ_ROOT)/test-palm-sdio-wifi
+	$(OBJ_ROOT)/test-palm-sdio-wifi
+
+.PHONY: test-palm-prism-frame
+test-palm-prism-frame:
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm tests/palm-prism-frame.cpp \
+		-o $(OBJ_ROOT)/test-palm-prism-frame
+	$(OBJ_ROOT)/test-palm-prism-frame
+
 .PHONY: test-pxa-mmc
 test-pxa-mmc: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \

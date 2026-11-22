@@ -265,6 +265,10 @@ class DesktopControl {
     // the .frond compressed and written on saveJob while the guest runs. True when the reply waits
     // for that write; false with `result` set when the save failed before it.
     bool startSave(commands::Context& ctx, const std::string& path, const std::string& id, Reply& result) {
+        if (ctx.testPalmWifi) {
+            result = {false, "test-mode", "Session saves are disabled in Palm Wi-Fi test runs."};
+            return false;
+        }
         if (!frondPosix::IsAbsolutePath(path)) {
             result = {false, "argument", "An absolute file path is required."};
             return false;
@@ -574,7 +578,9 @@ class DesktopControl {
         const auto& caps = capabilities(ctx);
         if (!caps.serial && command == "serial-mode")
             return {false, "unsupported", std::string("The ") + deviceProfile5(ctx.soc->GetDeviceType())->displayName + " has no serial port."};
-        if (!caps.network && command == "network-mode" && path != "disabled")
+        const bool palmWifi = deviceProfileHasPalmSdioWifi5(ctx.soc->GetDeviceType());
+        if (!caps.network && command == "network-mode" && path != "disabled" &&
+            !(path == "wireless" && (palmWifi || ctx.testPalmWifi)))
             return {false, "unsupported", "This device has no emulated network."};
         if(command=="bluetooth-state" || command=="bluetooth-mode") {
             if(!caps.bluetooth)
@@ -974,6 +980,25 @@ class DesktopControl {
                 return {true,"exported","Memory Stick image exported."};
             }
             return {false,"command","Unknown Memory Stick command."};
+        }
+        if (command.rfind("sd-", 0) == 0) {
+            auto* pxa = dynamic_cast<SocPXA*>(ctx.soc);
+            const bool wifiInserted = pxa && pxa->PalmWifiInserted();
+            if (command == "sd-wifi-insert") {
+                if (!pxa || (!palmWifi && !ctx.testPalmWifi) || !pxa->SupportsPalmWifi())
+                    return {false, "unsupported", "This device has no Palm Wi-Fi Card."};
+                if (ctx.soc->SdInserted() || wifiInserted || !pxa->InsertPalmWifi())
+                    return {false, "busy", "Eject the current SD card first."};
+                return {true, "inserted", "Palm Wi-Fi Card inserted."};
+            }
+            if (command == "sd-wifi-eject" || (wifiInserted && command == "sd-eject")) {
+                if (!wifiInserted) return {false, "empty", "No Palm Wi-Fi Card is inserted."};
+                pxa->EjectPalmWifi();
+                return {true, "ejected", "Palm Wi-Fi Card ejected."};
+            }
+            if (wifiInserted && command == "sd-state")
+                return {true, "card", sdCardInitialized() ? "inserted wifi ejected" : "inserted wifi"};
+            if (wifiInserted) return {false, "busy", "Eject the Palm Wi-Fi Card first."};
         }
         if (command == "sd-state") return {true, "card", !sdCardInitialized() ? "none" : ctx.soc->SdInserted() ? "inserted" : "ejected"};
         if (command == "sd-create" || command == "sd-insert") {

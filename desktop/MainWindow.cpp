@@ -306,6 +306,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     sdRetry = button(tr("Try again"), "sdRetry", true);
     for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdRetry}) cardRow->addWidget(b);
     cardLayout->addLayout(cardRow);
+    palmWifiCard = button(tr("Insert Palm Wi-Fi Card"), "palmWifiCard", true);
+    cardLayout->addWidget(palmWifiCard);
+    connect(palmWifiCard, &QPushButton::clicked, this, [this] {
+        send(palmWifiInserted ? "sd-wifi-eject" : "sd-wifi-insert");
+    });
     auto* linkedRow = new QHBoxLayout;
     linkedState = new QLabel(root);
     linkedState->setObjectName("linkedState");
@@ -900,6 +905,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 log->appendPlainText(error);
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
     linked2Watcher.reset(); linked2WatcherId.clear(); cardSlot = 0; secondStartPending = false;
+        palmWifiInserted = false;
         sdKnown = protectionKnown = protection2Known = protectionStartsSecond = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         refresh();
         // The machine's card is free for Files and the rest once its lock is gone.
@@ -1184,9 +1190,16 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         // frond-68k's state replies go on with the card's key and flags: the first word says it.
         const auto word = message.section(' ', 0, 0);
         if (command == "sd-state" || command == "ms-state") {
+            palmWifiInserted = command == "sd-state" && message.section(' ', 1, 1) == "wifi";
             sdKnown = word == "none" || word == "inserted" || word == "ejected";
-            cardPresent = sdKnown && word != "none";
-            cardInserted = word == "inserted";
+            cardPresent = palmWifiInserted ? message.section(' ', 2, 2) == "ejected"
+                                           : sdKnown && word != "none";
+            cardInserted = word == "inserted" && !palmWifiInserted;
+        }
+        else if (command == "sd-wifi-insert" || command == "sd-wifi-eject" ||
+                 (palmWifiInserted && command == "sd-eject")) {
+            palmWifiInserted = command == "sd-wifi-insert";
+            if (send("sd-state")) return;
         }
         else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert" || command == "sd-attach" ||
                  command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-attach") {
@@ -1455,7 +1468,10 @@ void MainWindow::refresh() {
     addButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
-    if (caps.wifiOnlyNetwork != networkWifiOnly) fillNetworkModes(caps.wifiOnlyNetwork);
+    const bool palmWifiAvailable = deviceProfileHasPalmSdioWifi5(int(currentDevice()));
+    const bool supportsNetwork = caps.network || palmWifiAvailable;
+    const bool wifiOnly = caps.wifiOnlyNetwork || (palmWifiAvailable && !caps.network);
+    if (wifiOnly != networkWifiOnly) fillNetworkModes(wifiOnly);
     const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
     const bool linkedCards = frondFirmware::linkedCards(currentDevice());
     // A connector the device has that isn't emulated yet, greyed out.
@@ -1472,7 +1488,7 @@ void MainWindow::refresh() {
     portableExport->setEnabled(client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
-    note(network, caps.network, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
+    note(network, supportsNetwork, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
     note(usb, caps.usb, frondFirmware::usbNetwork(currentDevice()) ? QString() : usbTip); note(usbPort, caps.usb, {});
     note(irda, caps.infrared, infraredKeyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
@@ -1504,7 +1520,7 @@ void MainWindow::refresh() {
     }
     shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
     if (frondFirmware::serialAbsent(currentDevice())) serialState->setVisible(false);
-    shown(!m68k || caps.network, {networkLabel, network});
+    shown(!m68k || supportsNetwork, {networkLabel, network});
     shown(!m68k || infraredKeyboard, {keyboardLabel, keyboard});
     shown(!m68k || caps.usb, {usbLabel, usb, usbPort});
     shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
@@ -1540,7 +1556,7 @@ void MainWindow::refresh() {
     holdToggle->setChecked(holdKnown && holdOn);
     note(holdToggle, frontend.holdSupported, {});
     importAction->setEnabled(!running && !busy);
-    network->setEnabled(enabled && caps.network);
+    network->setEnabled(enabled && supportsNetwork);
     keyboard->setEnabled(enabled && infraredKeyboard && irda->currentData()=="off");
     const bool editable = !busy && !stopping && (!running || enabled);
     const auto protocol = frondDesktopSync::protocol(currentDevice());
@@ -1599,6 +1615,9 @@ void MainWindow::refresh() {
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
     const bool known = sdKnown && running && supported;
+    palmWifiCard->setVisible(known && (palmWifiAvailable || palmWifiInserted));
+    palmWifiCard->setEnabled(enabled && !cardInserted);
+    palmWifiCard->setText(palmWifiInserted ? tr("Eject Palm Wi-Fi Card") : tr("Insert Palm Wi-Fi Card"));
     sdStatus->setText(!supported ? tr("Not available yet") : !known ? tr("Not known") : !cardPresent ? tr("No card") : cardInserted ? tr("Inserted") : tr("Ejected"));
     // The picker button already says "No card" or the card's name, and Eject shows it's in.
     sdStatus->setVisible((!m68k || linkedCards) && (!known || (cardPresent && !cardInserted)));
@@ -1633,6 +1652,12 @@ void MainWindow::refresh() {
     for (auto* b : {cardPick, sdReinsert, sdExchange, sdEject, sdExport, sdRetry, linkedInsert}) {
         if (!supported) b->setVisible(false);
         b->setEnabled(enabled && supported);
+    }
+    if (palmWifiInserted) {
+        sdStatus->hide();
+        linkedState->hide();
+        for (auto* b : {cardPick, sdReinsert, sdExchange, sdEject, sdExport, sdRetry, linkedInsert})
+            b->hide();
     }
     // A frond-68k card still linked from where an older Frond kept it (it couldn't be moved into
     // Cards) can be ejected, put back and exported, but not changed or opened in Files.
@@ -1694,9 +1719,11 @@ void MainWindow::refresh() {
     for (int i = 0; i < network->count(); i++) modes << qMakePair(network->itemData(i).toString(), network->itemText(i));
     updateBarMachine();
     // The bar's card icon follows slot 1, or slot 2 when slot 1 is empty.
-    const bool iconSecond = second && known2 && card2Present && !(known && cardPresent);
+    const bool primaryPresent = cardPresent || palmWifiInserted;
+    const bool iconSecond = second && known2 && card2Present && !(known && primaryPresent);
     runningBar->apply(traits, state, iconSecond ? runningRules::cardIcon(true, true, true, card2Inserted)
-                                                : runningRules::cardIcon(supported, known, cardPresent, cardInserted),
+                                                : runningRules::cardIcon(supported, known, primaryPresent,
+                                                                         cardInserted || palmWifiInserted),
                       caps.sound && runningPreferences.audio, modes);
     const auto syncLabel = protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
                            protocol == frondDesktopSync::Protocol::activeSync ? tr("ActiveSync") : QString();
