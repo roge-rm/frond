@@ -1152,8 +1152,9 @@ void S3c2442Machine::runFast(uint64_t n) {
                 }
             }
             // Code not compiled yet, a run that keeps stopping straight away or one stopped at a read the lean
-            // path takes (WTCNT) goes to the lean path a while.
-            leanCount = stop == arm920JitCold || instructions < 4 ? 32 : stop == arm920JitExit ? 16 : 1;
+            // path takes (WTCNT) goes to the lean path a while. 512 after cold code: shorter spans bounce between
+            // the two paths (on the Galaxy Tab 32 ran 65M instructions a second, 512 81M).
+            leanCount = stop == arm920JitCold || instructions < 4 ? 512 : stop == arm920JitExit ? 16 : 1;
             continue;
         }
         if (!blPending) {
