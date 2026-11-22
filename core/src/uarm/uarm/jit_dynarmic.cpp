@@ -482,6 +482,8 @@ struct Env final : public A32::UserCallbacks {
     std::array<uint8_t, 0x2000> guard{};
     std::vector<uint32_t> guarded;
     std::array<uint16_t, 128> absentRuns{};
+    // CheckMappings' and Resume's lists, kept so a run doesn't allocate them.
+    std::vector<uint32_t> scratchMoved, scratchList, scratchLeft;
 
     // The page dynarmic keeps code by (the run's VA) for a code page here (an MVA), and the code page of a VA.
     // An MVA page past 32 MB whose PID has a tag may also have blocks at its VA below 32 MB under that tag.
@@ -670,7 +672,8 @@ struct Env final : public A32::UserCallbacks {
     // another PID or the owner on a guarded page) drops the blocks at its MVA again when it moves.
     void CheckMappings() {
         stats.mapChecks++;
-        std::vector<uint32_t> moved;
+        std::vector<uint32_t> &moved = scratchMoved;
+        moved.clear();
         const uint32_t current = cpuGetPid(cpu) >> 25;
         const bool suspend = arm920 && !lineBound && pidTags;
         for (auto &[page, c] : code) {
@@ -707,7 +710,9 @@ struct Env final : public A32::UserCallbacks {
     // guard) for up to kAbsentRuns runs, then are dropped too. True if any stay.
     static constexpr uint16_t kAbsentRuns = 4096;
     bool Resume(uint32_t slot) {
-        std::vector<uint32_t> list, left;
+        std::vector<uint32_t> &list = scratchList, &left = scratchLeft;
+        list.clear();
+        left.clear();
         list.swap(suspended[slot]);
         const bool last = ++absentRuns[slot] > kAbsentRuns;
         for (uint32_t page : list) {
