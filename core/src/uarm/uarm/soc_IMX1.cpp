@@ -434,6 +434,7 @@ void SocIMX1::SyncSecondCard() {
 void SocIMX1::StateChanged() {
     // A load or reset ends a guest call.
     if (machine) EndGuestCall();
+    if (music.on) music.hooks.reset(machine ? GetTime() : 0);
     // The guest's Bluetooth starts over; a checkpoint keeps the controller's connection.
     if (!RestoringCheckpoint()) {
         bluetooth.backend.Close();
@@ -1077,6 +1078,7 @@ void SocIMX1::ApplyCodeHooks() {
     std::vector<uint32_t> pcs = traceHooks;
     if (BluetoothHooksOn())
         pcs.insert(pcs.end(), std::begin(zodiacBluetoothHooks), std::end(zodiacBluetoothHooks));
+    if (music.on) pcs.insert(pcs.end(), std::begin(music.library.pcs), std::end(music.library.pcs));
     if (pcs.size() > imx1MachineMaximumCodeHooks) pcs.resize(imx1MachineMaximumCodeHooks);
     if (!imx1MachineSetCodeHooks(machine, pcs.data(), unsigned(pcs.size())))
         std::cerr << "zodiac: code hooks refused" << std::endl;
@@ -1103,8 +1105,58 @@ void SocIMX1::CodeHookHit() {
         }
         std::cout << std::endl;
     }
+    // The music hooks only read, so the call runs on, and Bluetooth's may still take it.
+    if (music.on) MusicHook(pc, r);
     if (BluetoothHooksOn() && BluetoothHook(pc, r)) return;
     imx1MachineLeaveCodeHook(machine);
+}
+
+bool SocIMX1::SetMusicHooks(bool on, bool log) {
+    if (on && !music.searched) {
+        music.searched = true;
+        music.found = zodiac_music::findLibrary(rom.data(), rom.size(), zodiacRomBase, music.library);
+    }
+    if (on && !music.found) {
+        std::cerr << "zodiac: this ROM's Tapwave Midi Library isn't one Frond knows; music hooks off" << std::endl;
+        on = false;
+    }
+    music.log = on && log;
+    if (on == music.on) return on;
+    music.on = on;
+    music.hooks = zodiac_music::Hooks();
+    if (machine) ApplyCodeHooks();
+    return on;
+}
+
+void SocIMX1::MusicHook(uint32_t pc, const uint32_t (&r)[16]) {
+    const auto read = [this](uint32_t address, void* data, uint32_t size) { return ReadGuest(address, data, size); };
+    if (!music.hooks.hit(music.library, pc, r, GetTime(), read) || !music.log) return;
+    zodiac_music::Event e;
+    while (music.hooks.take(e)) {
+        char line[160];
+        const double t = double(e.timeNs) / 1e9;
+        switch (e.kind) {
+            case zodiac_music::Kind::play:
+                std::snprintf(line, sizeof line, "zodiac music %.3f play %08x smf %08x %zu bytes %zu events %.1f s",
+                              t, e.handle, e.smf->address, e.smf->bytes.size(), e.smf->song.events.size(),
+                              double(e.smf->song.lengthUs) / 1e6);
+                break;
+            case zodiac_music::Kind::stop: std::snprintf(line, sizeof line, "zodiac music %.3f stop %08x", t, e.handle); break;
+            case zodiac_music::Kind::close: std::snprintf(line, sizeof line, "zodiac music %.3f close %08x", t, e.handle); break;
+            case zodiac_music::Kind::message:
+                std::snprintf(line, sizeof line, "zodiac music %.3f midi %08x %02x %02x %02x", t, e.handle, e.bytes[0],
+                              e.bytes[1], e.length > 2 ? e.bytes[2] : 0);
+                break;
+            case zodiac_music::Kind::sysEx:
+                std::snprintf(line, sizeof line, "zodiac music %.3f sysex %08x %zu bytes", t, e.handle, e.data.size());
+                break;
+            case zodiac_music::Kind::masterVolume:
+                std::snprintf(line, sizeof line, "zodiac music %.3f master volume %u", t, e.value);
+                break;
+            case zodiac_music::Kind::reset: std::snprintf(line, sizeof line, "zodiac music %.3f reset", t); break;
+        }
+        std::cerr << line << std::endl;
+    }
 }
 
 // Facts of the 1.1 ROM: the DAL's doze routine, which the idle loop calls in SVC mode with IRQs off, in Thumb, and

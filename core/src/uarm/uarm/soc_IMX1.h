@@ -18,6 +18,7 @@
 #include "pace_patch.h"
 #include "zodiac_audio.h"
 #include "zodiac_input.h"
+#include "zodiac_music.h"
 #include "zodiac_panel.h"
 
 // The Tapwave Zodiac 2 in the normal runtime. It runs the guarded i.MX1 machine (imx1_boot_probe.h)
@@ -247,6 +248,14 @@ class SocIMX1 : public SoC {
     std::string BluetoothState() override;
     // Guest ticks at the Bluetooth driver's last start call, for tests.
     uint64_t BluetoothLastStart() const { return bluetooth.lastStart; }
+    // Music hooks (zodiac_music.h): code hooks at the ROM's Tapwave Midi Library catch the guest's SMF and MIDI
+    // calls as events in guest time. Off by default; with them off no hook is set. False, with them off, when the
+    // ROM's library isn't one Frond knows. log prints each event on stderr and drops it.
+    bool SetMusicHooks(bool on, bool log = false);
+    bool MusicHooksOn() const { return music.on; }
+    // The events caught, for the player and tests.
+    zodiac_music::Hooks& MusicHooks() { return music.hooks; }
+    const zodiac_music::Library& MusicLibrary() const { return music.library; }
 
    protected:
     void OnSetFramebufferDirty() override { redraw = true; }
@@ -270,11 +279,18 @@ class SocIMX1 : public SoC {
     void StateChanged();
     // Runs until the pc stop or for ticks of guest time. True on the stop.
     bool RunToStop(uint64_t ticks);
-    // Sets the machine's code hooks: the trace hooks and Bluetooth's.
+    // Sets the machine's code hooks: the trace hooks, Bluetooth's and the music hooks.
     void ApplyCodeHooks();
     // A run ended on a code hook: Bluetooth takes it, or the instruction runs.
     void CodeHookHit();
     std::vector<uint32_t> traceHooks;
+    // Host only, never saved: a reset or load drops the guest's opens and handles.
+    struct Music {
+        bool on{false}, log{false}, searched{false}, found{false};
+        zodiac_music::Library library;
+        zodiac_music::Hooks hooks;
+    } music;
+    void MusicHook(uint32_t pc, const uint32_t (&r)[16]);
     // The Bluetooth shim (zodiac_bluetooth.cpp). Host only: the guest's side of it is in guest memory.
     // started: the guest's start went to the backend and no stop came since, so the hooks stay on while it runs
     // even with no controller set. A started radio whose backend closed is down: its starts are refused until the

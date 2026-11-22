@@ -122,6 +122,7 @@ struct Options {
     bool syncNetwork{false};
     optional<string> syncFolder, syncProfile, syncMachine, syncUser;  // --sync-*
     optional<string> bluetooth;
+    bool musicHooks{false};  // --music-hooks
     bool cardSwap;                  // the frontend changed the card files while the machine was off
     optional<string> cardIdentity;  // the card put in: 64 hex digits
     bool cardProtected;
@@ -768,6 +769,7 @@ bool gFastEngineMissing = false;
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
+            if (options.musicHooks) static_cast<SocIMX1*>(soc)->SetMusicHooks(true, true);
         } else if (board == DeviceBoard5::s3c2442Rx1950) {
             // Low-latency audio is --low-latency-queue only: the --fast-audio preview is for Palm OS firmware.
             if (options.gdbPort || options.experimentalFastAudio) {
@@ -1997,6 +1999,11 @@ int main(int argc, char** argv) {
         .help("connect the virtual Bluetooth radio to a local H4 controller Unix socket; default off")
         .metavar("<off|/controller/socket>");
 
+    program.add_argument("--music-hooks")
+        .help("Zodiac: catch the games' MIDI music calls and print them on stderr; default off")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--irda")
         .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, phone for the core's mobile phone or printer for its IrDA printer; exclusive with keyboard; default off")
         .metavar("<off|pty|tcp:PORT|unix:PATH|phone|printer>");
@@ -2073,6 +2080,7 @@ int main(int argc, char** argv) {
                        .syncMachine = program.present("--sync-machine"),
                        .syncUser = program.present("--sync-user"),
                        .bluetooth = program.present("--bluetooth"),
+                       .musicHooks = program.get<bool>("--music-hooks"),
                        .cardSwap = program.get<bool>("--card-swap"),
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),

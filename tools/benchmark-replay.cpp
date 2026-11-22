@@ -330,6 +330,10 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const char* goOn=std::getenv("BENCH_ZODIAC_SAVE_CONTINUE");
     const bool reloadAfterSave=goOn && std::string(goOn)=="reload";
     const bool continueAfterSave=goOn && (std::string(goOn)=="1" || reloadAfterSave);
+    // BENCH_ZODIAC_MUSIC_HOOKS=1 turns the music hooks on (events counted, not printed).
+    const char* musicHooks=std::getenv("BENCH_ZODIAC_MUSIC_HOOKS");
+    if (musicHooks && std::string(musicHooks)=="1" && !soc->SetMusicHooks(true))
+        throw std::runtime_error("BENCH_ZODIAC_MUSIC_HOOKS: refused");
     if (const char* load=std::getenv("BENCH_ZODIAC_LOAD")) {
         auto state=readFile(load);
         uint64_t savedNs=0;
@@ -479,6 +483,12 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
                 "frame hash %llx, %llu PCM frames, PCM hash %llx\n",deviceName5(device),guestNs/1e9,(unsigned long long)cycles,wall,
                 (unsigned long long)instructions,(unsigned long long)jitInstructions,soc->Halted()?", stopped":"",
                 (unsigned long long)frameCount,(unsigned long long)frameSequence,(unsigned long long)pcmFrames,(unsigned long long)pcmHash);
+    if (soc->MusicHooksOn()) {
+        const auto& m=soc->MusicHooks().stats();
+        std::printf("music hooks: %llu calls, %llu opens, %llu bad files, %llu plays unmatched, %zu events waiting, %llu dropped\n",
+                    (unsigned long long)m.calls,(unsigned long long)m.opens,(unsigned long long)m.badFiles,
+                    (unsigned long long)m.unmatchedPlays,soc->MusicHooks().pending(),(unsigned long long)m.dropped);
+    }
     SoC::SetEventClock(nullptr);
     clockSoc=nullptr;
 }
