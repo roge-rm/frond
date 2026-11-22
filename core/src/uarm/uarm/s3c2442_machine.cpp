@@ -1295,7 +1295,7 @@ uint64_t S3c2442Machine::skipDelay(uint64_t left) {
 
 // PWM reads translated code answers (leanRead), as marked access pcs that start their block.
 static constexpr uint32_t tickReadPcs[] = {
-    0x8004aef4,  // WM5 kernel tick count: ldr r1, [r3] of TCNTO4
+    0x8004aef4, 0x8004aef8,  // WM5 kernel tick count: its TCNTO4 and TCNTB4 loads
 };
 
 bool S3c2442Machine::setFastEngine(bool fast) {
