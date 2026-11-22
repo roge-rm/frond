@@ -234,6 +234,65 @@ void lateEvent() {
     assert(s.size() == 3 && s[1].hostNs == 12000 * ms && s[2].hostNs == 12010 * ms);
 }
 
+// Messages go out the delay after the guest made them; nextWakeNs says when the next is due.
+void delayed() {
+    Log log;
+    fakeNow = 10000 * ms;
+    auto out = make(log);
+    out->setDelay(50 * ms);
+    assert(out->delay() == 50 * ms);
+    out->offer(play(100 * ms, 7, body));
+    out->work();
+    // Anchored at 10 s, the song's first note due 50 ms on.
+    assert(log.copy().empty() && out->nextWakeNs() == 10050 * ms);
+    runTo(*out, 10049 * ms);
+    assert(log.copy().empty());
+    runTo(*out, 10050 * ms);
+    auto s = log.copy();
+    assert(s.size() == 1 && s[0].hostNs == 10050 * ms && s[0].b == (Bytes{0x90, 0x3c, 0x64}));
+    assert(out->nextWakeNs() == 10300 * ms);
+    runTo(*out, 10300 * ms);
+    s = log.copy();
+    assert(s.size() == 3 && s[1].hostNs == 10300 * ms);
+    assert(onTime(s, 0, ms));
+    // Held: nothing to wake for.
+    out->hold(true);
+    assert(out->nextWakeNs() == UINT64_MAX);
+    out->hold(false);
+    // Clamped under the drift limit.
+    out->setDelay(10000 * ms);
+    assert(out->delay() == ZodiacMidiOut::maxDelayNs);
+}
+
+// The engine's thread sleeps with nothing due, and wakes for each message of a song on time.
+void sleeps() {
+    Log log;
+    {
+        ZodiacMidiOut out(std::make_unique<FakePort>(log, ZodiacMidiOut::steadyNs));
+        out.start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const uint64_t idle = out.passes();
+        fprintf(stderr, "idle: %llu passes in 300 ms\n", (unsigned long long)idle);
+        assert(idle <= 2);
+        out.offer(play(100 * ms, 7, body));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (log.copy().size() < 5 + 32) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                fprintf(stderr, "stuck: %zu sent, %llu passes\n", log.copy().size(), (unsigned long long)out.passes());
+                abort();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const uint64_t song = out.passes() - idle;
+        fprintf(stderr, "song: %llu passes for 750 ms\n", (unsigned long long)song);
+        assert(song < 40);
+        const auto s = log.copy();
+        // Never early, and late by less than 50 ms (sanitizers slow it).
+        for (const auto& x : s) assert(x.at >= x.hostNs && x.at < x.hostNs + 50 * ms);
+        out.stop();
+    }
+}
+
 // The hooks on this thread, the engine on its own with a steady clock, as in the app.
 void threads() {
     constexpr uint32_t noteOnPc = 0x1000;
@@ -253,6 +312,7 @@ void threads() {
             const bool hit = hooks.hit(lib, noteOnPc, r, i * ms, read);
             assert(hit);
             (void)hit;
+            out.poke();
             std::this_thread::sleep_for(std::chrono::microseconds(200));
         }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -275,7 +335,10 @@ int main() {
     lookahead();
     jumpForward();
     lateEvent();
+    delayed();
+    sleeps();
     threads();
-    std::puts("PASS: Zodiac MIDI out (event stream, song times, never early, stop, hold, lookahead, forward jump, late event, hooks and engine thread, notes off at the end)");
+    std::puts("PASS: Zodiac MIDI out (event stream, song times, never early, stop, hold, lookahead, forward jump, late event, delay, "
+              "sleeping thread, hooks and engine thread, notes off at the end)");
     return 0;
 }

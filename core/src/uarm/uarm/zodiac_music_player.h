@@ -205,6 +205,16 @@ class Player {
     void skipBefore(uint64_t timeNs) { skipBeforeNs_ = timeNs; }
 
     size_t playing() const { return songs_.size(); }
+    // When advance next has something to do: the earliest song event or song end, or UINT64_MAX with no song.
+    uint64_t nextNs() const {
+        uint64_t at = UINT64_MAX;
+        for (const auto& s : songs_) {
+            const auto& events = s.parsed->song.events;
+            const uint64_t t = s.startNs + (s.next < events.size() ? events[s.next].timeUs : s.parsed->song.lengthUs) * 1000;
+            if (t < at) at = t;
+        }
+        return at;
+    }
     // Hands back every song's Held; the player plays nothing after.
     void releaseAll() {
         for (auto& s : songs_) release_(s.held);

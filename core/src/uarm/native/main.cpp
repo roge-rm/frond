@@ -38,12 +38,12 @@
 #include "RenderThread.h"
 #include "Rotation.h"
 #include "ZodiacSpeed.h"
-#ifndef __ANDROID__
 #define TSF_IMPLEMENTATION
 #include "ZodiacMusicSynth.h"
+#include "ZodiacMidiOut.h"
+#ifndef __ANDROID__
 #include "ZodiacRtMidi.h"
 #else
-#include "ZodiacMidiOut.h"
 // In the app (ZodiacMidiJni.cpp): the MIDI output the app's MidiManager side sends from.
 std::unique_ptr<ZodiacMidiOut::Port> zodiacAndroidMidiPort();
 #endif
@@ -1075,9 +1075,7 @@ bool gFastEngineMissing = false;
                 cerr << "--music-midi-out: " << error << endl;
             }
         }
-#ifndef __ANDROID__
         std::unique_ptr<ZodiacMusicSynth> musicSynth;
-#endif
         SdlAudioDriver audioDriver(soc, audioQueue, lowLatencyQueue, audioPeriod);
         struct ClearMixerAtEnd {
             SdlAudioDriver& driver;
@@ -1085,7 +1083,6 @@ bool gFastEngineMissing = false;
         } clearMixerAtEnd{audioDriver};
         const auto noSynth = [](const std::string& why) { cerr << "--music-soundfont: " << why << endl; };
         if (zodiacMusic && options.musicSoundFont && zodiacMusic->MusicHooksOn()) {
-#ifndef __ANDROID__
             if (options.disableAudio) {
                 noSynth("no audio");
             } else if (musicSynth = std::make_unique<ZodiacMusicSynth>(); !musicSynth->loadFile(*options.musicSoundFont)) {
@@ -1097,21 +1094,14 @@ bool gFastEngineMissing = false;
                 musicSynth->start();
                 audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count) { synth->mix(frames, count); });
             }
-#else
-            noSynth("no SoundFont player in this build");
-#endif
         }
         if (!options.disableAudio) audioDriver.Start();
-#ifndef __ANDROID__
         if (musicSynth && !audioDriver.Running()) {
             audioDriver.ClearMixer();
             musicSynth.reset();
             noSynth("no audio device");
         }
         const bool synthTakes = musicSynth != nullptr;
-#else
-        const bool synthTakes = false;
-#endif
         if (midiOut) {
             // Straight from the hooks when no synth's helper hands it the events.
             if (!synthTakes) midiOut->attach(&zodiacMusic->MusicHooks());
@@ -1123,6 +1113,10 @@ bool gFastEngineMissing = false;
             zodiacMusic->SetMusicHooks(options.musicHooks, true);
             cerr << "Zodiac music: " << (options.musicHooks ? "printing the music calls" : "music hooks off") << endl;
         }
+        // The SoundFont or the MIDI output plays the music, so the guest's FM is left out of the sound.
+        if (zodiacMusic && (synthTakes || midiOut)) zodiacMusic->SetFmMuted(true);
+        // MIDI out waits for the audio queue: the frames queued and the one period the device is playing, smoothed.
+        double midiDelayFrames = 0;
 
         commands::Register();
         if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
@@ -1454,10 +1448,16 @@ bool gFastEngineMissing = false;
                 // The music's clock stands with the guest's.
                 {
                     const bool musicHeld = (sdlEventHandler.InBackground() && !headless) || replay.Paused();
-#ifndef __ANDROID__
                     if (musicSynth) musicSynth->hold(musicHeld);
-#endif
-                    if (midiOut) midiOut->hold(musicHeld);
+                    if (midiOut) {
+                        midiOut->hold(musicHeld);
+                        if (audioDriver.Running()) {
+                            const double queued = double(audioQueueGetState(audioQueue).pendingSamples) + audioPeriod;
+                            midiDelayFrames += (queued - midiDelayFrames) / 32;
+                            midiOut->setDelay(uint64_t(midiDelayFrames * 1e9 / 44100));
+                        }
+                        midiOut->poke();
+                    }
                 }
                 if (sdlEventHandler.InBackground() && !headless) {
                     wasHeadless = false;
