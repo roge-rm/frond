@@ -210,8 +210,10 @@ translated:
     pa = (adr - va) + paPage;
 
     if (!inspect && sz > 1024) {
-        // The host TLB only holds pages whose entry is live, so it needs a flush only when a live entry
-        // (another page of a 64 KB page or section, as the walked page's own entry is dead) changes.
+        // The host TLB holds pages with a live entry, and pages of 1 KB subpages the lean path filled whole
+        // (never in the TLB; Fast keeps those until a TLB flush even if the guest edits their entry). The
+        // walked page's own entry is dead, so a flush is needed only when a live entry (another page of a
+        // 64 KB page or section) changes.
         bool replaced = false;
         for (uint32_t offset = 0; offset < sz; offset += 4096) {
             struct TlbEntry *tlbEntry = mmu->tlb + ((va + offset) >> 12);
