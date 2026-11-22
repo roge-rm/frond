@@ -34,6 +34,8 @@ import com.rm.frond.BatteryMode
 import com.rm.frond.JogControls
 import com.rm.frond.JogLandscape
 import com.rm.frond.MachineSettings
+import com.rm.frond.MusicOutput
+import com.rm.frond.ZodiacMidiChoice
 import com.rm.frond.PhoneCamera
 import com.rm.frond.RunningModel
 import com.rm.frond.ScreenSize
@@ -314,4 +316,52 @@ fun CameraRow(model: RunningModel) {
         confirmButton = {},
         dismissButton = { androidx.compose.material3.TextButton(onClick = { choosing = false }) { Text("Cancel") } },
     )
+}
+
+// The Zodiac's Music output: the game's own sound, a SoundFont (picked with the file picker and copied into the app
+// by onPickSoundFont) or a MIDI device from MidiManager. Edit settings only; it applies at the next start.
+@Composable
+fun MachineMusicRows(settings: MachineSettings, onChange: (MachineSettings) -> Unit, onPickSoundFont: (android.net.Uri) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Choice("Music output", settings.musicOutput, MusicOutput.entries, { it.label }) { onChange(settings.copy(musicOutput = it)) }
+    when (settings.musicOutput) {
+        MusicOutput.FM -> Unit
+        MusicOutput.SOUNDFONT -> {
+            val picker = androidx.activity.compose.rememberLauncherForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+            ) { uri -> if (uri != null) onPickSoundFont(uri) }
+            PickField("SoundFont", settings.soundFont.takeIf { it.isNotEmpty() }?.let { java.io.File(it).name } ?: "None picked") {
+                picker.launch(arrayOf("*/*"))
+            }
+        }
+        MusicOutput.MIDI -> {
+            val devices = remember { ZodiacMidiChoice.devices(context) }
+            val names = devices.map { it.second }.distinct().let { found ->
+                if (settings.midiDevice.isNotEmpty() && settings.midiDevice !in found) found + settings.midiDevice else found
+            }
+            val label: (String) -> String = { n ->
+                when {
+                    n.isEmpty() -> if (devices.isEmpty()) "No MIDI devices" else "None picked"
+                    devices.none { it.second == n } -> "$n (not connected)"
+                    else -> n
+                }
+            }
+            Choice("MIDI device", settings.midiDevice, names.ifEmpty { listOf("") }, label) { onChange(settings.copy(midiDevice = it)) }
+        }
+    }
+}
+
+// A read-only field that runs onClick when tapped, like Choice without the menu.
+@Composable
+private fun PickField(label: String, value: String, onClick: () -> Unit) {
+    androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        androidx.compose.material3.OutlinedTextField(
+            value = value,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(label) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        androidx.compose.foundation.layout.Box(Modifier.matchParentSize().clickableRow(onClick = onClick))
+    }
 }

@@ -226,8 +226,9 @@ open class FrondActivity : SDLActivity() {
     // The Zodiac's controllers instead, as SDL game controller events. UI thread only.
     private var zodiacPad: ZodiacPad? = null
     private var rumble: Rumble? = null
-    // The Zodiac's music to a MIDI device (EXTRA_MIDI_OUT), until settings choose it.
+    // The Zodiac's music to the MIDI device its Music output names, found at start (its MidiManager id).
     private var zodiacMidi: ZodiacMidi? = null
+    private var midiOutId: Int? = null
     // The Battery setting sent to the core and kept current; read from the saved machine settings.
     val battery: BatteryControl by lazy {
         BatteryControl(applicationContext, link) { Sessions.forPath(applicationContext, sessionPath)?.settings ?: machineSettings }
@@ -263,7 +264,8 @@ open class FrondActivity : SDLActivity() {
         sound = launchDevice().sound && settings.sound
         display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd, touchHidden = launchTouchHidden())
         requestedOrientation = orientationRequest()
-        midiOutDevice()?.let { zodiacMidi = ZodiacMidi(this, it) }
+        midiOutId = midiOutDevice()
+        midiOutId?.let { zodiacMidi = ZodiacMidi(this, it) }
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
@@ -399,7 +401,9 @@ open class FrondActivity : SDLActivity() {
             arguments += listOf("--sync-folder", SyncNative.root(this).path, "--sync-machine", it.id)
         }
         arguments += listOf("--battery", battery.launchSpec())
-        arguments += ZodiacMidiChoice.arguments(midiOutDevice())
+        if (launchDevice().zodiac) {
+            arguments += machineSettings.musicArguments(File(machineSettings.soundFont).isFile, midiOutId)
+        }
         arguments += listOf("--window-background", BACKGROUND_HEX)
         // The core turns the Zodiac's view with its OS only when the app turns with it too.
         if (launchDevice().zodiac && !followsProgram()) arguments += listOf("--view-turn", "window")
@@ -412,7 +416,9 @@ open class FrondActivity : SDLActivity() {
     private fun launchDevice() = Device.byId(intent?.getStringExtra(EXTRA_DEVICE)) ?: Device.TX
 
     private fun midiOutDevice(): Int? =
-        intent?.takeIf { launchDevice().zodiac && it.hasExtra(EXTRA_MIDI_OUT) }?.getIntExtra(EXTRA_MIDI_OUT, 0)
+        if (launchDevice().zodiac && machineSettings.musicOutput == MusicOutput.MIDI)
+            ZodiacMidiChoice.deviceId(ZodiacMidiChoice.devices(this), machineSettings.midiDevice)
+        else null
 
     // The machine's folder in the sessions folder, or null for a session elsewhere.
     private fun machineFolder(): File? = Sessions.forPath(this, sessionPath)?.folder
@@ -1871,7 +1877,6 @@ open class FrondActivity : SDLActivity() {
         const val EXTRA_NOR = "nor"
         const val EXTRA_NAND = "nand"
         // A MidiManager device id for the Zodiac's music (int), until the machine settings choose one.
-        const val EXTRA_MIDI_OUT = "midi-out"
         // A new machine's cards per slot (ids, "" for none), put in once it runs.
         const val EXTRA_START_CARDS = "start-cards"
         // Written when the core stops without being asked; HomeActivity shows it once.

@@ -53,6 +53,14 @@ enum class CpuSpeed(val label: String, val arg: String) {
     }
 }
 
+// Zodiac: where the games' music goes; arg is the saved name. The game's own FM sound, a SoundFont the core plays in
+// the app, or a MIDI device through MidiManager.
+enum class MusicOutput(val label: String, val arg: String) {
+    FM("Game's own sound", "fm"),
+    SOUNDFONT("SoundFont", "soundfont"),
+    MIDI("MIDI device", "midi"),
+}
+
 // Android: whether the bar over the running machine hides by itself over the Palm or takes its own space.
 // arg is the saved name.
 enum class BarMode(val label: String, val arg: String) {
@@ -118,6 +126,11 @@ data class MachineSettings(
     val batteryLevel: Int = DEFAULT_BATTERY_LEVEL,
     val batteryCharging: Boolean = false,
     val headphonesIn: Boolean = false,
+    // Zodiac: Music output, the SoundFont's copy in the app's files (SoundFonts) and the MIDI device's name. With
+    // nothing picked the game's own sound plays. Applied at every start.
+    val musicOutput: MusicOutput = MusicOutput.FM,
+    val soundFont: String = "",
+    val midiDevice: String = "",
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
@@ -128,7 +141,10 @@ data class MachineSettings(
         if (batteryMode != BatteryMode.MAX) it.put("batteryMode", batteryMode.arg)
         if (batteryLevel != DEFAULT_BATTERY_LEVEL) it.put("batteryLevel", batteryLevel)
         if (batteryCharging) it.put("batteryCharging", true)
-        if (headphonesIn) it.put("headphonesIn", true) }
+        if (headphonesIn) it.put("headphonesIn", true)
+        if (musicOutput != MusicOutput.FM) it.put("musicOutput", musicOutput.arg)
+        if (soundFont.isNotEmpty()) it.put("soundFont", soundFont)
+        if (midiDevice.isNotEmpty()) it.put("midiDevice", midiDevice) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -150,6 +166,14 @@ data class MachineSettings(
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
         } else if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
         if (speed != CpuSpeed.ORIGINAL) addAll(listOf("--speed", CpuSpeed.forCore(speed, m68k).arg))
+    }
+
+    // The Zodiac's Music output for the core: a SoundFont that is there, or a MIDI device the activity found
+    // (midiDeviceId, its MidiManager id). Nothing for the game's own sound or a choice with nothing to use.
+    fun musicArguments(soundFontThere: Boolean, midiDeviceId: Int?): List<String> = when {
+        musicOutput == MusicOutput.SOUNDFONT && soundFont.isNotEmpty() && soundFontThere -> listOf("--music-soundfont", soundFont)
+        musicOutput == MusicOutput.MIDI && midiDeviceId != null -> ZodiacMidiChoice.arguments(midiDeviceId)
+        else -> emptyList()
     }
 
     // Audio arguments: the host period always, so low-latency limits are sized for Android's
@@ -226,6 +250,9 @@ data class MachineSettings(
                 batteryLevel = json.optInt("batteryLevel", DEFAULT_BATTERY_LEVEL).coerceIn(0, 100),
                 batteryCharging = json.optBoolean("batteryCharging", false),
                 headphonesIn = json.optBoolean("headphonesIn", false),
+                musicOutput = MusicOutput.entries.firstOrNull { it.arg == json.optString("musicOutput") } ?: MusicOutput.FM,
+                soundFont = json.optString("soundFont", ""),
+                midiDevice = json.optString("midiDevice", ""),
             )
         }
     }
