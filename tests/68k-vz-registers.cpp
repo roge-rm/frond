@@ -2,6 +2,9 @@
 #include <cstring>
 #include <cstdio>
 #include "EmRegsVZ.h"
+#include "EmRegsVZDana.h"
+#include "EmRegsVZPalmM500.h"
+#include "EmRegsVZPegVenice.h"
 #include "EmSession.h"
 #include "EmBankMapped.h"
 #include "EmSystemState.h"
@@ -219,7 +222,55 @@ static void CheckLiveClockFactor() {
     puts("VZ live clock factor change keeps the timer's guest time");
 }
 
+template <typename Bank>
+class GpioBoard : public Bank {
+ public:
+    using Bank::Bank;
+    using Bank::StdWrite;
+};
+
+static void CheckAttentionPins() {
+    constexpr emuptr portB = 0xfffff408, portE = 0xfffff420, portK = 0xfffff440;
+    const auto pins = [](auto& board, emuptr port, uint8 data, uint8 direction, uint8 select = 0xff) {
+        board.StdWrite(port, 1, direction);
+        board.StdWrite(port + 1, 1, data);
+        board.StdWrite(port + 3, 1, select);
+    };
+    {
+        GpioBoard<EmRegsVZPalmM500> board;
+        pins(board, portB, 0x40, 0x40);
+        pins(board, portK, 0x10, 0x10);
+        assert(EmHAL::GetLEDState() == kLEDGreen && EmHAL::GetVibrateOn());
+        pins(board, portB, 0x40, 0x40, 0);
+        pins(board, portK, 0x10, 0);
+        assert(EmHAL::GetLEDState() == kLEDOff && !EmHAL::GetVibrateOn());
+    }
+    {
+        EmRegsMB86189 stick(0x10800000);
+        GpioBoard<EmRegsVzPegVenice> board(stick);
+        pins(board, portE, 0, 0x08);
+        pins(board, portK, 0x04, 0x04);
+        assert(EmHAL::GetLEDState() == (kLEDGreen | kLEDRed) && EmHAL::GetVibrateOn());
+        pins(board, portE, 0x08, 0x08);
+        pins(board, portK, 0, 0x04);
+        assert(EmHAL::GetLEDState() == kLEDOff && !EmHAL::GetVibrateOn());
+        pins(board, portE, 0, 0);
+        assert(EmHAL::GetLEDState() == kLEDOff);
+    }
+    {
+        GpioBoard<EmRegsVZDana> board;
+        pins(board, portE, 0x20, 0x60);
+        assert(EmHAL::GetLEDState() == kLEDGreen && !EmHAL::GetVibrateOn());
+        pins(board, portE, 0x40, 0x60);
+        assert(EmHAL::GetLEDState() == kLEDRed);
+        pins(board, portE, 0x60, 0);
+        assert(EmHAL::GetLEDState() == kLEDOff);
+    }
+    puts("68k alarm and charge LED and vibrator GPIO levels passed");
+}
+
 int main() {
+    CheckAttentionPins();
     CheckTimerLoadClock();
     CheckLiveClockFactor();
     // Drive the VZ registers without running guest firmware.

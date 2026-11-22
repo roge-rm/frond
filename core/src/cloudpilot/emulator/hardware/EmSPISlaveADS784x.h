@@ -55,9 +55,10 @@ class EmSPISlaveADS784x : public EmSPISlave {
     virtual uint16 DoExchange(uint16 control, uint16 data);
     virtual void Reset(void);
 
-    // 12-bit reading of the kChannelDockSerial ID input; 0 (undocked) unless the device sets it.
+    // 12-bit dock ID resistor reading while attached.
     // Not saved: whoever owns the cradle sets it again after a load.
     void SetDockLevel(uint16 level) { fDockLevel = level; }
+    void SetTwisterDocked(bool attached) { fTwisterDocked = attached; }
 
     // The battery channel's 12-bit count for percent on the ROM's sysBatteryData curve (11 entries, 0% to 100%).
     static uint16 BatteryCount(const uint16_t (&curve)[11], UInt16 sysBattStepsPerVolt,
@@ -77,6 +78,7 @@ class EmSPISlaveADS784x : public EmSPISlave {
    private:
     EmADSChannelType fChannelUse[8];
     uint16 fDockLevel{0};
+    bool fTwisterDocked{false};
 
     uint32 fBitBufferIn;
     uint16 fBitBufferOut;

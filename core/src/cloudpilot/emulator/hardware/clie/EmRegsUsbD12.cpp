@@ -31,6 +31,7 @@ EmRegsUsbD12::EmRegsUsbD12(emuptr base) : base(base) {}
 void EmRegsUsbD12::Initialize() {
     EmRegs::Initialize();
     Reset(true);
+    if (onInterrupt) onInterrupt(line);
 }
 
 // The ROM resets the chip through PJ5 on every boot, so any reset gives power-on state.

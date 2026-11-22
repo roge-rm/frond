@@ -35,6 +35,7 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
 
     // A level source on IRQ1 beside the HotSync button (see fIrq1Line).
     void SetIrq1Line(bool asserted);
+    void SetUsbIrq3Line(bool asserted);
 
     virtual void Save(Savestate<ChunkType>&);
     virtual void Save(SavestateProbe<ChunkType>&);
@@ -185,8 +186,10 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
    protected:
     HwrM68VZ328Type f68VZ328Regs;
     bool fHotSyncButtonDown;
-    // A board's own level source on IRQ1 beside the HotSync button (the T400's USB chip). Not saved:
-    // its owner sets it again after a load.
+    // The Palm D12 drives PD6. The chip sets the level after a load.
+    bool fUsbIrq3Wired{false};
+    bool fUsbIrq3Asserted{false};
+    // The T400's USB chip shares IRQ1 with the HotSync button and restores its own level.
     bool fIrq1Line{false};
     uint16 fKeyBits;
     uint16 fLastTmr1Status;

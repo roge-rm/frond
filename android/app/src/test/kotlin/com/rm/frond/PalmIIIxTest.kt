@@ -147,8 +147,8 @@ class PalmIIIxTest {
         for (d in listOf(m125, m500, c500)) {
             assertTrue(d.id, d in Device.shown && d.runs68k && d.linkedCards)
             assertEquals(d.id, 1, d.storageSlots.size)
-            assertEquals("USB HotSync", d.pendingUsb)
-            assertTrue(d.id, d.serialPort && d.infrared)
+            assertEquals("", d.pendingUsb)
+            assertTrue(d.id, d.serialPort && d.infrared && d.usb)
             assertEquals(listOf("--device", d.id), d.coreFlags)
         }
         assertEquals("", iiix.pendingUsb)

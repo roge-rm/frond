@@ -6,6 +6,7 @@
 
 class EmRegsVZPalmM125 : public EMPalmVZWithSD<EmRegsVZ> {
    public:
+    void SetUsbCradle(bool docked);
     EmRegsVZPalmM125(void);
     virtual ~EmRegsVZPalmM125(void);
 

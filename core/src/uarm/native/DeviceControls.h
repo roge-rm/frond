@@ -128,7 +128,7 @@ static_assert(keyIdCount<=128,"DeviceKeyMask has a bit per key");
 struct DeviceStick {
     float x{0}, y{0};
     bool held{false};
-    // Not input: the power LED's colour bits (SoC::Attention::ledColour) the Zodiac's strip shows, carried
+    // The power LED's colour bits (AttentionState::ledColour), carried
     // here so a change redraws the strip like a stick move.
     uint8_t lamp{0};
     bool lampShown{false};  // the device profile has an LED (DeviceCapabilities5::ledColours)
@@ -938,6 +938,7 @@ inline DeviceControlView deviceControlViewForWindow(const DeviceControlProfile& 
                                                                : DeviceControlArrangement::around;
     return view;
 }
+void drawDeviceLamp(SDL_Renderer* renderer, int x, int y, uint8_t colour);
 void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
                         int screenWidth, int screenHeight, float scale, DeviceKeyMask pressed,
                         const DeviceControlView& view={}, DeviceStick stick={});

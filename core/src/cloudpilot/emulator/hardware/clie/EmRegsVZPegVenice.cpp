@@ -252,11 +252,9 @@ EmSPISlave* EmRegsVzPegVenice::GetSPI2Slave(void) {
 // ---------------------------------------------------------------------------
 
 uint16 EmRegsVzPegVenice::GetLEDState(void) {
-    uint16 result = kLEDOff;
-    UInt8 portEData = READ_REGISTER(portEData);
-
-    if (portEData & hwrVZVenicePortEAlermLED) result |= (kLEDRed | kLEDGreen);
-    return result;
+    const uint8 outputs = READ_REGISTER(portEDir) & READ_REGISTER(portESelect);
+    const uint8 low = outputs & ~READ_REGISTER(portEData);
+    return low & hwrVZVenicePortEAlermLED ? kLEDRed | kLEDGreen : kLEDOff;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,8 +262,8 @@ uint16 EmRegsVzPegVenice::GetLEDState(void) {
 // ---------------------------------------------------------------------------
 
 Bool EmRegsVzPegVenice::GetVibrateOn(void) {
-    UInt8 portKData = READ_REGISTER(portKData);
-    return (portKData & hwrVZVenicePortKVibrate);
+    const uint8 outputs = READ_REGISTER(portKDir) & READ_REGISTER(portKSelect) & READ_REGISTER(portKData);
+    return (outputs & hwrVZVenicePortKVibrate) != 0;
 }
 
 bool EmRegsVzPegVenice::CopyLCDFrame(Frame& frame, bool fullRefresh) {

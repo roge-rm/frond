@@ -1,4 +1,5 @@
 #include "EmBattery.h"
+#include "AttentionState.h"
 #include "BackgroundJob.h"
 #include "PortablePublication.h"
 #include "EmBankRegs.h"
@@ -99,6 +100,10 @@
 
 using namespace std;
 
+#ifdef __ANDROID__
+void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp);
+#endif
+
 namespace {
 
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -182,6 +187,7 @@ struct Options {
     optional<int> contrast;
     float windowScale{2};
     bool sound{true};
+    bool disableRumble{false};
     optional<string> audioOutput;
     bool toneLog{false};
     string serial{"off"};
@@ -213,7 +219,7 @@ struct Options {
 void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
-            "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
+            "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--no-rumble] [--audio-output WAV]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
@@ -1143,6 +1149,7 @@ class Runner {
                 DispatchReplay();
             }
             UpdateSpeed(wallMs());
+            UpdateAttention();
 
             now = wallMs();
             if (now - lastDraw >= 16) {
@@ -1498,7 +1505,7 @@ class Runner {
     UsbHostHooks usbHooks;
     bool usbCable=false;
     string usbDebugMode="off";
-    // The T415 cradle's host endpoint, kept across loads and resets.
+    // The USB cradle's host endpoint, kept across loads and resets.
     string usbCradleMode="off", usbError;
     // The bank owner calls this before disposing even the first register bank.
     int usbDisposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { StopUsb(usbCradleMode!="off"); });
@@ -1627,10 +1634,13 @@ class Runner {
     void UsbReplaced() {
         if(usbHooks.replaced) usbHooks.replaced(usbHooks.context);
     }
-    // The T415's PDIUSBD12, if this machine has a USB cradle.
+    // The PDIUSBD12 for this machine's USB cradle.
     EmRegsUsbD12* UsbCradle() const {
         if(!profile->capabilities.usb) return nullptr;
-        return dynamic_cast<EmRegsUsbD12*>(EmBankRegs::GetSubBank(0x10900000,4));
+        emuptr address = 0x10400000;
+        if (profile->deviceType == deviceTypeT415) address = 0x10900000;
+        if (profile->deviceType == deviceTypeM125) address = 0x1f000000;
+        return dynamic_cast<EmRegsUsbD12*>(EmBankRegs::GetSubBank(address, 4));
     }
     // usb-mode: the cradle cable to a host PTY, TCP or Unix socket for pilot-link; off unplugs it.
     bool StartUsbCradle(const string& mode,string& error) {
@@ -2251,6 +2261,25 @@ class Runner {
         } else {
             cout << "unknown command: " << command << endl;
         }
+    }
+
+    void UpdateAttention() {
+        const auto& caps = profile->capabilities;
+        if (!caps.ledColours && !caps.vibrate) return;
+        const AttentionState current{
+            uint8_t(caps.ledColours ? EmHAL::GetLEDState() & caps.ledColours : 0),
+            caps.vibrate && EmHAL::GetVibrateOn(),
+        };
+        bool changed = false;
+        const uint8_t previousColour = attention.Shown().ledColour;
+        const auto nowUsec = chrono::duration_cast<chrono::microseconds>(Clock::now().time_since_epoch()).count();
+        const auto& shown = attention.Update(current, nowUsec, changed);
+        if (previousColour != shown.ledColour) controlsDirty = true;
+#ifdef __ANDROID__
+        if (changed) frondGuestAttentionChanged(shown.ledColour, shown.vibrate, shown.led);
+#else
+        if (desktop && changed) desktop->Event("attention", shown.Describe());
+#endif
     }
 
     // The desktop control socket: one request at a time, the machine's state changes pushed as
@@ -3159,6 +3188,9 @@ class Runner {
         if (!renderer || hidden) return;
         const bool fitted = fit != WindowFit::none;
         const float s = fitted ? 1 : options.windowScale;
+        DeviceStick artState;
+        artState.lamp = attention.Shown().ledColour;
+        artState.lampShown = profile->capabilities.ledColours != 0;
         const auto& controls = deviceControls(profile->art);
         lcd.Update();
         SDL_RenderSetViewport(renderer, nullptr);
@@ -3171,12 +3203,23 @@ class Runner {
             if(present)SDL_RenderPresent(renderer);
             return;
         }
+        int shake = 0;
+#ifndef __ANDROID__
+        if (present && attention.Shown().vibrate && !options.disableRumble && windowFocused &&
+            !(SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED))
+            shake = (SDL_GetTicks() / 16) % 2 ? 2 : -2;
+#endif
         if (fitted) {
             // The viewport is in output pixels at scale 1; the scale then maps device pixels into it.
-            const SDL_Rect viewport{int(lround(layout.x * pixelsX)), int(lround(layout.y * pixelsY)),
+            const SDL_Rect viewport{int(lround(layout.x * pixelsX)) + shake, int(lround(layout.y * pixelsY)),
                                     int(lround(layout.width * pixelsX)), int(lround(layout.height * pixelsY))};
             SDL_RenderSetViewport(renderer, &viewport);
             SDL_RenderSetScale(renderer, layout.scaleX * pixelsX, layout.scaleY * pixelsY);
+        } else if (shake) {
+            int width = 0, height = 0;
+            SDL_GetRendererOutputSize(renderer, &width, &height);
+            const SDL_Rect viewport{shake, 0, width, height};
+            SDL_RenderSetViewport(renderer, &viewport);
         }
         if (lcdTexture) {
             SDL_UpdateTexture(lcdTexture, nullptr, lcd.Pixels(), lcd.Width() * 4);
@@ -3190,7 +3233,7 @@ class Runner {
         }
         if (StripHeight() <= 0) {
         } else if (!fitted) {
-            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
+            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view, artState);
         } else if (controlsTexture) {
             // Drawn once into a texture at the output's pixel size, again when a key changes.
             if (controlsDirty || pressed != shownPressed) {
@@ -3203,7 +3246,7 @@ class Runner {
                     // Transparent where the strip leaves room for the jog panel beside the buttons.
                     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
                     SDL_RenderClear(renderer);
-                    drawDeviceControls(renderer, controls, lcd.Width(), -StripTop(), artScale, pressed, view);
+                    drawDeviceControls(renderer, controls, lcd.Width(), -StripTop(), artScale, pressed, view, artState);
                     SDL_SetRenderTarget(renderer, nullptr);
                     SDL_RenderSetScale(renderer, 1, 1);
                     SDL_RenderSetViewport(renderer, &viewport);
@@ -3215,7 +3258,7 @@ class Runner {
             const SDL_Rect dest{0, InputHeight() + StripTop(), DeviceWidth(), StripHeight() - StripTop()};
             SDL_RenderCopy(renderer, controlsTexture, nullptr, &dest);
         } else {
-            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed, view);
+            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed, view, artState);
         }
         // A jog panel beside the screen or the buttons is drawn straight on the window, after the strip
         // so the strip's texture can't cover the part beside the buttons.
@@ -3291,6 +3334,13 @@ class Runner {
             SDL_RenderSetClipRect(renderer,&danaLayout.viewport);
             SDL_RenderCopyF(renderer,lcdTexture,nullptr,&danaLayout.screen);
             SDL_RenderSetClipRect(renderer,nullptr);
+        }
+        if (profile->capabilities.ledColours) {
+            const auto& screen = danaLayout.screen;
+            const auto& viewport = danaLayout.viewport;
+            const int right = viewport.x + viewport.w;
+            const bool margin = screen.y - viewport.y >= 18 || right - (screen.x + screen.w) >= 18;
+            if (margin) drawDeviceLamp(renderer, right - 18, viewport.y + 2, attention.Shown().ledColour);
         }
         const auto& dest=danaLayout.keyboard;
         if(dest.w<=0||dest.h<=0||danaLayout.resolved=="hidden")return;
@@ -3646,6 +3696,7 @@ class Runner {
     DeviceControlView view{};
     WindowLayout layout;
     float pixelsX{1}, pixelsY{1}, artScale{1};
+    AttentionThrottle attention;
     bool controlsDirty{true};
     DeviceKeyMask shownPressed{0};
     // Android has the app in the background.
@@ -3764,6 +3815,8 @@ bool parseOptions(int argc, char** argv, Options& options) {
             options.windowScale = float(n);
         } else if (arg == "--no-sound" || arg == "-q") {
             options.sound = false;
+        } else if (arg == "--no-rumble") {
+            options.disableRumble = true;
         } else if (arg == "--audio-output") {
             const char* v = value();
             if (!v) return false;

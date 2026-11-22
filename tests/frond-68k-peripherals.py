@@ -917,8 +917,9 @@ def launcher_session(device, rom, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rom', type=Path, action='append', default=[])
-    parser.add_argument('--device', choices=['palm-iiix', 'sony-clie-t415'],
-                        help='for ROMs without T400 in their name; default palm-iiix')
+    parser.add_argument('--device', choices=['palm-iiix', 'sony-clie-t415', 'palm-m125', 'palm-m500',
+                                                 'palm-m505', 'palm-m515', 'ibm-workpad-c500'],
+                        help='device for the supplied ROM; default palm-iiix or sony-clie-t415 for a T400 ROM')
     parser.add_argument('--only', action='append', choices=CHECKS)
     parser.add_argument('--sdk', type=Path, default=ROOT.parent / 'palm-os-sdk/sdk-3.5')
     parser.add_argument('--evidence', type=Path, help='keep logs and frames here')
@@ -926,6 +927,8 @@ def main():
     global DEVICE
     images = palm_boot.palm_images()
     default = images / (T415_ROM if args.device == 'sony-clie-t415' else 'Palm/IIIx/Palm-IIIx-3.1-en.rom')
+    if args.device not in (None, 'palm-iiix', 'sony-clie-t415') and not args.rom:
+        parser.error('--rom is required for this device')
     roms = args.rom or [p for p in [default] if p.is_file()]
     if not roms:
         print('frond-68k peripherals: skipped, no ROM')
@@ -933,7 +936,7 @@ def main():
     probes = build_probes(ROOT, args.sdk.expanduser())
     failed = 0
     with tempfile.TemporaryDirectory(prefix='frond-68k-peripherals-') as work:
-        base = args.evidence or Path(work)
+        base = args.evidence.resolve() if args.evidence else Path(work)
         for rom in roms:
             root = base / rom.stem
             root.mkdir(parents=True, exist_ok=True)

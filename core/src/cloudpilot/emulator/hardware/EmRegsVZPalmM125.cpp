@@ -152,3 +152,7 @@ EmSPISlave* EmRegsVZPalmM125::GetSPI2Slave(void) {
 
     return NULL;
 }
+
+void EmRegsVZPalmM125::SetUsbCradle(bool docked) {
+    static_cast<EmSPISlaveADS784x*>(fSPISlaveADC)->SetTwisterDocked(docked);
+}

@@ -3189,6 +3189,20 @@ void paintZodiacControls(Canvas& canvas, const DeviceControlProfile& profile, De
 }
 }  // namespace
 
+void drawDeviceLamp(SDL_Renderer* renderer, int x, int y, uint8_t colour) {
+    constexpr int size = 16;
+    Canvas canvas(size, size, 1);
+    Uint8 red = 0, green = 0, blue = 0, alpha = 0;
+    SDL_GetRenderDrawColor(renderer, &red, &green, &blue, &alpha);
+    std::fill(canvas.pixels.begin(), canvas.pixels.end(), Rgb{float(red), float(green), float(blue)});
+    paintLedLamp(canvas, size / 2, size / 2, colour, 1);
+    if (auto* texture = canvasTexture(renderer, canvas)) {
+        const SDL_Rect dest{x, y, size, size};
+        SDL_RenderCopy(renderer, texture, nullptr, &dest);
+        SDL_DestroyTexture(texture);
+    }
+}
+
 void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
                         int width, int height, float scale, DeviceKeyMask pressed,
                         const DeviceControlView& view, DeviceStick stick) {
@@ -3243,6 +3257,21 @@ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& prof
         case DeviceControlStyle::h4350: paintH4350Controls(canvas,profile,width*u,pressed,view);break;
         case DeviceControlStyle::t415: paintT415Controls(canvas,profile,beside ? profile.width : width*u,pressed,false,beside);break;
         default: paintTxControls(canvas,profile,width*u,pressed);
+    }
+    if (stick.lampShown) {
+        switch (profile.style) {
+            case DeviceControlStyle::m500:
+            case DeviceControlStyle::m505:
+            case DeviceControlStyle::m515:
+            case DeviceControlStyle::m520:
+            case DeviceControlStyle::c500:
+                paintLedLamp(canvas, width * u / 2.f + 29, 12, stick.lamp, 1);
+                break;
+            case DeviceControlStyle::t415:
+                paintLedLamp(canvas, (beside ? profile.width : width * u) - 16.f, 19, stick.lamp, 1);
+                break;
+            default: break;
+        }
     }
     if(auto* texture=canvasTexture(renderer,canvas)) {
         const SDL_Rect dest{stripX,int(std::lround((height+transform.top)*scale)),canvas.w,canvas.h};

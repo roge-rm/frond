@@ -104,6 +104,7 @@ data class Device internal constructor(
     val os: String = "palm-os",
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
     val storageSlots: List<StorageSlot> = emptyList(),
+    val vibrate: Boolean = false,
 ) {
     // Applications and Hard reset are Palm OS guest services; a Windows CE device has its own or greys them out.
     val palmOs: Boolean get() = os == "palm-os"

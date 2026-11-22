@@ -1459,6 +1459,7 @@ uint8 EmRegsVZ::GetPortInternalValue(int port) {
         // Get the INT bits that need to be set.
 
         result = this->GetKeyBits();
+        if (fUsbIrq3Wired && !fUsbIrq3Asserted) result |= 0x40;
     }
 
     return result;
@@ -2663,6 +2664,13 @@ void EmRegsVZ::UpdateIRQ2(uint8 oldBit) {
     WRITE_REGISTER(intPendingHi, intPendingHi);
 
     UpdateInterrupts();
+}
+
+void EmRegsVZ::SetUsbIrq3Line(bool asserted) {
+    const uint8 oldPins = GetPortInputValue('D');
+    fUsbIrq3Wired = true;
+    fUsbIrq3Asserted = asserted;
+    UpdateIRQ3(oldPins);
 }
 
 void EmRegsVZ::UpdateIRQ3(uint8 oldBit) {

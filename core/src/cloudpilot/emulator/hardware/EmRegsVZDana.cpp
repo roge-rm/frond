@@ -49,6 +49,13 @@ bool EmRegsVZDana::CopyLCDFrame(Frame& frame,bool fullRefresh) {
 }
 Bool EmRegsVZDana::GetLCDBacklightOn() { return (StdRead(0xfffff441,1)&0x10)!=0; }
 
+uint16 EmRegsVZDana::GetLEDState() {
+    constexpr emuptr direction = 0xfffff420, data = 0xfffff421, select = 0xfffff423;
+    constexpr uint8 charging = 0x20, charged = 0x40;
+    const uint8 pins = StdRead(direction, 1) & StdRead(select, 1) & StdRead(data, 1);
+    return (pins & charging ? kLEDGreen : kLEDOff) | (pins & charged ? kLEDRed : kLEDOff);
+}
+
 void EmRegsVZDana::GetKeyInfo(int* rows, int* cols, uint16*, Bool*) {
     *rows = *cols = 0;
 }

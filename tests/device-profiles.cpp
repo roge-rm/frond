@@ -894,7 +894,7 @@ static void danaWirelessInventory() {
 }
 
 // The m125, m500 and WorkPad c500 on the VZ board: told by the header's HAL ID (the c500 is chosen, as it has the
-// m500's), one SD/MMC slot of linked card files, the cradle's serial HotSync, and USB HotSync named as pending.
+// m500's), one SD/MMC slot of linked card files, and serial HotSync. Five boards also have D12 USB HotSync.
 static void vzProfiles() {
     struct Vz { const char* name; DeviceType5 type; DeviceArt art; DeviceDetect5 detect; uint32_t hal; int strip;
                 uint32_t ramMiB; bool colour; int width; };
@@ -924,10 +924,11 @@ static void vzProfiles() {
                p->frontend.silkscreenHeight == 60 * d.width / 160 && p->frontend.stripHeight == d.strip);
         assert(std::string(p->frontend.buttons) == "up|down|app1|app2|app3|app4");
         const auto& caps = p->capabilities;
-        assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && caps.infrared && caps.irPhone &&
+        const bool usb = d.type != deviceTypeM130 && d.type != deviceTypeM520;
+        assert(!caps.network && !caps.keyboard && caps.serial && caps.usb == usb && caps.infrared && caps.irPhone &&
                caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);
         assert(deviceProfileHasHotSyncButton5(p->deviceType));
-        assert(std::string(deviceProfilePendingUsb5(p->deviceType)) == "USB HotSync");
+        assert(std::string(deviceProfilePendingUsb5(p->deviceType)) == (usb ? "" : "USB HotSync"));
         // One slot, SD that a legacy CSD can describe and MMC up to 256 MiB, as the Dana's.
         assert(deviceProfileLinkedCards5(*p) && deviceProfileCardSlotCount5(*p) == 1);
         assert(deviceProfileCardSizeValid5(p->deviceType, DeviceCardSlot5::sd0, DeviceCardFamily5::sdsc, 32ull << 20));
