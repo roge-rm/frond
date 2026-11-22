@@ -18,6 +18,8 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QProcess>
+#include <QRegularExpression>
+#include <QTimer>
 #include <QSlider>
 #include <QVBoxLayout>
 #include <QGuiApplication>
@@ -168,20 +170,44 @@ namespace {
 QString midiCore;
 }
 void setMidiPortsCore(const QString& core) { midiCore = core; }
-QStringList midiOutputPorts() {
-    QStringList ports;
-    if (midiCore.isEmpty()) return ports;
-    QProcess core;
-    core.start(midiCore, {"--music-midi-ports"});
-    if (!core.waitForFinished(5000)) { core.kill(); core.waitForFinished(1000); return ports; }
-    // "N: name" a line.
-    for (const auto& line : QString::fromUtf8(core.readAllStandardOutput()).split('\n')) {
-        const int colon = line.indexOf(QStringLiteral(": "));
-        bool number = false;
-        if (colon > 0) line.left(colon).toUInt(&number);
-        if (number) ports << line.mid(colon + 2).trimmed();
+void listMidiOutputPorts(QObject* context, std::function<void(const QStringList&)> done) {
+    if (midiCore.isEmpty()) {
+        done({});
+        return;
     }
-    return ports;
+    auto* core = new QProcess(context);
+    auto* timeout = new QTimer(core);
+    timeout->setSingleShot(true);
+    QObject::connect(timeout, &QTimer::timeout, core, [core] { core->kill(); });
+    QObject::connect(core, &QProcess::finished, context, [core, done](int, QProcess::ExitStatus status) {
+        QStringList ports;
+        // "N: name" a line.
+        if (status == QProcess::NormalExit)
+            for (const auto& line : QString::fromUtf8(core->readAllStandardOutput()).split('\n')) {
+                const int colon = line.indexOf(QStringLiteral(": "));
+                bool number = false;
+                if (colon > 0) line.left(colon).toUInt(&number);
+                if (number) ports << line.mid(colon + 2).trimmed();
+            }
+        core->deleteLater();
+        done(ports);
+    });
+    QObject::connect(core, &QProcess::errorOccurred, context, [core, done](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) return;
+        core->deleteLater();
+        done({});
+    });
+    core->start(midiCore, {"--music-midi-ports"});
+    timeout->start(5000);
+}
+
+QString midiPortKey(const QString& name) {
+    static const QRegularExpression clientPort(QStringLiteral("\\s+\\d+:\\d+$"));
+    static const QRegularExpression bracketed(QStringLiteral("\\s*\\(\\d+(:\\d+)?\\)"));
+    QString key = name;
+    key.remove(clientPort);
+    key.remove(bracketed);
+    return key.trimmed().toLower();
 }
 
 MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool automaticScale, QWidget* parent)
@@ -436,16 +462,26 @@ void MachineSettings::showMusic() {
     midiPortRow->setVisible(zodiac && choice == "midi");
     if (!zodiac || choice != "midi" || midiPortsListed) return;
     midiPortsListed = true;
-    const auto keep = midiPort->currentData().toString();
-    const QSignalBlocker blocked(midiPort);
-    midiPort->clear();
+    listMidiOutputPorts(this, [this](const QStringList& ports) {
+        const auto keep = midiPort->currentData().toString();
+        const QSignalBlocker blocked(midiPort);
+        midiPort->clear();
 #ifndef Q_OS_WIN
-    midiPort->addItem(tr("Frond's own port"), "virtual");
+        midiPort->addItem(tr("Frond's own port"), "virtual");
 #endif
-    for (const auto& port : midiOutputPorts()) midiPort->addItem(port, port);
-    // A saved port that isn't there now stays, so the choice isn't lost while the device is unplugged.
-    if (!keep.isEmpty() && midiPort->findData(keep) < 0) midiPort->addItem(tr("%1 (not found)").arg(keep), keep);
-    midiPort->setCurrentIndex(std::max(0, midiPort->findData(keep)));
+        for (const auto& port : ports) midiPort->addItem(port, port);
+        int index = keep.isEmpty() ? 0 : midiPort->findData(keep);
+        // The same port under new client numbers.
+        if (index < 0)
+            for (int i = 0; i < midiPort->count() && index < 0; ++i)
+                if (midiPortKey(midiPort->itemData(i).toString()) == midiPortKey(keep)) index = i;
+        // A saved port that isn't there now stays, so the choice isn't lost while the device is unplugged.
+        if (index < 0) {
+            midiPort->addItem(tr("%1 (not found)").arg(keep), keep);
+            index = midiPort->count() - 1;
+        }
+        midiPort->setCurrentIndex(index);
+    });
 }
 
 void fillSpeedBox(QComboBox* box, bool m68k, const QString& name) {

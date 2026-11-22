@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <QDialog>
 #include "FirmwareInput.h"
 #include "SessionStore.h"
@@ -20,8 +21,11 @@ void fillSpeedBox(QComboBox* box, bool m68k, const QString& name);
 
 // The core that lists the MIDI output ports for the Zodiac's Music output (its --music-midi-ports).
 void setMidiPortsCore(const QString& core);
-// The MIDI output port names the core lists, empty when it has none or can't run.
-QStringList midiOutputPorts();
+// Asks the core for the MIDI output port names in the background; done gets them on context's thread, empty when
+// it has none or can't run (5 s at most). Nothing comes if context goes first.
+void listMidiOutputPorts(QObject* context, std::function<void(const QStringList&)> done);
+// A port's name without the numbers that change with plug order (as the core's zodiacMidiPortKey), in lower case.
+QString midiPortKey(const QString& name);
 
 class QPushButton;
 class MachineSettings : public QWidget {
