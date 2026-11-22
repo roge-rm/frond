@@ -67,6 +67,7 @@ struct Stats {
     // ARM920T Fast blocks: mapping checks that went through every code page (the rest took only the pages
     // of table lines that changed), the pages all checks walked, the changed lines and the most lines kept.
     uint64_t fullMapChecks = 0, mapPagesChecked = 0, tableLinesChanged = 0, tableLines = 0;
+    uint64_t tlbLiveScans = 0, tlbLiveRechecks = 0;  // watched checks after TLB fills, pages they sent to recheck
     std::unordered_map<uint32_t, uint64_t> interpPc;
     // Instruction at each interpreted PC (Thumb: the halfword), and the guest PC current
     // at each whole-cache invalidation with the word there.
@@ -147,9 +148,12 @@ struct Stats {
         fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu suspendedMvaDrops %llu\n",
                 (unsigned long long)suspends, (unsigned long long)resumes, (unsigned long long)otherPidInstalls,
                 (unsigned long long)suspendedMvaDrops);
-        fprintf(stderr, "jit: fullMapChecks %llu mapPagesChecked %llu tableLinesChanged %llu tableLines %llu\n",
+        fprintf(stderr,
+                "jit: fullMapChecks %llu mapPagesChecked %llu tableLinesChanged %llu tableLines %llu tlbLiveScans %llu "
+                "tlbLiveRechecks %llu\n",
                 (unsigned long long)fullMapChecks, (unsigned long long)mapPagesChecked,
-                (unsigned long long)tableLinesChanged, (unsigned long long)tableLines);
+                (unsigned long long)tableLinesChanged, (unsigned long long)tableLines,
+                (unsigned long long)tlbLiveScans, (unsigned long long)tlbLiveRechecks);
         fprintf(stderr,
                 "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
                 "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
@@ -512,7 +516,7 @@ struct Env final : public A32::UserCallbacks {
     };
     static constexpr uint32_t kSweepChecks = 4096;
     bool watchTables = false, checking = false;
-    uint32_t checkedTtb = ~0u, checkStamp = 0;
+    uint32_t checkedTtb = ~0u, checkStamp = 0, checkedFills = 0;
     std::vector<std::unique_ptr<TableLine>> tableLines;
     std::unordered_map<uint32_t, TableLine *> tableLineAt;  // by pa >> 6
     std::vector<uint32_t> recheck, scratchRecheck, scratchCheck;
@@ -824,10 +828,25 @@ struct Env final : public A32::UserCallbacks {
     bool CheckWatched(F &check) {
         watchTables = arm920 && !lineBound;
         if (!watchTables) return false;
-        const uint32_t ttb = cpuJitTtb(cpu);
+        uint32_t sinceFlush;
+        const uint32_t ttb = cpuJitTtb(cpu), fills = cpuJitTlbFills(cpu, &sinceFlush);
+        // Entries still live that were filled since the last check.
+        const bool filled = fills != checkedFills && sinceFlush;
+        checkedFills = fills;
         if (ttb != checkedTtb || ttb == MMU_DISABLED_TTP) {
             checkedTtb = ttb;
             return false;
+        }
+        // The TLB answers a code fetch before the tables, and its entries can differ from them (a table word
+        // edited and put back with no flush in between, or entries kept over a TTB write). Pages it answers
+        // now, after such fills, go to recheck, which keeps them while it answers.
+        if (filled) {
+            stats.tlbLiveScans++;
+            for (auto &[page, c] : code)
+                if (!c.rechecking && !(c.suspended && !c.noted) && cpuJitTlbLive(cpu, page << 12)) {
+                    stats.tlbLiveRechecks++;
+                    Recheck(page, c);
+                }
         }
         if (++checkStamp == 0) {
             for (auto &[page, c] : code) c.stamp = 0;

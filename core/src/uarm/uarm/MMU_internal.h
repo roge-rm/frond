@@ -36,6 +36,8 @@ struct ArmMmu {
     uint8_t staleOn;
     uint32_t staleTtb;
     uint32_t flushes;  // counts mmuTlbFlush calls, for the JIT; not saved
+    uint32_t fills;     // counts walks and loads that made TLB entries live, for the JIT; not saved
+    uint32_t genFills;  // of those, since the entries were last all made dead (a new gen)
     // Called when the TLB, domains, S or R change, so anything that checked a permission
     // before checks it again (the I-cache's fetch key). Not saved.
     void (*permChanged)(void *ctx);

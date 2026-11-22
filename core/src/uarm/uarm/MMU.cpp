@@ -32,6 +32,7 @@ static void mmuPrvNextGen(struct ArmMmu *mmu) {
         for (size_t i = 0; i < TLB_SIZE; i++) mmu->tlb[i].gen = 0;
         mmu->gen = 1;
     }
+    mmu->genFills = 0;
 }
 
 void mmuTlbFlush(struct ArmMmu *mmu) {
@@ -232,6 +233,8 @@ translated:
             tlbEntry->pa = (paPage + offset) >> 12;
             tlbEntry->gen = mmu->gen;
         }
+        mmu->fills++;
+        mmu->genFills++;
         if (replaced) hostTlbFlush(&mmu->mem->hostTlb);
     }
 
@@ -388,6 +391,15 @@ bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged) {
 uint32_t mmuGetTTP(struct ArmMmu *mmu) { return mmu->transTablPA; }
 
 uint32_t mmuFlushCount(const struct ArmMmu *mmu) { return mmu->flushes; }
+
+uint32_t mmuTlbFills(const struct ArmMmu *mmu, uint32_t *sinceFlush) {
+    *sinceFlush = mmu->genFills;
+    return mmu->fills;
+}
+
+bool mmuTlbLive(const struct ArmMmu *mmu, uint32_t va) {
+    return mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[va >> 12].gen == mmu->gen;
+}
 
 void mmuSetTTP(struct ArmMmu *mmu, uint32_t ttp) {
     mmuTlbFlush(mmu);
@@ -713,6 +725,8 @@ void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
         e.x = 0;
         e.gen = mmu->gen;
     }
+    mmu->fills++;
+    mmu->genFills++;
     mmuPrvPermChanged(mmu);
 }
 
