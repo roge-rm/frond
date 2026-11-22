@@ -53,7 +53,7 @@ class RunningSheetsTest {
     }
 
     @Test fun cardRowsFollowTheState() {
-        val sd = Device.entries.first { it.sdSlot && !it.memoryStick }
+        val sd = Device.entries.first { it.sdSlot && !it.memoryStick && !it.sdWriteProtection }
         fun rows(state: SdCard.State, linked: Boolean = false, free: Boolean = false) = RunningSheets.cardRows(sd, state, linked, free)
         assertEquals(listOf(CardRow.SLOT, CardRow.FILES, CardRow.EJECT), rows(SdCard.State.INSERTED))
         assertEquals(listOf(CardRow.SLOT, CardRow.INSERT, CardRow.FILES, CardRow.EXPORT_IMAGE), rows(SdCard.State.EJECTED))
@@ -71,6 +71,19 @@ class RunningSheetsTest {
         assertFalse(CardRow.WRITE_PROTECT in RunningSheets.cardRows(stick, SdCard.State.NONE, false, false))
         // Files… works on an ejected stick the same as on an SD card.
         assertTrue(CardRow.FILES in RunningSheets.cardRows(stick, SdCard.State.EJECTED, false, false))
+    }
+
+    @Test fun armPalmBoardControlsAreOnlyShownOnSupportedMachines() {
+        val armPalms = setOf("palm-tx", "palm-e2", "palm-e2-franken", "palm-zire-72")
+        for (device in Device.entries) {
+            val supported = device.id in armPalms
+            assertEquals(device.id, supported, AudioRow.HEADPHONES in RunningSheets.audioRows(device))
+            assertEquals(device.id, supported || device.zodiac, device.sdWriteProtection)
+            if (supported) {
+                val card = RunningSheets.cardRows(device, SdCard.State.EJECTED, false, false)
+                assertTrue(device.id, CardRow.WRITE_PROTECT in card)
+            }
+        }
     }
 
     @Test fun bothZodiacSdSlotsShowWriteProtection() {

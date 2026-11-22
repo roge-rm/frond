@@ -35,7 +35,7 @@
 		9		IN		0
 		10		IN		0			sd card detect (Active low)
 		11		IN		0
-		12		IN		0	RE FE 	headphone detect?		[GUESS]
+		12		IN		0	RE FE 	headphone detect (active high)
 		13		IN		0
 		14		IN		0
 		15		OUT	LO	2			nCS1
@@ -139,7 +139,7 @@ struct Device {
 
 // The battery input on each board: the TG50's AD7873 VBAT, the WM9712L BMON input (behind a divide by
 // three) on the E2, TX and Zire 72. The charger: the TG50's uc A13 and A14 (tg50BoardSetCharging), the Zire 72's
-// GPIO99 low (the charging bolt), the TX's GPIO90 high (DAL dock status 0x2009b7d0, palmtx.h POWER_DETECT) and
+// GPIO99 low (DAL dock status 0x2009c344), the TX's GPIO90 high (DAL dock status 0x2009b7d0) and
 // the E2's GPIO9 high (DAL dock status 0x2009c66c).
 static void deviceApplyBattery(Device *dev) {
     const uint32_t mV = BatteryPower::LiIonMilliVolts(dev->battery.Percent());
@@ -163,6 +163,11 @@ bool deviceSetBattery(Device *dev, const BatteryPower &battery) {
     dev->battery = battery;
     deviceApplyBattery(dev);
     return true;
+}
+
+void deviceSetCodecHeadphones(Device* dev, bool in) {
+    // The Zire 72 DAL configures WM9712 GPIO1 at 0x2009865c and reads its state at 0x20098e3c.
+    wm9712LsetHeadphones(dev->wm9712L, in);
 }
 
 // A random locally administered address, as btvirt gives a controller.
@@ -380,8 +385,6 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
 
     pxaGpioSetState(sp->gpio, 35, true); // USB cable absent (palmte2.h USB_DETECT_N)
     pxaGpioSetState(sp->gpio, 40, true);  // no hotsync button pressed [??]
-
-    pxaGpioSetState(sp->gpio, 12, false);  // no headphones [??]
 
     pxaGpioSetState(sp->gpio, 52, true);  // no manufacturing test mode please
 

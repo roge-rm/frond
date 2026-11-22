@@ -1116,7 +1116,7 @@ test-zodiac-normal-runtime: out/frond
 
 .PHONY: test-pxa-battery-pins
 test: test-pxa-battery-pins
-# The Charging switch on the TX, E2 and TG50 power inputs, firmware-free.
+# Battery, headphone and SD switch inputs on the PXA boards, firmware-free.
 test-pxa-battery-pins: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/pxa-battery-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \

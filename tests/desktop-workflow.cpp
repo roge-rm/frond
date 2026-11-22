@@ -990,7 +990,9 @@ s.sendall(b'0\tevent\tready\t\n')
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     with trace.open('ab') as t: t.write(cmd+b'\n')
-    message={b'device-state':b'palm-e2',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'usb-state':b'pty /dev/pts/9 connected running'}.get(cmd,b'done')
+    message={b'device-state':b'palm-e2',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'ejected',b'sd-protection':b'writable',b'usb-state':b'pty /dev/pts/9 connected running'}.get(cmd,b'done')
+    if cmd==b'headphones': message=bytes.fromhex(arg.decode())
+    if cmd==b'sd-read-only': message=b'read-only' if bytes.fromhex(arg.decode())==b'on' else b'writable'
     if cmd==b'keyboard-attach': message=b'attached' if bytes.fromhex(arg.decode())==b'on' else b'detached'
     if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
@@ -1059,6 +1061,20 @@ for line in s.makefile('rb'):
         QCOMPARE(window.windowTitle(), QString("Tungsten E2"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("sd-state"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
+        QVERIFY(read(".commands").contains("sd-protection"));
+        QVERIFY(!read(".commands").contains("sd2-state"));
+        auto* sdLock = window.findChild<QCheckBox*>("cardReadOnly");
+        QTRY_VERIFY(sdLock->isEnabled() && !sdLock->isHidden());
+        sdLock->click();
+        QTRY_VERIFY(read(".commands").contains("sd-read-only") && sdLock->isEnabled() && sdLock->isChecked());
+        auto* headphones = window.findChild<QCheckBox*>("headphonesIn");
+        QVERIFY(!args.contains("--headphones-in"));
+        QTRY_VERIFY(headphones->isEnabled() && !headphones->isHidden() && !headphones->isChecked());
+        headphones->click();
+        QTRY_VERIFY(frondSessions::readPreferences(managedSession("Tungsten E2"), &added) && added.headphonesIn);
+        QVERIFY(headphones->isChecked());
+        headphones->click();
+        QTRY_VERIFY(frondSessions::readPreferences(managedSession("Tungsten E2"), &added) && !added.headphonesIn);
         // TX-only network/serial controls stay off; the E2 keyboard and USB are usable.
         QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
         QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());

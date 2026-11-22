@@ -693,6 +693,7 @@ class RunningModel(
                 if (next.batteryMode != old.batteryMode) s = s.copy(batteryMode = next.batteryMode)
                 if (next.batteryLevel != old.batteryLevel) s = s.copy(batteryLevel = next.batteryLevel)
                 if (next.batteryCharging != old.batteryCharging) s = s.copy(batteryCharging = next.batteryCharging)
+                if (device.headphonesSupported && next.headphonesIn != old.headphonesIn) s = s.copy(headphonesIn = next.headphonesIn)
                 s
             }
             settings = machineSettings()
@@ -702,6 +703,7 @@ class RunningModel(
             FrondActivity.running?.applyBarMode()
             FrondActivity.running?.applyRumble()
             FrondActivity.running?.battery?.changed(settings)
+            if (settings.headphonesIn != old.headphonesIn) FrondActivity.running?.applyHeadphones()
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }

@@ -85,7 +85,7 @@ object RunningSheets {
     // ---- Display and audio ----
 
     enum class DisplayRow { SIZE, SMOOTH, CONTRAST, SHOW_KEYBOARD, JOG, ROTATE, SPEED, CAMERA }
-    enum class AudioRow { SOUND, MICROPHONE, AUDIO_PREVIEW, RUMBLE }
+    enum class AudioRow { SOUND, HEADPHONES, MICROPHONE, AUDIO_PREVIEW, RUMBLE }
 
     fun displayRows(device: Device): List<DisplayRow> {
         val rows = mutableListOf(DisplayRow.SIZE, DisplayRow.SMOOTH)
@@ -100,6 +100,7 @@ object RunningSheets {
 
     fun audioRows(device: Device): List<AudioRow> {
         val rows = mutableListOf(AudioRow.SOUND)
+        if (device.headphonesSupported) rows += AudioRow.HEADPHONES
         if (!device.runs68k || device.microphone) rows += AudioRow.MICROPHONE
         if (!device.runs68k) rows += AudioRow.AUDIO_PREVIEW
         if (device.vibrate) rows += AudioRow.RUMBLE

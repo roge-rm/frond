@@ -341,14 +341,14 @@ class MainWindow : public QMainWindow {
     // The second SD slot (the Zodiac's): the same row as the first.
     QPushButton *card2Pick, *sd2Eject, *sd2Reinsert, *sd2Export, *sd2Exchange, *sd2Retry, *linked2Insert;
     QLabel *linked2State, *sd2Status, *storage2Heading;
-    QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly, *card2ReadOnly;
+    QCheckBox *microphoneToggle, *soundToggle, *headphonesToggle, *holdToggle, *cardReadOnly, *card2ReadOnly;
     QLabel *serialLabel, *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
     QSlider* contrast;
     QPushButton *rotateButton, *hotSyncButton;
     QCheckBox* cradleToggle;
     QString cradleSetting;
     bool cradleStartupPending{false};
-    bool protectionKnown{false}, protection2Known{false}, protectionStartsSecond{false};
+    bool protectionKnown{false}, protection2Known{false}, protectionStartPending{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
     // The CLIÉ game controller as the core last said: empty unknown, attached, detached or busy.

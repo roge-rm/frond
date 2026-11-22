@@ -210,7 +210,7 @@ class SoC {
     // After an SD eject: whether the guest's card driver has handled the removal, on boards that can
     // tell (the PXA SD devices: the guest stopped the MMC clock with the slot empty), else nullopt.
     virtual std::optional<bool> SdRemovalHandled() { return std::nullopt; }
-    // The card's write protect tab as the slot reads it, for devices that have the switch (the rx1950).
+    // The card's write-protect tab, from the host's card descriptor.
     virtual void SetSdWriteProtect(bool) {}
     // A second SD slot, the Zodiac's only, with its card in sdCardStore(1). Sd2Insert puts that card
     // in and is false when it can't go in.

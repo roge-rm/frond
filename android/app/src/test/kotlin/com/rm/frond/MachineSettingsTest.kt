@@ -85,6 +85,16 @@ class MachineSettingsTest {
         assertEquals(ControllerMap.defaults(Device.E2), ControllerMap.defaults(e3))
     }
 
+    @Test fun headphonesDefaultOutAndFollowTheMachine() {
+        val old = metadata("without-headphones", legacy)
+        val plugged = metadata("with-headphones", legacy.copy(headphonesIn = true))
+        assertFalse(settings(old).headphonesIn)
+        assertTrue(settings(plugged).headphonesIn)
+        assertFalse("--headphones-in" in settings(old).arguments(headphonesSupported = true))
+        assertTrue("--headphones-in" in settings(plugged).arguments(headphonesSupported = true))
+        assertFalse("--headphones-in" in settings(plugged).arguments())
+    }
+
     @Test fun unsupportedSoundMutesWithoutChangingTheSavedChoice() {
         val chosen = MachineSettings(sound = true)
         assertTrue("--no-sound" in chosen.arguments(soundSupported = false))

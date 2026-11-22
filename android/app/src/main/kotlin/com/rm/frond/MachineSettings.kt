@@ -117,6 +117,7 @@ data class MachineSettings(
     val batteryMode: BatteryMode = BatteryMode.MAX,
     val batteryLevel: Int = DEFAULT_BATTERY_LEVEL,
     val batteryCharging: Boolean = false,
+    val headphonesIn: Boolean = false,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
@@ -126,14 +127,16 @@ data class MachineSettings(
         // Saved only when not the default.
         if (batteryMode != BatteryMode.MAX) it.put("batteryMode", batteryMode.arg)
         if (batteryLevel != DEFAULT_BATTERY_LEVEL) it.put("batteryLevel", batteryLevel)
-        if (batteryCharging) it.put("batteryCharging", true) }
+        if (batteryCharging) it.put("batteryCharging", true)
+        if (headphonesIn) it.put("headphonesIn", true) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
     // m68k: frond-68k's arguments, with contrast and speed and no engine. both: --speed unless Original.
     // tg50Controls: Show keyboard and the jog controls; jogControls: the jog controls on their own.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
-                  jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false, touchHidden: Boolean = false): List<String> = buildList {
+                  jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false, touchHidden: Boolean = false,
+                  headphonesSupported: Boolean = false): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
         if (gamepadSupported) this@MachineSettings.gamepad?.let { addAll(listOf("--gamepad", if (it) "on" else "off")) }
         if (smoothing) add("--smooth-lcd")
@@ -142,6 +145,7 @@ data class MachineSettings(
         if (gamepadSupported) addAll(listOf("--jog-controls-landscape", if (touchHidden) JogLandscape.HIDDEN.arg else jogLandscape.arg))
         if (touchHidden && !m68k) add("--hide-buttons")
         if (!soundSupported || !sound) add("--no-sound")
+        if (headphonesSupported && headphonesIn) add("--headphones-in")
         if (m68k) {
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
         } else if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
@@ -221,6 +225,7 @@ data class MachineSettings(
                 batteryMode = BatteryMode.entries.firstOrNull { it.arg == json.optString("batteryMode") } ?: BatteryMode.MAX,
                 batteryLevel = json.optInt("batteryLevel", DEFAULT_BATTERY_LEVEL).coerceIn(0, 100),
                 batteryCharging = json.optBoolean("batteryCharging", false),
+                headphonesIn = json.optBoolean("headphonesIn", false),
             )
         }
     }

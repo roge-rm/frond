@@ -125,6 +125,13 @@ fun MachineSoundRow(device: Device, settings: MachineSettings, listStyle: Boolea
     }
 }
 
+@Composable
+fun MachineHeadphonesRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineSwitchRow("Headphones in", settings.headphonesIn, listStyle) {
+        onChange(settings.copy(headphonesIn = it))
+    }
+}
+
 // Low-latency audio. The firmware only picks the preview or the queue-only mode at start.
 @Composable
 fun MachineAudioPreviewRow(

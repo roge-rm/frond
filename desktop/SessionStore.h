@@ -131,6 +131,7 @@ struct Preferences {
     QString batteryMode{"max"};
     int batteryLevel{100};
     bool batteryCharging{false};
+    bool headphonesIn{false};
     // Speed multiplier of Original (1.5x, 2x, 3x, 4x, 8x) when uncapped is false; empty is Original.
     QString multiplier;
 };
@@ -185,6 +186,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     if (const auto mode = object.value("batteryMode").toString(); mode == "level" || mode == "host") result->batteryMode = mode;
     result->batteryLevel = std::clamp(object.value("batteryLevel").toInt(100), 0, 100);
     result->batteryCharging = object.value("batteryCharging").toBool(false);
+    result->headphonesIn = object.value("headphonesIn").toBool(false);
     result->rumble = object.value("rumble").toBool(true);
     result->gamepadSet = object.value("gamepad").isBool();
     result->gamepad = object.value("gamepad").toBool(false);
@@ -218,6 +220,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     if (prefs.batteryMode != "max") object.insert("batteryMode", prefs.batteryMode);
     if (prefs.batteryLevel != 100) object.insert("batteryLevel", std::clamp(prefs.batteryLevel, 0, 100));
     if (prefs.batteryCharging) object.insert("batteryCharging", true);
+    if (prefs.headphonesIn) object.insert("headphonesIn", true);
     if (!prefs.rumble) object.insert("rumble", false);
     if (prefs.gamepadSet) object.insert("gamepad", prefs.gamepad);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
