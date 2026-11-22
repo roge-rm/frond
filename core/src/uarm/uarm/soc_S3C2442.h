@@ -156,6 +156,7 @@ class SocS3C2442 : public SoC {
     bool redraw{true};
     uint64_t scannedNs{0};  // guest time of the last LCD scan, and whether the LCD was on then
     bool scannedOn{false};
+    uint64_t frameCallNs{~uint64_t(0)};  // guest time of the last GetPendingFrame call
     // Guest ns Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};
     bool headphones{false};
