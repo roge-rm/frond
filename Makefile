@@ -2640,6 +2640,18 @@ test-zodiac-graphics-commands: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_eim.cpp -o $(OBJ_ROOT)/test-zodiac-graphics-commands
 	$(OBJ_ROOT)/test-zodiac-graphics-commands
 
+.PHONY: test-zodiac-graphics-worker
+# The Fast fill worker thread against fills on the calling thread, and the same with ThreadSanitizer.
+test-zodiac-graphics-worker: $(OBJ_ROOT)/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-worker.cpp \
+		core/src/uarm/uarm/imx1_eim.cpp -pthread -o $(OBJ_ROOT)/test-zodiac-graphics-worker
+	$(OBJ_ROOT)/test-zodiac-graphics-worker
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=thread \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-worker.cpp \
+		core/src/uarm/uarm/imx1_eim.cpp -pthread -o $(OBJ_ROOT)/test-zodiac-graphics-worker-tsan
+	TSAN_OPTIONS=halt_on_error=1 setarch -R $(OBJ_ROOT)/test-zodiac-graphics-worker-tsan
+
 .PHONY: test-zodiac-graphics-gpu
 # The host GPU path against the CPU model; skipped (77) on a host with no usable GPU.
 test-zodiac-graphics-gpu: $(OBJ_ROOT)/zodiac-boot-probe
@@ -2900,7 +2912,7 @@ test-zodiac-faster: $(OBJ_ROOT)/zodiac-boot-probe
 # The Zodiac checks not listed elsewhere in the suite. Left out for time: arm-add-pc, ldm-return and fast-lean;
 # cs4-capture is a diagnostic kept outside make test.
 .PHONY: test-zodiac
-test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
+test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-worker test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
 test: test-zodiac
 
 # The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,

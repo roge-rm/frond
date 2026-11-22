@@ -50,6 +50,32 @@ class Imx1GraphicsResidency {
     Cause cause = access;
 };
 
+// The bank ranges a fill worker (Imx1GraphicsWorker) may still read or write, one bounding range per bank, and
+// whether it holds results the memory hasn't taken yet. Graphics memory drains it before an access that meets a
+// range, and before anything reads the dirty state or a whole bank while results are out. Emu thread only.
+class Imx1GraphicsFence {
+   public:
+    virtual ~Imx1GraphicsFence() = default;
+    // Waits for every queued job and hands the memory their writes.
+    virtual void drain() = 0;
+    // The memory is going away.
+    virtual void forget(const Imx1GraphicsMemory* memory) = 0;
+    bool meets(unsigned bank, uint64_t first, uint64_t end) const { return first < hi[bank] && end > lo[bank]; }
+    bool unapplied() const { return queued; }
+   protected:
+    void clearRanges() {
+        lo = {UINT64_MAX, UINT64_MAX};
+        hi = {0, 0};
+        queued = false;
+    }
+    void addRange(unsigned bank, uint64_t first, uint64_t end) {
+        if (first < lo[bank]) lo[bank] = first;
+        if (end > hi[bank]) hi[bank] = end;
+        queued = true;
+    }
+    std::array<uint64_t, 2> lo{UINT64_MAX, UINT64_MAX}, hi{0, 0};
+    bool queued = false;
+};
 // Storage belongs to the probe, separately from transactional control state.
 class Imx1GraphicsMemory {
    public:
@@ -63,6 +89,13 @@ class Imx1GraphicsMemory {
     Imx1GraphicsMemory() : bytes{std::vector<uint8_t>(internalBytes), std::vector<uint8_t>(externalBytes)} {}
     Imx1GraphicsMemory(const Imx1GraphicsMemory&) = delete;
     Imx1GraphicsMemory& operator=(const Imx1GraphicsMemory&) = delete;
+    // A worker still attached finishes its jobs first.
+    ~Imx1GraphicsMemory() {
+        if (fence) {
+            fence->drain();
+            fence->forget(this);
+        }
+    }
     static bool owns(uint32_t address) {
         return (address >= 0x16080000 && address < 0x160c0000) ||
                (address >= 0x16100000 && address < 0x16160000) ||
@@ -70,6 +103,7 @@ class Imx1GraphicsMemory {
     }
     // Borrowed backing for private diagnostics, without acknowledging dirty consumers.
     const uint8_t* diagnosticData(unsigned bank, uint32_t& size) const {
+        fenceAll();
         if (residency && bank < 2) {
             residency->cause = Imx1GraphicsResidency::whole;
             residency->cpuReads(bank, 0, uint32_t(bytes[bank].size()));
@@ -78,9 +112,11 @@ class Imx1GraphicsMemory {
         return bank < 2 ? bytes[bank].data() : nullptr;
     }
     Dirty dirty(unsigned bank, Consumer consumer = Consumer::legacy) const {
+        fenceAll();
         return bank < 2 && unsigned(consumer) < changes.size() ? changes[unsigned(consumer)][bank] : Dirty{};
     }
     void acknowledgeDirty(unsigned bank, Consumer consumer, uint64_t generation) {
+        fenceAll();
         if (bank < 2 && unsigned(consumer) < changes.size()) {
             auto& change = changes[unsigned(consumer)][bank];
             if (change.generation == generation) change = {};
@@ -89,11 +125,13 @@ class Imx1GraphicsMemory {
     // Dirty ranges and the write count.
     static constexpr uint32_t stateVersion = 1;
     template <class A> void state(A& a) {
+        fenceAll();
         for (auto& consumer : changes)
             for (auto& d : consumer) a.Do32(d.first).Do32(d.end).DoBool(d.pending).Do64(d.generation);
         a.Do64(generation);
     }
     template <class A> void stateBytes(A& a, unsigned bank) {
+        fenceAll();
         const size_t size = bytes[bank].size();
         if (residency) {
             residency->cause = Imx1GraphicsResidency::whole;
@@ -120,6 +158,7 @@ class Imx1GraphicsMemory {
     uint8_t* gpuSpan(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, uint32_t address, uint64_t length,
                      unsigned& bank, uint32_t& offset) {
         if (!contains(configuration, eim, address, length, &bank, &offset)) return nullptr;
+        fenceRange(bank, offset, offset + length);
         if (residency) {
             residency->cause = Imx1GraphicsResidency::span;
             residency->cpuReads(bank, offset, uint32_t(offset + length));
@@ -154,6 +193,7 @@ class Imx1GraphicsMemory {
         unsigned bank = 0;
         uint32_t offset = 0;
         if (!destination || !contains(configuration, eim, address, length, &bank, &offset)) return false;
+        fenceRange(bank, offset, uint64_t(offset) + length);
         if (residency) {
             residency->cause = Imx1GraphicsResidency::copy;
             residency->cpuReads(bank, offset, offset + length);
@@ -223,18 +263,35 @@ class Imx1GraphicsMemory {
     }
     // A word write at a bank offset that accessReady would take, for a caller that checked the offset with contains().
     void writeWord(unsigned bank, uint32_t offset, uint32_t value) { transfer(bank, offset, 4, true, value); }
-    // The residency pointer, left out of the saved layout's size.
-    static constexpr size_t unsavedBytes = sizeof(Imx1GraphicsResidency*);
+    // The residency and fence pointers, left out of the saved layout's size.
+    static constexpr size_t unsavedBytes = sizeof(Imx1GraphicsResidency*) + sizeof(Imx1GraphicsFence*);
     // The host GPU's copy, or none. Not saved; a load gives a new memory and the GPU marks every page again.
     void setResidency(Imx1GraphicsResidency* gpu) { residency = gpu; }
     Imx1GraphicsResidency* gpuResidency() const { return residency; }
     // Bank storage with no residency check, for the GPU's uploads, downloads and shadow copy.
     uint8_t* rawBank(unsigned bank, uint32_t& size) {
+        fenceAll();
         size = bank < 2 ? uint32_t(bytes[bank].size()) : 0;
         return bank < 2 ? bytes[bank].data() : nullptr;
     }
+    // The fill worker's fence, or none (Fast only, never with residency). Not saved.
+    void setFence(Imx1GraphicsFence* worker) { fence = worker; }
+    Imx1GraphicsFence* graphicsFence() const { return fence; }
+    // gpuSpan without the fence, for a job the fence's worker runs after every job queued before it.
+    uint8_t* queuedSpan(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, uint32_t address,
+                        uint64_t length, unsigned& bank, uint32_t& offset) {
+        if (!contains(configuration, eim, address, length, &bank, &offset)) return nullptr;
+        return bytes[bank].data() + offset;
+    }
    private:
+    void fenceRange(unsigned bank, uint64_t first, uint64_t end) const {
+        if (fence && fence->meets(bank, first, end)) fence->drain();
+    }
+    void fenceAll() const {
+        if (fence && fence->unapplied()) fence->drain();
+    }
     void transfer(unsigned bank, uint32_t offset, uint32_t size, bool write, uint32_t& value) {
+        fenceRange(bank, offset, offset + size);
         if (residency) {
             // An access never crosses a page, as it is aligned to its size.
             const uint8_t page = residency->pages[bank][offset >> Imx1GraphicsResidency::pageShift];
@@ -280,6 +337,7 @@ class Imx1GraphicsMemory {
     }
     std::array<std::vector<uint8_t>, 2> bytes;
     Imx1GraphicsResidency* residency = nullptr;
+    Imx1GraphicsFence* fence = nullptr;
     std::array<std::array<Dirty, 2>, unsigned(Consumer::count)> changes{};
     uint64_t generation = 0;
 };

@@ -3,13 +3,23 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <deque>
 #include <utility>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 #include "imx1_graphics_memory.h"
 
+class Imx1GraphicsWorker;
 // Validated ring batches retain their register snapshot until guest-time completion.
 class Imx1GraphicsCommands {
    public:
@@ -800,23 +810,32 @@ class Imx1GraphicsCommands {
         if (source && ((fill.sourceBase | fill.sourcePitch) & 1)) return false;
         unsigned bank = 0, sourceBank = 0;
         uint32_t offset = 0, sourceOffset = 0;
-        uint8_t* destination = memory.gpuSpan(configuration, eim, fill.base,
-                                              uint64_t(fill.height - 1) * fill.pitch + fill.width * 2, bank, offset);
+        // With a fill worker attached the spans skip the fence: the job runs after every one queued before it.
+        Imx1GraphicsWorker* const worker = fillWorker(memory);
+        const uint64_t length = uint64_t(fill.height - 1) * fill.pitch + fill.width * 2;
+        uint8_t* destination = worker ? memory.queuedSpan(configuration, eim, fill.base, length, bank, offset) :
+                                        memory.gpuSpan(configuration, eim, fill.base, length, bank, offset);
         if (!destination) return false;
         const uint8_t* from = nullptr;
+        // The source range the batch check worked out.
+        const uint64_t sourceLength = source ? sourceBytes(fill) : 0;
         if (source) {
-            // The source range the batch check worked out.
-            const uint64_t length = sourceBytes(fill);
-            from = memory.gpuSpan(configuration, eim, fill.sourceBase, length, sourceBank, sourceOffset);
+            from = worker ? memory.queuedSpan(configuration, eim, fill.sourceBase, sourceLength, sourceBank, sourceOffset) :
+                            memory.gpuSpan(configuration, eim, fill.sourceBase, sourceLength, sourceBank, sourceOffset);
             if (!from) return false;
+        }
+        const bool copy = fill.keyed || fill.plain;
+        const bool kinds[6] = {!copy && !fill.pixels.empty(), copy, fill.keyed, copy && fill.doubled, fill.invert, fill.a4};
+        ++directFillCount;
+        if (worker) {
+            queueFill(*worker, fill, kinds, false, destination, from, 0, bank, offset, length, sourceBank, sourceOffset,
+                      sourceLength);
+            return true;
         }
         uint64_t writes = 0;
         uint32_t first = UINT32_MAX, end = 0;
-        const bool copy = fill.keyed || fill.plain;
-        const bool kinds[6] = {!copy && !fill.pixels.empty(), copy, fill.keyed, copy && fill.doubled, fill.invert, fill.a4};
         fillKind<>(kinds, fill, destination, from, offset, writes, first, end);
         memory.noteWrites(bank, first, end, writes);
-        ++directFillCount;
         return true;
     }
     // The rotate and mirror blit straight on the bank storage: each pixel read from its source and then written,
@@ -829,14 +848,30 @@ class Imx1GraphicsCommands {
         const uint64_t length = uint64_t(fill.height - 1) * fill.pitch + fill.width * 2;
         unsigned bank = 0, sourceBank = 0;
         uint32_t offset = 0, sourceOffset = 0;
-        uint8_t* destination = memory.gpuSpan(configuration, eim, fill.base, length, bank, offset);
+        Imx1GraphicsWorker* const worker = fillWorker(memory);
+        uint8_t* destination = worker ? memory.queuedSpan(configuration, eim, fill.base, length, bank, offset) :
+                                        memory.gpuSpan(configuration, eim, fill.base, length, bank, offset);
         if (!destination) return false;
         const uint32_t start = sourceStart(fill);
-        const uint8_t* from = memory.gpuSpan(configuration, eim, start, sourceBytes(fill), sourceBank, sourceOffset);
+        const uint64_t sourceLength = sourceBytes(fill);
+        const uint8_t* from = worker ? memory.queuedSpan(configuration, eim, start, sourceLength, sourceBank, sourceOffset) :
+                                       memory.gpuSpan(configuration, eim, start, sourceLength, sourceBank, sourceOffset);
         if (!from) return false;
-        // Byte offsets from start: column x of row y reads at origin + y * row + x * column.
-        const int64_t column = signedStep(fill.colour), row = signedStep(fill.sourcePitch);
         const int64_t origin = int64_t(uint32_t(fill.sourceBase - start));
+        ++directFillCount;
+        if (worker) {
+            queueFill(*worker, fill, nullptr, true, destination, from, origin, bank, offset, length, sourceBank,
+                      sourceOffset, sourceLength);
+            return true;
+        }
+        transformRows(fill, destination, from, origin);
+        memory.noteWrites(bank, offset, uint32_t(offset + length), uint64_t(fill.width) * fill.height);
+        return true;
+    }
+    // fastTransform's pixels. origin: the byte offset of the fill's source base from from.
+    static void transformRows(const Fill& fill, uint8_t* destination, const uint8_t* from, int64_t origin) {
+        // Byte offsets from the source start: column x of row y reads at origin + y * row + x * column.
+        const int64_t column = signedStep(fill.colour), row = signedStep(fill.sourcePitch);
         for (uint32_t y = 0; y < fill.height; ++y) {
             uint8_t* to = destination + uint64_t(y) * fill.pitch;
             int64_t at = origin + int64_t(y) * row;
@@ -846,10 +881,14 @@ class Imx1GraphicsCommands {
                 to[1] = high;
             }
         }
-        memory.noteWrites(bank, offset, uint32_t(offset + length), uint64_t(fill.width) * fill.height);
-        ++directFillCount;
-        return true;
     }
+    // The memory's fence as the fill worker, or none.
+    static Imx1GraphicsWorker* fillWorker(const Imx1GraphicsMemory& memory);
+    // Hands one fill fastFill or fastTransform has checked to the worker (kinds: fillKind's, or none for a transform).
+    static void queueFill(Imx1GraphicsWorker& worker, const Fill& fill, const bool* kinds, bool transform,
+                          uint8_t* destination, const uint8_t* from, int64_t origin, unsigned bank, uint32_t offset,
+                          uint64_t length, unsigned sourceBank, uint32_t sourceOffset, uint64_t sourceLength);
+    friend class Imx1GraphicsWorker;
     // A plain copy whose source and destination share pixels, as pieces that don't, in an order where no piece
     // reads what an earlier one wrote, or whole when it doesn't move. A move with a row part goes in pieces of that many whole rows, last rows
     // first when moving down; one along a row goes in pieces of that many columns, last columns first when moving
@@ -2119,6 +2158,246 @@ inline void Imx1GraphicsCommands::undo(const Undo& u) {
     compareKey = u.compareKey;
     ticks = u.ticks;
     refused = u.refused;
+}
+// Stats over every worker, printed at exit with FROND_ZODIAC_GFX_STATS: jobs, drains that waited and for how
+// long, pushes that found the ring full, wakes, the workers' time on jobs.
+struct Imx1GraphicsWorkerStats {
+    std::atomic<uint64_t> jobs{0}, waits{0}, waitNs{0}, fullWaits{0}, wakes{0};
+    alignas(64) std::atomic<uint64_t> busyNs{0};
+    ~Imx1GraphicsWorkerStats() {
+        if (std::getenv("FROND_ZODIAC_GFX_STATS"))
+            std::fprintf(stderr, "zodiac gfx thread: %llu jobs, %llu drains waited %.1f ms, %llu full waits, %llu wakes, "
+                         "worker ran %.1f ms\n", (unsigned long long)jobs.load(), (unsigned long long)waits.load(),
+                         waitNs.load() / 1e6, (unsigned long long)fullWaits.load(), (unsigned long long)wakes.load(),
+                         busyNs.load() / 1e6);
+    }
+};
+inline Imx1GraphicsWorkerStats imx1GraphicsWorkerStats;
+// Fast only: a host thread that runs the pixel work of the fills fastFill and fastTransform take, in queue order.
+// The emu thread keeps everything the guest sees (complete's checks, the engine, each fill's ranges) and queues the
+// fill after them; it applies each fill's noteWrites when it takes the result back. The fence (Imx1GraphicsFence)
+// holds every queued job's destination and source, so graphics memory drains the worker before any access that
+// meets them and before the dirty state or a whole bank is read with results out. Each job is a pure function of
+// the bytes it reads and nothing else touches those bytes until a drain, so the bytes and the dirty state are
+// the synchronous path's wherever anything reads them, and no guest timing waits on the worker's progress.
+// Single producer (the emu thread) and single consumer (the worker). Not saved.
+class Imx1GraphicsWorker final : public Imx1GraphicsFence {
+   public:
+    // FROND_ZODIAC_GFX_THREAD=0 keeps the fills on the emu thread.
+    static bool enabledByEnvironment() {
+        const char* value = std::getenv("FROND_ZODIAC_GFX_THREAD");
+        return !value || std::strcmp(value, "0") != 0;
+    }
+    Imx1GraphicsWorker() : slots(capacity), results(capacity), thread([this] { run(); }) {}
+    Imx1GraphicsWorker(const Imx1GraphicsWorker&) = delete;
+    Imx1GraphicsWorker& operator=(const Imx1GraphicsWorker&) = delete;
+    ~Imx1GraphicsWorker() override {
+        attach(nullptr);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopping = true;
+        }
+        wake.notify_one();
+        thread.join();
+    }
+    // Moves to memory (or none), draining and letting go of the one before.
+    void attach(Imx1GraphicsMemory* to) {
+        if (to == memory) return;
+        if (memory) {
+            drain();
+            memory->setFence(nullptr);
+        }
+        memory = to;
+        if (memory) memory->setFence(this);
+    }
+    Imx1GraphicsMemory* attachedMemory() const { return memory; }
+    void forget(const Imx1GraphicsMemory* gone) override {
+        if (gone == memory) memory = nullptr;
+    }
+    void drain() override {
+        if (!queued) return;
+        publish();
+        if (tail.load(std::memory_order_acquire) != pushed) {
+            const auto started = std::chrono::steady_clock::now();
+            imx1GraphicsWorkerStats.waits.fetch_add(1, std::memory_order_relaxed);
+            wakeWorker();
+            for (unsigned i = 1; tail.load(std::memory_order_acquire) != pushed; ++i) spin(i);
+            imx1GraphicsWorkerStats.waitNs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
+        }
+        collect();
+    }
+    // Jobs queued, for tests.
+    uint64_t jobs() const { return pushed; }
+    // Tests: the worker waits while this holds, before each run of jobs.
+    static inline std::atomic<bool> holdForTests{false};
+    // What the emu thread hands over; the worker only reads it. For a transform, its results too.
+    struct Job {
+        Imx1GraphicsCommands::Fill fill;
+        uint8_t* destination = nullptr;
+        const uint8_t* from = nullptr;
+        int64_t origin = 0;
+        uint32_t offset = 0, transformEnd = 0;
+        bool transform = false;
+        bool kinds[6] = {};
+    };
+    // What the worker hands back: fillRows' write count and written range in the bank.
+    struct Result {
+        uint64_t writes = 0;
+        uint32_t first = 0, end = 0;
+    };
+    // The next free slot for push.
+    Job& next() {
+        if (pushed - applied == capacity) {
+            imx1GraphicsWorkerStats.fullWaits.fetch_add(1, std::memory_order_relaxed);
+            publish();
+            wakeWorker();
+            for (unsigned i = 1; tail.load(std::memory_order_acquire) == applied; ++i) spin(i);
+            collect();
+        }
+        return slots[pushed % capacity];
+    }
+    // Queues the slot next gave, whose job may read and write those bank ranges. Jobs go to the worker in groups
+    // (publish), so each one costs the emu thread no shared cache line.
+    void push(unsigned bank, uint64_t first, uint64_t end, unsigned sourceBank, uint64_t sourceFirst, uint64_t sourceEnd,
+              uint64_t pixels) {
+        addRange(bank, first, end);
+        if (sourceEnd > sourceFirst) addRange(sourceBank, sourceFirst, sourceEnd);
+        slotBanks[pushed % capacity] = uint8_t(bank);
+        ++pushed;
+        stagedPixels += pixels;
+        if (pushed - published >= publishJobs || stagedPixels >= publishPixels) publish();
+    }
+   private:
+    // Jobs go to the worker 128 at a time or once 16384 pixels are staged, and it spins 20 us before sleeping.
+    // On the Tab a 200 us spin (and 32 jobs) gains about 1.5% more of the emu thread but keeps a big core half
+    // busy; this costs the worker about a tenth of a core.
+    static constexpr uint64_t capacity = 2048, publishJobs = 128, publishPixels = 16384;
+    static constexpr unsigned spinMicroseconds = 20;
+    static void pause() {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+        __asm__ __volatile__("yield");
+#endif
+    }
+    // A wait's i-th turn: a pause, and now and then the core to another thread.
+    static void spin(unsigned i) {
+        if (i & 1023) pause();
+        else std::this_thread::yield();
+    }
+    // Hands the staged jobs to the worker, waking it if it sleeps, and takes back the results it has finished.
+    void publish() {
+        if (published != pushed) {
+            imx1GraphicsWorkerStats.jobs.fetch_add(pushed - published, std::memory_order_relaxed);
+            published = pushed;
+            stagedPixels = 0;
+            head.store(published, std::memory_order_seq_cst);
+            wakeWorker();
+        }
+        collect();
+    }
+    void wakeWorker() {
+        if (!sleeping.load(std::memory_order_seq_cst)) return;
+        imx1GraphicsWorkerStats.wakes.fetch_add(1, std::memory_order_relaxed);
+        { std::lock_guard<std::mutex> lock(mutex); }
+        wake.notify_one();
+    }
+    // Takes back the results the worker has finished, in order, and clears the ranges once none is queued.
+    void collect() {
+        const uint64_t done = tail.load(std::memory_order_acquire);
+        for (; applied < done; ++applied) {
+            const Result& result = results[applied % capacity];
+            memory->noteWrites(slotBanks[applied % capacity], result.first, result.end, result.writes);
+        }
+        if (applied == pushed) clearRanges();
+    }
+    static void runJob(const Job& job, Result& result) {
+        if (job.transform) {
+            Imx1GraphicsCommands::transformRows(job.fill, job.destination, job.from, job.origin);
+            result.writes = uint64_t(job.fill.width) * job.fill.height;
+            result.first = job.offset;
+            result.end = job.transformEnd;
+            return;
+        }
+        uint64_t writes = 0;
+        uint32_t first = UINT32_MAX, end = 0;
+        Imx1GraphicsCommands::fillKind<>(job.kinds, job.fill, job.destination, job.from, job.offset, writes, first, end);
+        result.writes = writes;
+        result.first = first;
+        result.end = end;
+    }
+    void run() {
+#if defined(__linux__)
+        pthread_setname_np(pthread_self(), "FrondGfx");
+#endif
+        uint64_t done = 0;
+        for (;;) {
+            uint64_t last = head.load(std::memory_order_acquire);
+            if (last == done) {
+                // Spins for a while before sleeping, so a busy producer seldom has to wake it.
+                const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinMicroseconds);
+                for (unsigned i = 1; (last = head.load(std::memory_order_acquire)) == done; ++i) {
+                    pause();
+                    if (!(i & 255) && std::chrono::steady_clock::now() > until) break;
+                }
+                if (last == done) {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    sleeping.store(true, std::memory_order_seq_cst);
+                    wake.wait(lock, [&] {
+                        return stopping || head.load(std::memory_order_seq_cst) != done;
+                    });
+                    sleeping.store(false, std::memory_order_relaxed);
+                    if (stopping && head.load(std::memory_order_acquire) == done) return;
+                    continue;
+                }
+            }
+            while (holdForTests.load(std::memory_order_relaxed)) pause();
+            const auto started = std::chrono::steady_clock::now();
+            for (; done < last; ++done) {
+                runJob(slots[done % capacity], results[done % capacity]);
+                tail.store(done + 1, std::memory_order_release);
+            }
+            imx1GraphicsWorkerStats.busyNs.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
+        }
+    }
+    std::vector<Job> slots;
+    std::vector<Result> results;
+    // Each slot's destination bank, for its noteWrites (emu thread only).
+    std::array<uint8_t, capacity> slotBanks{};
+    Imx1GraphicsMemory* memory = nullptr;
+    // Emu thread: jobs written to slots (pushed), handed to the worker (published), results taken back (applied).
+    uint64_t pushed = 0, published = 0, applied = 0, stagedPixels = 0;
+    // head: jobs published (emu thread), tail: jobs run (worker). On cache lines of their own, as each is written by
+    // one thread and read by the other.
+    alignas(64) std::atomic<uint64_t> head{0};
+    alignas(64) std::atomic<uint64_t> tail{0};
+    alignas(64) std::atomic<bool> sleeping{false};
+    bool stopping = false;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::thread thread;
+};
+inline Imx1GraphicsWorker* Imx1GraphicsCommands::fillWorker(const Imx1GraphicsMemory& memory) {
+    return static_cast<Imx1GraphicsWorker*>(memory.graphicsFence());
+}
+inline void Imx1GraphicsCommands::queueFill(Imx1GraphicsWorker& worker, const Fill& fill, const bool* kinds, bool transform,
+                                            uint8_t* destination, const uint8_t* from, int64_t origin, unsigned bank,
+                                            uint32_t offset, uint64_t length, unsigned sourceBank, uint32_t sourceOffset,
+                                            uint64_t sourceLength) {
+    auto& job = worker.next();
+    // Copy-assigned, so the slot's pixel vector keeps its capacity.
+    job.fill = fill;
+    job.destination = destination;
+    job.from = from;
+    job.origin = origin;
+    job.offset = offset;
+    job.transform = transform;
+    if (transform) job.transformEnd = uint32_t(offset + length);
+    else std::memcpy(job.kinds, kinds, sizeof job.kinds);
+    worker.push(bank, offset, offset + length, sourceBank, sourceOffset, sourceOffset + sourceLength,
+                uint64_t(fill.width) * fill.height);
 }
 #if defined(__GLIBCXX__) && defined(__x86_64__)
 static_assert(sizeof(Imx1GraphicsCommands) - Imx1GraphicsCommands::unsavedBytes == 10352, "update state() and stateVersion");

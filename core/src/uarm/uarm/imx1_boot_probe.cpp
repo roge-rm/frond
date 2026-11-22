@@ -3,6 +3,7 @@
 #include "xscale_cost.h"
 
 #include <algorithm>
+#include <exception>
 #include <cassert>
 #include <cstring>
 #include <optional>
@@ -305,6 +306,9 @@ struct Probe {
     Imx1Cs4Capture cs4Capture;
     Imx1Cs5Reset cs5Reset;
     Imx1Cs5Configuration cs5Configuration;
+    // The fill worker thread (Fast only, FROND_ZODIAC_GFX_THREAD). Declared before graphicsMemory, which lets go of
+    // it when it goes. Not saved.
+    std::unique_ptr<Imx1GraphicsWorker> graphicsWorker;
     std::unique_ptr<Imx1GraphicsMemory> graphicsMemory;
     Imx1GraphicsFrame graphicsFrame;
     Imx1GraphicsCommands graphicsCommands;
@@ -342,7 +346,8 @@ struct Probe {
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
                                            sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
                                            Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks) +
-                                           sizeof(QuietWriteMemo) + Imx1GraphicsCommands::unsavedBytes;
+                                           sizeof(QuietWriteMemo) + Imx1GraphicsCommands::unsavedBytes +
+                                           sizeof(std::unique_ptr<Imx1GraphicsWorker>);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -368,7 +373,28 @@ struct Probe {
         }
         // Already attached to this memory: nothing to bring back or upload.
         if (graphicsGpu.gpu->attachedMemory() == graphicsMemory.get()) return;
+        // The GPU's residency and the fill worker don't go together.
+        if (graphicsWorker) graphicsWorker->attach(nullptr);
         graphicsGpu.gpu->attach(graphicsMemory.get());
+    }
+    // Attaches the fill worker to graphics memory in Fast without a host GPU, or lets it go. A drain first, so
+    // leaving Fast or switching it off leaves every fill done.
+    void attachGraphicsWorker() {
+        const bool on = fastEngine && graphicsMemory && !graphicsMemory->gpuResidency() &&
+                        Imx1GraphicsCommands::directFills && Imx1GraphicsWorker::enabledByEnvironment();
+        if (!on) {
+            if (graphicsWorker) graphicsWorker->attach(nullptr);
+            return;
+        }
+        if (!graphicsWorker) {
+            // A host that can't start the thread keeps the fills here.
+            try {
+                graphicsWorker = std::make_unique<Imx1GraphicsWorker>();
+            } catch (const std::exception&) {
+                return;
+            }
+        }
+        graphicsWorker->attach(graphicsMemory.get());
     }
     // What the command decoder said about the batch it last refused. For the stop text, not saved.
     Imx1GraphicsCommands::Refusal graphicsRefusal;
@@ -2965,6 +2991,7 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     // Fast keeps no cache contents: dirty data goes to memory first.
     if (fast) cpuArm920LeanReset(p->cpu);
     p->attachGraphicsGpu();
+    p->attachGraphicsWorker();
     return true;
 }
 
@@ -4312,8 +4339,10 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     info.graphicsSdResumed = p->cs5Configuration.reattachSdCard(
         graphicsSdCard, info.graphicsSdSection ? &staged.graphicsSdCard : nullptr);
     p->graphicsCommands = std::move(*staged.commands);
+    if (p->graphicsWorker) p->graphicsWorker->attach(nullptr);
     if (p->graphicsMemory) p->graphicsMemory.swap(staged.graphicsMemory);
     if (p->graphicsGpu.gpu) p->graphicsGpu.gpu->attach(p->graphicsMemory.get());
+    p->attachGraphicsWorker();
     p->graphicsFrame.replace(*staged.frame);
     if (p->options.i2cBus) {
         // Checked in decodeState, so this takes it.
