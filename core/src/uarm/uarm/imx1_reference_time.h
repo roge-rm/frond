@@ -69,7 +69,21 @@ struct Imx1ReferenceTime {
         return valid() && d && d / imx1Gcd(d, denominator) <= UINT64_MAX / denominator;
     }
     bool add(uint64_t n, uint64_t d) {
-        if (!valid() || !supports(d)) return false;
+        if (!valid()) return false;
+        if (d && denominator % d == 0) {
+            // The common denominator stays: numerator < denominator and (n % d) * (denominator / d) < denominator,
+            // so the sum carries at most one whole tick (past 2^64 too, which the unsigned wrap undoes).
+            uint64_t fraction;
+            const bool wrapped = __builtin_add_overflow(numerator, (n % d) * (denominator / d), &fraction);
+            const bool carry = wrapped || fraction >= denominator;
+            uint64_t whole;
+            if (__builtin_add_overflow(ticks, n / d, &whole) || __builtin_add_overflow(whole, uint64_t(carry), &whole))
+                return false;
+            ticks = whole;
+            numerator = carry ? fraction - denominator : fraction;
+            return true;
+        }
+        if (!supports(d)) return false;
         const auto common = denominator * (d / imx1Gcd(d, denominator));
         const __uint128_t fraction = __uint128_t(numerator) * (common / denominator) +
                                      __uint128_t(n % d) * (common / d);
