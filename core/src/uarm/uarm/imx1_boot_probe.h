@@ -343,7 +343,7 @@ void imx1MachineRestorePcStops(Imx1Machine*, const Imx1MachinePcStops&);
 // Imx1MachineYield::codeHook, in Exact and Fast alike; unlike pc stops they leave Fast its lean path and JIT, which
 // stop short of the hooks. Leave lets the next run run the instruction at the hook first. Setting replaces the
 // ones before (none: count 0). Not saved; a load or reset keeps them. None set runs as before.
-inline constexpr unsigned imx1MachineMaximumCodeHooks = 16;
+inline constexpr unsigned imx1MachineMaximumCodeHooks = 32;
 bool imx1MachineSetCodeHooks(Imx1Machine*, const uint32_t* pcs, unsigned count);
 void imx1MachineLeaveCodeHook(Imx1Machine*);
 bool imx1MachineAtCodeHook(const Imx1Machine*);
