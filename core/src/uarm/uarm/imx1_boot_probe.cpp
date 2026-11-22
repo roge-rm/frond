@@ -1223,9 +1223,16 @@ struct Probe {
         // at once and its clocks are charged after it, as the lean path does for ring words: the batch starts that
         // many clocks earlier. The span after it has to hold their cost.
         uint32_t clocks = 0;
-        leanSubmit = !peripherals.systemPllBusStallPending() && quietWriteClocks(clocks) &&
-                     !graphicsFrame.scanDue(cs5Configuration, peripherals.eimState()) &&
-                     acceptGraphics(cs5Configuration, false) == Imx1BootstrapAccess::ok;
+        // The run's lean checks, where they passed, cover these: since them only the chip has moved, within the
+        // span, and with the board kept back the board hasn't.
+        if (keepLeanChecks && keepBoard && checks.checked && checks.usable) {
+            clocks = checks.clocks;
+            leanSubmit = true;
+        } else {
+            leanSubmit = !peripherals.systemPllBusStallPending() && quietWriteClocks(clocks) &&
+                         !graphicsFrame.scanDue(cs5Configuration, peripherals.eimState()) &&
+                         acceptGraphics(cs5Configuration, false) == Imx1BootstrapAccess::ok;
+        }
         const bool lean = leanSubmit;
         if (!lean && keepBoard) flushSubmitBoard();
         const bool ok = access(this, pa, uint_fast8_t(size), true, &datum);
