@@ -273,6 +273,15 @@ void A32EmitX64::GenTerminalHandlers() {
         code.mov(qword[rbp + offsetof(FastDispatchEntry, location_descriptor)], rbx);
         code.LookupBlock();
         code.mov(ptr[rbp + offsetof(FastDispatchEntry, code_ptr)], rax);
+        // Frond: a block that isn't compiled yet (cold or queued) looks up as the dispatcher. That entry is
+        // emptied again, or every later hit would go through the dispatcher's full lookup even once the block
+        // is in (as the arm64 backend's FillFastDispatch does).
+        Xbyak::Label keep;
+        code.mov(rcx, reinterpret_cast<u64>(code.GetReturnFromRunCodeAddress()));
+        code.cmp(rax, rcx);
+        code.jne(keep);
+        code.mov(qword[rbp + offsetof(FastDispatchEntry, location_descriptor)], 0);
+        code.L(keep);
         code.jmp(rax);
         PerfMapRegister(terminal_handler_fast_dispatch_hint, code.getCurr(), "a32_terminal_handler_fast_dispatch_hint");
 
