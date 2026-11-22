@@ -316,6 +316,22 @@ void probeGuards() {
                     assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe1b0f00e);
                     assert(r.registers[15] == 32 && !r.busAccesses);
                 }
+        // LDM^ with PC in User or System mode (an APCS-26 return, Big Money's ARMlets) loads as a plain LDM.
+        for (bool taken : {true, false}) {
+            std::vector<uint32_t> p(0x40 / 4, 0xe7f000f0);
+            p[0] = 0xe3a00020;  // mov r0, #0x20
+            p[1] = 0xe321f0df;  // msr cpsr_c, #0xdf (System)
+            p[2] = 0xe3b06000;  // movs r6, #0 (Z set, so the NE form doesn't run)
+            p[3] = taken ? 0xe8d08010u : 0x18d08010u;  // ldmia r0, {r4, pc}^ or ldmiane
+            p[4] = 0xe3a05003;  // mov r5, #3
+            p[0x20 / 4] = 7; p[0x24 / 4] = 0x30;
+            p[0x30 / 4] = 0xe3a05009;  // mov r5, #9
+            const auto r = probe(p, fast);
+            assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe7f000f0);
+            assert((r.cpsr & 0xff) == 0xdf && !r.busAccesses);
+            if (taken) assert(r.registers[4] == 7 && r.registers[5] == 9);
+            else assert(r.registers[4] == 0 && r.registers[5] == 3);
+        }
         for (uint32_t instruction : {0xe1b0f00du, 0xe1b0f00fu, 0xe25ef004u, 0xe8fd8000u}) {
             const auto r = probe({instruction}, fast);
             assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 0 && !r.busAccesses);

@@ -2138,6 +2138,11 @@ bool bootstrapInstructionChecked(uint32_t i, const uint32_t* registers, uint32_t
         const bool load = i & 0x00100000;
         if (i & 0x00400000) {
             const unsigned mode = cpsr & 31;
+            // An APCS-26 return (ldmdb fp, {..., pc}^) in User or System mode, which has no SPSR, loads as a plain
+            // LDM, as the shared interpreter runs it (ASSUMPTION "ARM920T LDM^ with PC in User and System mode":
+            // the ARM ARM calls it unpredictable; Big Money's ARMlets end with it and ran on OS 5 Palms).
+            if ((mode == 0x10 || mode == 0x1f) && load && (i & 0x8000))
+                return base != 15 && (!(i & 0x00200000) || !(i & (1u << base)));
             if (!armMode(mode) || mode == 0x10 || mode == 0x1f || base == 15) return false;
             if (load && (i & 0x8000)) {
                 // LDM exception return uses current registers, then restores CPSR.
