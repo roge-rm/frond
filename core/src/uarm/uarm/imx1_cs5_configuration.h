@@ -110,19 +110,26 @@ class Imx1Cs5Configuration {
     // takes the completions and the busy level at the last one's time in its charge (cpuStepsThroughLast).
     uint64_t idleQuietStepsThrough(uint64_t numerator, uint64_t denominator, uint64_t& front,
                                    bool pastLast = false) const {
-        front = idleQuietSteps(numerator, denominator);
-        if (front == UINT64_MAX || front <= 1 || !clocks.programmed() || engine.idleQuietTicks() == UINT64_MAX ||
-            acquisition.deadlineRemaining() || sd.idleQuietTicks() != UINT64_MAX)
-            return front;
-        uint64_t ticks = clocks.nextEvent() ? clocks.nextEvent() : UINT64_MAX;
+        // idleQuietSteps's sources, each looked at once for both bounds.
+        if (!clocks.programmed()) return front = UINT64_MAX;
+        if (!timeFraction.supports(denominator * 64) || clocks.gpuBusyValue() != !engine.emptyRing()) return front = 1;
+        const uint64_t event = clocks.nextEvent() ? clocks.nextEvent() : UINT64_MAX;
+        const uint64_t first = engine.idleQuietTicks(), deadline = acquisition.deadlineRemaining();
+        const uint64_t card = sd.idleQuietTicks(), scan = display.idleQuietTicks();
+        uint64_t ticks = std::min({event, first, card, scan});
+        if (deadline) ticks = std::min(ticks, deadline);
+        const uint64_t n = numerator * 390625, d = denominator * 64;
+        front = ticks == UINT64_MAX ? UINT64_MAX : imx1StepsUntil(timeFraction.phase, timeFraction.denominator, n, d, ticks);
+        if (front == UINT64_MAX || front <= 1 || first == UINT64_MAX || deadline || card != UINT64_MAX) return front;
+        ticks = event;
         const uint64_t last = engine.idleQuietTicksThrough();
         if (!pastLast) ticks = std::min(ticks, last);
         else if (const uint64_t idle = clocks.idleAutomaticTicks(); idle != UINT64_MAX)
             ticks = std::min(ticks, idle < UINT64_MAX - last ? last + idle : UINT64_MAX - 1);
-        ticks = std::min(ticks, display.idleQuietTicks());
-        if (ticks <= engine.idleQuietTicks()) return front;
+        ticks = std::min(ticks, scan);
+        if (ticks <= first) return front;
         if (ticks == UINT64_MAX) return UINT64_MAX;
-        return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, numerator * 390625, denominator * 64, ticks);
+        return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, n, d, ticks);
     }
     // CPU cycles of this period after which the last queued batch has finished; 0 with none queued or where the
     // count can't be worked out.
