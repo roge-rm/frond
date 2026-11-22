@@ -410,10 +410,17 @@ class Imx1GraphicsCommands {
                     ticks += uint64_t(fill.width) * fill.height;
                     fills.push_back(std::move(fill));
                 }
-                // With the sources clear of every destination the order of the copies changes nothing.
-                for (size_t i = 0; i < sources.size(); ++i)
+                // With the sources clear of every destination the order of the copies changes nothing. A source
+                // outside the span from the first destination byte to the last can't share one, so only the
+                // rest are checked against each destination.
+                uint64_t low = UINT64_MAX, high = 0;
+                for (const Area& to : destinations)
+                    if (to.rows && to.bytes) low = std::min(low, to.base), high = std::max(high, to.end());
+                for (size_t i = 0; i < sources.size(); ++i) {
+                    if (sources[i].base >= high || sources[i].end() <= low) continue;
                     for (size_t j = 0; j < destinations.size(); ++j)
                         if (sources[i].overlaps(destinations[j])) return refuse("stretch-source-overlap", uint32_t(i));
+                }
             } else if ((header & 0xc000ffffu) == 0xc0001900u) {
                 const bool a4 = engine.a4Submission();
                 // The host producer writes source field 0 into GMC bits 12..14 for packed 1bpp.
