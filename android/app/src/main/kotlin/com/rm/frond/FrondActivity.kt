@@ -232,7 +232,7 @@ open class FrondActivity : SDLActivity() {
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
-        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd, touchHidden = launchTouchHidden())
         requestedOrientation = orientationRequest()
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
@@ -360,7 +360,8 @@ open class FrondActivity : SDLActivity() {
             cardArguments()
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
-            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd,
+            touchHidden = launchTouchHidden())
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
@@ -472,6 +473,8 @@ open class FrondActivity : SDLActivity() {
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
             updateSurfaceMargin()
+            // The bars come back when the keyboard closes or the screen turns (below Android 11 too).
+            if (!imeVisible && insets.isVisible(WindowInsetsCompat.Type.systemBars())) view.post { applyImmersive() }
             insets
         }
     }
@@ -488,11 +491,16 @@ open class FrondActivity : SDLActivity() {
 
     // Whether a game controller is connected.
     private fun controllerConnected(): Boolean {
-        val manager = inputDevices ?: return false
+        val manager = inputDevices ?: getSystemService(InputManager::class.java) ?: return false
         return manager.inputDeviceIds.any { id ->
-            manager.getInputDevice(id)?.let { RunningBar.isGameController(it.sources, it.isVirtual) } == true
+            manager.getInputDevice(id)?.let {
+                RunningBar.isGameController(it.sources, it.isVirtual, it.keyboardType, Build.VERSION.SDK_INT < 29 || it.isExternal)
+            } == true
         }
     }
+
+    // The touch controls start hidden when a controller is already connected, so the art doesn't flash.
+    private fun launchTouchHidden() = RunningBar.touchHidden(settings.hideTouchWithController, controllerConnected())
 
     // Hides or brings back the bar, the keyboard button and the core's jog panels as controllers come and go.
     private fun applyTouchOverlay() {

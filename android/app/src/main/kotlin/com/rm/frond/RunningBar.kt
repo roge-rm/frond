@@ -48,12 +48,11 @@ object RunningBar {
     fun surfaceTopMargin(mode: BarMode, shown: Boolean, barPx: Int, availablePx: Int, minPalmPx: Int, imeButtonsPx: Int, touchHidden: Boolean = false) =
         if (touchHidden) 0 else maxOf(imeButtonsPx, if (takesSpace(mode, shown, barPx, availablePx, minPalmPx)) barPx else 0)
 
-    // Whether an input device is a game controller: gamepad or joystick buttons, and not an on-screen one.
-    fun isGameController(sources: Int, virtual: Boolean): Boolean {
-        if (virtual) return false
-        val pad = android.view.InputDevice.SOURCE_GAMEPAD
-        val stick = android.view.InputDevice.SOURCE_JOYSTICK
-        return sources and pad == pad || sources and stick == stick
+    // Whether an input device is a connected game controller: a gamepad or joystick, not an on-screen one
+    // and, where Android says, not built into the machine (so a handheld's own pad keeps the controls).
+    fun isGameController(sources: Int, virtual: Boolean, keyboardType: Int = android.view.InputDevice.KEYBOARD_TYPE_NONE, external: Boolean = true): Boolean {
+        if (virtual || !external) return false
+        return ControllerMap.fromControllerSource(sources, keyboardType, dpad = false)
     }
 
     // The on-screen controls (the bar, its handle, the keyboard button and the core's jog panels) go away

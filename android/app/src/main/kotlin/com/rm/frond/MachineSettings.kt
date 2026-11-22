@@ -133,13 +133,14 @@ data class MachineSettings(
     // m68k: frond-68k's arguments, with contrast and speed and no engine. both: --speed unless Original.
     // tg50Controls: Show keyboard and the jog controls; jogControls: the jog controls on their own.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
-                  jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false): List<String> = buildList {
+                  jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false, touchHidden: Boolean = false): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
         if (gamepadSupported) this@MachineSettings.gamepad?.let { addAll(listOf("--gamepad", if (it) "on" else "off")) }
         if (smoothing) add("--smooth-lcd")
         if (tg50Controls && !showKeyboard) add("--hide-keyboard")
-        if (jogControls) addAll(listOf("--jog-controls", this@MachineSettings.jogControls.arg))
-        if (gamepadSupported) addAll(listOf("--jog-controls-landscape", jogLandscape.arg))
+        if (jogControls) addAll(listOf("--jog-controls", if (touchHidden) JogControls.HIDDEN.arg else this@MachineSettings.jogControls.arg))
+        if (gamepadSupported) addAll(listOf("--jog-controls-landscape", if (touchHidden) JogLandscape.HIDDEN.arg else jogLandscape.arg))
+        if (touchHidden) add("--hide-buttons")
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
@@ -163,7 +164,7 @@ data class MachineSettings(
         if (jogControls) append(" jog=${if (touchHidden) JogControls.HIDDEN.arg else this@MachineSettings.jogControls.arg}")
         if (gamepadSupported) append(" jog-landscape=${if (touchHidden) JogLandscape.HIDDEN.arg else jogLandscape.arg}")
         if (m68k && !colourLcd) append(" contrast=$contrast")
-        if (touchHidden) append(" buttons=off")
+        append(" buttons=${if (touchHidden) "off" else "on"}")
     }
 
     // The pad state the core reports, as the setting, so a session loaded with its own state starts

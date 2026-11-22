@@ -185,13 +185,13 @@ class MachineSettingsTest {
     }
 
     @Test fun displayArgumentMatchesLaunchArguments() {
-        assertEquals("fit=fit smooth=off", MachineSettings().displayArgument())
-        assertEquals("fit=whole smooth=on", MachineSettings(ScreenSize.WHOLE, smoothing = true).displayArgument())
-        assertEquals("fit=fill smooth=off keyboard=off jog=hidden",
+        assertEquals("fit=fit smooth=off buttons=on", MachineSettings().displayArgument())
+        assertEquals("fit=whole smooth=on buttons=on", MachineSettings(ScreenSize.WHOLE, smoothing = true).displayArgument())
+        assertEquals("fit=fill smooth=off keyboard=off jog=hidden buttons=on",
             MachineSettings(ScreenSize.FILL, showKeyboard = false, jogControls = JogControls.HIDDEN)
                 .displayArgument(tg50Controls = true))
-        assertEquals("fit=fit smooth=off keyboard=on jog=keyboard", MachineSettings().displayArgument(tg50Controls = true))
-        assertEquals("fit=fit smooth=off jog=screen",
+        assertEquals("fit=fit smooth=off keyboard=on jog=keyboard buttons=on", MachineSettings().displayArgument(tg50Controls = true))
+        assertEquals("fit=fit smooth=off jog=screen buttons=on",
             MachineSettings(jogControls = JogControls.SCREEN).displayArgument(jogControls = true))
     }
 

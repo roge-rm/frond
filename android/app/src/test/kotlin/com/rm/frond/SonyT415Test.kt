@@ -119,6 +119,6 @@ class SonyT415Test {
         val s = MachineSettings(contrast = 40, contrastSet = true)
         val args = s.arguments(m68k = true, jogControls = t415.jogControls)
         assertEquals(listOf("--window-fit", "fit", "--jog-controls", "keyboard", "--contrast", "40"), args)
-        assertEquals("fit=fit smooth=off jog=keyboard contrast=40", s.displayArgument(m68k = true, jogControls = true))
+        assertEquals("fit=fit smooth=off jog=keyboard contrast=40 buttons=on", s.displayArgument(m68k = true, jogControls = true))
     }
 }

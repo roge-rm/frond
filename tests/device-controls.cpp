@@ -1902,6 +1902,18 @@ static void tg50LiveDisplay() {
             if(device==deviceTypeTG50) assert(after.count>0);
             else assert(barBefore && after.count==0 && deviceControlsHeight(after,320,view)==0 && deviceScreenLeft(after,view)==0);
         }
+        // Input keeps the device's own profile while its art is left out.
+        DeviceControlView bareZodiac;bareZodiac.bare=true;
+        const auto& drawn=deviceControls(deviceTypeZodiac2,bareZodiac);
+        const auto& input=deviceControls(deviceArt(deviceTypeZodiac2),bareZodiac.gamepad);
+        assert(drawn.count==0 && drawn.style!=DeviceControlStyle::zodiac);
+        assert(input.style==DeviceControlStyle::zodiac && input.count>0);
+        bool hasFunction=false,hasStick=false;
+        for(size_t i=0;i<input.count;++i) {
+            if(input.buttons[i].key>=keyIdFunction)hasFunction=true;
+            if(input.buttons[i].icon==DeviceControlIcon::stick)hasStick=true;
+        }
+        assert(hasFunction && hasStick);
     }
     DisplaySettings settings{WindowFit::fit,false,true,JogPlacement::screen};
     DisplayChange first,second;

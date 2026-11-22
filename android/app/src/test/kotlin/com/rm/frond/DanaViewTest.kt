@@ -91,7 +91,7 @@ class DanaViewTest {
         assertFalse(Device.TX.isDana())
         val other = MachineSettings(danaView = DanaView(keyboard = DanaKeyboard.HIDDEN))
         assertFalse("--dana-view" in other.arguments())
-        assertEquals("fit=fit smooth=off", other.displayArgument())
+        assertEquals("fit=fit smooth=off buttons=on", other.displayArgument())
     }
 
     @Test

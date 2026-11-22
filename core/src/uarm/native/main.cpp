@@ -94,6 +94,8 @@ struct Options {
     optional<float> windowScale;
     bool smoothLcd;
     bool hideKeyboard;
+    // The button bar art and its keys start left out (a host using a controller).
+    bool hideButtons;
     // The CLIÉ game controller at start (the machine setting); unset keeps the session's.
     optional<bool> gamepad;
     bool hideJogControls;
@@ -953,6 +955,7 @@ bool gFastEngineMissing = false;
         DeviceControlView controlView = deviceType == deviceTypeTG50
             ? deviceControlView(display.keyboard, display.jog) : DeviceControlView{};
         controlView.gamepad = display.gamepad;
+        display.buttons = !options.hideButtons;
         controlView.bare = !display.buttons;
         if (deviceType == deviceTypeTG50) controlView.jogLandscape = display.jogLandscape;
         // A device with two arrangements starts with its controls around the screen; a fitted
@@ -1888,6 +1891,9 @@ int main(int argc, char** argv) {
     program.add_argument("--hide-keyboard")
         .help("hide the TG50 keyboard")
         .default_value(false).implicit_value(true);
+    program.add_argument("--hide-buttons")
+        .help("start without the device's button bar art and keys")
+        .default_value(false).implicit_value(true);
     program.add_argument("--gamepad")
         .help("CLIÉ game controller on the TG50 at start, on or off, over the session's; default: the session's")
         .action([](const string& value) {
@@ -2009,6 +2015,7 @@ int main(int argc, char** argv) {
                        .windowScale = program.present<float>("--window-scale"),
                        .smoothLcd = program.get<bool>("--smooth-lcd"),
                        .hideKeyboard = program.get<bool>("--hide-keyboard"),
+                       .hideButtons = program.get<bool>("--hide-buttons"),
                        .gamepad = program.present<bool>("--gamepad"),
                        .hideJogControls = program.get<bool>("--hide-jog-controls"),
                        .jogPlacement = program.present<JogPlacement>("--jog-controls"),
