@@ -329,7 +329,7 @@ struct Probe {
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
                                            sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
                                            Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks) +
-                                           sizeof(QuietWriteMemo);
+                                           sizeof(QuietWriteMemo) + Imx1GraphicsCommands::unsavedBytes;
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -3653,7 +3653,7 @@ static_assert(sizeof(Imx1GraphicsInterrupts) == 12, "update its stateVersion and
 static_assert(sizeof(Imx1GraphicsAcquisition) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsSd) - Imx1GraphicsSd::unsavedBytes == 80, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsClocks) == 104, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1GraphicsCommands) == 10352, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1GraphicsCommands) - Imx1GraphicsCommands::unsavedBytes == 10352, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsMemory) - Imx1GraphicsMemory::unsavedBytes == 248, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsFrame) == 136, "update its stateVersion and the size in stateLayoutFingerprint");
 #endif

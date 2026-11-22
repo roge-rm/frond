@@ -113,6 +113,10 @@ class Imx1GraphicsCommands {
         if (!left) { ticks = 1; return A::ok; }
         if (left > words - 1 - queuedWords) return A::sequence;
         Batch batch{};
+        if (!spareFills.lists.empty()) {
+            batch.fills = std::move(spareFills.lists.back());
+            spareFills.lists.pop_back();
+        }
         batch.end = engine.producer();
         batch.words = left;
         auto& fills = batch.fills;
@@ -519,6 +523,7 @@ class Imx1GraphicsCommands {
             }
             configuration.completeEngine(batch.option);
             queuedWords -= batch.words;
+            keepFills(batches.front());
             batches.pop_front();
         }
         return A::ok;
@@ -2030,6 +2035,22 @@ class Imx1GraphicsCommands {
     uint16_t compareKey = 0;
     uint64_t ticks = 0;
     mutable Refusal refused;
+    // Fill lists of finished and dropped batches, emptied, so a new batch reuses their storage. Host side, not
+    // saved: a copy or move leaves each object its own.
+    struct SpareFills {
+        std::vector<std::vector<Fill>> lists;
+        SpareFills() = default;
+        SpareFills(const SpareFills&) {}
+        SpareFills& operator=(const SpareFills&) { return *this; }
+    } spareFills;
+    void keepFills(Batch& batch) {
+        if (spareFills.lists.size() >= 8 || !batch.fills.capacity()) return;
+        batch.fills.clear();
+        spareFills.lists.push_back(std::move(batch.fills));
+    }
+
+   public:
+    static constexpr size_t unsavedBytes = sizeof(SpareFills);
 };
 // decode writes only the registers store() takes, 30e and the IDCT scan slot, so only those are kept.
 struct Imx1GraphicsCommands::Undo {
@@ -2069,6 +2090,7 @@ inline void Imx1GraphicsCommands::undo(const Undo& u) {
         values[Undo::kept[i]] = u.values[i];
         known[Undo::kept[i]] = u.known[i];
     }
+    for (size_t i = u.batches; i < batches.size(); ++i) keepFills(batches[i]);
     batches.resize(u.batches);
     queuedWords = u.queuedWords;
     touched = u.touched;
@@ -2078,6 +2100,6 @@ inline void Imx1GraphicsCommands::undo(const Undo& u) {
     refused = u.refused;
 }
 #if defined(__GLIBCXX__) && defined(__x86_64__)
-static_assert(sizeof(Imx1GraphicsCommands) == 10352, "update state() and stateVersion");
+static_assert(sizeof(Imx1GraphicsCommands) - Imx1GraphicsCommands::unsavedBytes == 10352, "update state() and stateVersion");
 #endif
 #endif
