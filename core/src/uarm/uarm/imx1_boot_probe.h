@@ -304,6 +304,9 @@ uint16_t imx1MachinePcmLastTransmitted(const Imx1Machine*);
 // Sends each 16-bit word SSI1 finishes and its slot (0 the frame sync slot) to hook, on the thread that runs
 // the machine, in guest time order. Kept through state loads; null stops it.
 void imx1MachineSetPcmOutput(Imx1Machine*, void (*hook)(void*, uint16_t word, unsigned slot), void* context);
+// Leaves the YMF768's FM out of the PCM output's words (the chip still runs and mixes as before, so nothing the
+// guest sees or saves changes). Kept through state loads; off at first.
+void imx1MachineSetFmOutputMuted(Imx1Machine*, bool muted);
 // Puts the Zodiac's YMF768 on CS4 in place of the diagnostic recorder: its registers, its FM output mixed into
 // the PCM output's words and its interrupt on GPIO B15. Call before the first instruction. Saved states carry it
 // in an optional section; a state without one loads with the chip reset.

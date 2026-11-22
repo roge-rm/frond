@@ -594,7 +594,10 @@ void Imx1Bootstrap::pcmWordBoundary() {
         ssi1LastTransmitted = ssi1ShiftWord;
         ++ssi1Transmitted;
         ssi1Shifting = false;
-        if (pcmHook) pcmHook(pcmContext, ymfEnabled ? ymf.mix(ssi1ShiftWord, ssi1Slot) : ssi1ShiftWord, ssi1Slot);
+        if (pcmHook) {
+            const uint16_t mixed = ymfEnabled ? ymf.mix(ssi1ShiftWord, ssi1Slot) : ssi1ShiftWord;
+            pcmHook(pcmContext, fmOutputMuted ? ssi1ShiftWord : mixed, ssi1Slot);
+        }
     }
     if (ssi1Words[0] & 0x200) {
         if (ssi1TxCount) {

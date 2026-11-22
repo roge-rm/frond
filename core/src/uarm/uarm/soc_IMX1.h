@@ -253,6 +253,9 @@ class SocIMX1 : public SoC {
     // ROM's library isn't one Frond knows. log prints each event on stderr and drops it.
     bool SetMusicHooks(bool on, bool log = false);
     bool MusicHooksOn() const { return music.on; }
+    // The guest's FM music left out of the sound played, while a SoundFont or MIDI output plays it instead. Only
+    // the host's copy of the sound changes.
+    void SetFmMuted(bool muted) { imx1MachineSetFmOutputMuted(machine, muted); }
     // The events caught, for the player and tests.
     zodiac_music::Hooks& MusicHooks() { return music.hooks; }
     const zodiac_music::Library& MusicLibrary() const { return music.library; }

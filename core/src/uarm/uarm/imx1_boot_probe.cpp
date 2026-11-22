@@ -3123,6 +3123,7 @@ void imx1MachineEnableYmf768(Imx1Machine* machine) { machine->probe->peripherals
 void imx1MachineSetPcmOutput(Imx1Machine* machine, void (*hook)(void*, uint16_t, unsigned), void* context) {
     machine->probe->peripherals.setPcmOutput(hook, context);
 }
+void imx1MachineSetFmOutputMuted(Imx1Machine* machine, bool muted) { machine->probe->peripherals.setFmOutputMuted(muted); }
 
 extern uint64_t imx1PcmUnderrunWords;
 uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*) { return imx1PcmUnderrunWords; }
