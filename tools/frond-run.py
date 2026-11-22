@@ -108,6 +108,11 @@ def parser():
     p.add_argument('--install', type=Path, action='append', default=[], help='PRC/PDB; repeat in install order')
     p.add_argument('--reset', action='store_true', help='soft reset the guest after the installs and the card, before the launch')
     p.add_argument('--sd-insert', type=Path, help='raw SD image to put in the slot after the installs (the card then stays in the saved session)')
+    card = p.add_mutually_exclusive_group()
+    card.add_argument('--palm-wifi-card', action='store_true',
+                      help='attach the Palm Wi-Fi Card and use Virtual Wi-Fi')
+    card.add_argument('--test-palm-wifi', action='store_true',
+                      help='attach the test Palm Wi-Fi Card and skip the session save')
     launch = p.add_mutually_exclusive_group(required=True)
     launch.add_argument('--app', help='exact Palm application database name')
     launch.add_argument('--resume-app', action='store_true',
@@ -340,6 +345,8 @@ def run(args):
         for name in ([args.app] if args.app is not None else []) + args.export_db:
             if not name or len(name.encode()) > 31 or '\n' in name or '\0' in name:
                 raise RunError('argument', 'Palm database names must be 1–31 UTF-8 bytes without newline/NUL')
+        if (args.palm_wifi_card or args.test_palm_wifi) and args.sd_insert:
+            raise RunError('argument', 'The Palm Wi-Fi Card and the SD image use the same slot.')
         output = args.output.resolve()
         if any(c in str(output) for c in ('\n', '\r', '\0')):
             raise RunError('argument', 'Output paths cannot contain newline/NUL')
@@ -420,6 +427,8 @@ def run(args):
                     *(['--nand', str(root / 'input-nand.bin')] if args.nand else [])]
                 command = (['heavy', 'emulator'] if shutil.which('heavy') else []) + [
                     str(root / 'core'), *boot, '--desktop-socket', address]
+                if args.test_palm_wifi:
+                    command.append('--test-palm-wifi')
                 if not args.sound:
                     command.append('--no-sound')
                 if args.serial:
@@ -488,6 +497,15 @@ def run(args):
                 if args.app is not None or resume is not None:
                     control.retry_ready('launch-app', args.app if args.app is not None else resume, args.ready_timeout)
                 pause(args.settle, deadline)
+                if args.palm_wifi_card or args.test_palm_wifi:
+                    result['stage'] = 'wifi-insert'
+                    slot = control.require('sd-state')['message']
+                    if slot == 'inserted':
+                        control.require('sd-eject')
+                        pause(1, deadline)
+                    control.require('network-mode', 'wireless')
+                    if not slot.startswith('inserted wifi'):
+                        control.require('sd-wifi-insert')
                 result['stage'] = 'replay'
                 control.require('input-replay', replay)
                 until = time.monotonic() + max(args.run_for, last_ms / 1000)
@@ -511,6 +529,9 @@ def run(args):
                     capture['written'] = path.is_file() and path.stat().st_size > 0
                     if not capture['written']:
                         missing.append(str(path))
+                if args.test_palm_wifi:
+                    result['stage'] = 'wifi-eject'
+                    control.require('sd-wifi-eject')
                 result['stage'] = 'export'
                 for index, name in enumerate(args.export_db, 1):
                     archive = root / f'database-{index:03d}.zip'
@@ -526,9 +547,10 @@ def run(args):
                             zlib.error) as error:
                         raise RunError('export', f'Unreadable named database archive: {archive}: {error}') from error
                     result['artifacts']['exports'].append({'database': name, 'path': str(archive)})
-                result['stage'] = 'save'
-                control.require('save', machine / 'working.frond')
-                result['artifacts']['session_saved'] = True
+                if not args.test_palm_wifi:
+                    result['stage'] = 'save'
+                    control.require('save', machine / 'working.frond')
+                    result['artifacts']['session_saved'] = True
                 result['stage'] = 'quit'
                 control.require('quit')
                 try:

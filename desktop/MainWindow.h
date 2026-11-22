@@ -354,6 +354,8 @@ class MainWindow : public QMainWindow {
     // The CLIÉ game controller as the core last said: empty unknown, attached, detached or busy.
     QString gamepadState;
     QLabel *sdStatus, *storageHeading;
+    QPushButton* palmWifiCard;
+    bool palmWifiInserted{false};
     // A Dana or VZ Palm's portable folder: the session with copies of its cards.
     QPushButton* portableExport;
     // Files… on the running machine's SD card: eject, save, take the card out into the machine

@@ -112,6 +112,8 @@ SOURCE_CXX =		 					\
 	uarm/nand.cpp 						\
 	uarm/mmiodev_DirectNAND.cpp			\
 	uarm/uartdev_bcm2035.cpp			\
+	uarm/SdioCard.cpp					\
+	uarm/PalmSdioWifi.cpp				\
 	uarm/vSD.cpp						\
 	uarm/devicePalmTungstenE2.cpp 		\
 	uarm/deviceSonyTG50.cpp \

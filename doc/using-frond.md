@@ -369,7 +369,11 @@ A relay waits again after its peer goes, and Connect again retries.
 
 ### Network
 
-Network is the T|X only, and the E2 and Zire 72 don't have their networking yet. The 68k Palms have no network setting, they connect over PPP on their serial port, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). Choose a mode before opening a network app:
+The T|X has built-in Wi-Fi. On Desktop, the Tungsten E2 and Zire 72 can use the Palm Wi-Fi Card. In Storage, eject any memory card and choose **Insert Palm Wi-Fi Card**. Install the original Palm Wi-Fi Card driver in Palm OS. In Network, choose **Virtual Wi-Fi (Frond)**, then open Wi-Fi in Palm OS Preferences to join Frond. The card stays in the slot when you reopen the machine.
+
+Tungsten E3 with the CloudPilot E3 v2 ROM uses the same card. Prepare its driver files with `python3 tools/prepare-e3-wifi.py WiFi_Installer1.2.prc e3-wifi-driver`. Install all the numbered PRCs from that folder, then soft reset Palm OS. Insert the card and join Frond as on the E2.
+
+The 68k Palms connect over PPP on their serial port, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). Choose a mode before opening a network app:
 
 - Virtual Wi-Fi (Frond): turn on Wi-Fi in Palm OS, scan and connect to the open **Frond** network. A virtual router gives it an address, DNS and IPv4 through the computer's or phone's connection, with no root, bridge or Wi-Fi adapter needed. The router is 10.0.2.2, so use that for a service on your computer. Blazer loads HTTP pages, but its old HTTPS is refused by most sites. For Network HotSync run `pilot-xfer -p net:127.0.0.1 -l` and enter 10.0.2.2 as the PC address in the Palm's HotSync setup.
 - Internet via host: forwards some 68k NetLib calls to host sockets. Blazer's Wi-Fi workflow doesn't work this way, use Virtual Wi-Fi.

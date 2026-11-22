@@ -637,22 +637,43 @@ appimage:
 appimage-arm64:
 	$(call build-appimage,aarch64,arm64)
 
+.PHONY: test-palm-sdio-wifi
+test-palm-sdio-wifi: $(COMMON_NET_LIB) $(COMMON_LIB)
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/palm-sdio-wifi.cpp core/src/uarm/uarm/PalmSdioWifi.cpp \
+		core/src/uarm/uarm/SdioCard.cpp core/src/uarm/uarm/vSD.cpp \
+		core/src/uarm/uarm/NetworkSimulation.cpp core/src/uarm/uarm/HostNetwork.cpp \
+		$(COMMON_NET_LIB) $(COMMON_LIB) $(shell pkg-config --libs slirp) -pthread \
+		-Wl,--gc-sections -o $(OBJ_ROOT)/test-palm-sdio-wifi
+	$(OBJ_ROOT)/test-palm-sdio-wifi
+
+.PHONY: test-palm-prism-frame
+test-palm-prism-frame:
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm tests/palm-prism-frame.cpp \
+		-o $(OBJ_ROOT)/test-palm-prism-frame
+	$(OBJ_ROOT)/test-palm-prism-frame
+
+.PHONY: test-pxa-mmc
+test-pxa-mmc: $(COMMON_LIB)
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-mmc.cpp core/src/uarm/uarm/pxa_MMC.cpp core/src/uarm/uarm/vSD.cpp \
+		core/src/uarm/uarm/SdioCard.cpp \
+		$(COMMON_LIB) -Wl,--gc-sections -o $(OBJ_ROOT)/test-pxa-mmc
+	$(OBJ_ROOT)/test-pxa-mmc
+
 .PHONY: test-sd-image test-sd
 test-sd-image: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/native tests/sd-image.cpp -o $(OBJ_ROOT)/test-sd-image
 	$(OBJ_ROOT)/test-sd-image
 
-test-sd: out/frond
+test-sd: out/frond test-pxa-mmc
 	python3 tests/sd-results.py
 	$(CXX) -std=c++17 -O1 -g -Icore/src/common -Icore/src/uarm/native -Icore/src/uarm/uarm \
 		tests/sd-session.cpp core/src/uarm/uarm/sdcard.cpp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-sd-session
 	$(OBJ_ROOT)/test-sd-session
-	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
-		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/pxa-mmc.cpp core/src/uarm/uarm/pxa_MMC.cpp core/src/uarm/uarm/vSD.cpp \
-		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -Wl,--gc-sections -o $(OBJ_ROOT)/test-pxa-mmc
-	$(OBJ_ROOT)/test-pxa-mmc
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/pxa-dma.cpp core/src/uarm/uarm/pxa_DMA.cpp -Wl,--gc-sections -o $(OBJ_ROOT)/test-pxa-dma
@@ -1440,7 +1461,7 @@ test-debugger-inspect: out/frond
 
 .PHONY: test-lifecycle test-tx-lifecycle-rom
 test: test-lifecycle
-test-lifecycle: out/frond
+test-lifecycle: out/frond test-sd-lifecycle
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/lifecycle-core.rsp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' ! -name cputil.o > $(OBJ_ROOT)/audio-lifecycle-core.rsp
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
@@ -1453,10 +1474,14 @@ test-lifecycle: out/frond
 		tests/peripheral-lifecycle.cpp @$(OBJ_ROOT)/lifecycle-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-peripheral-lifecycle
 	$(OBJ_ROOT)/test-peripheral-lifecycle
+
+.PHONY: test-sd-lifecycle
+test-sd-lifecycle: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/sd-lifecycle.cpp core/src/uarm/uarm/pxa_MMC.cpp core/src/uarm/uarm/vSD.cpp \
-		$(COMMON_LIB) $(CPU_TEST_LDLIBS) -Wl,--gc-sections -o $(OBJ_ROOT)/test-sd-lifecycle
+		core/src/uarm/uarm/SdioCard.cpp \
+		$(COMMON_LIB) -Wl,--gc-sections -o $(OBJ_ROOT)/test-sd-lifecycle
 	$(OBJ_ROOT)/test-sd-lifecycle
 
 # Optional: build only; invoke explicitly with private sessions and a host deadline.

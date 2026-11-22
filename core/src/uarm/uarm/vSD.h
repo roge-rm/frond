@@ -12,7 +12,7 @@ typedef struct VSD VSD;
 
 enum SdReplyType {
     SdReplyNone,
-    SdReply48bits,         // R1,R6,R7 (have checksum), R3 (no checksum)
+    SdReply48bits,         // R1/R5/R6/R7 (CRC), R3/R4 (no CRC)
     SdReply48bitsAndBusy,  // R1b
     SdReply136bits,        // R2
 };

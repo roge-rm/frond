@@ -68,6 +68,7 @@ enum class ChunkType : uint32_t {
     libertasCF = 0x100d0,
     xscaleDcache = 0x100e0,
     costDataCache = 0x100f0,
+    palmSdioWifi = 0x10100,
 };
 
 inline ChunkType operator+(ChunkType chunkType, uint32_t index) {

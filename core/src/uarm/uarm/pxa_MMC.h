@@ -10,10 +10,21 @@
 #include "vSD.h"
 
 struct PxaMmc;
+class SdioCard;
 
 struct PxaMmc* pxaMmcInit(struct ArmMem* physMem, struct PxaIc* ic, struct PxaDma* dma, bool wordFifo = false);
 
 void pxaMmcInsert(struct PxaMmc* mmc, struct VSD* vsd);  // NULL also acceptable
+// Replaces the slot contents. The caller owns the card and must detach it before destroying it.
+// The board drives card detect and any external SDIO interrupt routing.
+// The card owner must save and restore its state before using this in a machine session.
+void pxaMmcInsertSdio(PxaMmc* mmc, SdioCard* card);
+// Call on the emulation thread after changing a card IRQ source.
+// Wire a restored SDIO card to restored controller state without powering it on.
+void pxaMmcRestoreSdio(struct PxaMmc *mmc, SdioCard *card);
+void pxaMmcSdioIrqChanged(PxaMmc* mmc);
+using PxaMmcSdioIrq = void (*)(void* context, bool asserted);
+void pxaMmcSetSdioIrq(PxaMmc* mmc, PxaMmcSdioIrq irq, void* context);
 // With no card in: the guest has stopped the MMC clock since the card went (its driver handling the
 // removal). Host only, false again after a session load.
 bool pxaMmcClockStoppedSinceRemoval(struct PxaMmc* mmc);

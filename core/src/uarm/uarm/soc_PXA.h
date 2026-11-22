@@ -2,6 +2,7 @@
 #define _SOC_PXA_H_
 
 #include <cstdint>
+#include <vector>
 
 #include "CPU.h"
 #include "ClieGamepad.h"
@@ -36,6 +37,7 @@ struct PxaI2c;
 struct PxaPwm;
 struct PxaTimr;
 struct PxaMmc;
+class PalmSdioWifi;
 struct PxaRtc;
 struct PxaLcd;
 struct Pxa270wmmx;
@@ -54,6 +56,8 @@ struct VSD;
 class SocPXA : public SocGeneric<SocPXA> {
     friend SocGeneric<SocPXA>;
     bool disableSleep{false};
+    std::vector<uint8_t> e3WifiRom;
+    bool e3WifiCompatible = false;
 
    public:
     ~SocPXA();
@@ -72,6 +76,12 @@ class SocPXA : public SocGeneric<SocPXA> {
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     uint64_t CoreHz() const override;
     std::optional<bool> SdRemovalHandled() override;
+    bool InsertPalmWifi();
+    void EjectPalmWifi();
+    bool PalmWifiInserted() const { return bool(palmSdioWifi); }
+    using SocGeneric<SocPXA>::Save;
+    bool Save() override;
+    bool SupportsPalmWifi();
     uint32_t *GetPendingFrame(uint32_t &firstDirtyLine, uint32_t &lastDirtyLine) override;
     void ResetPendingFrame() override;
     DeviceType5 GetDeviceType() override;
@@ -176,6 +186,11 @@ class SocPXA : public SocGeneric<SocPXA> {
     void OnSetAudioQueue(struct AudioQueue *audioQueue) override;
     void OnSetPcmOutputEnabled() override;
     void OnSetPcmSuspended() override;
+    std::unique_ptr<PalmSdioWifi> palmSdioWifi;
+    std::unique_ptr<PalmSdioWifi> displacedPalmSdioWifi;
+    bool reinsertPalmWifi = false;
+    bool LoadPalmWifi(SavestateLoader<ChunkType>& loader);
+
     void OnSdInsert() override;
     void OnSdRemount() override;
     void OnSdEject() override;
