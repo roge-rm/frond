@@ -106,6 +106,12 @@ class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private
         pads.keys.toList().forEach { release(it) }
     }
 
+    // Swaps the map after letting go of everything held under the old one.
+    fun replaceMap(newMap: ControllerMap) {
+        releaseAll()
+        map = newMap
+    }
+
     // Presses past PRESS and lets go under RELEASE, so a trigger resting near the middle doesn't chatter.
     private fun trigger(device: Int, pad: Pad, key: Int, value: Float) {
         val tag = "t$key"

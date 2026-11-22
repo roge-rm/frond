@@ -698,6 +698,13 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    // Picks up Settings > Controller edits made while this machine was running (onPause let go of every button).
+    private fun reloadControllerMaps() {
+        if (leaving || !::runningDevice.isInitialized) return
+        controller.replaceMap(ControllerMap.load(this, runningDevice))
+        zodiacPad?.replaceMap(ControllerMap.load(this, launchDevice()))
+    }
+
     private fun configureController(device: Device) {
         controller.releaseAll()
         val buttons = PalmButtons(device, link, cacheDir)
@@ -1092,6 +1099,7 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        reloadControllerMaps()
         applyImmersive()
         applyTouchOverlay()
         if (!leaving) rumble?.set(guestVibrate)

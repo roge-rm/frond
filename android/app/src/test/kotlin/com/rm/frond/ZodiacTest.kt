@@ -193,6 +193,15 @@ class ZodiacTest {
         assertEquals(listOf(Button(1, ZodiacPad.BUTTON_B, true), Button(1, ZodiacPad.RIGHT_SHOULDER, true)), events)
     }
 
+    @Test fun replacingTheMapReleasesHeldButtons() {
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(ControllerMap.defaults(zodiac)) { events += it }
+        pad.key(1, KeyEvent.KEYCODE_BUTTON_B, true)
+        pad.replaceMap(ControllerMap.defaults(zodiac).clear(PalmButton.APP2))
+        assertEquals(Button(1, ZodiacPad.BUTTON_B, false), events.last())
+        assertFalse(pad.key(1, KeyEvent.KEYCODE_BUTTON_B, true))
+    }
+
     @Test fun theRightStickPressesWhatTheMapGivesIt() {
         val events = mutableListOf<ZodiacPad.Event>()
         val map = ControllerMap.defaults(zodiac)
