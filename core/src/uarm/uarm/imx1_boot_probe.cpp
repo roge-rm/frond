@@ -637,21 +637,24 @@ struct Probe {
         // change charges only the chip, leaves the board behind (pendingBoardCycles) and works out the graphics side
         // of the next span, as a lagged submit does. Anything the board sees catches it up first (flushSubmitBoard).
         // A change of the chip's interrupt output and a short span take the full path.
+        // The deferred cycles were taken off quietCycles as the runs added them, so only the stall cycle is new.
         const uint64_t boardLeft = quietCycles + boardSlack;
-        if (submitLag && boardLeft > uint64_t(deferredCycles) + leanMinimumSpan &&
+        if (submitLag && boardLeft > leanMinimumSpan &&
             uint64_t(pendingBoardCycles) + deferredCycles < UINT32_MAX &&
             uint64_t(pendingBoardHclk) + deferredHclk <= UINT32_MAX) {
             // The stall cycle as below; the board is quiet past it.
+            uint64_t stall = 0;
             if (!quietCycles && !deferredHclk && cs5Configuration.quietCpuCycles(period) == deferredCycles &&
-                (deferredCycles || cs5Configuration.changeDue(period)))
+                (deferredCycles || cs5Configuration.changeDue(period))) {
                 ++deferredCycles;
+                stall = 1;
+            }
             const auto lineBefore = cs5Configuration.interruptState().interruptOutput();
-            const uint64_t charged = deferredCycles;
             if (!chargeDeferred(true)) { flushSubmitBoard(); clockBoundary(); return -1; }
             cs5Configuration.takeBusyLevel();
             if (graphicsWireStatus == Imx1BootstrapAccess::ok &&
                 cs5Configuration.interruptState().interruptOutput() == lineBefore) {
-                const uint64_t cap = boardLeft - charged;
+                const uint64_t cap = boardLeft - stall;
                 const uint64_t span = submitSpan(cap);
                 if (span >= leanMinimumSpan) {
                     quietCycles = span;
