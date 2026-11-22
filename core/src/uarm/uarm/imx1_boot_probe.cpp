@@ -126,6 +126,12 @@ bool crossEnd = [] {
     return !(v && *v && !std::strcmp(v, "0"));
 }();
 bool spanCrosses = false, crossBlocked = false;
+// Fast blocks: a lagged ring submit keeps the run's lean CS5 checks (jitChargedWrite). FROND_ZODIAC_KEEP_CHECKS=0
+// turns that off, for measuring.
+bool keepLeanChecks = [] {
+    const char* v = std::getenv("FROND_ZODIAC_KEEP_CHECKS");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
 // Fast blocks: a ring submit inside the quiet span leaves the board behind the chip (pendingBoardCycles) and works out
 // only the graphics side of the new span, capped at the rest of the old one and its boardSlack, the board's quiet time
 // and the bounds (submitSpan). A span boundary on a graphics change does the same (spanBoundary). The board catches up
@@ -1200,6 +1206,7 @@ struct Probe {
         deferredHclk += leanCs5.waitClocks;
         result.cs5WaitClocks += leanCs5.waitClocks;
         work += leanCs5.waitClocks;
+        const LeanCs5 checks = leanCs5;
         leanCs5 = {};
         deferredCycles += ran;
         cpuArm920JitCharge(cpu, ran, 0);
@@ -1248,6 +1255,14 @@ struct Probe {
             side = remaining + slackBefore;
             quietCycles = submitSpan(side);
             ++lagSubmits;
+            // The run's lean checks still hold: the board hasn't moved, the line and the write clocks are the same,
+            // and a submit changes only the engine's queue, which none of them read. The ring view, memoryReady and
+            // the register checks read the ring and window registers, the EIM and the GPIO, which it doesn't write.
+            if (keepLeanChecks && checks.checked && checks.usable && checks.clocks == clocks &&
+                !graphicsMemory->gpuResidency()) {
+                leanCs5 = checks;
+                leanCs5.waitClocks = leanCs5.waitCost = 0;
+            }
         } else {
             flushSubmitBoard();
             updateInterrupts();
