@@ -8,8 +8,7 @@ infrared phone (--irda phone). --only modemsync HotSyncs over the modem both way
 HotSync number through --modem-sync pty, then Network HotSync over PPP to pilot-xfer on net:.
 
 ROMs come from --rom, else the IIIx 3.1 ROM in the private firmware folder; with none the checks
-are skipped. A ROM whose name has T400 runs as the CLIE T415, which has no serial port (USB cradle), so its
-serial checks are skipped and the others run at 320x320 through palm_boot.HalfCore. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
+are skipped. A ROM whose name has T400 runs as the CLIE T415 at 320x320 through palm_boot.HalfCore. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
 Palm OS 3.5 SDK are there (--sdk), else the checks that need them are skipped."""
 import argparse
 import os
@@ -378,7 +377,7 @@ class Endpoint:
 
     def __init__(self, m, mode):
         self.socat = None
-        state = m.send('serial-state', 'serial:')
+        state = m.send('serial-state', f'serial: {mode} ')
         address = state.split()[2]
         if mode == 'pty':
             self.port = address
@@ -401,7 +400,7 @@ def check_serial(rom, session, root, probes):
     """pilot-link over the cradle serial port: install Hello.prc, fetch MemoDB and back up over a
     PTY at 57600, then list over TCP at 115200 in a fresh process loaded from the synced session."""
     if not palm_boot.rom_device(DEVICE)['serial']:
-        raise Skip(f'{DEVICE} has no serial port (USB cradle)')
+        raise Skip(f'{DEVICE} has no serial port')
     if not shutil.which('pilot-xfer') or not shutil.which('socat'):
         raise Skip('no pilot-xfer or socat')
     if not HELLO.is_file():

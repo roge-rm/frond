@@ -340,7 +340,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // emulated: the T415 has the piezo beeper.
     {deviceTypeT415, "sony-clie-t415", "Sony CLIÉ T415", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x736f6e79 /* sony */, 0x766e6365 /* vnce */, DeviceBoard5::vz328, DeviceArt::t415,
-     {false, false, false, true, false, true, false, true, false, false, false, true},
+     {false, false, true, true, false, true, false, true, false, false, false, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_320x320, 1u << 5, false,
      DeviceNorLayout5::any, 0, 0, false, 0, 0,
      {true, "iiix-hires", 320, 320, 128, 104, "Date Book|Address|To Do|Memo Pad",

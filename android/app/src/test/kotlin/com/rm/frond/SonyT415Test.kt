@@ -50,9 +50,9 @@ class SonyT415Test {
         assertEquals(320, d.height)
         assertEquals(38, d.sideTabWidth)
         assertTrue(d.jogControls && d.jogBesideButtons)
-        // The beeper, IrDA and the USB cradle; no serial connector, modem, keyboard or Bluetooth.
-        assertTrue(d.sound && d.infrared && d.irPhone && d.usb)
-        assertFalse(d.serialPort || d.modem || d.network || d.keyboard || d.bluetooth || d.microphone || d.camera || d.fastAudio)
+        // The beeper, IrDA, serial cable and USB cradle.
+        assertTrue(d.sound && d.infrared && d.irPhone && d.usb && d.serialPort)
+        assertFalse(d.modem || d.network || d.keyboard || d.bluetooth || d.microphone || d.camera || d.fastAudio)
         assertEquals("", d.pendingUsb)
         assertEquals(Frond68kActivity::class.java, Emulators.activity(d))
         assertEquals(":emulator68k", Emulators.process(d))
@@ -119,6 +119,6 @@ class SonyT415Test {
         val s = MachineSettings(contrast = 40, contrastSet = true)
         val args = s.arguments(m68k = true, jogControls = t415.jogControls)
         assertEquals(listOf("--window-fit", "fit", "--jog-controls", "keyboard", "--contrast", "40"), args)
-        assertEquals("fit=fit smooth=off jog=keyboard contrast=40 buttons=on", s.displayArgument(m68k = true, jogControls = true))
+        assertEquals("fit=fit smooth=off jog=keyboard contrast=40", s.displayArgument(m68k = true, jogControls = true))
     }
 }

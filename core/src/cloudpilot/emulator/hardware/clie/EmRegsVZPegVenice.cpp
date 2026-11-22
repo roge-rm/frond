@@ -113,11 +113,13 @@ Bool EmRegsVzPegVenice::GetSerialPortOn(int /*uartNum*/) {
     return (READ_REGISTER(portGData) & hwrVZVenicePortGRS232Enable) != 0;
 }
 
-// The ROM gates nothing on a port bit for IR, so the transceiver counts as always powered.
-Bool EmRegsVzPegVenice::GetLineDriverState(EmUARTDeviceType type) { return type == kUARTIR; }
+Bool EmRegsVzPegVenice::GetLineDriverState(EmUARTDeviceType type) {
+    return GetUARTDevice(0) == type && type != kUARTNone;
+}
 
 EmUARTDeviceType EmRegsVzPegVenice::GetUARTDevice(int uartNum) {
-    return uartNum == 0 ? kUARTIR : kUARTNone;
+    if (uartNum != 0) return kUARTNone;
+    return GetSerialPortOn(uartNum) ? kUARTSerial : kUARTIR;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,8 +224,19 @@ uint16 EmRegsVzPegVenice::ButtonToBits(ButtonEvent::Button btn) {
 // ---------------------------------------------------------------------------
 
 void EmRegsVzPegVenice::SetUsbCradle(bool docked) {
-    // HwrDockStatus reports the USB cradle (0x10) for readings of 197-220 in the top 8 bits.
-    static_cast<EmSPISlaveADS784x*>(fSPISlaveADC)->SetDockLevel(docked ? 208 << 4 : 0);
+    usbCradle = docked;
+    UpdateDockLevel();
+}
+
+void EmRegsVzPegVenice::SetSerialCable(bool attached) {
+    serialCable = attached;
+    UpdateDockLevel();
+}
+
+void EmRegsVzPegVenice::UpdateDockLevel() {
+    // HwrDockStatus reads the high eight bits: 197-220 for USB, 63-93 for serial cradle.
+    const int level = usbCradle ? 208 : serialCable ? 78 : 0;
+    static_cast<EmSPISlaveADS784x*>(fSPISlaveADC)->SetDockLevel(level << 4);
 }
 
 EmSPISlave* EmRegsVzPegVenice::GetSPI2Slave(void) {

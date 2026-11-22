@@ -4,6 +4,7 @@
 #include "EmBankRegs.h"
 #include "UsbDanaPort.h"
 #include "EmRegsUsbD12.h"
+#include "EmRegsVZPegVenice.h"
 #include "UsbPrinterRuntime.h"
 #include "UsbWifiRuntime.h"
 #include "dana_wireless5.h"
@@ -1375,7 +1376,9 @@ class Runner {
             return false;
         }
         serialTransport->SetModemMode(false, error);
-        return serialLink.Open(kind, port, error, path);
+        const bool opened = serialLink.Open(kind, port, error, path);
+        UpdateSerialCable();
+        return opened;
     }
 
     // The IR port's mode: a host link, phone for the core's mobile phone on a device that has one, or
@@ -1506,7 +1509,13 @@ class Runner {
         usbDana.reset();
         usbCable=false;
     }
+    void UpdateSerialCable() {
+        if (profile->deviceType != deviceTypeT415) return;
+        auto* venice = dynamic_cast<EmRegsVzPegVenice*>(EmBankRegs::GetSubBank(0xfffff900, 2));
+        if (venice) venice->SetSerialCable(serialLink.GetKind() != HostLink68k::Kind::off);
+    }
     void RestoreUsb() {
+        UpdateSerialCable();
         if(UsbCradle()) {
             // A load or a failed load disposed the chip: the bridge starts again on the new one.
             string error;
@@ -2638,6 +2647,8 @@ class Runner {
                 syncPressBy = std::chrono::steady_clock::now() + std::chrono::seconds(20);
                 return {true, "sync", "Starting a HotSync over USB."};
             }
+            if (UsbCradle() && usbCradleMode != "off")
+                return {false, "busy", "The USB cradle is in use. Turn USB off to use serial HotSync."};
             if (!serialSync) {
                 if (!profile->capabilities.serial || serialTransport->ModemMode() || serialLink.GetKind() != HostLink68k::Kind::off)
                     return {false, "busy", "The cradle is in use. Set serial or USB to sync first."};
@@ -2686,13 +2697,14 @@ class Runner {
             HostLink68k& link = serial ? serialLink : irLink;
             string& error = serial ? serialError : infraredError;
             error.clear();
-            if (serial) serialTransport->SetModemMode(false, error);
-            else {
+            if (serial) {
+                if (!SetSerial(argument, error)) return {false, "serial", error};
+            } else {
                 irTransport->SetPhoneMode(false, error);
                 irTransport->SetPrinterMode(false);
+                // A failed open leaves the link off, and its state shows why.
+                if (!link.Open(kind, port, error, path)) return {false, "infrared", error};
             }
-            // A failed open leaves the link off, and its state shows why.
-            if (!link.Open(kind, port, error, path)) return {false, serial ? "serial" : "infrared", error};
             return {true, serial ? "serial" : "infrared", link.Describe()};
         }
         if (command == "serial-stats") return {true, "serial", serialTransport->Stats()};

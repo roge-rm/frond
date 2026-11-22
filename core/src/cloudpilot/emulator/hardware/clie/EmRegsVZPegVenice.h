@@ -21,7 +21,7 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     virtual uint16 GetLEDState(void);
 
     virtual Bool GetSerialPortOn(int uartNum);
-    // IrDA is UART1. The cradle is USB, so there is no serial line.
+    // PG4 switches UART1 between the serial cable and IrDA.
     virtual Bool GetLineDriverState(EmUARTDeviceType type);
     virtual EmUARTDeviceType GetUARTDevice(int uartNum);
     virtual Bool GetVibrateOn(void);
@@ -35,8 +35,9 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     // Jog Dial turns: one IRQ2 edge (PD5) per detent, PG1 high for up.
     void DispatchButtonEvent(ButtonEvent evt) override;
 
-    // In the USB cradle: HwrDockStatus reads the cradle's ID resistor on ADC input 6.
+    // HwrDockStatus reads the cable ID resistor on ADC input 6.
     void SetUsbCradle(bool docked);
+    void SetSerialCable(bool attached);
 
    protected:
     virtual EmSPISlave* GetSPI2Slave(void);
@@ -44,6 +45,9 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     uint16 ButtonToBits(ButtonEvent::Button btn) override;
 
    private:
+    void UpdateDockLevel();
+    bool usbCradle{false};
+    bool serialCable{false};
     EmRegsMB86189& mb86189;
     EmSPISlave* fSPISlaveADC;
     unique_ptr<uint32[]> framebufferTmp;
