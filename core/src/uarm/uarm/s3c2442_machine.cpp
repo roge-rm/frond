@@ -1128,12 +1128,12 @@ void S3c2442Machine::runFast(uint64_t n) {
     sfrAccessed = false;
     while (left && stopped.stop == S3c2442Stop::running && !watchdog.resetRequested && !clock.idle() &&
            !cpuArm920Waiting(cpuCore)) {
-        // A run passes its clock budget by a block at most (slack), and a Thumb BL pair is one clock but two
-        // instructions, so it gets half of what's left less a block.
-        if (leanCount == UINT32_MAX && !blPending && left / 2 > slack && cpuArm920JitCanRun(cpuCore)) {
+        // With no cost model a run's clocks are its instructions (a Thumb BL pair is 2), and it passes its budget
+        // by a block at most (slack instructions, 2 clocks for a pair), so it gets what's left less two blocks.
+        if (leanCount == UINT32_MAX && !blPending && left > 2 * uint64_t(slack) && cpuArm920JitCanRun(cpuCore)) {
             int stop = arm920JitExit;
             uint32_t instructions = 0;
-            const uint32_t budget = uint32_t(std::min<uint64_t>(left / 2 - slack + 1, UINT32_MAX / 2));
+            const uint32_t budget = uint32_t(std::min<uint64_t>(left - 2 * uint64_t(slack) + 1, UINT32_MAX / 2));
             leanAdvanced = 0;
             cpuArm920RunJit(cpuCore, budget, &stop, budget, &instructions);
             if (instructions) {

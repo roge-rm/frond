@@ -296,16 +296,18 @@ bool EndsBlock(uint32_t w, uint32_t pc, bool thumb) {
 // table's cost when the condition passed, 1 when it failed. On PXA a tick is a core clock. On the
 // ARM920T a tick holds the clocks above bit 32 and the instructions below (a Thumb pair counts 2,
 // as the board steps each half), since its board counts both; budgets there are clocks << 32, so a
-// run still stops once its clocks reach the budget.
+// run still stops once its clocks reach the budget. With no cost model there a Thumb pair is 2 clocks
+// too, so clocks are instructions and a budget can be given in instructions.
 struct TickModel {
     bool on = false;
     uint8_t core = 0;
     unsigned shift = 0;
 
     uint64_t Ticks(bool thumb, uint32_t instruction) const {
-        const uint64_t c = on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : 1;
-        if (!shift) return c;
-        return (c << shift) | (thumb && instruction > 0xffff ? 2 : 1);
+        const uint64_t n = thumb && instruction > 0xffff ? 2 : 1;
+        if (!shift) return on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : 1;
+        const uint64_t c = on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : n;
+        return (c << shift) | n;
     }
     uint64_t Failed() const { return shift ? (uint64_t(1) << shift) | 1 : 1; }
 };
