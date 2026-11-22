@@ -116,10 +116,12 @@ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
                                           samplesRemaining, queueGeneration);
     }
 
-    if (muted.load(std::memory_order_relaxed)) memset(stream, 0, len);
-    else if (samplesRemaining > 0) {
-        memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
+    if (muted.load(std::memory_order_relaxed)) {
+        memset(stream, 0, len);
+        return;
     }
+    if (samplesRemaining > 0) memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
+    if (mixer) mixer(reinterpret_cast<int16_t*>(stream), size_t(len) / 4);
 }
 
 void SdlAudioDriver::SetMuted(bool value) { muted.store(value, std::memory_order_relaxed); }

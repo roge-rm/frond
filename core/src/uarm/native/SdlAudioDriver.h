@@ -33,6 +33,10 @@ class SdlAudioDriver {
 
     void AudioCallback(uint8_t* stream, int len);
 
+    // Mixes more sound into each period (stereo frames, interleaved), on the callback thread, after the guest's and
+    // unless muted. Set it before Start.
+    void SetMixer(std::function<void(int16_t*, size_t)> mix) { mixer = std::move(mix); }
+
     // Runs the SDL device calls through run, which runs them on the SDL thread and waits.
     // Android's background pause holds the device lock on that thread until resume.
     void SetDeviceThread(std::function<void(const std::function<void()>&)> run) { deviceThread = std::move(run); }
@@ -42,6 +46,7 @@ class SdlAudioDriver {
 
     SoC* soc;
     std::function<void(const std::function<void()>&)> deviceThread;
+    std::function<void(int16_t*, size_t)> mixer;
     AudioQueue* audioQueue;
     SDL_AudioDeviceID audioDevice;
 

@@ -38,6 +38,10 @@
 #include "RenderThread.h"
 #include "Rotation.h"
 #include "ZodiacSpeed.h"
+#ifndef __ANDROID__
+#define TSF_IMPLEMENTATION
+#include "ZodiacMusicSynth.h"
+#endif
 
 #ifdef __ANDROID__
 // In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
@@ -123,6 +127,7 @@ struct Options {
     optional<string> syncFolder, syncProfile, syncMachine, syncUser;  // --sync-*
     optional<string> bluetooth;
     bool musicHooks{false};  // --music-hooks
+    std::optional<std::string> musicSoundFont;  // --music-soundfont
     bool cardSwap;                  // the frontend changed the card files while the machine was off
     optional<string> cardIdentity;  // the card put in: 64 hex digits
     bool cardProtected;
@@ -769,7 +774,9 @@ bool gFastEngineMissing = false;
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
-            if (options.musicHooks) static_cast<SocIMX1*>(soc)->SetMusicHooks(true, true);
+            // With a SoundFont the synth takes the events, so the hooks don't print them.
+            if (options.musicHooks || options.musicSoundFont)
+                static_cast<SocIMX1*>(soc)->SetMusicHooks(true, !options.musicSoundFont);
         } else if (board == DeviceBoard5::s3c2442Rx1950) {
             // Low-latency audio is --low-latency-queue only: the --fast-audio preview is for Palm OS firmware.
             if (options.gdbPort || options.experimentalFastAudio) {
@@ -1038,6 +1045,22 @@ bool gFastEngineMissing = false;
         if (lowLatencyQueue) audioQueueEnsureCapacity(audioQueue, size_t(audioPeriod) * 12 + 1024);
         if (options.experimentalFastAudio) static_cast<SocPXA*>(soc)->SetFastAudioPeriod(audioPeriod);
         SdlAudioDriver audioDriver(soc, audioQueue, lowLatencyQueue, audioPeriod);
+#ifndef __ANDROID__
+        // The Zodiac's MIDI music through a SoundFont, mixed on the audio callback's thread.
+        std::unique_ptr<ZodiacMusicSynth> musicSynth;
+        if (options.musicSoundFont) {
+            auto* zodiac = dynamic_cast<SocIMX1*>(soc);
+            if (!zodiac || !zodiac->MusicHooksOn()) {
+                std::cerr << "--music-soundfont: no Zodiac music hooks, so no music" << std::endl;
+            } else if (musicSynth = std::make_unique<ZodiacMusicSynth>(); !musicSynth->loadFile(*options.musicSoundFont)) {
+                std::cerr << "--music-soundfont: can't read " << *options.musicSoundFont << " as a SoundFont" << std::endl;
+                musicSynth.reset();
+            } else {
+                musicSynth->attach(&zodiac->MusicHooks());
+                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count) { synth->mix(frames, count); });
+            }
+        }
+#endif
         if (!options.disableAudio) audioDriver.Start();
 
         commands::Register();
@@ -2004,6 +2027,10 @@ int main(int argc, char** argv) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--music-soundfont")
+        .help("Zodiac: play the games' MIDI music through this SoundFont 2 file (turns the music hooks on)")
+        .metavar("<file.sf2>");
+
     program.add_argument("--irda")
         .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, phone for the core's mobile phone or printer for its IrDA printer; exclusive with keyboard; default off")
         .metavar("<off|pty|tcp:PORT|unix:PATH|phone|printer>");
@@ -2081,6 +2108,7 @@ int main(int argc, char** argv) {
                        .syncUser = program.present("--sync-user"),
                        .bluetooth = program.present("--bluetooth"),
                        .musicHooks = program.get<bool>("--music-hooks"),
+                       .musicSoundFont = program.present("--music-soundfont"),
                        .cardSwap = program.get<bool>("--card-swap"),
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),
