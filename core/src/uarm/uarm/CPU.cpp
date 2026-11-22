@@ -6976,7 +6976,8 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
             // ARM920T word stores use PC+12; the JIT uses the ARMv5 PC+8 value.
             if ((word & 0x0e108000) == 0x08008000 ||
                 (word & 0x0c50f000) == 0x0400f000) return false;
-            if ((word >> 28) == 15 || (word & 0x0ffffff0) == 0x012fff30 ||
+            // PLD, which never executes on the ARM920T (execFn_noop), is a no-op in the JIT too.
+            if (((word >> 28) == 15 && (word & 0x0D70F000UL) != 0x0550F000UL) || (word & 0x0ffffff0) == 0x012fff30 ||
                 (word & 0x0fff0ff0) == 0x016f0f10 ||
                 (word & 0x0f9000f0) == 0x01000050 ||
                 (word & 0x0f900090) == 0x01000080 ||
@@ -7003,15 +7004,16 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
         }
         // Fast blocks: what the lean path leaves to the step stays out too (CP15, exception returns, S-bit
         // LDM/STM, unpredictable forms), except MSR of the CPSR control field, which the JIT runs through
-        // cpuJitSetCpsr (a pending interrupt it unmasks ends the run), the two exception returns below and SWI,
-        // which cpuJitSwi takes as the step would (the run ends at the vector).
+        // cpuJitSetCpsr (a pending interrupt it unmasks ends the run), the two exception returns below, SWI,
+        // which cpuJitSwi takes as the step would (the run ends at the vector), and PLD, a no-op in both.
         if (cpu->jitBlocks) {
             if (!thumb) {
                 const bool msrCpsr = (word & 0x0ff0fff0) == 0x0120f000 || (word & 0x0ff0f000) == 0x0320f000;
                 // MOVS PC, LR and SUBS PC, LR, #4 return through cpuJitExceptionReturn.
                 const bool exceptionReturn = (word & 0x0fffffff) == 0x01b0f00e || (word & 0x0fffffff) == 0x025ef004;
                 const bool swi = (word & 0x0f000000) == 0x0f000000 && (word >> 28) != 15;
-                if (!msrCpsr && !exceptionReturn && !dacr && !swi && cpuPrvLeanClassArm(word) == LeanClass::exit)
+                const bool pld = (word >> 28) == 15 && (word & 0x0D70F000UL) == 0x0550F000UL;
+                if (!msrCpsr && !exceptionReturn && !dacr && !swi && !pld && cpuPrvLeanClassArm(word) == LeanClass::exit)
                     return false;
             } else {
                 const uint16_t h = (pc & 2) ? word >> 16 : word & 0xffff;
