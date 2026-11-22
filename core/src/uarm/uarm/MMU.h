@@ -35,6 +35,10 @@ MMUTranslateResult mmuTranslateInspect(ArmMmu*, uint32_t, bool write);
 // maintenance, reset, load) goes through.
 uint32_t mmuFlushCount(const struct ArmMmu *mmu);
 MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged, bool write);
+// A 4 KB page the TLB doesn't hold (a small page with a different AP for each 1 KB subpage): whether every
+// subpage allows the access and maps to the same physical 4 KB page with the same C and B. Walks the tables
+// without caching anything.
+bool mmuPageWhollyAllowed(ArmMmu*, uint32_t va, bool privileged, bool write);
 
 // The translation of a code address for the JIT's code map (as mmuTranslateInspect), and in
 // access its 4K page's domain and the AP of each 1K subpage, for mmuAccessReadable:

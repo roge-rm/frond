@@ -371,6 +371,9 @@ struct ArmCpu {
     // before the current instruction.
     bool leanRun, leanExit;
     uint32_t leanBlNext;
+    // The last page mmuPageWhollyAllowed refused for the lean path's host TLB fill: VA page, privilege and
+    // write in the low bits, the host TLB gen above.
+    uint64_t leanWholeRefused;
     Arm920LeanPage leanPage;
     Arm920LeanGuard leanGuard;
     void* leanContext;
@@ -1380,6 +1383,15 @@ static uint32_t cpuPrvJitRanUncharged(const ArmCpu *cpu) {
 }
 #endif
 
+static bool cpuPrvLeanWholePage(struct ArmCpu *cpu, uint32_t va, uint32_t mva, bool privileged, bool write) {
+    const uint64_t key = (va & ~0xfffu) | (privileged ? 2u : 0u) | (write ? 1u : 0u) |
+                         (uint64_t(cpu->mem->hostTlb.gen) << 32);
+    if (cpu->leanWholeRefused == key) return false;
+    if (mmuPageWhollyAllowed(cpu->memorySystem.mmu, mva, privileged, write)) return true;
+    cpu->leanWholeRefused = key;
+    return false;
+}
+
 template <int size, bool write>
 static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, void *buf, uint32_t va,
                                                          bool privileged) {
@@ -1457,8 +1469,11 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     uint8_t *host = page + (MMU_TRANSLATE_RESULT_PA(r) & 0xfffu);
     if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
     cpu->leanBus += counted;
-    // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
-    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].gen == mmu->gen) &&
+    // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned. A page the TLB
+    // doesn't hold, as its 1 KB subpages have different APs (WinCE's KData page), is filled too when the
+    // access is allowed on all of it; the host TLB is flushed with every TLB flush, TTB and domain change.
+    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].gen == mmu->gen ||
+         cpuPrvLeanWholePage(cpu, va, mva, privileged, write)) &&
         !(uintptr_t(page) & 1)) {
         struct HostTlb &t = cpu->mem->hostTlb;
         if (!codePage) {

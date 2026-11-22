@@ -358,6 +358,18 @@ MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu* mmu, uint32_t addr, uint32
     return r;
 }
 
+bool mmuPageWhollyAllowed(struct ArmMmu *mmu, uint32_t va, bool privileged, bool write) {
+    if (mmu->transTablPA == MMU_DISABLED_TTP) return true;
+    const uint32_t page = va & ~0xfffu;
+    const MMUTranslateResult first = translateAndCache(mmu, page, privileged, write, true);
+    if (!MMU_TRANSLATE_RESULT_OK(first) || (MMU_TRANSLATE_RESULT_PA(first) & 0xfffu)) return false;
+    for (uint32_t q = 0x400; q < 0x1000; q += 0x400) {
+        const MMUTranslateResult r = translateAndCache(mmu, page + q, privileged, write, true);
+        if (!MMU_TRANSLATE_RESULT_OK(r) || r != first + q) return false;
+    }
+    return true;
+}
+
 bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged) {
     if (access == MMU_ACCESS_ANY) return true;
     const uint32_t domain = (access >> 8) & 15;
