@@ -175,6 +175,7 @@ SOURCE_CXX_FROND = \
 	$(SOURCE_CXX) \
 	frond/main.cpp \
 	frond/DanaX11Keys.cpp \
+	frond/WindowId.cpp \
 	frond/DeviceControls.cpp \
 	frond/HostLink.cpp \
 	native/GdbStub.cpp \

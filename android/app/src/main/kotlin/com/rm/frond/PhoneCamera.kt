@@ -12,12 +12,13 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 
-// The phone's back camera through Camera2, writing each frame as I420 into the core's frames file.
+// The phone's camera through Camera2, writing each frame as I420 into the core's frames file.
 // start and stop run on the UI thread; frames arrive on the camera's own thread. The caller holds the
-// CAMERA permission. failed is called once, on the camera thread, when the camera can't run.
+// CAMERA permission. failed can run during start or later on the camera thread.
 class PhoneCamera(
     private val context: Context,
     private val frames: CameraFrames.FrameFile,
+    private val facing: Int,
     private val displayDegrees: () -> Int,
     private val failed: (String) -> Unit,
 ) {
@@ -30,11 +31,12 @@ class PhoneCamera(
     @SuppressLint("MissingPermission")
     fun start() {
         val manager = context.getSystemService(CameraManager::class.java) ?: return failed("No camera")
-        val id = try {
-            manager.cameraIdList.firstOrNull { manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK }
-                ?: manager.cameraIdList.firstOrNull()
-        } catch (e: Exception) { null } ?: return failed("No camera")
-        val characteristics = manager.getCameraCharacteristics(id)
+        val camera = try {
+            cameras(manager).firstOrNull { (_, info) ->
+                info.get(CameraCharacteristics.LENS_FACING) == facing
+            }
+        } catch (_: Exception) { null } ?: return failed("No camera")
+        val (id, characteristics) = camera
         val front = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
         val sensor = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
         val sizes = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -43,7 +45,11 @@ class PhoneCamera(
         val t = HandlerThread("FrondCamera").also { it.start() }
         thread = t
         val handler = Handler(t.looper)
-        val r = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2)
+        val r = try {
+            ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2)
+        } catch (e: Exception) {
+            return fail("Couldn't start the camera", e)
+        }
         reader = r
         r.setOnImageAvailableListener({ source ->
             val image = try { source.acquireLatestImage() } catch (e: IllegalStateException) { null } ?: return@setOnImageAvailableListener
@@ -97,6 +103,18 @@ class PhoneCamera(
             session = null; device = null; reader = null
             t.quitSafely()
         }
+    }
+
+    companion object {
+        private fun cameras(manager: CameraManager) =
+            manager.cameraIdList.asSequence().map { it to manager.getCameraCharacteristics(it) }
+
+        fun available(context: Context, facing: Int): Boolean = try {
+            val manager = context.getSystemService(CameraManager::class.java)
+            manager != null && cameras(manager).any { (_, info) ->
+                info.get(CameraCharacteristics.LENS_FACING) == facing
+            }
+        } catch (_: Exception) { false }
     }
 
     private fun fail(why: String, e: Exception?) {

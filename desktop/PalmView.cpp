@@ -1,11 +1,10 @@
 #include "PalmView.h"
 #include "RunningRules.h"
 #include <QApplication>
-#include <QCursor>
 #include <QLabel>
-#include <QRegularExpression>
 #include <QGuiApplication>
 #include <QMenuBar>
+#include <QMouseEvent>
 #include <QTimer>
 #include <QToolBar>
 #include <QMouseEvent>
@@ -53,7 +52,7 @@ PalmHolder::PalmHolder(QWidget* parent) : QWidget(parent) {
     setPalette(dark);
     pollTimer = new QTimer(this);
     pollTimer->setInterval(15);
-    connect(pollTimer, &QTimer::timeout, this, &PalmHolder::poll);
+    connect(pollTimer, &QTimer::timeout, this, &PalmHolder::applyFocus);
     keySink = new KeySink(this);
     keySink->hide();
     // A native window of its own, so it stays above the Palm's X window; the pointer goes through it.
@@ -132,7 +131,8 @@ void PalmHolder::release() {
     palm.clear();
     keySink->hide();
     holders.clear();
-    buttonWasDown = false;
+    holdersAge = 0;
+    lastFocusPress.reset();
     wantPalm = true;
     wanted = {};
 }
@@ -225,7 +225,8 @@ void PalmHolder::setInputFocus(quint32 target) {
 #endif
 }
 
-void PalmHolder::focusPalm() {
+void PalmHolder::focusPalm(quint32 time) {
+    if (!container || !runningRules::acceptFocusPress(lastFocusPress, time, runningRules::Press::OnPalm)) return;
     wantPalm = true;
     applyFocus();
 }
@@ -266,35 +267,9 @@ void PalmHolder::applyFocus() {
 #endif
 }
 
-// A press on the Palm never reaches Qt, so the pointer is watched: a button going down over the
-// Palm gives it the keys. Each poll also puts the focus back where it belongs.
-void PalmHolder::poll() {
-#ifdef FROND_XCB
-    if (!container || !palm) return;
-    auto* connection = xcbConnection();
-    if (!connection) return;
-    const auto root = xcb_setup_roots_iterator(xcb_get_setup(connection)).data->root;
-    XcbReply<xcb_query_pointer_reply_t> reply(xcb_query_pointer_reply(connection, xcb_query_pointer(connection, root), nullptr), &free);
-    if (!reply) return;
-    const bool down = reply->mask & (XCB_BUTTON_MASK_1 | XCB_BUTTON_MASK_2 | XCB_BUTTON_MASK_3);
-    const bool pressed = down && !buttonWasDown;
-    buttonWasDown = down;
-    if (pressed && !QApplication::activePopupWidget() && palmGlobalRect().contains(QCursor::pos())) {
-        // Only a press in Frond's own window counts, not one in a window over it.
-        holders = withParents(connection, xcb_window_t(palm->winId()));
-        holdersAge = 0;
-        // In full screen the bar and a panel float over the Palm; a press on one of them isn't on the Palm.
-        const auto* over = QApplication::widgetAt(QCursor::pos());
-        const bool onOverlay = over && over != container && over != this && !container->isAncestorOf(over) && over->window() == window();
-        if (!holders.empty() && reply->child == holders.back() && !onOverlay)
-            wantPalm = runningRules::palmWantsKeys(wantPalm, runningRules::Press::OnPalm);
-    }
-    applyFocus();
-#endif
-}
-
 bool PalmHolder::eventFilter(QObject* watched, QEvent* event) {
-    if (!container || event->type() != QEvent::MouseButtonPress) return false;
+    if (!container || (event->type() != QEvent::MouseButtonPress &&
+                       event->type() != QEvent::MouseButtonDblClick)) return false;
     // A press on one of Frond's own widgets takes the keys, so fields can be typed in. The bar,
     // the menu bar and the handle strip leave them where they are.
     auto* widget = qobject_cast<QWidget*>(watched);
@@ -305,7 +280,8 @@ bool PalmHolder::eventFilter(QObject* watched, QEvent* event) {
             press = runningRules::Press::None;
             break;
         }
-    wantPalm = runningRules::palmWantsKeys(wantPalm, press);
+    if (runningRules::acceptFocusPress(lastFocusPress, quint32(static_cast<QMouseEvent*>(event)->timestamp()), press))
+        wantPalm = runningRules::palmWantsKeys(wantPalm, press);
     applyFocus();
     return false;
 }

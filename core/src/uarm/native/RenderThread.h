@@ -19,6 +19,7 @@
 #include "input_trace.h"
 #include "Rotation.h"
 #include "WindowLayout.h"
+#include "WindowId.h"
 
 // Input trace (input_trace.h): an input event at one stage.
 inline void traceInputEvent(const char* stage, bool guestThread, const SDL_Event& event) {
@@ -122,6 +123,7 @@ class RenderLink {
         std::optional<Rotation> rotation;  // the rotation this layout is for, when it changed
         // Runs on the guest thread before the layout applies, e.g. to change the input view.
         std::function<void()> before;
+        std::optional<uint32_t> pointerTime{};
     };
 
     RenderLink(int width, int height) : width(width), height(height), renderThread(std::this_thread::get_id()) {
@@ -131,6 +133,7 @@ class RenderLink {
     }
 
     std::function<void(const SDL_Event&)> beforeEvent;
+    unsigned long pointerWindow{0};
 
     // SDL thread: a new layout, queued behind the events so far.
     void PushLayout(const WindowLayout& layout, std::optional<Rotation> rotation = std::nullopt,
@@ -383,7 +386,14 @@ class RenderLink {
     // With the mutex held: queues an event for the guest thread and notes what the SDL
     // thread has to act on.
     void Take(const SDL_Event& event) {
-        inputs.push_back(Input{false, event, {}, std::nullopt, {}});
+        // SDL owns the native message. Copy its time before the guest thread takes the input.
+        if (event.type == SDL_SYSWMEVENT) {
+            const auto time = x11PointerTime(pointerWindow, event.syswm.msg);
+            if (!time) return;
+            inputs.push_back(Input{false, {}, {}, std::nullopt, {}, time});
+        } else {
+            inputs.push_back(Input{false, event, {}, std::nullopt, {}});
+        }
         inputWoken = true;
         inputWake.notify_one();
         auto& n = notices;

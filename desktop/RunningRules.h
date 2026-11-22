@@ -208,6 +208,16 @@ inline bool palmWantsKeys(bool wanted, Press press) {
     if (press == Press::OnFrond) return false;
     return wanted;
 }
+// X timestamps wrap every 2^32 ms. Give the panel precedence for presses in the same ms.
+inline bool acceptFocusPress(std::optional<quint32>& previous, quint32 time, Press press) {
+    if (press == Press::None) return false;
+    if (previous) {
+        const quint32 elapsed = time - *previous;
+        if (elapsed >= 0x80000000u || (elapsed == 0 && press == Press::OnPalm)) return false;
+    }
+    previous = time;
+    return true;
+}
 // Where to move the X focus. Nothing changes while another application or a dialog has it, or a
 // menu is open (it grabs the keyboard).
 enum class KeyTarget { Keep, Palm, Frond };

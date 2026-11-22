@@ -21,7 +21,7 @@ The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by 
 
 Which ROM each 68k device and the Zodiac take:
 
-- The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. The IIIe has no ROM of its own and runs the IIIx's OS 3.1 ROM (1,212,416 bytes).
+- The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. For a IIIe, select Palm IIIe when importing the IIIx retail OS 3.1 ROM (1,212,416 bytes).
 - The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes).
 - The m100 and m105 take the OS 3.5.1 ROM (2 MiB). Frond offers the m100 when it sees one, so choose the m105 yourself.
 - The m125 takes its OS 4.0.1 ROM (3 MiB), the m130 its OS 4.0 ROM (4 MiB), the m500 its OS 4.1 ROM (2,424,832 bytes) and the c500 the WorkPad ROM (2,621,440 bytes) or the m500's, so choose the c500 yourself.
@@ -598,7 +598,7 @@ What each device has, beyond the Devices table in the [README](../README.md#devi
 
 The T|X plays videos in Media. On a slower computer use the Fast engine for it. HotSync over its serial port isn't tested.
 
-The Zire 72 has no serial port, same as the real one. Its Camera shows a test pattern, a picture or the phone's back camera on Android, or a webcam on Linux desktop: pick it in the Camera row of the Display panel or sheet (Webcam is greyed when there is no /dev/video device you can open). It goes back to the test pattern on a save, sleep, or when the webcam goes away or the app is left, and the row says why. Video isn't tested with a picture or camera. Its microphone is the built-in one that Voice Memo uses, with no choice of input.
+The Zire 72 has no serial port, same as the real one. Its Camera shows a test pattern, a picture or the phone's front or back camera on Android, or a webcam on Linux desktop: pick it in the Camera row of the Display panel or sheet (Webcam is greyed when there is no /dev/video device you can open). It goes back to the test pattern on a save, sleep, or when the webcam goes away or the app is left, and the row says why. Video isn't tested with a picture or camera. Its microphone is the built-in one that Voice Memo uses, with no choice of input.
 
 The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its early Palm OS 5 has no standard Palm SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on it.
 

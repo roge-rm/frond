@@ -4,6 +4,7 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.input.InputManager
 import android.view.InputDevice
 import android.view.WindowManager
@@ -103,6 +104,8 @@ open class FrondActivity : SDLActivity() {
     }
     // The camera's feed into the core's frames file: the phone camera while it runs. UI thread.
     private var phoneCamera: PhoneCamera? = null
+    private var pendingCameraPermission: CameraFrames.Choice? = null
+    private var cameraPermissionGranted: Boolean? = null
     private var frameFile: CameraFrames.FrameFile? = null
     // Counts camera choices and sends their camera-mode requests in order, so a slow one that finishes
     // after a newer one or a pause is dropped before it reaches the core.
@@ -111,9 +114,17 @@ open class FrondActivity : SDLActivity() {
     }) { mode, timeout -> link.request("camera-mode", mode, timeoutSeconds = timeout) }
 
     // Picks the camera's source. The test pattern goes straight to the core; a picture is decoded here
-    // and written once; the phone camera writes each frame. The caller has the CAMERA permission.
+    // and written once; the phone camera writes each frame after permission is granted.
     fun chooseCamera(choice: CameraFrames.Choice, picture: android.net.Uri?) {
         if (leaving || !launchDevice().camera) return
+        if ((choice == CameraFrames.Choice.PHONE || choice == CameraFrames.Choice.FRONT) &&
+            checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (pendingCameraPermission == null) {
+                pendingCameraPermission = choice
+                requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_CAMERA)
+            }
+            return
+        }
         stopCameraFeed()
         val request = cameraModes.next()
         Thread({
@@ -138,10 +149,16 @@ open class FrondActivity : SDLActivity() {
             val (w, h, argb) = pixels
             file.write(CameraFrames.FORMAT_RGBA, w, h, 0, 0) { CameraFrames.putRgba(argb, it) }
         } else {
-            phoneCamera = PhoneCamera(this, file, ::displayDegrees) { why -> runOnUiThread { if (request == cameraModes.current) cameraOff(why) } }
-                .also { it.start() }
+            val facing = if (choice == CameraFrames.Choice.FRONT)
+                CameraCharacteristics.LENS_FACING_FRONT
+            else CameraCharacteristics.LENS_FACING_BACK
+            val camera = PhoneCamera(this, file, facing, ::displayDegrees) { why ->
+                runOnUiThread { if (request == cameraModes.current) cameraOff(why) }
+            }
+            phoneCamera = camera
+            camera.start()
         }
-        menuModel?.cameraChosen(choice)
+        if (request == cameraModes.current) menuModel?.cameraChosen(choice)
     }
 
     // The picture cut down to fit the frames file, as ARGB pixels.
@@ -224,7 +241,17 @@ open class FrondActivity : SDLActivity() {
 
     override fun getLibraries(): Array<String> = arrayOf("c++_shared", "SDL2", "SDL2_image", coreLibrary)
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_CAMERA_PERMISSION, pendingCameraPermission?.name)
+        cameraPermissionGranted?.let { outState.putBoolean(STATE_CAMERA_GRANTED, it) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        val lens = savedInstanceState?.getString(STATE_CAMERA_PERMISSION)
+        pendingCameraPermission = CameraFrames.Choice.entries.firstOrNull { it.name == lens }
+        if (savedInstanceState?.containsKey(STATE_CAMERA_GRANTED) == true)
+            cameraPermissionGranted = savedInstanceState.getBoolean(STATE_CAMERA_GRANTED)
         // The core names a new machine's file on its first save, so an older path may not be the one in use.
         sessionPath = Sessions.resolve(this, intent?.getStringExtra(EXTRA_SESSION))
         machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
@@ -1113,6 +1140,7 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        finishCameraPermission()
         reloadControllerMaps()
         applyImmersive()
         applyTouchOverlay()
@@ -1197,6 +1225,7 @@ open class FrondActivity : SDLActivity() {
             addRule(RelativeLayout.ALIGN_PARENT_TOP)
         })
         layoutBar()
+        finishCameraPermission()
     }
 
     private fun readMenuState() {
@@ -1300,9 +1329,26 @@ open class FrondActivity : SDLActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (barResults?.dispatchPermissions(requestCode, permissions, grantResults) == true) return
+        if (requestCode == REQUEST_CAMERA) {
+            if (pendingCameraPermission != null) {
+                cameraPermissionGranted = grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED
+                finishCameraPermission()
+            }
+            return
+        }
         if (requestCode != REQUEST_MICROPHONE) return
         if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) menuModel?.changeMicrophone(true)
         else menuModel?.microphoneDenied()
+    }
+
+    private fun finishCameraPermission() {
+        if (!foreground || leaving) return
+        val model = menuModel ?: return
+        val choice = pendingCameraPermission ?: return
+        val granted = cameraPermissionGranted ?: return
+        pendingCameraPermission = null
+        cameraPermissionGranted = null
+        if (granted) chooseCamera(choice, null) else model.cameraDenied()
     }
 
     private fun saveCopy(model: RunningModel) {
@@ -1804,6 +1850,9 @@ open class FrondActivity : SDLActivity() {
         const val EXTRA_SESSION = "session"
         private const val REQUEST_MICROPHONE = 41
         private const val REQUEST_LOCAL_NETWORK = 43
+        private const val REQUEST_CAMERA = 44
+        private const val STATE_CAMERA_PERMISSION = "cameraPermission"
+        private const val STATE_CAMERA_GRANTED = "cameraGranted"
         private const val REQUEST_SAVE_COPY = 42
         const val EXTRA_DEVICE = "device"
         const val EXTRA_NOR = "nor"

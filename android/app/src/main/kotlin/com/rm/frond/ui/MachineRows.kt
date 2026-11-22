@@ -1,5 +1,6 @@
 package com.rm.frond.ui
 
+import android.hardware.camera2.CameraCharacteristics
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -33,6 +34,7 @@ import com.rm.frond.BatteryMode
 import com.rm.frond.JogControls
 import com.rm.frond.JogLandscape
 import com.rm.frond.MachineSettings
+import com.rm.frond.PhoneCamera
 import com.rm.frond.RunningModel
 import com.rm.frond.ScreenSize
 import kotlin.math.roundToInt
@@ -273,18 +275,23 @@ fun CameraRow(model: RunningModel) {
     val picker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent(),
     ) { uri -> if (uri != null) model.chooseCamera(CameraFrames.Choice.PICTURE, uri) }
-    val permission = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
-    ) { granted -> if (granted) model.chooseCamera(CameraFrames.Choice.PHONE) else model.cameraDenied() }
+    val choices = remember(context) {
+        CameraFrames.choices.filter { choice ->
+            when (choice) {
+                CameraFrames.Choice.PHONE -> PhoneCamera.available(
+                    context, CameraCharacteristics.LENS_FACING_BACK)
+                CameraFrames.Choice.FRONT -> PhoneCamera.available(
+                    context, CameraCharacteristics.LENS_FACING_FRONT)
+                else -> true
+            }
+        }
+    }
     val choose: (CameraFrames.Choice) -> Unit = { choice ->
         choosing = false
         when (choice) {
             CameraFrames.Choice.PATTERN -> model.chooseCamera(choice)
             CameraFrames.Choice.PICTURE -> picker.launch("image/*")
-            CameraFrames.Choice.PHONE ->
-                if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
-                    android.content.pm.PackageManager.PERMISSION_GRANTED) model.chooseCamera(choice)
-                else permission.launch(android.Manifest.permission.CAMERA)
+            CameraFrames.Choice.PHONE, CameraFrames.Choice.FRONT -> model.chooseCamera(choice)
         }
     }
     ListItem(
@@ -297,7 +304,7 @@ fun CameraRow(model: RunningModel) {
         title = { Text("Camera") },
         text = {
             Column {
-                for (c in CameraFrames.choices) ListItem(
+                for (c in choices) ListItem(
                     headlineContent = { Text(CameraFrames.choiceLabel(c)) },
                     leadingContent = { androidx.compose.material3.RadioButton(selected = c == model.camera, onClick = null) },
                     modifier = Modifier.clickableRow { choose(c) },

@@ -104,11 +104,19 @@ void DesktopClient::receive() {
         if (fields.size() != 4) return fail(tr("The emulator sent an invalid control response."));
         if (fields[0] == "0" && fields[1] == "event") {
             // An event name from a newer core is skipped; a known one that is malformed or out of order fails.
-            static const QList<QByteArray> knownEvents{"ready", "close", "shortcut", "microphone", "camera", "serial", "usb",
+            static const QList<QByteArray> knownEvents{"ready", "close", "shortcut", "pointer-press", "microphone", "camera", "serial", "usb",
                                                        "infrared", "bluetooth", "dana-view", "card", "rumble", "sd-progress", "attention", "sync"};
             if (!knownEvents.contains(fields[2])) continue;
             if (fields[2] == "ready" && !ready) { ready = true; deadline.stop(); emit started(); }
             else if (fields[2] == "close" && ready) emit closeRequested();
+            else if (fields[2] == "pointer-press" && ready) {
+                const auto time = QByteArray::fromHex(fields[3]);
+                bool ok = false;
+                const auto value = time.toUInt(&ok);
+                if (ok && time == QByteArray::number(value) && time.toHex() == fields[3])
+                    emit pointerPressed(value);
+                else return fail(tr("The emulator sent an invalid control event."));
+            }
             else if (fields[2] == "shortcut" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit shortcut(QString::fromUtf8(QByteArray::fromHex(fields[3])));

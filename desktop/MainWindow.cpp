@@ -788,6 +788,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         auto* shortcut = new QShortcut(QKeySequence(QString::fromLatin1(key.keys)), this);
         connect(shortcut, &QShortcut::activated, this, [this, what = key.what] { runShortcut(what); });
     }
+    connect(&client, &DesktopClient::pointerPressed, this, [this](quint32 time) {
+        if (!QApplication::activePopupWidget() && !QApplication::activeModalWidget()) palmHolder->focusPalm(time);
+    });
     connect(&client, &DesktopClient::shortcut, this, [this](const QString& name) {
         // A dialog in front owns the keys.
         if (const auto what = runningRules::shortcutFor(name); what && !QApplication::activeModalWidget()) runShortcut(*what);

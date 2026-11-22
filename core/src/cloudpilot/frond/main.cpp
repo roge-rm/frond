@@ -1119,8 +1119,10 @@ class Runner {
         if (options.gdbPort) StartGdb(options.gdbPort);
         OpenWindow();
         if (soundOn) OpenAudio();
-        if (options.desktopSocket) desktop = make_unique<DesktopChannel>(*options.desktopSocket);
-        else console.Start();
+        if (options.desktopSocket) {
+            desktop = make_unique<DesktopChannel>(*options.desktopSocket);
+            pointerWindow = watchX11Pointer(window);
+        } else console.Start();
         uint64_t lastDraw = 0;
         double emulatedMs = 0;
         const auto origin = Clock::now();
@@ -3664,6 +3666,8 @@ class Runner {
                     break;
                 }
                 case SDL_SYSWMEVENT:
+                    if (const auto time = x11PointerTime(pointerWindow, event.syswm.msg))
+                        desktop->Event("pointer-press", std::to_string(*time));
                     if (const auto scan = danaX11Keys.NativeEvent(event.syswm.msg)) ApplyDanaHostKey(*scan,false);
                     break;
                 case SDL_TEXTINPUT: {
@@ -3781,6 +3785,7 @@ class Runner {
     DanaHostKeys danaHostKeys;
     DanaRepeats danaRepeats;
     DanaX11Keys danaX11Keys;
+    unsigned long pointerWindow{0};
     // Fingers: held buttons and the pen, besides the mouse.
     struct TouchHost : TouchSink68k {
         explicit TouchHost(Runner& runner) : runner(runner) {}

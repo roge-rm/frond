@@ -158,6 +158,7 @@ SOURCE_CXX_NATIVE =						\
 	native/SdlAudioDriver.cpp			\
 	native/Commands.cpp					\
 	native/InputReplay.cpp				\
+	native/WindowId.cpp				\
 	native/main.cpp
 
 # The infrared phone's and Wi-Fi's slirp side (common/net), ahead of libcommon.a.

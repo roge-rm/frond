@@ -20,9 +20,9 @@ class CameraFramesTest {
     @Test fun rowSaysTheChoiceOrWhyItStopped() {
         assertEquals("Test pattern", CameraFrames.rowText(CameraFrames.Choice.PATTERN, "pattern"))
         assertEquals("Picture", CameraFrames.rowText(CameraFrames.Choice.PICTURE, "frames"))
-        assertEquals("Phone camera", CameraFrames.rowText(CameraFrames.Choice.PHONE, "frames"))
+        assertEquals("Back camera", CameraFrames.rowText(CameraFrames.Choice.PHONE, "frames"))
         assertEquals("Permission denied", CameraFrames.rowText(CameraFrames.Choice.PATTERN, "pattern Permission denied"))
-        assertEquals(listOf("Test pattern", "Picture…", "Phone camera"), CameraFrames.choices.map { CameraFrames.choiceLabel(it) })
+        assertEquals(listOf("Test pattern", "Picture…", "Back camera", "Front camera"), CameraFrames.choices.map { CameraFrames.choiceLabel(it) })
     }
 
     // A queue run by hand, standing in for the sending thread.

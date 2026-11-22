@@ -307,6 +307,19 @@ class RunningRulesTest : public QObject {
         QCOMPARE(keyTarget(FocusAt::HoldsPalm, true, true), KeyTarget::Keep);
         QCOMPARE(keyTarget(FocusAt::HoldsPalm, false, true), KeyTarget::Keep);
     }
+    void rapidPalmToPanel() {
+        std::optional<quint32> last;
+        QVERIFY(acceptFocusPress(last, 100, Press::OnPalm));
+        QVERIFY(acceptFocusPress(last, 102, Press::OnFrond));
+        // The socket can deliver the first click after the panel has taken the keys.
+        QVERIFY(!acceptFocusPress(last, 101, Press::OnPalm));
+        QVERIFY(!acceptFocusPress(last, 102, Press::OnPalm));
+        QVERIFY(acceptFocusPress(last, 103, Press::OnPalm));
+        QVERIFY(!acceptFocusPress(last, 102, Press::OnFrond));
+        last = 0xffffffffu;
+        QVERIFY(acceptFocusPress(last, 0, Press::OnFrond));
+        QVERIFY(!acceptFocusPress(last, 0xffffffffu, Press::OnPalm));
+    }
     void topEdgeReveal() {
         // The hidden bar comes back with the pointer on the top two rows of the full-screen area.
         const QRect area(0, 0, 1280, 800);
