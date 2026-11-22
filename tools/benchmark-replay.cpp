@@ -235,6 +235,19 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
     return ok;
 }
 
+// Each thread's name and time on a CPU in ns, from /proc (Linux and Android; empty elsewhere), for the
+// "threads" line: the Zodiac run's emu thread and its fill worker separately.
+std::map<std::string,std::pair<std::string,uint64_t>> threadCpuNs() {
+    std::map<std::string,std::pair<std::string,uint64_t>> out;
+    std::error_code error;
+    for (const auto& task : std::filesystem::directory_iterator("/proc/self/task",error)) {
+        std::ifstream comm(task.path()/"comm"), sched(task.path()/"schedstat");
+        std::string name; uint64_t ns=0;
+        if (!std::getline(comm,name) || !(sched >> ns)) continue;
+        out[task.path().filename().string()]={name,ns};
+    }
+    return out;
+}
 // A Zodiac cold boot: its own machine, no session. Counts and hashes as for the PXA boards;
 // instructions are the machine's retired count and jit_instructions those its Fast engine ran in
 // Dynarmic blocks. Its runs have no host time limit and its input is stamped with guest time, so
@@ -348,6 +361,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     if (const char* paceEnv=std::getenv("BENCH_ZODIAC_PACE")) pace.open(paceEnv);
     const uint64_t underrunStart=soc->PcmUnderrunWords();
     uint64_t paceNext=0;
+    const auto threadsStart=threadCpuNs();
     const auto start=std::chrono::steady_clock::now();
     for (;;) {
         uint32_t first=0,last=0;
@@ -425,6 +439,15 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         }
     }
     const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    {
+        std::string line;
+        for (const auto& [tid,thread] : threadCpuNs()) {
+            const auto before=threadsStart.find(tid);
+            const uint64_t ns=thread.second-(before==threadsStart.end()?0:before->second.second);
+            if (ns>=1000000) line+=" "+thread.first+" "+std::to_string(ns/1000000)+" ms";
+        }
+        if (!line.empty()) std::fprintf(stderr,"threads cpu:%s\n",line.c_str());
+    }
     if (wavEnv) {
         const uint32_t bytes=uint32_t(wav.size()*4), rate=44100, byteRate=rate*4, fmtSize=16, riffSize=36+bytes;
         const uint16_t format=1, channels=2, align=4, bits=16;
