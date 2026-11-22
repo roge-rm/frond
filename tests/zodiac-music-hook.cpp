@@ -127,7 +127,8 @@ struct Caught {
 
 Caught hooked(const std::vector<uint32_t>& words, bool fast, const zodiac_music::Library& lib) {
     Imx1Machine* m = make(words, fast);
-    assert(imx1MachineSetCodeHooks(m, lib.pcs, zodiac_music::callCount));
+    const bool set = imx1MachineSetCodeHooks(m, lib.pcs, zodiac_music::callCount);
+    assert(set);
     zodiac_music::Hooks hooks;
     hooks.enable();
     const auto read = [m](uint32_t address, void* data, uint32_t size) {
@@ -139,13 +140,16 @@ Caught hooked(const std::vector<uint32_t>& words, bool fast, const zodiac_music:
         assert(run.reason != Imx1MachineYield::invalidBounds && run.reason != Imx1MachineYield::pcStop);
         if (run.reason != Imx1MachineYield::codeHook) continue;
         uint32_t r[16], cpsr = 0;
-        assert(imx1MachineAtCodeHook(m) && imx1MachineRegisters(m, r, &cpsr));
+        const bool atHook = imx1MachineAtCodeHook(m) && imx1MachineRegisters(m, r, &cpsr);
+        assert(atHook);
         uint32_t before[16];
         std::memcpy(before, r, sizeof before);
-        assert(hooks.hit(lib, r[15], r, imx1MachineGetStatus(m).time.ticks, read));
+        const bool hit = hooks.hit(lib, r[15], r, imx1MachineGetStatus(m).time.ticks, read);
+        assert(hit);
         // The hook changes nothing in the guest.
         uint32_t after[16];
-        assert(imx1MachineRegisters(m, after, &cpsr) && !std::memcmp(before, after, sizeof after));
+        const bool read2 = imx1MachineRegisters(m, after, &cpsr);
+        assert(read2 && !std::memcmp(before, after, sizeof after));
         ++out.hits;
         imx1MachineLeaveCodeHook(m);
     }
@@ -167,7 +171,8 @@ void checkEvents(const Caught& c) {
     assert(smf.address == 0x20000000 + smfAt && smf.bytes == smfFile());
     // Tempo, note on, note off, program change, end of track; 96 ticks a quarter at 120 bpm.
     zodiac_smf::Song song;
-    assert(zodiac_smf::parseSmf(smf.bytes.data(), smf.bytes.size(), song) == zodiac_smf::Error::none);
+    const auto parsed = zodiac_smf::parseSmf(smf.bytes.data(), smf.bytes.size(), song);
+    assert(parsed == zodiac_smf::Error::none);
     assert(song.events.size() == 5 && song.events[2].timeUs == 500000);
     assert(song.events[3].status == 0xc1 && song.events[3].data1 == 0xff);
     assert(ev[1].kind == Kind::masterVolume && ev[1].value == 99);
@@ -199,7 +204,8 @@ void sameEvents(const Caught& a, const Caught& b) {
 void guestCalls() {
     const auto words = guestImage();
     zodiac_music::Library lib;
-    assert(zodiac_music::findLibrary(reinterpret_cast<const uint8_t*>(words.data()), words.size() * 4, 0x20000000, lib));
+    const bool found = zodiac_music::findLibrary(reinterpret_cast<const uint8_t*>(words.data()), words.size() * 4, 0x20000000, lib);
+    assert(found);
     assert(lib.table == 0x20000000 + libraryAt + 0x24 && lib.pcs[0] == 0x20000000 + libraryAt + 0x100);
     Caught first;
     for (int engine = 0; engine < 3; ++engine) {
@@ -233,7 +239,8 @@ void finding() {
     library(words, 0x400);
     const auto bytes = [&] { return reinterpret_cast<const uint8_t*>(words.data()); };
     zodiac_music::Library lib;
-    assert(zodiac_music::findLibrary(bytes(), words.size() * 4, 0x30000000, lib));
+    const bool found = zodiac_music::findLibrary(bytes(), words.size() * 4, 0x30000000, lib);
+    assert(found);
     assert(lib.header == 0x30000400 && lib.table == 0x30000424);
     for (unsigned i = 0; i < zodiac_music::callCount; ++i)
         assert(lib.pcs[i] == 0x30000500 + zodiac_music::callOffsets[i] / 4 * 0x20);
@@ -242,7 +249,8 @@ void finding() {
         copy[word / 4] = value;
         zodiac_music::Library none;
         none.table = 7;
-        assert(!zodiac_music::findLibrary(reinterpret_cast<const uint8_t*>(copy.data()), copy.size() * 4, 0x30000000, none));
+        const bool foundBroken = zodiac_music::findLibrary(reinterpret_cast<const uint8_t*>(copy.data()), copy.size() * 4, 0x30000000, none);
+        assert(!foundBroken);
         assert(none.table == 7);
     };
     refused(0x400 + 16, 20);              // entry count
@@ -252,7 +260,8 @@ void finding() {
     refused(0x500 + 7 * 0x20, 0xe1a00000);  // NoteOn's function doesn't start with STMDB sp!
     refused(0x424, 0xea7fffff);           // Open's branch leaves the image
     // Cut short: the table doesn't fit.
-    assert(!zodiac_music::findLibrary(bytes(), 0x424 + 40, 0x30000000, lib));
+    const bool foundShort = zodiac_music::findLibrary(bytes(), 0x424 + 40, 0x30000000, lib);
+    assert(!foundShort);
 }
 
 // The 1.1 ROM's library: the table and functions found by hand (step-zodiac-finish-plan, MIDI out design).
@@ -263,7 +272,8 @@ void realRom() {
     const std::vector<uint8_t> rom{std::istreambuf_iterator<char>(input), {}};
     if (rom.empty()) { std::puts("SKIP: real ROM check, ZODIAC_ROM unreadable"); return; }
     zodiac_music::Library lib;
-    assert(zodiac_music::findLibrary(rom.data(), rom.size(), 0x20000000, lib));
+    const bool found = zodiac_music::findLibrary(rom.data(), rom.size(), 0x20000000, lib);
+    assert(found);
     const uint32_t expected[] = {0x203224e0, 0x20321e44, 0x203223e8, 0x203226e4, 0x20322824, 0x2032288c,
                                  0x203228f4, 0x20322a10, 0x20322a80, 0x20321d04, 0x2032295c};
     assert(lib.header == 0x20321b8c && lib.table == 0x20321bb0);

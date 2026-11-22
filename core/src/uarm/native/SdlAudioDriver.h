@@ -34,8 +34,8 @@ class SdlAudioDriver {
     void AudioCallback(uint8_t* stream, int len);
 
     // Mixes more sound into each period on the callback thread, after the guest's: (stereo frames, interleaved;
-    // the frames of guest audio taken from the queue, which start the period). It runs while muted too, and not
-    // when no guest audio was taken. Set it before Start; ClearMixer takes it out while the device runs.
+    // the period's frame count). It runs every period, with guest audio or silence, muted and headless too (its
+    // sound is dropped then). Set it before Start; ClearMixer takes it out while the device runs.
     void SetMixer(std::function<void(int16_t*, size_t)> mix) { mixer = std::move(mix); }
     void ClearMixer();
 
@@ -58,6 +58,7 @@ class SdlAudioDriver {
     std::atomic<bool> audioBuffering{true};
     std::atomic<bool> audioBackpressure{false};
     std::atomic<bool> muted{false};
+    std::atomic<bool> headlessOut{false};  // headless, for the callback
     std::atomic<uint64_t> underrunCount{0};
     std::atomic<bool> starting{true};
     bool lowLatencyStartup;

@@ -330,9 +330,10 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const char* goOn=std::getenv("BENCH_ZODIAC_SAVE_CONTINUE");
     const bool reloadAfterSave=goOn && std::string(goOn)=="reload";
     const bool continueAfterSave=goOn && (std::string(goOn)=="1" || reloadAfterSave);
-    // BENCH_ZODIAC_MUSIC_HOOKS=1 turns the music hooks on (events counted, not printed).
+    // BENCH_ZODIAC_MUSIC_HOOKS=1 turns the music hooks on (events counted, not printed), =log prints them too.
     const char* musicHooks=std::getenv("BENCH_ZODIAC_MUSIC_HOOKS");
-    if (musicHooks && std::string(musicHooks)=="1" && !soc->SetMusicHooks(true))
+    const bool musicLog=musicHooks && std::string(musicHooks)=="log";
+    if (musicHooks && (std::string(musicHooks)=="1" || musicLog) && !soc->SetMusicHooks(true,musicLog))
         throw std::runtime_error("BENCH_ZODIAC_MUSIC_HOOKS: refused");
     if (const char* load=std::getenv("BENCH_ZODIAC_LOAD")) {
         auto state=readFile(load);

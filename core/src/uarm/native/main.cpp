@@ -1057,30 +1057,36 @@ bool gFastEngineMissing = false;
             SdlAudioDriver& driver;
             ~ClearMixerAtEnd() { driver.ClearMixer(); }
         } clearMixerAtEnd{audioDriver};
+        // Nobody would take the music events: print them with --music-hooks, else the hooks go off.
+        const auto noSynth = [&](SocIMX1* zodiac, const std::string& why) {
+            const bool log = options.musicHooks;
+            zodiac->SetMusicHooks(log, true);
+            cerr << "--music-soundfont: " << why << "; " << (log ? "printing the music calls" : "music hooks off") << endl;
+        };
         if (auto* zodiac = dynamic_cast<SocIMX1*>(soc); options.musicSoundFont && zodiac && zodiac->MusicHooksOn()) {
-            // Nobody would take the events: print them with --music-hooks, else the hooks go off.
-            const auto noSynth = [&](const std::string& why) {
-                const bool log = options.musicHooks;
-                zodiac->SetMusicHooks(log, true);
-                cerr << "--music-soundfont: " << why << "; " << (log ? "printing the music calls" : "music hooks off")
-                     << endl;
-            };
 #ifndef __ANDROID__
             if (options.disableAudio) {
-                noSynth("no audio");
+                noSynth(zodiac, "no audio");
             } else if (musicSynth = std::make_unique<ZodiacMusicSynth>(); !musicSynth->loadFile(*options.musicSoundFont)) {
                 musicSynth.reset();
-                noSynth("can't read " + *options.musicSoundFont + " as a SoundFont");
+                noSynth(zodiac, "can't read " + *options.musicSoundFont + " as a SoundFont");
             } else {
                 musicSynth->attach(&zodiac->MusicHooks());
                 musicSynth->start();
                 audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count) { synth->mix(frames, count); });
             }
 #else
-            noSynth("no SoundFont player in this build");
+            noSynth(zodiac, "no SoundFont player in this build");
 #endif
         }
         if (!options.disableAudio) audioDriver.Start();
+#ifndef __ANDROID__
+        if (musicSynth && !audioDriver.Running()) {
+            audioDriver.ClearMixer();
+            musicSynth.reset();
+            noSynth(static_cast<SocIMX1*>(soc), "no audio device");
+        }
+#endif
 
         commands::Register();
         if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
@@ -1409,6 +1415,10 @@ bool gFastEngineMissing = false;
                 const bool headless = sdlEventHandler.InBackground() &&
                                       ((capabilities.backgroundPanel && desktop && desktop->PanelVisible()) || printing);
                 audioDriver.SetHeadless((capabilities.backgroundPanel || printing) && sdlEventHandler.InBackground());
+#ifndef __ANDROID__
+                // The music's clock stands with the guest's.
+                if (musicSynth) musicSynth->hold((sdlEventHandler.InBackground() && !headless) || replay.Paused());
+#endif
                 if (sdlEventHandler.InBackground() && !headless) {
                     wasHeadless = false;
                     mainLoop.PauseAt(now);

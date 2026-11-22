@@ -167,8 +167,10 @@ class Player {
         }
     }
 
-    // Sends every song message due by now, in time order (songs started earlier first at the same time).
-    void advance(uint64_t nowNs, const Sink& sink) {
+    // Sends every song message due by now, in time order (songs started earlier first at the same time). budget,
+    // when given, is how many song events it may take: each one counts it down, and it stops at 0 with the rest
+    // left for the next call. False when it stopped there.
+    bool advance(uint64_t nowNs, const Sink& sink, size_t* budget = nullptr) {
         for (;;) {
             Song* next = nullptr;
             uint64_t at = 0;
@@ -178,6 +180,10 @@ class Player {
                 if (t <= nowNs && (!next || t < at)) next = &s, at = t;
             }
             if (!next) break;
+            if (budget) {
+                if (!*budget) return false;
+                --*budget;
+            }
             send(*next, at, sink);
         }
         // Songs played through end by themselves.
@@ -190,7 +196,13 @@ class Player {
             songs_.erase(songs_.begin() + long(i));
             allNotesOff(endNs, sink);
         }
+        return true;
     }
+
+    // Song events due before timeNs that haven't gone out yet give only their state when they do: note-ons are
+    // dropped, and programs, controllers, pitch bend, note-offs and sysex still go. For a clock that jumped
+    // forward, so the span it skipped doesn't sound all at once. 0 plays everything again.
+    void skipBefore(uint64_t timeNs) { skipBeforeNs_ = timeNs; }
 
     size_t playing() const { return songs_.size(); }
     // Hands back every song's Held; the player plays nothing after.
@@ -219,6 +231,7 @@ class Player {
     };
     const Release release_;
     std::vector<Song> songs_;  // reserved for maxSongs, never grown
+    uint64_t skipBeforeNs_ = 0;
     uint8_t sysEx_[maxFileSysEx + 1];
 
     void end(uint32_t handle, uint64_t timeNs, const Sink& sink, bool notesOff) {
@@ -248,6 +261,7 @@ class Player {
             return;
         }
         const uint8_t type = e.status & 0xf0;
+        if (type == 0x90 && e.data2 && timeNs < skipBeforeNs_) return;
         const uint8_t b[3] = {e.status, clamp(e.data1), clamp(e.data2)};
         sink(timeNs, b, type == 0xc0 || type == 0xd0 ? 2 : 3, false);
     }

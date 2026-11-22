@@ -117,14 +117,14 @@ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
                                           samplesRemaining, queueGeneration);
     }
 
-    // The mixer runs muted too, so its clock and events keep pace with the guest audio taken.
-    const size_t played = size_t(len) / 4 - samplesRemaining;
-    if (mixer && played) mixer(reinterpret_cast<int16_t*>(stream), played);
-    if (muted.load(std::memory_order_relaxed)) {
+    // The mixer gets the whole period, guest audio or silence, and runs muted and headless too, so its clock keeps
+    // to the device's.
+    if (samplesRemaining > 0) memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
+    if (mixer) mixer(reinterpret_cast<int16_t*>(stream), size_t(len) / 4);
+    if (muted.load(std::memory_order_relaxed) || headlessOut.load(std::memory_order_relaxed)) {
         memset(stream, 0, len);
         return;
     }
-    if (samplesRemaining > 0) memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
 }
 
 void SdlAudioDriver::ClearMixer() {
@@ -147,6 +147,7 @@ void SdlAudioDriver::SetHeadless(bool value) {
     if (headless == value) return;
     headless = value;
     soc->SetAudioOutputFenced(value);
+    headlessOut.store(value, std::memory_order_relaxed);
     // Frames from before the panel shouldn't play on return.
     if (value) audioQueueClear(audioQueue);
 }

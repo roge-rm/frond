@@ -1,7 +1,8 @@
 // The Zodiac music player (zodiac_music_player.h): song messages at their guest times from Play, tempo applied,
 // clamped data bytes, sysex from the file, Stop and Close with all notes off, a Play of a playing handle starting
 // over, two songs merged in time order, a song's end, a reset, real-time messages and master volume, an F7 escape
-// sent as raw bytes, the song limit, and every Held the preparer made handed back. Built with ASan and UBSan.
+// sent as raw bytes, the song limit, every Held the preparer made handed back, a jumped clock's skipped note-ons and
+// the event budget. Built with ASan and UBSan.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -194,6 +195,53 @@ void escapesAndLimits() {
     p.feed(x);
     assert(!p.prep.outstanding());
 }
+
+// A clock that jumped: song events before skipBefore's time give only their state, no note-ons; after it they play
+// as usual. A budget stops advance with the rest left for the next call.
+void skipAndBudget() {
+    sent.clear();
+    Stages p;
+    // 120 bpm, 96 ticks are 500 ms. At 0 note on 60 and CC 7; at 250 ms note on 62 and program 5; at 500 ms note
+    // off 60 and note on 62 velocity 0; at 750 ms note on 64; end at 1000 ms.
+    const Bytes jumpy = {0x00, 0x90, 0x3c, 0x64, 0x00, 0xb0, 0x07, 0x50,
+                         0x30, 0x90, 0x3e, 0x64, 0x00, 0xc0, 0x05,
+                         0x30, 0x80, 0x3c, 0x40, 0x00, 0x90, 0x3e, 0x00,
+                         0x30, 0x90, 0x40, 0x64,
+                         0x30, 0xff, 0x2f, 0x00};
+    p.feed(play(0, 1, smf(jumpy)));
+    p.advance(0);
+    assert(sent.size() == 2 && sent[0].b == (Bytes{0x90, 0x3c, 0x64}) && sent[1].b == (Bytes{0xb0, 0x07, 0x50}));
+    p.p.skipBefore(600 * ms);
+    p.advance(600 * ms);
+    assert(sent.size() == 5 && sent[2].b == (Bytes{0xc0, 0x05}) && sent[2].t == 250 * ms);
+    assert(sent[3].b == (Bytes{0x80, 0x3c, 0x40}) && sent[4].b == (Bytes{0x90, 0x3e, 0x00}));
+    p.advance(800 * ms);
+    assert(sent.size() == 6 && sent[5].b == (Bytes{0x90, 0x40, 0x64}) && sent[5].t == 750 * ms);
+    p.p.skipBefore(0);
+    p.feed(ev(2000 * ms, Kind::reset));
+    assert(p.playing() == 0 && !p.prep.outstanding());
+
+    // 600 events at 0: a budget of 512 sends 512 and stops; the next call sends the rest.
+    sent.clear();
+    Bytes many;
+    for (int i = 0; i < 300; ++i) many.insert(many.end(), {0x00, 0x90, 0x3c, 0x64, 0x00, 0x80, 0x3c, 0x00});
+    many.insert(many.end(), {0x00, 0xff, 0x2f, 0x00});
+    auto s = std::make_shared<Smf>();
+    s->bytes = {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 96, 'M', 'T', 'r', 'k', 0, 0,
+                uint8_t(many.size() >> 8), uint8_t(many.size())};
+    s->bytes.insert(s->bytes.end(), many.begin(), many.end());
+    p.feed(play(0, 2, s));
+    size_t budget = 512;
+    const bool all = p.p.advance(0, sink, &budget);
+    assert(!all && budget == 0 && sent.size() == 512 && p.playing() == 1);
+    budget = 512;
+    const bool rest = p.p.advance(0, sink, &budget);
+    // The rest, the end's meta event, and the song's notes off.
+    assert(rest && budget == 512 - 89 && sent.size() == 600 + 32 && allOff(600, 0) && p.playing() == 0);
+    (void)all;
+    (void)rest;
+    assert(!p.prep.outstanding());
+}
 }  // namespace
 
 int main() {
@@ -202,7 +250,8 @@ int main() {
     twoSongs();
     volumeAndSysEx();
     escapesAndLimits();
+    skipAndBudget();
     std::puts("PASS: Zodiac music player (times, clamping, sysex, stop, restart, merge, end, reset, volume, escapes, "
-              "song limit, Helds returned)");
+              "song limit, Helds returned, skipped note-ons, budget)");
     return 0;
 }
