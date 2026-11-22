@@ -989,8 +989,16 @@ bool gFastEngineMissing = false;
         const string windowTitle = !sessionFolder.empty()
             ? std::filesystem::path(options.norOrSession).stem().string()
             : string(deviceProfile5(deviceType)->displayName);
+#if defined(__linux__) && !defined(__ANDROID__)
+        struct sigaction terminate{};
+        const bool savedTerminate = sigaction(SIGTERM, nullptr, &terminate) == 0;
+#endif
         SDL_Window* window = initSdl(windowTitle.c_str(), displayConfiguration, scale, frameRotation(rotation),
                                      deviceControls(deviceType, controlView), controlView, fitted);
+#if defined(__linux__) && !defined(__ANDROID__)
+        // Keep SDL's SIGINT cleanup and restore the process's SIGTERM disposition.
+        if (savedTerminate) sigaction(SIGTERM, &terminate, nullptr);
+#endif
         if (!window) {
             cerr << "failed to init SDL" << endl;
             return false;
@@ -1327,6 +1335,10 @@ bool gFastEngineMissing = false;
                         if (input.event.type == SDL_AUDIODEVICEREMOVED && input.event.adevice.iscapture)
                             microphone.Removed(input.event.adevice.which);
                         traceInputEvent("take", true, input.event);
+                        if (input.pointerTime) {
+                            desktop->event("pointer-press", std::to_string(*input.pointerTime));
+                            continue;
+                        }
                         sdlEventHandler.HandleEvent(input.event);
                         continue;
                     }
@@ -1562,6 +1574,7 @@ bool gFastEngineMissing = false;
 
         // Events go straight from SDL to the guest thread through the filter.
         link.InstallFilter();
+        if (desktop) link.pointerWindow = watchX11Pointer(window);
 
         exception_ptr guestError;
         thread guest([&] {

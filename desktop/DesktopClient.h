@@ -29,6 +29,7 @@ class DesktopClient : public QObject {
     void backgroundResult(const QString& command, bool ok, const QString& message);
     void error(const QString& message);
     void closeRequested();
+    void pointerPressed(quint32 time);
     void shortcut(const QString& name);  // a key pressed over the Palm that the app owns
     void microphoneState(const QString& state);
     void cameraState(const QString& state);

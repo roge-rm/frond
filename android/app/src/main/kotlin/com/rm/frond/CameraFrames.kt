@@ -8,7 +8,7 @@ import java.nio.channels.FileChannel
 // The camera's host sources on Android and the frames file the core reads them from
 // (native/HostCamera.h). The core scales, crops and converts; the app only hands over pixels.
 object CameraFrames {
-    enum class Choice(val label: String) { PATTERN("Test pattern"), PICTURE("Picture"), PHONE("Phone camera") }
+    enum class Choice(val label: String) { PATTERN("Test pattern"), PICTURE("Picture"), PHONE("Back camera"), FRONT("Front camera") }
 
     // The choices in the camera dialog, with the picker's ellipsis.
     val choices = Choice.entries

@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <QPointer>
 #include <QSize>
 #include <QWidget>
@@ -27,7 +28,7 @@ class PalmHolder : public QWidget {
     // Gives the keyboard to the Palm's window, or to Frond's key window, which forwards keys to
     // Qt's focus widget. The X focus is read back every poll and moved off any window that holds
     // the Palm (see runningRules::keyTarget).
-    void focusPalm();
+    void focusPalm(quint32 time);
     void focusFrond();
     bool palmWantsKeys() const { return wantPalm; }
     // The MIPS readout in the Palm's bottom right corner. The reply text starts with the figure;
@@ -45,7 +46,6 @@ class PalmHolder : public QWidget {
     void resizeEvent(QResizeEvent* event) override;
  private:
     void setInputFocus(quint32 window);
-    void poll();
     // Moves the X focus where runningRules::keyTarget says.
     void applyFocus();
     QPointer<QWidget> container;
@@ -57,10 +57,11 @@ class PalmHolder : public QWidget {
     void placeMips();
     QTimer* pollTimer{nullptr};
     QSize wanted;
-    // The Palm's X window and its parents, refreshed about once a second and on each press.
+    // The Palm's X window and its parents, refreshed about once a second.
     std::vector<quint32> holders;
     int holdersAge{0};
-    bool buttonWasDown{false}, wantPalm{true};
+    bool wantPalm{true};
+    std::optional<quint32> lastFocusPress;
 };
 
 // Frond's key window while the Palm is embedded: a 1x1 native window under the Palm's, so the

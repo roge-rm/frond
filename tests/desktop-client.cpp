@@ -15,7 +15,7 @@ s=socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\trea')
 time.sleep(.03)
-s.sendall(b'dy\t\n')
+s.sendall(b'dy\t\n0\tevent\tpointer-press\t'+b'4294967295'.hex().encode()+b'\n')
 f=s.makefile('rb')
 for line in f:
     i,command,arg=line.rstrip(b'\n').split(b'\t')
@@ -29,8 +29,11 @@ s.close()
         DesktopClient client;
         QSignalSpy ready(&client, &DesktopClient::started), result(&client, &DesktopClient::result);
         QSignalSpy finished(&client, &DesktopClient::finished), error(&client, &DesktopClient::error);
+        QSignalSpy pointer(&client, &DesktopClient::pointerPressed);
         QVERIFY(client.start("/usr/bin/python3", {fake.fileName()}));
         QTRY_COMPARE(ready.count(), 1);
+        QTRY_COMPARE(pointer.count(), 1);
+        QCOMPARE(pointer.first().at(0).toUInt(), 0xffffffffu);
         QVERIFY(client.available());
         QVERIFY(client.request("save", QString::fromUtf8("/tmp/a b\n音.frond")));
         QVERIFY(!client.request("reset"));
