@@ -245,10 +245,15 @@ inline bool jitCp15SlotWord(uint32_t w) {
     return false;
 }
 
-// The ARM920T's p15 slot in Fast blocks: jitCp15SlotWord's words, and MCR c7, c5, 0 and c7, c5, 2 (I-cache
-// invalidate, all and by index), which Fast blocks ignore as they watch code by physical page.
+// The ARM920T's p15 slot in Fast blocks: jitCp15SlotWord's words, MRC of c5, c6 and c13 (fault status,
+// fault address, FCSE PID: an abort handler's reads), and MCR c7, c5, 0 and c7, c5, 2 (I-cache invalidate,
+// all and by index), which Fast blocks ignore as they watch code by physical page.
 inline bool jitCp15SlotWord920(uint32_t w) {
     if (jitCp15SlotWord(w)) return true;
+    if ((w & 0x0ff00fff) == 0x0e100f10) {  // MRC p15, 0, Rd, CRn, c0, 0
+        const uint32_t crn = (w >> 16) & 15;
+        return crn == 5 || crn == 6 || crn == 13;
+    }
     if ((w & 0x0fff0f1f) != 0x0e070f15) return false;
     const uint32_t op2 = (w >> 5) & 7;
     return op2 == 0 || op2 == 2;
