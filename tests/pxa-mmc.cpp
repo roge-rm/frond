@@ -4,6 +4,7 @@
 #include <cstring>
 #include <unistd.h>
 #include "pxa_MMC.h"
+#include "SdioCard.h"
 #include "savestate/savestateAll.h"
 
 static ArmMemAccessF accessRegister;
@@ -34,6 +35,186 @@ static void command(unsigned cmd,unsigned arg,unsigned length,bool writing){
     writeReg(0,1);writeReg(0x1c,length);writeReg(0x20,1);writeReg(0x30,cmd);
     writeReg(0x34,arg>>16);writeReg(0x38,arg&65535);writeReg(0x10,writing?13:5);writeReg(0,2);
 }
+class TestSdioFunctions : public SdioFunctions {
+   public:
+    std::array<uint8_t, 2048> registers{};
+    unsigned resets = 0;
+    unsigned writes = 0;
+
+    bool Read(unsigned function, uint32_t address, uint8_t& value) override {
+        if (!function) {
+            if (address == 0x100) value = 0x0f;  // Vendor-specific interface.
+            else if (address == 0x1000) value = 0xff;  // End of test CIS.
+            else return false;
+            return true;
+        }
+        if (address >= registers.size()) return false;
+        value = registers[address];
+        return true;
+    }
+
+    bool Write(unsigned function, uint32_t address, uint8_t value) override {
+        if (function != 1 || address >= registers.size()) return false;
+        ++writes;
+        registers[address] = value;
+        return true;
+    }
+
+    void Reset() override {
+        ++resets;
+        registers.fill(0);
+    }
+};
+
+static uint32_t sdioCommand(unsigned command, uint32_t arg, unsigned cmdat = 1,
+                            unsigned length = 0, unsigned blocks = 0) {
+    writeReg(0, 1);
+    writeReg(0x1c, length);
+    writeReg(0x20, blocks);
+    writeReg(0x30, command);
+    writeReg(0x34, arg >> 16);
+    writeReg(0x38, arg & 0xffff);
+    writeReg(0x10, cmdat);
+    writeReg(0, 2);
+    const uint32_t high = readReg(0x3c);
+    const uint32_t mid = readReg(0x3c);
+    const uint32_t low = readReg(0x3c);
+    return (high << 24) | (mid << 8) | (low >> 8);
+}
+
+static void testSdio(bool pxa27x, VSD* memoryCard) {
+    const unsigned fifoWidth = pxa27x ? 1 : 4;
+    TestSdioFunctions functions;
+    SdioCard card(functions, 1, 0x1000);
+    auto* mmc = pxaMmcInit(nullptr, nullptr, nullptr, pxa27x);
+    pxaMmcInsert(mmc, memoryCard);
+    sdioCommand(5, 0, 3);
+    assert(readReg(4) & 2);  // Memory cards do not answer CMD5.
+
+    pxaMmcInsertSdio(mmc, &card);
+    assert(functions.resets == 1);
+    const auto direct = [](unsigned function, unsigned address, uint32_t flags = 0) {
+        return sdioCommand(52, (function << 28) | (address << 9) | flags);
+    };
+    constexpr uint32_t write = 1u << 31;
+    constexpr uint32_t rawOrBlock = 1u << 27;
+    constexpr uint32_t increment = 1u << 26;
+    constexpr uint32_t fn1 = 1u << 28;
+
+    assert(sdioCommand(5, 0, 3) == 0x10300000);
+    assert(!(readReg(4) & 0x22));
+    assert(sdioCommand(5, 0x00300000, 3) == 0x90300000);
+    assert(sdioCommand(3, 0) == 0x00030000);
+    assert(sdioCommand(7, 0x00030000) == 0x1e00);
+    assert(direct(0, 0) == 0x1011);
+    assert(direct(0, 10) == 0x1010);
+    assert((direct(0, 0x100) & 0xff) == 0x0f);
+    assert((direct(0, 0x1000) & 0xff) == 0xff);
+    assert(direct(2, 0) & 0x200);
+    assert(direct(1, 0, write | 0x88) & 0x800);
+    assert(functions.writes == 0);
+    assert(direct(0, 2, write | rawOrBlock | 0xff) == 0x1002);
+    assert(direct(0, 3) == 0x1002);
+    assert(direct(1, 7, write | rawOrBlock | 0x99) == 0x1099);
+
+    assert(sdioCommand(53, fn1 | increment | (7u << 9) | 2, 5, 1, 1) == 0x1000);
+    assert((readReg(4) & 0x801) == 0x801);  // Host length mismatch.
+    assert(readReg(0x40, fifoWidth) == 0);
+    const unsigned oldWrites = functions.writes;
+    assert(sdioCommand(53, write | fn1 | (7u << 9) | 3, 13, 3, 1) == 0x1000);
+    for (uint8_t v : {0x12, 0x34, 0x56}) writeReg(0x44, v, fifoWidth);
+    assert((readReg(4) & 0x1804) == 0x1800);
+    assert(functions.writes == oldWrites + 3 && functions.registers[7] == 0x56);
+    assert(functions.registers[8] == 0);
+
+    direct(0, 0x110, write | 4);
+    assert(sdioCommand(53, write | fn1 | rawOrBlock | increment | 2, 13, 4, 2) == 0x1000);
+    for (unsigned i = 0; i < 8; ++i) writeReg(0x44, i + 1, fifoWidth);
+    assert((readReg(4) & 0x1804) == 0x1800);
+    assert(sdioCommand(53, fn1 | rawOrBlock | increment | 2, 5, 4, 2) == 0x1000);
+    for (unsigned i = 0; i < 8; ++i) assert(readReg(0x40, fifoWidth) == i + 1);
+    assert(readReg(4) & 0x800);
+
+    assert(sdioCommand(53, fn1 | increment, 5, 512, 1) == 0x1000);
+    for (unsigned i = 0; i < 512; ++i) assert(readReg(0x40, fifoWidth) == functions.registers[i]);
+    if (pxa27x) {
+        for (unsigned length : {1024u, 2048u}) {
+            direct(0, 0x110, write | (length & 0xff));
+            direct(0, 0x111, write | (length >> 8));
+            const uint32_t transfer = fn1 | rawOrBlock | increment | 1;
+            assert(sdioCommand(53, write | transfer, 13, length, 1) == 0x1000);
+            assert(readReg(0x1c) == length);
+            for (unsigned i = 0; i < length; ++i) writeReg(0x44, (i + i / 256) & 0xff, fifoWidth);
+            assert((readReg(4) & 0x1804) == 0x1800);
+            assert(sdioCommand(53, transfer, 5, length, 1) == 0x1000);
+            for (unsigned i = 0; i < length; ++i) assert(readReg(0x40, fifoWidth) == ((i + i / 256) & 0xff));
+            assert(readReg(4) & 0x800);
+        }
+        for (unsigned i = 0; i < 4; ++i) functions.registers[i] = i + 1;
+    } else {
+        writeReg(0x1c, 1025);
+        assert(readReg(0x1c) == 1);
+    }
+    assert(readReg(4) & 0x800);
+    assert(sdioCommand(53, 2u << 28 | 1, 5, 1, 1) & 0x200);
+    assert((readReg(4) & 0x801) == 0x800);
+    assert(readReg(0x40, fifoWidth) == 0);
+    assert(sdioCommand(53, fn1 | increment | (0x1ffffu << 9) | 2, 5, 2, 1) & 0x100);
+
+    assert(sdioCommand(53, fn1 | increment | 4, 0x85, 4, 1) == 0x1000);
+    assert(dmaRequest[0] && !dmaRequest[1]);
+    if (pxa27x)
+        assert(readReg(0x40) == 0x04030201);
+    else
+        for (unsigned i = 1; i <= 4; ++i) assert(readReg(0x40) == i);
+    readReg(0x2c);
+    assert(!dmaRequest[0] && !dmaRequest[1]);
+
+    direct(0, 4, write | 3);
+    writeReg(0x28, 0x37f);
+    sdioCommand(52, 5 << 9, 0x801);
+    card.SetPending(2);
+    assert(card.IrqAsserted());
+    pxaMmcSdioIrqChanged(mmc);
+    assert(icLevel == pxa27x);
+    if (pxa27x) {
+        assert(readReg(0x2c) & 0x800);
+        writeReg(0x28, 0xb7f);
+        assert(!icLevel);
+        writeReg(0x28, 0x37f);
+        assert(icLevel);
+        direct(0, 7, write | 2);
+        sdioCommand(53, fn1 | increment | 4, 0x905, 4, 1);
+        assert(!icLevel);
+        assert(readReg(0x40) == 0x04030201);
+        assert(icLevel);
+    }
+    card.SetPending(0);
+    pxaMmcSdioIrqChanged(mmc);
+    assert(!icLevel);
+    sdioCommand(52, 5 << 9, 1);
+    card.SetPending(2);
+    pxaMmcSdioIrqChanged(mmc);
+    assert(!icLevel);
+    direct(0, 6, write | 8);
+    assert(!card.IrqAsserted());
+    assert(functions.resets == 2 && sdioCommand(5, 0, 3) == 0x10300000);
+    sdioCommand(5, 0x00300000, 3);
+    sdioCommand(3, 0);
+    sdioCommand(7, 0x00030000);
+    direct(0, 2, write | 2);
+    sdioCommand(53, write | fn1 | increment | 4, 13, 4, 1);
+    writeReg(0x44, 0xab, fifoWidth);
+    const unsigned beforeRemoval = functions.writes;
+    pxaMmcInsertSdio(mmc, nullptr);
+    assert(functions.writes == beforeRemoval);
+    assert((readReg(4) & 0x1804) == 0x1804);
+    pxaMmcInsert(mmc, memoryCard);
+    initCard(memoryCard);
+    command(17, 0, 512, false);
+    assert(readReg(0x40, fifoWidth) == sector[0]);
+}
+
 int main(){
     auto* card=vsdInit(readSector,writeSector,65536);initCard(card);
     auto* mmc=pxaMmcInit(nullptr,nullptr,nullptr,true);pxaMmcInsert(mmc,card);
@@ -146,17 +327,17 @@ int main(){
     }
     // PXA27x I_REG: DAT_ERR (bit 8) and RES_ERR (bit 9), gated by I_MASK (Linux pxamci.h).
     {
-        writeReg(0x28,0x3ff);assert(readReg(0x28)==0x37f);  // bit 7 (TINT) is not modelled
+        writeReg(0x28,0xbff);assert(readReg(0x28)==0xb7f);  // bit 7 (TINT) is not modelled
         command(17,512,512,false);  // sector 1 has no backing store
         assert((readReg(4)&0x801)==0x801);
         assert((readReg(0x2c)&0x300)==0x100);assert(!icLevel);
-        writeReg(0x28,0x37f&~0x100u);assert(icLevel);
-        writeReg(0x28,0x37f);assert(!icLevel);
+        writeReg(0x28,0xb7f&~0x100u);assert(icLevel);
+        writeReg(0x28,0xb7f);assert(!icLevel);
         command(63,0,0,false);  // no response
         assert((readReg(4)&0x2002)==0x2002);
         assert((readReg(0x2c)&0x300)==0x200);
-        writeReg(0x28,0x37f&~0x200u);assert(icLevel);
-        writeReg(0x28,0x37f);
+        writeReg(0x28,0xb7f&~0x200u);assert(icLevel);
+        writeReg(0x28,0xb7f);
         writeReg(0,1);writeReg(0x30,13);writeReg(0x34,3);writeReg(0x38,0);writeReg(0x10,1);writeReg(0,2);
         assert((readReg(4)&0x2022)==0x2000);  // a clean command clears both
         assert(!(readReg(0x2c)&0x300));
@@ -232,5 +413,8 @@ int main(){
     mmc=pxaMmcInit(nullptr,nullptr,nullptr);pxaMmcInsert(mmc,card);
     writeReg(0x28,0x3ff);assert(readReg(0x28)==0x7f);  // PXA25x I_MASK has 7 bits
     command(17,0,512,false);assert(readReg(0x40)==0x11);assert(readReg(0x40)==0x22);
+    testSdio(true, card);
+    testSdio(false, card);
+    puts("PASS: SDIO enumeration, CCCR/FBR/CIS, CMD53, IRQ, reset and memory-card replacement");
     puts("PASS: PXA27x packed FIFO widths, block write, PRTBUF, SD status, DMA requests after the command, error and removal signalling, PXA25x compatibility");
 }

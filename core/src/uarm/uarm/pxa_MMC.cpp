@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "SdioCard.h"
 #include "cputil.h"
 #include "mem.h"
 #include "pxa_DMA.h"
@@ -14,12 +15,16 @@
 #define PXA_MMC_BASE 0x41100000UL
 #define PXA_MMC_SIZE 0x00001000UL
 
-#define SAVESTATE_VERSION 1
+#define SAVESTATE_VERSION 2
 
 // MMC_I_REG / MMC_I_MASK bits above the PXA25x ones (PXA27x manual 15.8, Linux pxamci.h)
 #define I_DAT_ERR 0x0100
 #define I_RES_ERR 0x0200
-#define I_MASK_PXA27X 0x037f
+#define I_SDIO 0x0800
+#define CMDAT_SDIO_INT_EN 0x0800
+#define CMDAT_SD_4DAT 0x0100
+#define R5_ERROR_FLAGS 0xcb
+#define I_MASK_PXA27X 0x0b7f
 
 struct PxaMmc {
     SdLogLimit noReplyLog;  // not saved
@@ -29,33 +34,39 @@ struct PxaMmc {
 
     uint32_t arg;
     uint16_t stat, readTo, blkLen, numBlks, iMask, iReg;
-    uint8_t spi, cmdat, clockSpeed, resTo, cmdReg;
+    uint8_t spi, clockSpeed, resTo, cmdReg;
+    uint16_t cmdat;
     uint16_t respBuf[8];
     bool clockOn, cmdQueued, dataXferOngoing;
 
     struct VSD *vsd;
+    SdioCard *sdio;
     bool wordFifo;  // PXA27x transfers 1/2/4 bytes per FIFO access; PXA25x uses the low byte.
     // The guest stopped the clock since the card was taken out (pxaMmcClockStoppedSinceRemoval). Not saved.
     bool stoppedSinceRemoval;
 
     // fifo
     uint32_t fifoBytes, fifoOfst;
-    uint8_t blockFifo[1024];
+    static constexpr size_t legacyFifoSize = 1024;
+    uint8_t blockFifo[2048];
+
+    uint16_t BlockLengthMask() const { return wordFifo ? 0x0fff : 0x03ff; }
 
     template <typename T>
     void DoSaveLoad(T &chunkHelper, uint32_t version) {
         uint8_t iMaskLo = iMask, iRegLo = iReg, iMaskHi = 0, iRegHi = 0;
+        uint8_t cmdatLo = cmdat, cmdatHi = cmdat >> 8;
 
         chunkHelper.Do32(arg)
             .Do(typename T::Pack16() << stat << readTo)
             .Do(typename T::Pack16() << blkLen << numBlks)
-            .Do(typename T::Pack8() << spi << iMaskLo << iRegLo << cmdat)
+            .Do(typename T::Pack8() << spi << iMaskLo << iRegLo << cmdatLo)
             .Do(typename T::Pack8() << clockSpeed << resTo << cmdReg)
             .DoBuffer16(respBuf, sizeof(respBuf) >> 1)
             .Do(typename T::BoolPack() << clockOn << cmdQueued << dataXferOngoing)
             .Do32(fifoBytes)
             .Do32(fifoOfst)
-            .DoBuffer(blockFifo, sizeof(blockFifo));
+            .DoBuffer(blockFifo, legacyFifoSize);
         if (version >= 1) {
             iMaskHi = iMask >> 8;
             iRegHi = iReg >> 8;
@@ -64,12 +75,27 @@ struct PxaMmc {
             iMaskHi = wordFifo ? I_MASK_PXA27X >> 8 : 0;  // older states had the new bits masked
             iRegHi = 0;
         }
+        if (version >= 2) {
+            chunkHelper.Do(typename T::Pack8() << cmdatHi);
+            chunkHelper.DoBuffer(blockFifo + legacyFifoSize, sizeof(blockFifo) - legacyFifoSize);
+        } else {
+            cmdatHi = 0;
+            if (wordFifo) iMaskHi |= I_SDIO >> 8;
+            memset(blockFifo + legacyFifoSize, 0, sizeof(blockFifo) - legacyFifoSize);
+        }
+        cmdat = (uint16_t)cmdatHi << 8 | cmdatLo;
         iMask = (uint16_t)iMaskHi << 8 | iMaskLo;
         iReg = (uint16_t)iRegHi << 8 | iRegLo;
     }
 };
 
 static void pxaMmcPrvIrqUpdate(struct PxaMmc *mmc) {
+    mmc->iReg &= ~I_SDIO;
+    // DAT1 carries data during a 4-bit transfer. Sample its IRQ between transfers.
+    const bool irqWindow = !(mmc->cmdat & CMDAT_SD_4DAT) || !mmc->dataXferOngoing;
+    if (mmc->wordFifo && irqWindow && (mmc->cmdat & CMDAT_SDIO_INT_EN) &&
+        mmc->sdio && mmc->sdio->IrqAsserted())
+        mmc->iReg |= I_SDIO;
     uint32_t irqs = mmc->iReg;
 
     // mask as per mask
@@ -138,7 +164,13 @@ static void pxaMmcPrvDataXferNextBlockRead(struct PxaMmc *mmc) {
         return;
     }
 
-    ret = vsdDataXferBlockFromCard(mmc->vsd, mmc->blockFifo, mmc->blkLen);
+    if (mmc->blkLen > sizeof(mmc->blockFifo)) {
+        pxaMmcPrvDataXferFail(mmc, 0x0008);
+        return;
+    }
+
+    ret = mmc->sdio ? mmc->sdio->ReadBlock(mmc->blockFifo, mmc->blkLen)
+                    : vsdDataXferBlockFromCard(mmc->vsd, mmc->blockFifo, mmc->blkLen);
     switch (ret) {
         case SdDataErrWrongBlockSize:  // would manifest as a crc error
             pxaMmcPrvDataXferFail(mmc, 0x0008);  // crc read error
@@ -167,6 +199,10 @@ static void pxaMmcPrvDataXferStart(struct PxaMmc *mmc) {
         return;
     }
 
+    if (mmc->blkLen > sizeof(mmc->blockFifo)) {
+        pxaMmcPrvDataXferFail(mmc, (mmc->cmdat & 8) ? 4 : 8);
+        return;
+    }
     if (mmc->cmdat & 8) {  // write
 
         mmc->fifoBytes = 0;
@@ -189,7 +225,8 @@ static bool pxaMmcPrvDataFifoW(struct PxaMmc *mmc, uint32_t val) {
 
         if (!mmc->dataXferOngoing) return true;
 
-        ret = vsdDataXferBlockToCard(mmc->vsd, mmc->blockFifo, mmc->blkLen);
+        ret = mmc->sdio ? mmc->sdio->WriteBlock(mmc->blockFifo, mmc->blkLen)
+                        : vsdDataXferBlockToCard(mmc->vsd, mmc->blockFifo, mmc->blkLen);
         switch (ret) {
             case SdDataErrWrongBlockSize:     // would manifest as a crc error
             case SdDataErrWrongCurrentState:  // would manifest as a timeout but we report all as
@@ -244,12 +281,14 @@ static bool pxaMmcPrvDataFifoR(struct PxaMmc *mmc, uint32_t *valP) {
 static bool mmcSendCommand(struct PxaMmc *mmc) {
     bool success = false, doCrcCheck = true, withBusy = false, crcFail = false;
     enum SdReplyType ret;
-    uint8_t reply[17];
+    uint8_t reply[17]{};
     unsigned i, len;
 
     mmc->cmdQueued = false;
 
-    if (mmc->vsd) {
+    if (mmc->sdio) {
+        ret = mmc->sdio->Command(mmc->cmdReg & 0x3f, mmc->arg, reply);
+    } else if (mmc->vsd) {
         //	fprintf(stderr, "sending cmd %u (0x%08x)\n", mmc->cmdReg & 0x3f, mmc->arg);
         ret = vsdCommand(mmc->vsd, mmc->cmdReg & 0x3f, mmc->arg, reply);
     } else {
@@ -310,7 +349,22 @@ static bool mmcSendCommand(struct PxaMmc *mmc) {
     }
 
     // data to handle?
-    if (success && (mmc->cmdat & 4)) pxaMmcPrvDataXferStart(mmc);
+    if (success && (mmc->cmdat & 4)) {
+        if (!mmc->sdio) {
+            pxaMmcPrvDataXferStart(mmc);
+        } else if ((mmc->cmdReg & 0x3f) == 53 && !(reply[3] & R5_ERROR_FLAGS)) {
+            if (mmc->sdio->AcceptsTransfer(mmc->cmdat & 8, mmc->blkLen, mmc->numBlks))
+                pxaMmcPrvDataXferStart(mmc);
+            else {
+                mmc->sdio->AbortTransfer();
+                pxaMmcPrvDataXferFail(mmc, (mmc->cmdat & 8) ? 4 : 1);
+            }
+        } else {
+            mmc->stat |= 0x1800;
+        }
+    } else if (mmc->sdio && (mmc->cmdReg & 0x3f) == 53) {
+        mmc->sdio->AbortTransfer();
+    }
 
     // all cases except write, we're not busy by response time
     if (!success || !(mmc->cmdat & 4) || !(mmc->cmdat & 8)) mmc->stat |= 0x1000;  // not busy
@@ -350,7 +404,7 @@ static bool pxaMmcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
                 case 1:  // stop clock
                     //				fprintf(stderr, "MMC: clock off\n");
                     mmc->clockOn = false;
-                    if (!mmc->vsd) mmc->stoppedSinceRemoval = true;
+                    if (!mmc->vsd && !mmc->sdio) mmc->stoppedSinceRemoval = true;
                     mmc->stat &= ~0x100;
                     pxaMmcPrvRecalcIregAndFifo(mmc);
                     break;
@@ -400,7 +454,15 @@ static bool pxaMmcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
 
         case 4:
             if (write) {
-                mmc->cmdat = val;
+                if (mmc->sdio) {
+                    mmc->sdio->AbortTransfer();
+                    mmc->dataXferOngoing = false;
+                    mmc->fifoBytes = mmc->fifoOfst = 0;
+                    mmc->iReg &= ~0x60;
+                    pxaDmaExternalReq(mmc->dma, DMA_CMR_MMC_RX, false);
+                    pxaDmaExternalReq(mmc->dma, DMA_CMR_MMC_TX, false);
+                }
+                mmc->cmdat = val & (mmc->wordFifo ? (CMDAT_SDIO_INT_EN | CMDAT_SD_4DAT | 0xff) : 0xff);
                 mmc->stat &= 0x100;
                 mmc->stat |= 0x40;
                 pxaMmcPrvRecalcIregAndFifo(mmc);
@@ -429,7 +491,7 @@ static bool pxaMmcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
 
         case 7:
             if (write)
-                mmc->blkLen = val & 0x3ff;
+                mmc->blkLen = val & mmc->BlockLengthMask();
             else
                 val = mmc->blkLen;
             break;
@@ -559,12 +621,16 @@ struct PxaMmc *pxaMmcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDm
     return mmc;
 }
 
-bool pxaMmcClockStoppedSinceRemoval(struct PxaMmc *mmc) { return !mmc->vsd && mmc->stoppedSinceRemoval; }
+bool pxaMmcClockStoppedSinceRemoval(struct PxaMmc *mmc) {
+    return !mmc->vsd && !mmc->sdio && mmc->stoppedSinceRemoval;
+}
 
 void pxaMmcInsert(struct PxaMmc *mmc, struct VSD *vsd) {
     sdLogReset(&mmc->noReplyLog);
     mmc->stoppedSinceRemoval = false;
-    if (!vsd) {
+    if (!vsd || mmc->sdio) {
+        if (mmc->sdio) mmc->sdio->AbortTransfer();
+        mmc->sdio = nullptr;
         // Removal ends the old card's transfer. Never drain its FIFO into a
         // later block request through a null card, or expose it after reinsert.
         // An unfinished block gets no CRC token or data, so it ends as a write CRC
@@ -582,6 +648,15 @@ void pxaMmcInsert(struct PxaMmc *mmc, struct VSD *vsd) {
     // Reconnecting restored state is not a new transfer or physical card edge.
     mmc->vsd = vsd;
 }
+
+void pxaMmcInsertSdio(PxaMmc *mmc, SdioCard *card) {
+    pxaMmcInsert(mmc, nullptr);
+    mmc->sdio = card;
+    if (card) card->Reset();
+    pxaMmcPrvIrqUpdate(mmc);
+}
+
+void pxaMmcSdioIrqChanged(PxaMmc *mmc) { pxaMmcPrvIrqUpdate(mmc); }
 
 template <typename T>
 void pxaMmcSave(struct PxaMmc *mmc, T &savestate) {
@@ -604,9 +679,10 @@ void pxaMmcLoad(struct PxaMmc *mmc, T &loader) {
         if (mmc->stat & 0x000d) mmc->iReg |= I_DAT_ERR;
         if (mmc->stat & 0x0022) mmc->iReg |= I_RES_ERR;
     }
-    if (mmc->blkLen > 0x3ff || mmc->fifoBytes > sizeof(mmc->blockFifo) ||
-        mmc->fifoOfst > sizeof(mmc->blockFifo) ||
-        (!(mmc->cmdat & 8) && mmc->fifoBytes > sizeof(mmc->blockFifo) - mmc->fifoOfst))
+    const size_t fifoSize = version >= 2 && mmc->wordFifo ? sizeof(mmc->blockFifo) : PxaMmc::legacyFifoSize;
+    const uint16_t lengthMask = version >= 2 ? mmc->BlockLengthMask() : 0x03ff;
+    if (mmc->blkLen > lengthMask || mmc->fifoBytes > fifoSize || mmc->fifoOfst > fifoSize ||
+        (!(mmc->cmdat & 8) && mmc->fifoBytes > fifoSize - mmc->fifoOfst))
         loader.NotifyError();
 }
 

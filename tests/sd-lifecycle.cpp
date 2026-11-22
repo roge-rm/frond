@@ -128,15 +128,19 @@ static void versions() {
     require(f.restore(old) && !(status(f.card) & 1u << 22), "version 0 vsd state not loaded clear");
     // A failed read raises DAT_ERR; older MMC states default the new mask bits to masked.
     regWrite(0, 1); regWrite(0x1c, 512); regWrite(0x20, 1); regWrite(0x30, 17);
-    regWrite(0x34, 0); regWrite(0x38, 512); regWrite(0x10, 5); regWrite(0, 2);
+    regWrite(0x34, 0); regWrite(0x38, 512); regWrite(0x10, 0x805); regWrite(0, 2);
     require((regRead(0x04) & 1) && (regRead(0x2c) & 0x100), "DAT_ERR not raised");
     state = f.snapshot();
-    require(chunkWord(state, ChunkType::pxaMmc, 0) == 1, "mmc version");
+    require(chunkWord(state, ChunkType::pxaMmc, 0) == 2, "mmc version");
     regWrite(0x28, 0);
-    require(f.restore(state) && regRead(0x28) == 0x37f && (regRead(0x2c) & 0x100), "mmc v1 restore");
+    require(f.restore(state) && regRead(0x28) == 0xb7f && (regRead(0x2c) & 0x100) &&
+            regRead(0x10) == 0x805, "mmc v2 restore");
+    old = state; downgrade(old, ChunkType::pxaMmc, 1);
+    require(f.restore(old) && regRead(0x28) == 0xb7f && (regRead(0x2c) & 0x100) &&
+            regRead(0x10) == 5, "mmc v1 restore");
     old = state; downgrade(old, ChunkType::pxaMmc, 0);
     regWrite(0x28, 0);
-    require(f.restore(old) && regRead(0x28) == 0x37f && (regRead(0x2c) & 0x100),
+    require(f.restore(old) && regRead(0x28) == 0xb7f && (regRead(0x2c) & 0x100),
             "version 0 mmc state not loaded with new bits masked");
 }
 static void transfers() {
@@ -166,9 +170,9 @@ static void malformed() {
     auto good = f.snapshot();
     for (auto test : std::array<std::array<uint32_t, 3>, 6>{{
              {{uint32_t(ChunkType::pxaMmc), 3, (65535u << 16) | 1}},
-             {{uint32_t(ChunkType::pxaMmc), 11, 1025}},
-             {{uint32_t(ChunkType::pxaMmc), 12, 1025}},
-             {{uint32_t(ChunkType::pxaMmc), 12, 1024}},
+             {{uint32_t(ChunkType::pxaMmc), 11, 2049}},
+             {{uint32_t(ChunkType::pxaMmc), 12, 2049}},
+             {{uint32_t(ChunkType::pxaMmc), 12, 2048}},
              {{uint32_t(ChunkType::vsd), 2, 255u << 16}},
              {{uint32_t(ChunkType::vsd), 3, 65535}} }}) {
         auto bad = good; corrupt(bad, ChunkType(test[0]), test[1], test[2]);
