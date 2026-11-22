@@ -355,6 +355,7 @@ struct Snapshot final : public A32::CodeSnapshot {
     std::vector<uint8_t> fetched, read;  // per word
     std::vector<std::pair<uint32_t, bool>> plain;  // each instruction in order, and its check
     std::vector<uint32_t> marked;  // access pcs among them
+    uint32_t splitAt = ~0u;  // the marked pc the snapshot stopped before (startBlocks), which ends the block
     size_t next = 0;
     bool arm920 = false;
     bool startBlocks = false;  // cpuJitAccessPcsStartBlocks when fetched: a marked pc only ever starts the block
@@ -390,7 +391,7 @@ struct Snapshot final : public A32::CodeSnapshot {
 
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
         if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
-        const bool isMarked = std::find(marked.begin(), marked.end(), pc) != marked.end();
+        const bool isMarked = pc == splitAt || std::find(marked.begin(), marked.end(), pc) != marked.end();
         if (!AccessPcSplit(isMarked && startBlocks, pc, ir)) return false;
         uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
@@ -1348,7 +1349,10 @@ struct Env final : public A32::UserCallbacks {
             const bool plain = s->fetched[i] && cpuJitPlain(cpu, at, w, thumb);
             // A marked pc that starts its block ends the snapshot before it unless it's the first.
             const bool marked = arm920 && cpuJitAccessPcMarked(cpu, at);
-            if (marked && s->startBlocks && at != pc) break;
+            if (marked && s->startBlocks && at != pc) {
+                s->splitAt = at;
+                break;
+            }
             s->plain.push_back({at, plain});
             if (!plain) break;
             if (marked) s->marked.push_back(at);
