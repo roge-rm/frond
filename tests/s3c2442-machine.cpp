@@ -734,17 +734,19 @@ static void pollSkipTests() {
 }
 
 // TCNTO4 reads at access pcs that start their block (as the WM5 tick read), Exact against Fast at every stop,
-// on the compile thread: a marked ldrne whose condition fails, a marked load of RAM, and a marked load in the
-// middle of a block. Each leaves nothing behind for the unmarked TCNTO4 read after it, which Fast blocks
-// mustn't answer, and the mid-block one is answered with the exact time.
+// on the compile thread: a marked ldrne whose condition fails, a marked load of RAM, a marked load after a run
+// of unmarked instructions, which splits the block there (a marked pc can't sit mid-block with startBlocks), and
+// a marked load to pc, which ends its block. Each leaves nothing behind for the unmarked TCNTO4 read after it,
+// which Fast blocks mustn't answer, and the third is answered with the exact time.
 static void tickReadTests() {
     // mov r0, #0x51000000; mov r6, #0x30000000; add r6, r6, #0x10000
     // back: cmp r3, r3; ldrne r1, [r0, #0x40] (marked); add r4, r4, #1 x64; ldr r5, [r0, #0x40]; add r7, r7, r5
     // ldr r1, [r6] (marked); add r4, r4, #1 x64; ldr r8, [r0, #0x40]; add r9, r9, r8; add r4, r4, #1 x32
-    // ldr r10, [r0, #0x40] (marked); add r11, r11, r10; mov r12, #0x800; subs r12, r12, #1; bne back 1
+    // ldr r10, [r0, #0x40] (marked); add r11, r11, r10; ldr pc, [pc, #-4] (marked) to the next but one word;
+    // add r4, r4, #1 x32; ldr r2, [r0, #0x40]; add r9, r9, r2; mov r12, #0x800; subs r12, r12, #1; bne back 1
     // add r3, r3, #1; b back
     std::vector<uint32_t> program{0xe3a00451, 0xe3a06203, 0xe2866801, 0xe1530003};
-    static uint32_t marked[3];
+    static uint32_t marked[4];
     marked[0] = code + uint32_t(program.size()) * 4;
     program.push_back(0x15901040);
     program.insert(program.end(), 64, 0xe2844001);
@@ -755,11 +757,15 @@ static void tickReadTests() {
     program.insert(program.end(), {0xe5908040, 0xe0899008});
     program.insert(program.end(), 32, 0xe2844001);
     marked[2] = code + uint32_t(program.size()) * 4;
-    program.insert(program.end(), {0xe590a040, 0xe08bb00a, 0xe3a0cb02, 0xe25cc001, 0x1afffffd, 0xe2833001});
+    program.insert(program.end(), {0xe590a040, 0xe08bb00a});
+    marked[3] = code + uint32_t(program.size()) * 4;
+    program.insert(program.end(), {0xe51ff004, marked[3] + 8});
+    program.insert(program.end(), 32, 0xe2844001);
+    program.insert(program.end(), {0xe5902040, 0xe0899002, 0xe3a0cb02, 0xe25cc001, 0x1afffffd, 0xe2833001});
     program.push_back(0xea000000u | ((3 - int32_t(program.size()) - 2) & 0xffffff));
     auto exact = make(program), fast = make(program);
     if (!fast->setFastEngine(true)) return;
-    cpuArm920SetJitAccessPcs(fast->cpu(), marked, 3, true);
+    cpuArm920SetJitAccessPcs(fast->cpu(), marked, 4, true);
     for (auto* m : {exact.get(), fast.get()}) {
         m->pwm.tcfg0 = 0;  // prescaler 0 and the 1/2 divider: TCNTO4 moves every 2 PCLK ticks
         m->pwm.tcfg1 = 0;

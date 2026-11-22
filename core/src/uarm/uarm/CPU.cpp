@@ -7283,6 +7283,8 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span,
     uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
     int jitStop;
     const uint32_t ran = jitRun(cpu->jit, cpu->regs, cpsr, budget, jitStop);
+    // A marked access that faulted, or ended the run, leaves its pc behind.
+    cpu->jitAccessPc = 0;
     if (instructions) *instructions = jitLastInstructions(cpu->jit);
     *stop = jitStop == FROND_JIT_BUDGET ? arm920JitBudget :
             jitStop == FROND_JIT_HALT   ? arm920JitHalt :

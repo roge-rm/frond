@@ -244,17 +244,25 @@ constexpr std::size_t kPsrCoprocessor = 8;
 thread_local uint32_t cp15Pc = ~0u, cp15Rd = 0, cp15Word = 0;
 
 // ARM920T access pcs (cpuArm920SetJitAccessPcs) that start their block: the block before one links to it, so
-// only finished blocks' ticks come before its access. accessNoted: the block's first instruction noted its pc,
-// so the next one clears the slot again (an access that went to a host page, or none, leaves nothing set for a
-// later read at another pc). False when the block ends before pc.
-thread_local bool accessNoted = false;
+// only finished blocks' ticks come before its access. The slot is cleared again so a marked access that went to a
+// host page, or none, leaves nothing set for a later read at another pc: by the marked block's second
+// instruction, and by every other block as it starts, for a marked block that ended right after its access (a
+// capped or single-step block, a load to pc, a line bound). clearPending: the clear is still to come in this
+// block. A conditional first instruction needs an empty block (IsConditionPassed), so its clear waits for the
+// second one.
+thread_local bool clearPending = false;
 
-bool AccessPcSplit(bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
+inline void ClearAccessPc(A32::IREmitter &ir) {
+    ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(0));
+}
+
+// Before the code read. startBlocks: the access pcs start their blocks (cpuArm920JitAccessPcsStartBlocks).
+bool AccessPcSplit(bool startBlocks, bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
     const bool start = pc == A32::LocationDescriptor{ir.block.Location()}.PC();
     if (start) {
-        accessNoted = false;
-    } else if (std::exchange(accessNoted, false)) {
-        ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(0));
+        clearPending = startBlocks;
+    } else if (std::exchange(clearPending, false)) {
+        ClearAccessPc(ir);
     }
     if (startsBlock && !start) {
         ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
@@ -263,12 +271,27 @@ bool AccessPcSplit(bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
     return true;
 }
 
-// A marked pc's value goes to cpuJitAccessPcSlot before the instruction (psr slot, opc1 3). One that starts its
-// block is only noted unconditional, as a failed one would leave the slot set.
-void NoteAccessPc(bool thumb, uint32_t word, bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
-    if (startsBlock && !thumb && word >> 28 != 14) return;
+// Not an instruction IsConditionPassed sees with a condition: ARM's cond field, Thumb's IT blocks and B<c> (T1).
+// word is the aligned word holding the instruction.
+inline bool Unconditional(bool thumb, uint32_t word, A32::VAddr pc, const A32::IREmitter &ir) {
+    if (!thumb) return word >> 28 == 14;
+    const uint32_t half = (pc & 2) ? word >> 16 : word & 0xffff;
+    return !ir.current_location.IT().IsInITBlock() && !((half & 0xf000) == 0xd000 && (half & 0x0e00) != 0x0e00);
+}
+
+// After a code read that goes to the JIT. A marked pc's value goes to cpuJitAccessPcSlot before the instruction
+// (psr slot, opc1 3). One that starts its block is only noted unconditional, as a failed one would leave the slot
+// set (and a conditional first instruction needs an empty block).
+void NoteAccessPc(bool thumb, uint32_t word, bool marked, bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
+    const bool note = marked && (!startsBlock || Unconditional(thumb, word, pc, ir));
+    if (clearPending && !note && pc == A32::LocationDescriptor{ir.block.Location()}.PC() &&
+        Unconditional(thumb, word, pc, ir)) {
+        ClearAccessPc(ir);
+        clearPending = false;
+    }
+    if (!note) return;
     ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
-    accessNoted = startsBlock;
+    clearPending = startsBlock;
 }
 
 // PreCodeReadHook's work: the instruction at pc goes to the JIT if plain(pc, word) says
@@ -392,7 +415,7 @@ struct Snapshot final : public A32::CodeSnapshot {
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
         if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
         const bool isMarked = pc == splitAt || std::find(marked.begin(), marked.end(), pc) != marked.end();
-        if (!AccessPcSplit(isMarked && startBlocks, pc, ir)) return false;
+        if (!AccessPcSplit(startBlocks, isMarked && startBlocks, pc, ir)) return false;
         uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             while (next < plain.size() && plain[next].first != at) next++;
@@ -405,7 +428,7 @@ struct Snapshot final : public A32::CodeSnapshot {
             word = w;
             return plain[next].second;
         });
-        if (ok && isMarked) NoteAccessPc(thumb, word, startBlocks, pc, ir);
+        if (ok) NoteAccessPc(thumb, word, isMarked, isMarked && startBlocks, pc, ir);
         return ok;
     }
 };
@@ -1299,8 +1322,9 @@ struct Env final : public A32::UserCallbacks {
             return false;
         }
         const bool marked = arm920 && cpuJitAccessPcMarked(cpu, pc);
-        const bool startsBlock = marked && cpuJitAccessPcsStartBlocks(cpu);
-        if (!AccessPcSplit(startsBlock, pc, ir)) return false;
+        const bool startBlocks = arm920 && cpuJitAccessPcsStartBlocks(cpu);
+        const bool startsBlock = marked && startBlocks;
+        if (!AccessPcSplit(startBlocks, startsBlock, pc, ir)) return false;
         uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             const bool plain = cpuJitFetch(cpu, at & ~3u, &w) && cpuJitPlain(cpu, at, w, thumb);
@@ -1308,7 +1332,7 @@ struct Env final : public A32::UserCallbacks {
             word = w;
             return plain;
         });
-        if (ok && marked) NoteAccessPc(thumb, word, startsBlock, pc, ir);
+        if (ok) NoteAccessPc(thumb, word, marked, startsBlock, pc, ir);
         return ok;
     }
 
