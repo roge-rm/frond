@@ -2284,6 +2284,15 @@ test-zodiac-dma-channel: $(OBJ_ROOT)/zodiac-boot-probe
 		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-channel
 	$(OBJ_ROOT)/test-zodiac-dma-channel
 
+# The Zodiac music hooks' host sequencer, with ASan and UBSan.
+.PHONY: test-zodiac-music-player
+test: test-zodiac-music-player
+test-zodiac-music-player:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-Icore/src/uarm/uarm tests/zodiac-music-player.cpp -o $(OBJ_ROOT)/test-zodiac-music-player
+	$(OBJ_ROOT)/test-zodiac-music-player
+
 # Host-side SMF reader for the Zodiac music hooks, with ASan and UBSan.
 .PHONY: test-zodiac-smf
 test: test-zodiac-smf
