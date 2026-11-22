@@ -44,6 +44,23 @@ bool HostSeesState(const IR::Inst& inst) {
     }
 }
 
+// Frond: the accesses whose backend stores A32SlowPathSetRegister values on its callback path.
+bool HasSlowPathSets(const IR::Inst& inst) {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::A32ReadMemory8:
+    case IR::Opcode::A32ReadMemory16:
+    case IR::Opcode::A32ReadMemory32:
+    case IR::Opcode::A32ReadMemory64:
+    case IR::Opcode::A32WriteMemory8:
+    case IR::Opcode::A32WriteMemory16:
+    case IR::Opcode::A32WriteMemory32:
+    case IR::Opcode::A32WriteMemory64:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void FlagsPass(IR::Block& block, bool memory_barriers) {
     using Iterator = std::reverse_iterator<IR::Block::iterator>;
 
@@ -204,12 +221,15 @@ void FlagsPass(IR::Block& block, bool memory_barriers) {
     }
 }
 
-void RegisterPass(IR::Block& block, bool memory_barriers) {
+void RegisterPass(IR::Block& block, bool memory_barriers, bool slow_path_sets) {
     using Iterator = IR::Block::iterator;
 
     struct RegInfo {
         IR::Value register_value;
         std::optional<Iterator> last_set_instruction;
+        // Frond (slow_path_sets): the accesses since last_set_instruction. If a later set replaces it,
+        // each of them gets an A32SlowPathSetRegister of its value and the set itself goes.
+        std::vector<Iterator> accesses_since_set;
     };
     std::array<RegInfo, 15> reg_info;
 
@@ -221,13 +241,18 @@ void RegisterPass(IR::Block& block, bool memory_barriers) {
         get_inst->ReplaceUsesWith(info.register_value);
     };
 
-    const auto do_set = [](RegInfo& info, IR::Value value, Iterator set_inst) {
+    const auto do_set = [&block](RegInfo& info, IR::Value value, Iterator set_inst) {
         if (info.last_set_instruction) {
-            (*info.last_set_instruction)->Invalidate();
+            const Iterator last = *info.last_set_instruction;
+            for (const Iterator access : info.accesses_since_set) {
+                block.PrependNewInst(std::next(access), IR::Opcode::A32SlowPathSetRegister, {last->GetArg(0), last->GetArg(1)});
+            }
+            last->Invalidate();
         }
         info = {
             .register_value = value,
             .last_set_instruction = set_inst,
+            .accesses_since_set = {},
         };
     };
 
@@ -385,9 +410,18 @@ void RegisterPass(IR::Block& block, bool memory_barriers) {
                 (memory_barriers && HostSeesState(*inst))) {
                 reg_info = {};
                 ext_reg_info = {};
+            } else if (memory_barriers && slow_path_sets && HasSlowPathSets(*inst)) {
+                // The values stay known; a run that ends here stores the sets so far on the callback path.
+                for (auto& info : reg_info) {
+                    if (info.last_set_instruction) info.accesses_since_set.push_back(inst);
+                }
+                for (auto& info : ext_reg_info) info.last_set_instruction.reset();
             } else if (memory_barriers && inst->IsMemoryReadOrWrite()) {
                 // The values stay known; the sets so far are kept for a run that ends here.
-                for (auto& info : reg_info) info.last_set_instruction.reset();
+                for (auto& info : reg_info) {
+                    info.last_set_instruction.reset();
+                    info.accesses_since_set.clear();
+                }
                 for (auto& info : ext_reg_info) info.last_set_instruction.reset();
             }
             break;
@@ -400,7 +434,11 @@ void RegisterPass(IR::Block& block, bool memory_barriers) {
 
 void A32GetSetElimination(IR::Block& block, A32GetSetEliminationOptions opt) {
     FlagsPass(block, opt.memory_barriers);
-    RegisterPass(block, opt.memory_barriers);
+    RegisterPass(block, opt.memory_barriers, false);
+}
+
+void A32SlowPathSets(IR::Block& block) {
+    RegisterPass(block, true, true);
 }
 
 }  // namespace Dynarmic::Optimization

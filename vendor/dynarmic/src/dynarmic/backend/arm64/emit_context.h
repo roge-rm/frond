@@ -42,6 +42,11 @@ struct EmitContext {
 
     std::vector<std::function<void()>> deferred_emits;
 
+    // Frond: the A32SlowPathSetRegister instructions right after the instruction being emitted, and
+    // those a memory access took for its callback path (the rest store as A32SetRegister would).
+    std::vector<IR::Inst*> slow_path_sets{};
+    std::vector<const IR::Inst*> taken_slow_path_sets{};
+
     FP::FPCR FPCR(bool fpcr_controlled = true) const {
         const FP::FPCR fpcr = conf.descriptor_to_fpcr(block.Location());
         return fpcr_controlled ? fpcr : fpcr.ASIMDStandardValue();

@@ -11,6 +11,7 @@
 #include <mcl/bit_cast.hpp>
 #include <oaknut/oaknut.hpp>
 
+#include "dynarmic/backend/arm64/a32_jitstate.h"
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/backend/arm64/emit_arm64.h"
 #include "dynarmic/backend/arm64/emit_context.h"
@@ -128,11 +129,33 @@ LinkTarget ExclusiveWriteMemoryLinkTarget(size_t bitsize) {
     UNREACHABLE();
 }
 
+// Frond: the register sets this access stores only on its callback path (A32SlowPathSetRegister), with
+// where each value is held after the access's registers are realized.
+using SlowPathSets = std::vector<std::pair<size_t, RegAlloc::Held>>;
+
+SlowPathSets TakeSlowPathSets(EmitContext& ctx) {
+    SlowPathSets sets;
+    for (IR::Inst* set : ctx.slow_path_sets) {
+        const size_t reg = static_cast<size_t>(set->GetArg(0).GetA32RegRef());
+        sets.emplace_back(offsetof(A32JitState, regs) + sizeof(u32) * reg, ctx.reg_alloc.HeldValue(set->GetArg(1)));
+        ctx.taken_slow_path_sets.push_back(set);
+    }
+    ctx.slow_path_sets.clear();
+    return sets;
+}
+
+void EmitSlowPathSets(oaknut::CodeGenerator& code, const SlowPathSets& sets) {
+    for (const auto& [offset, held] : sets) {
+        RegAlloc::StoreHeld32(code, held, Xstate, offset);
+    }
+}
+
 template<size_t bitsize>
 void CallbackOnlyEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.PrepareForCall({}, args[1]);
     const bool ordered = IsOrdered(args[2].GetImmediateAccType());
+    EmitSlowPathSets(code, TakeSlowPathSets(ctx));
 
     EmitRelocation(code, ctx, ReadMemoryLinkTarget(bitsize));
     if (ordered) {
@@ -173,6 +196,7 @@ void CallbackOnlyEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, 
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.PrepareForCall({}, args[1], args[2]);
     const bool ordered = IsOrdered(args[3].GetImmediateAccType());
+    EmitSlowPathSets(code, TakeSlowPathSets(ctx));
 
     if (ordered) {
         code.DMB(oaknut::BarrierOp::ISH);
@@ -480,14 +504,16 @@ void InlinePageTableEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx
     ctx.fpsr.Spill();
     ctx.reg_alloc.SpillFlags();
     RegAlloc::Realize(Xaddr, Rvalue);
+    SlowPathSets slow_sets = TakeSlowPathSets(ctx);
 
     SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
 
     const auto [Xbase, Xoffset] = InlinePageTableEmitVAddrLookup<bitsize>(code, ctx, Xaddr, fallback);
     EmitMemoryLdr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered);
 
-    ctx.deferred_emits.emplace_back([&code, &ctx, inst, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end] {
+    ctx.deferred_emits.emplace_back([&code, &ctx, inst, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end, slow_sets = std::move(slow_sets)] {
         code.l(*fallback);
+        EmitSlowPathSets(code, slow_sets);
         code.MOV(Xscratch0, Xaddr);
         EmitRelocation(code, ctx, WrappedReadMemoryLinkTarget(bitsize));
         if (ordered) {
@@ -520,14 +546,16 @@ void InlinePageTableEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ct
     ctx.fpsr.Spill();
     ctx.reg_alloc.SpillFlags();
     RegAlloc::Realize(Xaddr, Rvalue);
+    SlowPathSets slow_sets = TakeSlowPathSets(ctx);
 
     SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
 
     const auto [Xbase, Xoffset] = InlinePageTableEmitVAddrLookup<bitsize, true>(code, ctx, Xaddr, fallback);
     EmitMemoryStr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered);
 
-    ctx.deferred_emits.emplace_back([&code, &ctx, inst, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end] {
+    ctx.deferred_emits.emplace_back([&code, &ctx, inst, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end, slow_sets = std::move(slow_sets)] {
         code.l(*fallback);
+        EmitSlowPathSets(code, slow_sets);
         if constexpr (bitsize == 128) {
             code.MOV(Xscratch0, Xaddr);
             code.MOV(Q0.B16(), Rvalue.B16());
@@ -599,13 +627,14 @@ void FastmemEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::In
     ctx.fpsr.Spill();
     ctx.reg_alloc.SpillFlags();
     RegAlloc::Realize(Xaddr, Rvalue);
+    SlowPathSets slow_sets = TakeSlowPathSets(ctx);
 
     SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
 
     const auto [Xbase, Xoffset] = FastmemEmitVAddrLookup<bitsize>(code, ctx, Xaddr, fallback);
     const auto fastmem_location = EmitMemoryLdr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered, ShouldExt32(ctx));
 
-    ctx.deferred_emits.emplace_back([&code, &ctx, inst, marker, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end, fastmem_location] {
+    ctx.deferred_emits.emplace_back([&code, &ctx, inst, marker, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end, fastmem_location, slow_sets = std::move(slow_sets)] {
         ctx.ebi.fastmem_patch_info.emplace(
             fastmem_location - ctx.ebi.entry_point,
             FastmemPatchInfo{
@@ -617,6 +646,7 @@ void FastmemEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::In
             });
 
         code.l(*fallback);
+        EmitSlowPathSets(code, slow_sets);
         code.MOV(Xscratch0, Xaddr);
         EmitRelocation(code, ctx, WrappedReadMemoryLinkTarget(bitsize));
         if (ordered) {
@@ -649,13 +679,14 @@ void FastmemEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::I
     ctx.fpsr.Spill();
     ctx.reg_alloc.SpillFlags();
     RegAlloc::Realize(Xaddr, Rvalue);
+    SlowPathSets slow_sets = TakeSlowPathSets(ctx);
 
     SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
 
     const auto [Xbase, Xoffset] = FastmemEmitVAddrLookup<bitsize>(code, ctx, Xaddr, fallback);
     const auto fastmem_location = EmitMemoryStr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered, ShouldExt32(ctx));
 
-    ctx.deferred_emits.emplace_back([&code, &ctx, inst, marker, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end, fastmem_location] {
+    ctx.deferred_emits.emplace_back([&code, &ctx, inst, marker, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end, fastmem_location, slow_sets = std::move(slow_sets)] {
         ctx.ebi.fastmem_patch_info.emplace(
             fastmem_location - ctx.ebi.entry_point,
             FastmemPatchInfo{
@@ -667,6 +698,7 @@ void FastmemEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::I
             });
 
         code.l(*fallback);
+        EmitSlowPathSets(code, slow_sets);
         if constexpr (bitsize == 128) {
             code.MOV(Xscratch0, Xaddr);
             code.MOV(Q0.B16(), Rvalue.B16());

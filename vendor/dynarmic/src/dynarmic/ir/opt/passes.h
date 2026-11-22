@@ -39,6 +39,11 @@ struct A32GetSetEliminationOptions {
 void PolyfillPass(IR::Block& block, const PolyfillOptions& opt);
 void A32ConstantMemoryReads(IR::Block& block, A32::UserCallbacks* cb);
 void A32GetSetElimination(IR::Block& block, A32GetSetEliminationOptions opt);
+// Frond: after A32GetSetElimination with memory_barriers and the passes that can drop reads, a register
+// set that a later set replaces isn't stored before the plain memory accesses between them. Each of those
+// accesses is followed by A32SlowPathSetRegister with the value, which the backend stores only on the
+// access's callback path, where the run can end.
+void A32SlowPathSets(IR::Block& block);
 void A64CallbackConfigPass(IR::Block& block, const A64::UserConfig& conf);
 void A64GetSetElimination(IR::Block& block);
 void A64MergeInterpretBlocksPass(IR::Block& block, A64::UserCallbacks* cb);

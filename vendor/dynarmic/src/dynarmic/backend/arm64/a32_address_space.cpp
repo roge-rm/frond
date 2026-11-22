@@ -5,6 +5,9 @@
 
 #include "dynarmic/backend/arm64/a32_address_space.h"
 
+#include <cstdlib>
+#include <string_view>
+
 #include "dynarmic/backend/arm64/a32_jitstate.h"
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/backend/arm64/devirtualize.h"
@@ -222,6 +225,14 @@ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor, A32::Tr
         Optimization::DeadCodeElimination(ir_block);
     }
     Optimization::IdentityRemovalPass(ir_block);
+    // Frond: FROND_JIT_SLOW_PATH_SETS=0 turns the slow-path register sets off, for comparisons.
+    static const bool slow_path_sets = [] {
+        const char* const env = std::getenv("FROND_JIT_SLOW_PATH_SETS");
+        return !env || std::string_view{env} != "0";
+    }();
+    if (slow_path_sets && conf.HasOptimization(OptimizationFlag::GetSetElimination) && conf.check_halt_on_memory_access) {
+        Optimization::A32SlowPathSets(ir_block);
+    }
 #ifndef NDEBUG
     Optimization::VerificationPass(ir_block);
 #endif
