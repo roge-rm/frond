@@ -1307,12 +1307,13 @@ bool S3c2442Machine::setFastEngine(bool fast) {
     return true;
 }
 
-// SDRAM (bank 6, repeating) and the steppingstone (bank 0, repeating): plain memory with no time and no side
-// effect, which the Fast engine reads and writes from host memory.
+// SDRAM (bank 6, repeating) and the steppingstone's 4 KB at 0: plain memory with no time and no side effect,
+// which the Fast engine reads and writes from host memory. The rest of bank 0 goes through the bus, whose
+// mirroring of the steppingstone is an assumption (mmio), so page table walks never memoise it.
 uint8_t* S3c2442Machine::leanPage(void* context, uint32_t pa, bool, bool* counted) {
     auto& m = *static_cast<S3c2442Machine*>(context);
     *counted = true;
-    if (pa < 0x08000000) return m.steppingstone;
+    if (pa < 0x08000000) return pa < sizeof m.steppingstone ? m.steppingstone : nullptr;
     // The RAM regions create() maps: up to 4 copies of the SDRAM.
     const uint32_t mapped = std::min<uint32_t>(4, bank6Size / m.options.ramBytes) * m.options.ramBytes;
     if (pa >= sdramBase && pa - sdramBase < mapped) return m.ramBuffer + ((pa - sdramBase) & (m.options.ramBytes - 1) & ~0xfffu);
