@@ -64,6 +64,28 @@ class RunningSheetsTest {
         assertFalse(CardRow.WRITE_PROTECT in rows(SdCard.State.EJECTED))
     }
 
+    @Test fun palmWifiSharesThePrimaryMemoryCardSlot() {
+        val supported = setOf("palm-e2", "palm-e2-franken", "palm-zire-72")
+        for (device in Device.entries) {
+            assertEquals(device.id, device.id in supported, device.palmWifiCard)
+        }
+        val device = Device.E2
+        fun rows(state: SdCard.State) = RunningSheets.cardRows(device, state, false, false)
+        assertTrue(CardRow.INSERT_PALM_WIFI in rows(SdCard.State.NONE))
+        assertTrue(CardRow.INSERT_PALM_WIFI in rows(SdCard.State.EJECTED))
+        assertFalse(CardRow.INSERT_PALM_WIFI in rows(SdCard.State.INSERTED))
+        for (reply in listOf("inserted wifi", "inserted wifi ejected")) {
+            val restored = SdCard.parseState(reply, m68k = false)
+            assertEquals(SdCard.State.PALM_WIFI, restored)
+            assertEquals(listOf(CardRow.SLOT, CardRow.EJECT_PALM_WIFI), rows(restored))
+            assertEquals(CardIcon.IN, RunningSheets.cardIcon(restored, false))
+            assertFalse(RunningSheets.slotUsable(restored, busy = false, pending = false))
+        }
+        assertEquals(SdCard.State.INSERTED, SdCard.parseState("inserted key writable", m68k = true))
+        assertTrue(device.networkSupported)
+        assertEquals(listOf(NetworkMode.DISABLED, NetworkMode.WIRELESS), NetworkMode.offered(device.networkWifiOnly))
+    }
+
     @Test fun writeProtectIsForMemorySticksWithACard() {
         val stick = Device.entries.firstOrNull { it.memoryStick } ?: return
         assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(stick, SdCard.State.EJECTED, false, false))

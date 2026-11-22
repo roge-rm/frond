@@ -36,7 +36,7 @@ object RunningMenu {
         if (has(device.keyboard)) rows += Row(Id.KEYBOARD, "Infrared keyboard", onOff(s.keyboard), enabled = device.keyboard && s.keyboard != null && s.beamOff)
         if (device.clieGamepad) rows += gamepadRow(s)
         if (has(device.microphone)) rows += Row(Id.MICROPHONE, "Microphone", microphoneValue(s.microphone), enabled = device.microphone)
-        if (has(device.network)) rows += Row(Id.NETWORK, "Network", s.network?.label, enabled = device.network && s.network != null)
+        if (has(device.networkSupported)) rows += Row(Id.NETWORK, "Network", s.network?.label, enabled = device.networkSupported && s.network != null)
         if (SyncProtocol.forDevice(device) != null) rows += Row(Id.SYNC_MANAGER, "Sync Manager…", group = 1)
         rows += Row(Id.DISPLAY, "Display…", group = 1)
         rows += Row(Id.CONNECTIONS, "Connections…", group = 1)

@@ -282,6 +282,7 @@ class RunningModel(
     private fun slotInfo(s: SdCard.State, n: Int = 0): SlotShown {
         val dir = machineDir
         val pending = n == 0 && SdCard.pendingFor(activity.applicationContext, FrondActivity.running?.session) != null
+        if (s == SdCard.State.PALM_WIFI) return SlotShown("Palm Wi-Fi Card")
         val label = if (n == 0) device.cardLabel else "SD card"
         if (dir == null) return SlotShown(if (s == SdCard.State.NONE) "No card" else label, pending = pending)
         val library = Cards.libraryFor(sessions)
@@ -312,7 +313,8 @@ class RunningModel(
 
     fun openPicker(select: String? = null, n: Int = cardSlot) {
         val dir = machineDir ?: return
-        if (busy != null || waiting() || shownOf(n).pending || shownOf(n).oldPlace || !selectSlot(n)) return
+        if (busy != null || waiting() || stateOf(n) == SdCard.State.PALM_WIFI ||
+            shownOf(n).pending || shownOf(n).oldPlace || !selectSlot(n)) return
         val keep = picker?.selected
         val reopening = picker != null
         activity.lifecycleScope.launch {
@@ -353,7 +355,9 @@ class RunningModel(
     fun changeCard(to: String?) {
         val dir = machineDir ?: return
         job("Changing the card", "Couldn't change the card") { c ->
-            if (c.state() == SdCard.State.INSERTED) c.eject()
+            val state = c.state()
+            if (state == SdCard.State.PALM_WIFI) throw SdCard.Failed("Eject the Palm Wi-Fi Card first.")
+            if (state == SdCard.State.INSERTED) c.eject()
             val n = c.slot
             if (c.state() != SdCard.State.NONE) {
                 val (identity, protected) = c.takeOut()
