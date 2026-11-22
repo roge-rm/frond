@@ -129,6 +129,7 @@ Caught hooked(const std::vector<uint32_t>& words, bool fast, const zodiac_music:
     Imx1Machine* m = make(words, fast);
     assert(imx1MachineSetCodeHooks(m, lib.pcs, zodiac_music::callCount));
     zodiac_music::Hooks hooks;
+    hooks.enable();
     const auto read = [m](uint32_t address, void* data, uint32_t size) {
         return imx1MachineAccessMemory(m, address, data, size, false);
     };

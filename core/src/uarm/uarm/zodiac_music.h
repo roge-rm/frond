@@ -43,7 +43,6 @@ constexpr uint32_t maxSmfBytes = 1u << 20;
 constexpr uint32_t maxSysExBytes = 4096;
 // Events the ring holds for the player; newer ones are dropped while it is full.
 constexpr size_t maxEvents = 4096;
-static_assert((maxEvents & (maxEvents - 1)) == 0, "the ring's size is a power of 2");
 constexpr size_t maxOpens = 16, maxHandles = 32;
 
 struct Library {
@@ -141,15 +140,65 @@ inline uint32_t guestSmfLength(uint32_t address, const Read& read) {
     return uint32_t(at);
 }
 
+// A single-producer single-consumer ring of a fixed size, a power of 2. Its storage is made by allocate, once,
+// before either side uses it; push and front on a ring with none fail. Neither side allocates or locks.
+template <typename T>
+class SpscRing {
+   public:
+    SpscRing() = default;
+    explicit SpscRing(size_t capacity) { allocate(capacity); }
+    SpscRing(const SpscRing&) = delete;
+    SpscRing& operator=(const SpscRing&) = delete;
+    ~SpscRing() { delete[] data_.load(std::memory_order_relaxed); }
+
+    void allocate(size_t capacity) {
+        if (data_.load(std::memory_order_relaxed) || !capacity || (capacity & (capacity - 1))) return;
+        mask_ = capacity - 1;
+        data_.store(new T[capacity], std::memory_order_release);
+    }
+    bool allocated() const { return data_.load(std::memory_order_acquire) != nullptr; }
+    size_t capacity() const { return allocated() ? mask_ + 1 : 0; }
+
+    // Producer: false, with value untouched, when full or not allocated.
+    bool push(T&& value) {
+        T* data = data_.load(std::memory_order_acquire);
+        const size_t tail = tail_.load(std::memory_order_relaxed);
+        if (!data || tail - head_.load(std::memory_order_acquire) > mask_) return false;
+        data[tail & mask_] = std::move(value);
+        tail_.store(tail + 1, std::memory_order_release);
+        return true;
+    }
+    bool full() const {
+        return !allocated() || tail_.load(std::memory_order_relaxed) - head_.load(std::memory_order_acquire) > mask_;
+    }
+    // Consumer: the oldest entry, or null when empty. pop drops it; move out of it first to keep it.
+    T* front() {
+        T* data = data_.load(std::memory_order_acquire);
+        const size_t head = head_.load(std::memory_order_relaxed);
+        if (!data || head == tail_.load(std::memory_order_acquire)) return nullptr;
+        return &data[head & mask_];
+    }
+    void pop() { head_.store(head_.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
+    size_t size() const { return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire); }
+
+   private:
+    std::atomic<T*> data_{nullptr};
+    size_t mask_ = 0;
+    std::atomic<size_t> head_{0}, tail_{0};
+};
+
 // The hooks' host side. hit takes each code hook stop at one of the library's pcs; the events wait in order for
 // the player (take). Host only, never saved: a reset or load calls reset, which drops the opens and handles.
-// hit, reset and stats are the producer's (the emulation thread), take and pending the consumer's.
+// hit, reset and stats are the producer's (the emulation thread), take and pending the consumer's. The ring is
+// made by enable, the first time the hooks go on, so a Zodiac with them off holds none; until then nothing is kept.
 class Hooks {
    public:
-    Hooks() : ring_(new Event[maxEvents]) {
+    Hooks() {
         opens_.reserve(maxOpens);
         handles_.reserve(maxHandles);
     }
+    // Before the first hit or take, and before a consumer on another thread starts.
+    void enable() { ring_.allocate(maxEvents); }
 
     // False for a pc that isn't one of the library's. Never changes the guest.
     bool hit(const Library& library, uint32_t pc, const uint32_t (&r)[16], uint64_t timeNs, const Read& read) {
@@ -216,15 +265,16 @@ class Hooks {
         push(at(timeNs, Kind::reset, 0));
     }
 
+    // The consumer's: the slot is emptied here, so what it held is freed on this thread or moved to e.
     bool take(Event& e) {
-        const size_t head = head_.load(std::memory_order_relaxed);
-        if (head == tail_.load(std::memory_order_acquire)) return false;
-        e = std::move(ring_[head & (maxEvents - 1)]);
-        ring_[head & (maxEvents - 1)] = Event();
-        head_.store(head + 1, std::memory_order_release);
+        Event* front = ring_.front();
+        if (!front) return false;
+        e = std::move(*front);
+        *front = Event();
+        ring_.pop();
         return true;
     }
-    size_t pending() const { return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire); }
+    size_t pending() const { return ring_.size(); }
     const Stats& stats() const { return stats_; }
 
    private:
@@ -232,8 +282,7 @@ class Hooks {
     struct Handle { uint32_t handle; std::shared_ptr<const Smf> smf; };
     std::vector<Open> opens_;
     std::vector<Handle> handles_;
-    std::unique_ptr<Event[]> ring_;
-    std::atomic<size_t> head_{0}, tail_{0};
+    SpscRing<Event> ring_;
     Stats stats_;
 
     static Event at(uint64_t timeNs, Kind kind, uint32_t handle) {
@@ -244,10 +293,7 @@ class Hooks {
         return e;
     }
     void push(Event&& e) {
-        const size_t tail = tail_.load(std::memory_order_relaxed);
-        if (tail - head_.load(std::memory_order_acquire) >= maxEvents) { ++stats_.dropped; return; }
-        ring_[tail & (maxEvents - 1)] = std::move(e);
-        tail_.store(tail + 1, std::memory_order_release);
+        if (!ring_.push(std::move(e))) ++stats_.dropped;
     }
     void message(uint64_t timeNs, uint32_t handle, uint32_t status, uint32_t a, uint32_t b, uint8_t length) {
         // Data bytes keep up to 8 bits; the player clamps them.

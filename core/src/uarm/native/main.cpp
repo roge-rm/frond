@@ -804,6 +804,9 @@ bool gFastEngineMissing = false;
                                                gdbPort, pxa270 ? 2 : deviceGetSocRev()));
         }
 
+        if (board != DeviceBoard5::imx1Zodiac && (options.musicHooks || options.musicSoundFont))
+            cerr << "--music-hooks and --music-soundfont are for the Tapwave Zodiac only; ignored" << endl;
+
         // Before the load, which applies it again over the session's saved inputs.
         if (soc->BatterySupported()) soc->SetBattery(options.battery);
         else if (options.battery != BatteryPower{}) cerr << "this device's battery can't be set yet, it stays full" << endl;
@@ -1044,23 +1047,39 @@ bool gFastEngineMissing = false;
         const uint32_t audioPeriod = options.audioPeriod;
         if (lowLatencyQueue) audioQueueEnsureCapacity(audioQueue, size_t(audioPeriod) * 12 + 1024);
         if (options.experimentalFastAudio) static_cast<SocPXA*>(soc)->SetFastAudioPeriod(audioPeriod);
-        SdlAudioDriver audioDriver(soc, audioQueue, lowLatencyQueue, audioPeriod);
+        // The Zodiac's MIDI music through a SoundFont, mixed on the audio callback's thread. Declared before the
+        // driver, and its mixer cleared at the end of the scope, so the callback never runs into a freed synth.
 #ifndef __ANDROID__
-        // The Zodiac's MIDI music through a SoundFont, mixed on the audio callback's thread.
         std::unique_ptr<ZodiacMusicSynth> musicSynth;
-        if (options.musicSoundFont) {
-            auto* zodiac = dynamic_cast<SocIMX1*>(soc);
-            if (!zodiac || !zodiac->MusicHooksOn()) {
-                std::cerr << "--music-soundfont: no Zodiac music hooks, so no music" << std::endl;
+#endif
+        SdlAudioDriver audioDriver(soc, audioQueue, lowLatencyQueue, audioPeriod);
+        struct ClearMixerAtEnd {
+            SdlAudioDriver& driver;
+            ~ClearMixerAtEnd() { driver.ClearMixer(); }
+        } clearMixerAtEnd{audioDriver};
+        if (auto* zodiac = dynamic_cast<SocIMX1*>(soc); options.musicSoundFont && zodiac && zodiac->MusicHooksOn()) {
+            // Nobody would take the events: print them with --music-hooks, else the hooks go off.
+            const auto noSynth = [&](const std::string& why) {
+                const bool log = options.musicHooks;
+                zodiac->SetMusicHooks(log, true);
+                cerr << "--music-soundfont: " << why << "; " << (log ? "printing the music calls" : "music hooks off")
+                     << endl;
+            };
+#ifndef __ANDROID__
+            if (options.disableAudio) {
+                noSynth("no audio");
             } else if (musicSynth = std::make_unique<ZodiacMusicSynth>(); !musicSynth->loadFile(*options.musicSoundFont)) {
-                std::cerr << "--music-soundfont: can't read " << *options.musicSoundFont << " as a SoundFont" << std::endl;
                 musicSynth.reset();
+                noSynth("can't read " + *options.musicSoundFont + " as a SoundFont");
             } else {
                 musicSynth->attach(&zodiac->MusicHooks());
+                musicSynth->start();
                 audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count) { synth->mix(frames, count); });
             }
-        }
+#else
+            noSynth("no SoundFont player in this build");
 #endif
+        }
         if (!options.disableAudio) audioDriver.Start();
 
         commands::Register();

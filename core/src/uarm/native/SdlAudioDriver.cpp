@@ -18,6 +18,7 @@ SdlAudioDriver::SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatency
       periodFrames(periodFrames) {}
 
 SdlAudioDriver::~SdlAudioDriver() {
+    if (!initialized) ClearMixer();
     if (initialized) {
         SDL_CloseAudioDevice(audioDevice);
     }
@@ -116,16 +117,31 @@ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
                                           samplesRemaining, queueGeneration);
     }
 
+    // The mixer runs muted too, so its clock and events keep pace with the guest audio taken.
+    const size_t played = size_t(len) / 4 - samplesRemaining;
+    if (mixer && played) mixer(reinterpret_cast<int16_t*>(stream), played);
     if (muted.load(std::memory_order_relaxed)) {
         memset(stream, 0, len);
         return;
     }
     if (samplesRemaining > 0) memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
-    if (mixer) mixer(reinterpret_cast<int16_t*>(stream), size_t(len) / 4);
+}
+
+void SdlAudioDriver::ClearMixer() {
+    if (!mixer) return;
+    // The callback may be in it: take the device's lock. Never called on Android (no mixer there), where a
+    // background pause holds that lock.
+    if (audioDevice) SDL_LockAudioDevice(audioDevice);
+    mixer = nullptr;
+    if (audioDevice) SDL_UnlockAudioDevice(audioDevice);
 }
 
 void SdlAudioDriver::SetMuted(bool value) { muted.store(value, std::memory_order_relaxed); }
-void SdlAudioDriver::Abandon() { initialized = false; }
+void SdlAudioDriver::Abandon() {
+    // The device stays open, so nothing it calls may outlive this.
+    ClearMixer();
+    initialized = false;
+}
 
 void SdlAudioDriver::SetHeadless(bool value) {
     if (headless == value) return;

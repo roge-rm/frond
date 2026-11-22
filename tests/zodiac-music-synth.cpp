@@ -1,14 +1,18 @@
 // The Zodiac music synth (native/ZodiacMusicSynth.h) with a SoundFont made here (one looped square wave): silence
 // until the guest's note on, sound once it's due, nothing changed in frames before it, quiet again after the note
-// off and its release, a late event moving the clock, and refusing a file that isn't a SoundFont. Built with ASan
-// and UBSan.
+// off and its release, a late event moving the clock, a song from the guest's memory played through and its Held
+// freed, refusing a file that isn't a SoundFont, and the three threads (hooks, helper, audio) at once, which the
+// TSan build checks. Built with ASan and UBSan, and with TSan.
 #define TSF_IMPLEMENTATION
 #include "ZodiacMusicSynth.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 using Bytes = std::vector<uint8_t>;
@@ -69,57 +73,168 @@ uint64_t energy(const std::vector<int16_t>& s, size_t from, size_t to) {
     return e;
 }
 
-constexpr uint32_t noteOnPc = 0x1000, noteOffPc = 0x1004, volumePc = 0x1008;
+constexpr uint32_t noteOnPc = 0x1000, noteOffPc = 0x1004, volumePc = 0x1008, openPc = 0x100c, playPc = 0x1010,
+                   stopPc = 0x1014, sysExPc = 0x1018;
 zodiac_music::Library library() {
     zodiac_music::Library l;
     for (auto& pc : l.pcs) pc = 0xfffffff0;
     l.pcs[unsigned(zodiac_music::Call::noteOn)] = noteOnPc;
     l.pcs[unsigned(zodiac_music::Call::noteOff)] = noteOffPc;
     l.pcs[unsigned(zodiac_music::Call::setMasterVolume)] = volumePc;
+    l.pcs[unsigned(zodiac_music::Call::smfOpen)] = openPc;
+    l.pcs[unsigned(zodiac_music::Call::smfPlay)] = playPc;
+    l.pcs[unsigned(zodiac_music::Call::smfStop)] = stopPc;
+    l.pcs[unsigned(zodiac_music::Call::sysEx)] = sysExPc;
     return l;
 }
-void call(zodiac_music::Hooks& h, uint32_t pc, uint64_t timeNs, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+
+// A guest's memory, from 0: an SMF at smfAt, its handle word at handleAt, a sysex at sysExAt.
+constexpr uint32_t smfAt = 0x2000, handleAt = 0x3000, sysExAt = 0x3100, handle = 0x4444;
+struct Guest {
+    Bytes mem = Bytes(0x4000, 0);
+    Guest() {
+        // Note on 60 at 0, note off at 96 ticks (500 ms at 120 bpm), end there.
+        const Bytes smf = {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 96, 'M', 'T', 'r', 'k', 0, 0, 0, 12,
+                           0x00, 0x90, 0x3c, 0x64, 0x60, 0x80, 0x3c, 0x00, 0x00, 0xff, 0x2f, 0x00};
+        std::copy(smf.begin(), smf.end(), mem.begin() + smfAt);
+        const Bytes sysEx = {0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7};
+        std::copy(sysEx.begin(), sysEx.end(), mem.begin() + sysExAt);
+    }
+    bool read(uint32_t address, void* data, uint32_t size) const {
+        if (address > mem.size() || size > mem.size() - address) return false;
+        std::memcpy(data, mem.data() + address, size);
+        return true;
+    }
+};
+
+void call(zodiac_music::Hooks& h, const Guest& g, uint32_t pc, uint64_t timeNs, uint32_t a, uint32_t b, uint32_t c,
+          uint32_t d) {
     const uint32_t r[16] = {a, b, c, d};
-    assert(h.hit(library(), pc, r, timeNs, [](uint32_t, void*, uint32_t) { return false; }));
+    const bool hit = h.hit(library(), pc, r, timeNs, [&g](uint32_t at, void* data, uint32_t n) { return g.read(at, data, n); });
+    assert(hit);
+    (void)hit;
 }
 constexpr uint64_t ms = 1000000;
+
+bool same(const std::vector<int16_t>& s, size_t from, size_t to, int16_t level) {
+    for (size_t i = from * 2; i < to * 2; ++i)
+        if (s[i] != level) return false;
+    return true;
+}
+
+// The hooks on one thread, the helper on its own, mix on a third, as in the app.
+void threads(const Bytes& font) {
+    ZodiacMusicSynth synth;
+    const bool loaded = synth.load(font.data(), int(font.size()));
+    assert(loaded);
+    (void)loaded;
+    zodiac_music::Hooks hooks;
+    hooks.enable();
+    synth.attach(&hooks);
+    synth.start();
+    std::atomic<bool> done{false};
+    std::thread audio([&] {
+        std::vector<int16_t> out(512 * 2);
+        while (!done.load()) {
+            std::fill(out.begin(), out.end(), 0);
+            synth.mix(out.data(), 512);
+            std::this_thread::yield();
+        }
+    });
+    Guest guest;
+    uint64_t t = 1000 * ms;
+    for (unsigned i = 0; i < 3000; ++i, t += ms / 4) {
+        switch (i % 6) {
+            case 0: call(hooks, guest, openPc, t, handleAt, smfAt, 0, 0); break;
+            case 1:
+                std::memcpy(guest.mem.data() + handleAt, &handle, 4);
+                call(hooks, guest, playPc, t, handle, 0, 0, 0);
+                break;
+            case 2: call(hooks, guest, noteOnPc, t, 1, 2, 64, 100); break;
+            case 3: call(hooks, guest, sysExPc, t, 1, sysExAt, 6, 0); break;
+            case 4: call(hooks, guest, noteOffPc, t, 1, 2, 64, 0); break;
+            case 5: call(hooks, guest, stopPc, t, handle, 0, 0, 0); break;
+        }
+        if (i % 64 == 0) std::this_thread::yield();
+    }
+    while (hooks.pending() || synth.cuesWaiting()) std::this_thread::yield();
+    done.store(true);
+    audio.join();
+    synth.stop();
+    // This thread is the audio side now: two more seconds end any song whose stop was dropped (a full ring), and
+    // then every Held is back.
+    std::vector<int16_t> out(44100 * 2 * 2, 0);
+    synth.mix(out.data(), 44100 * 2);
+    synth.pump();
+    assert(synth.playing() == 0 && !synth.outstanding());
+}
 }  // namespace
 
 int main() {
     ZodiacMusicSynth synth;
     const Bytes junk(64, 0x55);
-    assert(!synth.load(junk.data(), int(junk.size())));
+    const bool junkLoaded = synth.load(junk.data(), int(junk.size()));
+    assert(!junkLoaded);
     const Bytes font = soundFont();
-    assert(synth.load(font.data(), int(font.size())));
+    const bool loaded = synth.load(font.data(), int(font.size()));
+    assert(loaded);
+    (void)junkLoaded;
+    (void)loaded;
 
     zodiac_music::Hooks hooks;
+    hooks.enable();
     synth.attach(&hooks);
-    // Guest 5 s: note on; guest 5.1 s: note off. The first event anchors guest 5 s to frame 0.
-    call(hooks, noteOnPc, 5000 * ms, 1, 0, 60, 127);
-    call(hooks, noteOffPc, 5100 * ms, 1, 0, 60, 0);
+    Guest guest;
+    // Guest 5 s: master volume, which anchors guest 5 s to frame 0; 5.05 s note on; 5.15 s note off.
+    call(hooks, guest, volumePc, 5000 * ms, 127, 0, 0, 0);
+    call(hooks, guest, noteOnPc, 5050 * ms, 1, 0, 60, 127);
+    call(hooks, guest, noteOffPc, 5150 * ms, 1, 0, 60, 0);
+    synth.pump();
+    assert(!hooks.pending() && synth.cuesWaiting() == 3);
     // The guest's own sound, kept under the music.
     std::vector<int16_t> out(44100 * 2, 100);
-    synth.mix(out.data(), 2205);  // 50 ms
-    assert(energy(out, 0, 2205) > uint64_t(2205) * 2 * 1000);
+    synth.mix(out.data(), 2205);  // 50 ms: up to the note on, nothing changed
+    assert(same(out, 0, 2205, 100));
     synth.mix(out.data() + 2205 * 2, 44100 - 2205);
-    // Sounding up to the note off at 100 ms (4410), then the release, then only the guest's level.
-    assert(energy(out, 2205, 4410) > uint64_t(2205) * 2 * 1000);
-    assert(energy(out, 30000, 44100) == uint64_t(14100) * 2 * 100);
-    assert(synth.playing() == 0 && !hooks.pending());
+    // Sounding from the note on at 50 ms (2205) to the note off at 150 ms (6615), then the release, then only the
+    // guest's level.
+    assert(energy(out, 2205, 6615) > uint64_t(4410) * 2 * 1000);
+    assert(same(out, 30000, 44100, 100));
+    assert(synth.playing() == 0 && !synth.cuesWaiting());
 
-    // Late by a second (a pause): the clock moves to it and it sounds at once.
-    call(hooks, volumePc, 7000 * ms, 64, 0, 0, 0);
-    call(hooks, noteOnPc, 7000 * ms, 1, 0, 67, 100);
+    // Late by a second and more (guest 7 s, the clock at 6.0 s): the clock moves to it and it sounds at once.
+    call(hooks, guest, noteOnPc, 7000 * ms, 1, 0, 67, 100);
+    synth.pump();
     std::vector<int16_t> quiet(512 * 2, 0);
     synth.mix(quiet.data(), 512);
     assert(energy(quiet, 0, 512) > 0);
-    // An empty font refuses nothing more and mixes nothing.
+    call(hooks, guest, noteOffPc, 7020 * ms, 1, 0, 67, 0);
+
+    // A song from guest memory: copied at its open, parsed on the helper's side, played, and its Held freed once it
+    // ends and the helper runs again. A guest sysex's Held comes back at once.
+    call(hooks, guest, openPc, 8000 * ms, handleAt, smfAt, 0, 0);
+    std::memcpy(guest.mem.data() + handleAt, &handle, 4);
+    call(hooks, guest, playPc, 8000 * ms, handle, 0, 0, 0);
+    call(hooks, guest, sysExPc, 8000 * ms, 1, sysExAt, 6, 0);
+    synth.pump();
+    assert(synth.outstanding() == 2 && !synth.refused());
+    std::vector<int16_t> song(44100 * 2, 0);
+    synth.mix(song.data(), 4410);
+    assert(synth.playing() == 1 && energy(song, 0, 4410) > 0);
+    synth.mix(song.data() + 4410 * 2, 44100 - 4410);
+    assert(synth.playing() == 0);
+    synth.pump();
+    assert(!synth.outstanding());
+
+    // An empty font mixes nothing.
     ZodiacMusicSynth none;
     none.attach(&hooks);
     std::vector<int16_t> flat(64 * 2, 7);
     none.mix(flat.data(), 64);
-    assert(energy(flat, 0, 64) == 64 * 2 * 7);
-    std::printf("PASS: Zodiac music synth (SoundFont load and refusal, note on and off on time, release, late events, "
-                "volume, mixing)\n");
+    assert(same(flat, 0, 64, 7));
+
+    threads(font);
+    std::printf("PASS: Zodiac music synth (SoundFont load and refusal, nothing before the first note, note on and off "
+                "on time, release, late events, a guest song through the helper, Helds freed, three threads)\n");
     return 0;
 }

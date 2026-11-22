@@ -2284,15 +2284,19 @@ test-zodiac-dma-channel: $(OBJ_ROOT)/zodiac-boot-probe
 		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-channel
 	$(OBJ_ROOT)/test-zodiac-dma-channel
 
-# The Zodiac music hooks' SoundFont synth (TinySoundFont), with ASan and UBSan.
+# The Zodiac music hooks' SoundFont synth (TinySoundFont), with ASan and UBSan, then with TSan for its threads.
 .PHONY: test-zodiac-music-synth
 test: test-zodiac-music-synth
+ZODIAC_MUSIC_SYNTH_FLAGS = -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+	-Wno-missing-field-initializers -Wno-sign-compare -Wno-implicit-fallthrough \
+	-Icore/src/uarm/native -Icore/src/uarm/uarm tests/zodiac-music-synth.cpp -pthread
 test-zodiac-music-synth:
 	@mkdir -p $(OBJ_ROOT)
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers \
-		-Wno-sign-compare -Wno-implicit-fallthrough -fsanitize=address,undefined -fno-sanitize-recover=all \
-		-Icore/src/uarm/native -Icore/src/uarm/uarm tests/zodiac-music-synth.cpp -o $(OBJ_ROOT)/test-zodiac-music-synth
+	$(CXX) $(ZODIAC_MUSIC_SYNTH_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-o $(OBJ_ROOT)/test-zodiac-music-synth
 	$(OBJ_ROOT)/test-zodiac-music-synth
+	$(CXX) $(ZODIAC_MUSIC_SYNTH_FLAGS) -fsanitize=thread -o $(OBJ_ROOT)/test-zodiac-music-synth-tsan
+	TSAN_OPTIONS=halt_on_error=1 setarch -R $(OBJ_ROOT)/test-zodiac-music-synth-tsan
 
 # The Zodiac music hooks' host sequencer, with ASan and UBSan.
 .PHONY: test-zodiac-music-player

@@ -1078,7 +1078,18 @@ void SocIMX1::ApplyCodeHooks() {
     std::vector<uint32_t> pcs = traceHooks;
     if (BluetoothHooksOn())
         pcs.insert(pcs.end(), std::begin(zodiacBluetoothHooks), std::end(zodiacBluetoothHooks));
-    if (music.on) pcs.insert(pcs.end(), std::begin(music.library.pcs), std::end(music.library.pcs));
+    if (music.on) {
+        if (pcs.size() + zodiac_music::callCount > imx1MachineMaximumCodeHooks) {
+            // The music hooks all go in or none do.
+            std::cerr << "zodiac: no room for the music hooks next to " << pcs.size() << " other code hooks (at most "
+                      << imx1MachineMaximumCodeHooks << "); music hooks off" << std::endl;
+            music.on = false;
+            music.log = false;
+            music.hooks.reset(GetTime());
+        } else {
+            pcs.insert(pcs.end(), std::begin(music.library.pcs), std::end(music.library.pcs));
+        }
+    }
     if (pcs.size() > imx1MachineMaximumCodeHooks) pcs.resize(imx1MachineMaximumCodeHooks);
     if (!imx1MachineSetCodeHooks(machine, pcs.data(), unsigned(pcs.size())))
         std::cerr << "zodiac: code hooks refused" << std::endl;
@@ -1122,11 +1133,12 @@ bool SocIMX1::SetMusicHooks(bool on, bool log) {
     }
     music.log = on && log;
     if (on == music.on) return on;
+    // The ring is made the first time and then stays: a consumer on another thread may be reading it.
+    if (on) music.hooks.enable();
     music.on = on;
-    // The ring stays: a consumer on another thread may be reading it.
     music.hooks.reset(machine ? GetTime() : 0);
     if (machine) ApplyCodeHooks();
-    return on;
+    return music.on;
 }
 
 void SocIMX1::MusicHook(uint32_t pc, const uint32_t (&r)[16]) {
