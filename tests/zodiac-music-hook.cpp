@@ -165,8 +165,10 @@ void checkEvents(const Caught& c) {
     const auto& smf = *ev[0].smf;
     assert(smf.address == 0x20000000 + smfAt && smf.bytes == smfFile());
     // Tempo, note on, note off, program change, end of track; 96 ticks a quarter at 120 bpm.
-    assert(smf.song.events.size() == 5 && smf.song.events[2].timeUs == 500000);
-    assert(smf.song.events[3].status == 0xc1 && smf.song.events[3].data1 == 0xff);
+    zodiac_smf::Song song;
+    assert(zodiac_smf::parseSmf(smf.bytes.data(), smf.bytes.size(), song) == zodiac_smf::Error::none);
+    assert(song.events.size() == 5 && song.events[2].timeUs == 500000);
+    assert(song.events[3].status == 0xc1 && song.events[3].data1 == 0xff);
     assert(ev[1].kind == Kind::masterVolume && ev[1].value == 99);
     const auto message = [&](size_t i, uint8_t a, uint8_t b, uint8_t c2, uint8_t length) {
         assert(ev[i].kind == Kind::message && ev[i].handle == midiHandle && ev[i].length == length);

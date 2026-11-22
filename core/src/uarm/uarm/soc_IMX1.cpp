@@ -1123,7 +1123,8 @@ bool SocIMX1::SetMusicHooks(bool on, bool log) {
     music.log = on && log;
     if (on == music.on) return on;
     music.on = on;
-    music.hooks = zodiac_music::Hooks();
+    // The ring stays: a consumer on another thread may be reading it.
+    music.hooks.reset(machine ? GetTime() : 0);
     if (machine) ApplyCodeHooks();
     return on;
 }
@@ -1137,9 +1138,8 @@ void SocIMX1::MusicHook(uint32_t pc, const uint32_t (&r)[16]) {
         const double t = double(e.timeNs) / 1e9;
         switch (e.kind) {
             case zodiac_music::Kind::play:
-                std::snprintf(line, sizeof line, "zodiac music %.3f play %08x smf %08x %zu bytes %zu events %.1f s",
-                              t, e.handle, e.smf->address, e.smf->bytes.size(), e.smf->song.events.size(),
-                              double(e.smf->song.lengthUs) / 1e6);
+                std::snprintf(line, sizeof line, "zodiac music %.3f play %08x smf %08x %zu bytes", t, e.handle,
+                              e.smf ? e.smf->address : 0, e.smf ? e.smf->bytes.size() : 0);
                 break;
             case zodiac_music::Kind::stop: std::snprintf(line, sizeof line, "zodiac music %.3f stop %08x", t, e.handle); break;
             case zodiac_music::Kind::close: std::snprintf(line, sizeof line, "zodiac music %.3f close %08x", t, e.handle); break;

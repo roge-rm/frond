@@ -5,6 +5,9 @@
 // catch a game's SMF and real-time MIDI calls and turn them into host events, timed in guest time. The hooks only
 // read registers and guest memory; the ROM runs every call as it would without them. Nothing here touches the
 // machine: guest memory comes through the caller's read function.
+// Threads: hit and reset run on the emulation thread and only copy (the SMF's bytes once at its open, a sysex's
+// bytes) and push small events into a single-producer single-consumer ring; parsing and playing happen on the
+// consumer's side (zodiac_music_player.h), which calls take.
 //
 // ROM facts (1.1; zodiac MIDI out design in the plan): the library runs in place from ROM, its code resource
 // starts with a branch, then the entry table's offset, its globals' size, a version, the entry count (21) and
@@ -17,8 +20,8 @@
 // not checked against a game: none of the 58 calls them.
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <cstring>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -38,8 +41,9 @@ constexpr uint32_t libraryEntries = 21;
 // An SMF bigger than this isn't copied (the games' biggest is under 100 KB).
 constexpr uint32_t maxSmfBytes = 1u << 20;
 constexpr uint32_t maxSysExBytes = 4096;
-// Events kept for the player; older ones go first when it falls behind.
+// Events the ring holds for the player; newer ones are dropped while it is full.
 constexpr size_t maxEvents = 4096;
+static_assert((maxEvents & (maxEvents - 1)) == 0, "the ring's size is a power of 2");
 constexpr size_t maxOpens = 16, maxHandles = 32;
 
 struct Library {
@@ -83,11 +87,11 @@ inline bool findLibrary(const uint8_t* rom, size_t size, uint32_t base, Library&
     return false;
 }
 
-// A file the guest opened: its bytes, copied at TwSmfOpen, and the song read from them.
+// A file the guest opened: its bytes from MThd through the last track, copied at TwSmfOpen. The player reads
+// the song from them.
 struct Smf {
     uint32_t address = 0;
     std::vector<uint8_t> bytes;
-    zodiac_smf::Song song;
 };
 
 enum class Kind : uint8_t {
@@ -139,8 +143,14 @@ inline uint32_t guestSmfLength(uint32_t address, const Read& read) {
 
 // The hooks' host side. hit takes each code hook stop at one of the library's pcs; the events wait in order for
 // the player (take). Host only, never saved: a reset or load calls reset, which drops the opens and handles.
+// hit, reset and stats are the producer's (the emulation thread), take and pending the consumer's.
 class Hooks {
    public:
+    Hooks() : ring_(new Event[maxEvents]) {
+        opens_.reserve(maxOpens);
+        handles_.reserve(maxHandles);
+    }
+
     // False for a pc that isn't one of the library's. Never changes the guest.
     bool hit(const Library& library, uint32_t pc, const uint32_t (&r)[16], uint64_t timeNs, const Read& read) {
         unsigned call = 0;
@@ -207,12 +217,14 @@ class Hooks {
     }
 
     bool take(Event& e) {
-        if (events_.empty()) return false;
-        e = std::move(events_.front());
-        events_.pop_front();
+        const size_t head = head_.load(std::memory_order_relaxed);
+        if (head == tail_.load(std::memory_order_acquire)) return false;
+        e = std::move(ring_[head & (maxEvents - 1)]);
+        ring_[head & (maxEvents - 1)] = Event();
+        head_.store(head + 1, std::memory_order_release);
         return true;
     }
-    size_t pending() const { return events_.size(); }
+    size_t pending() const { return tail_.load(std::memory_order_acquire) - head_.load(std::memory_order_acquire); }
     const Stats& stats() const { return stats_; }
 
    private:
@@ -220,7 +232,8 @@ class Hooks {
     struct Handle { uint32_t handle; std::shared_ptr<const Smf> smf; };
     std::vector<Open> opens_;
     std::vector<Handle> handles_;
-    std::deque<Event> events_;
+    std::unique_ptr<Event[]> ring_;
+    std::atomic<size_t> head_{0}, tail_{0};
     Stats stats_;
 
     static Event at(uint64_t timeNs, Kind kind, uint32_t handle) {
@@ -231,8 +244,10 @@ class Hooks {
         return e;
     }
     void push(Event&& e) {
-        if (events_.size() >= maxEvents) { events_.pop_front(); ++stats_.dropped; }
-        events_.push_back(std::move(e));
+        const size_t tail = tail_.load(std::memory_order_relaxed);
+        if (tail - head_.load(std::memory_order_acquire) >= maxEvents) { ++stats_.dropped; return; }
+        ring_[tail & (maxEvents - 1)] = std::move(e);
+        tail_.store(tail + 1, std::memory_order_release);
     }
     void message(uint64_t timeNs, uint32_t handle, uint32_t status, uint32_t a, uint32_t b, uint8_t length) {
         // Data bytes keep up to 8 bits; the player clamps them.
@@ -243,8 +258,9 @@ class Hooks {
         e.length = length;
         push(std::move(e));
     }
-    // TwSmfOpen's entry: copies the file. The handle isn't known until the call writes it to handleAt, so the
-    // open waits for the Play whose handle is there. A file that can't be read or parsed opens nothing here.
+    // TwSmfOpen's entry: copies the file, found by its chunk headers. The handle isn't known until the call writes
+    // it to handleAt, so the open waits for the Play whose handle is there. A file whose chunks can't be read
+    // opens nothing here; one that reads but doesn't parse is refused by the player.
     void open(uint32_t handleAt, uint32_t address, const Read& read) {
         if (!handleAt || !address) return;
         for (size_t i = 0; i < opens_.size(); ++i)
@@ -253,9 +269,7 @@ class Hooks {
         smf->address = address;
         const uint32_t length = guestSmfLength(address, read);
         smf->bytes.resize(length);
-        if (!length || !read(address, smf->bytes.data(), length) ||
-            zodiac_smf::smfLength(smf->bytes.data(), length) != length ||
-            zodiac_smf::parseSmf(smf->bytes.data(), length, smf->song) != zodiac_smf::Error::none) {
+        if (!length || !read(address, smf->bytes.data(), length)) {
             ++stats_.badFiles;
             return;
         }
