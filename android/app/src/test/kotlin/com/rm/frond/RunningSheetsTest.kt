@@ -123,12 +123,14 @@ class RunningSheetsTest {
     }
 
     @Test fun audioRowsFollowTheHardware() {
+        val vibrating = setOf("palm-m500", "palm-m505", "palm-m515", "palm-m520", "ibm-workpad-c500",
+            "sony-clie-t415", "tapwave-zodiac-2")
         for (device in Device.entries) {
             val rows = RunningSheets.audioRows(device)
             assertEquals(AudioRow.SOUND, rows.first())
             assertEquals(device.id, !device.runs68k || device.microphone, AudioRow.MICROPHONE in rows)
             assertEquals(device.id, !device.runs68k, AudioRow.AUDIO_PREVIEW in rows)
-            assertEquals(device.id, device.zodiac, AudioRow.RUMBLE in rows)
+            assertEquals(device.id, device.id in vibrating, AudioRow.RUMBLE in rows)
         }
     }
 

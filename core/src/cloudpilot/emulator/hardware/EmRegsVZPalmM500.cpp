@@ -120,7 +120,8 @@ EmUARTDeviceType EmRegsVZPalmM500::GetUARTDevice(int uartNum) {
 // ---------------------------------------------------------------------------
 
 Bool EmRegsVZPalmM500::GetVibrateOn(void) {
-    return (READ_REGISTER(portKData) & hwrVZPortKVibeEn) != 0;
+    return (READ_REGISTER(portKDir) & READ_REGISTER(portKSelect) & READ_REGISTER(portKData) &
+            hwrVZPortKVibeEn) != 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,12 +129,8 @@ Bool EmRegsVZPalmM500::GetVibrateOn(void) {
 // ---------------------------------------------------------------------------
 
 uint16 EmRegsVZPalmM500::GetLEDState(void) {
-    uint16 result = kLEDOff;
-    UInt8 portBData = READ_REGISTER(portBData);
-
-    if (portBData & hwrVZPortBALARM_LED) result |= kLEDGreen;
-
-    return result;
+    const uint8 outputs = READ_REGISTER(portBDir) & READ_REGISTER(portBSelect) & READ_REGISTER(portBData);
+    return outputs & hwrVZPortBALARM_LED ? kLEDGreen : kLEDOff;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,4 +205,8 @@ EmSPISlave* EmRegsVZPalmM500::GetSPI2Slave(void) {
     }
 
     return NULL;
+}
+
+void EmRegsVZPalmM500::SetUsbCradle(bool docked) {
+    static_cast<EmSPISlaveADS784x*>(fSPISlaveADC)->SetTwisterDocked(docked);
 }

@@ -108,7 +108,7 @@ data class MachineSettings(
     val usbPort: String = UsbPort.OFF,
     // Dana Wireless: the built-in Wi-Fi module's radio (applied at every start).
     val wifiModule: Boolean = true,
-    // Zodiac: its rumble motor drives the controller's or the phone's vibrator.
+    // The guest motor drives the controller's or the phone's vibrator.
     val rumble: Boolean = true,
     // CLIE TG50: the game controller on the connector. null leaves what the session has (nothing was chosen yet).
     val gamepad: Boolean? = null,

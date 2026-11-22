@@ -1,13 +1,15 @@
 package com.rm.frond
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioManager
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.view.InputDevice
 
-// Where the guest's vibrate motor (the Zodiac's rumble) goes: the controller playing when it has a
+// Where the guest's vibrate motor goes: the controller playing when it has a
 // vibrator, else the phone's, or nowhere when the machine's Rumble setting is off.
 enum class RumbleTarget { CONTROLLER, PHONE, NONE }
 
@@ -22,7 +24,7 @@ object RumbleChoice {
 
 // Runs a vibrator while the guest's motor is on. The guest steps any pattern itself, so this only starts
 // and stops. UI thread only.
-class Rumble(private val context: Context) {
+class Rumble(private val context: Context, private val notification: Boolean = false) {
     var enabled = true
         set(value) {
             field = value
@@ -40,7 +42,10 @@ class Rumble(private val context: Context) {
             stop()
             return
         }
-        val pad = controller?.let { controllerVibrator(it) }
+        if (notification &&
+            context.getSystemService(AudioManager::class.java)?.ringerMode == AudioManager.RINGER_MODE_SILENT
+        ) return
+        val pad = if (notification) null else controller?.let { controllerVibrator(it) }
         val phone = phoneVibrator()
         val vibrator = when (RumbleChoice.target(enabled, pad != null, phone != null)) {
             RumbleTarget.CONTROLLER -> pad
@@ -48,8 +53,16 @@ class Rumble(private val context: Context) {
             RumbleTarget.NONE -> null
         } ?: return
         // Repeats the 1 s step until cancelled.
-        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 1000), 0))
+        val effect = VibrationEffect.createWaveform(longArrayOf(0, 1000), 0)
+        if (notification) vibrateNotification(vibrator, effect)
+        else vibrator.vibrate(effect)
         running = vibrator
+    }
+
+    @Suppress("DEPRECATION")
+    private fun vibrateNotification(vibrator: Vibrator, effect: VibrationEffect) {
+        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build()
+        vibrator.vibrate(effect, attributes)
     }
 
     // Stops it, as when the app goes to the background; the next on starts it again.

@@ -235,10 +235,10 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "iiix"},
      0, 0, 16580608},
     // Palm m125: DragonBall VZ with 8 MiB of RAM, one SD/MMC slot, serial and USB HotSync on the Universal
-    // Connector (USB isn't emulated yet) and infrared. Power is on the top edge, outside the bar.
+    // Connector and infrared. Power is on the top edge, outside the bar.
     {deviceTypeM125, "palm-m125", "Palm m125", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x76737475 /* vstu */, DeviceBoard5::vz328, DeviceArt::m125,
-     {false, false, true, false, false, true, false, true, false, false, true, true},
+     {false, false, true, true, false, true, false, true, false, false, true, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Note Pad",
@@ -247,7 +247,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // Palm m500: the m125's board with the m515's keys, 8 MiB of RAM and the same slot and connector.
     {deviceTypeM500, "palm-m500", "Palm m500", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x7674726e /* vtrn */, DeviceBoard5::vz328, DeviceArt::m500,
-     {false, false, true, false, false, true, false, true, false, false, true, true},
+     {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Note Pad",
@@ -256,7 +256,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // IBM WorkPad c500: an m500 sold by IBM. Its ROM has the m500's HAL ID, so it is picked by choosing the device.
     {deviceTypeC500, "ibm-workpad-c500", "IBM WorkPad c500", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0x70616c6d /* palm */, 0x7674726e /* vtrn */, DeviceBoard5::vz328, DeviceArt::c500,
-     {false, false, true, false, false, true, false, true, false, false, true, true},
+     {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Note Pad",
@@ -275,7 +275,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // Palm m505: the m500 with a colour reflective TFT on Epson's SED1376 controller, 8 MiB of RAM.
     {deviceTypeM505, "palm-m505", "Palm m505", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x65637479 /* ecty */, DeviceBoard5::vz328, DeviceArt::m505,
-     {false, false, true, false, false, true, false, true, false, false, true, true},
+     {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Note Pad",
@@ -284,7 +284,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // Palm m515: the m505 with a brighter colour TFT and 16 MiB of RAM.
     {deviceTypeM515, "palm-m515", "Palm m515", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x766c6974 /* vlit */, DeviceBoard5::vz328, DeviceArt::m515,
-     {false, false, true, false, false, true, false, true, false, false, true, true},
+     {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 16u << 20, 16u << 20, DisplayMode::mode_160x160, 1u << 1, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Note Pad",
@@ -302,7 +302,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // Palm m520: an unreleased m515 with a 320x320 colour panel on a MediaQ MQ1100 and 16 MiB of RAM.
     {deviceTypeM520, "palm-m520", "Palm m520", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x7366676f /* sfgo */, DeviceBoard5::vz328, DeviceArt::m520,
-     {false, false, true, false, false, true, false, true, false, false, true, true},
+     {false, false, true, false, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "iiix-hires", 320, 320, 120, 88, "Date Book|Address|To Do List|Note Pad",
@@ -311,7 +311,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // Dana uses its built-in keyboard and two independent SD/MMC slots.
     {deviceTypeDana, "alphasmart-dana", "AlphaSmart Dana", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
-     DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, true},
+     DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, true, false, 3},
      6u << 20, 0, 8u << 20, 8u << 20, DisplayMode::mode_560x160, 1u << 9, false,
      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
@@ -320,7 +320,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // already gives it Wi-Fi.
     {deviceTypeDanaWireless, "alphasmart-dana-wireless", "AlphaSmart Dana Wireless", DeviceCohort5::vz68k,
      DeviceSupport5::experimentalDesktop, DeviceDetect5::none, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
-     DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, false, true},
+     DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, false, true, 3},
      6u << 20, 0, 16u << 20, 16u << 20, DisplayMode::mode_560x160, 1u << 9, false,
      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
@@ -340,7 +340,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // emulated: the T415 has the piezo beeper.
     {deviceTypeT415, "sony-clie-t415", "Sony CLIÉ T415", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x736f6e79 /* sony */, 0x766e6365 /* vnce */, DeviceBoard5::vz328, DeviceArt::t415,
-     {false, false, true, true, false, true, false, true, false, false, false, true},
+     {false, false, true, true, false, true, false, true, false, false, false, true, false, false, false, 3, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_320x320, 1u << 5, false,
      DeviceNorLayout5::any, 0, 0, false, 0, 0,
      {true, "iiix-hires", 320, 320, 128, 104, "Date Book|Address|To Do|Memo Pad",
@@ -465,8 +465,7 @@ inline bool deviceProfileHasHotSyncButton5(int32_t deviceType) {
 }
 
 // A connector the device has that Frond doesn't run yet, named as the frontends grey it out; empty for none.
-// The Dana's USB computer port and the VZ Palms' USB HotSync wait on their USB device controllers,
-// unless the profile already has usb (the T415).
+// The Dana computer port and the remaining VZ cradle ports need their USB device controllers.
 inline const char* deviceProfilePendingUsb5(int32_t deviceType) {
     const auto* profile = deviceProfile5(deviceType);
     if (!profile || profile->board != DeviceBoard5::vz328 || profile->capabilities.usb) return "";

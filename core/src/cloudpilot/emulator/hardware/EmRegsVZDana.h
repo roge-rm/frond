@@ -221,6 +221,7 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
     bool CopyLCDFrame(Frame& frame, bool fullRefresh) override;
     Bool GetLCDScreenOn() override;
     Bool GetLCDBacklightOn() override;
+    uint16 GetLEDState() override;
     uint8 GetPortInternalValue(int port) override;
     void GetKeyInfo(int* rows, int* cols, uint16* map, Bool* active) override;
 };

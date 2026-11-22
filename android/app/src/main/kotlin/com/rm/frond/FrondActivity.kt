@@ -577,7 +577,7 @@ open class FrondActivity : SDLActivity() {
         if (followsProgram()) requestedOrientation = orientationRequest()
     }
 
-    // The guest's LED or vibrate motor changed (the Zodiac's rumble). ledColour has bits 1 green and 2 red;
+    // The guest's LED or vibrate motor changed. ledColour has bits 1 green and 2 red;
     // the core draws the LED in the button bar, so it is only kept here. lamp is a second lamp output, not shown.
     // The core's latest vibrate state, kept so rumble that is still on comes back when the app does.
     private var guestVibrate = false
@@ -711,7 +711,9 @@ open class FrondActivity : SDLActivity() {
         configureController(runningDevice)
         if (launchDevice().zodiac) {
             zodiacPad = ZodiacPad(ControllerMap.load(this, launchDevice()), ZodiacPad::push)
-            rumble = Rumble(this).also { it.enabled = machineSettings.rumble }
+        }
+        if (launchDevice().vibrate) {
+            rumble = Rumble(this, notification = launchDevice().runs68k).also { it.enabled = machineSettings.rumble }
         }
         inputDevices = getSystemService(InputManager::class.java)
         inputListener = object : InputManager.InputDeviceListener {
@@ -1362,12 +1364,13 @@ open class FrondActivity : SDLActivity() {
         keyboardButton?.visibility = if (corner && bar.keyboardKey) View.VISIBLE else View.GONE
     }
 
-    // The bar's mode changed in the Display sheet.
+    // The physical vibration setting changed in the Audio sheet.
     fun applyRumble() {
         val on = Sessions.forPath(this, sessionPath)?.settings?.rumble ?: return
         runOnUiThread {
             machineSettings = machineSettings.copy(rumble = on)
             rumble?.enabled = on
+            if (on && foreground && !leaving) rumble?.set(guestVibrate)
         }
     }
 

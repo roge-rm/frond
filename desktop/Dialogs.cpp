@@ -487,7 +487,8 @@ void MachineSettings::setDevice(Device device) {
         frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(frontend)));
     const bool m68k = frondFirmware::runs68k(device);
     fastAudio->setVisible(!m68k);
-    rumble->setVisible(device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac);
+    rumble->setText(frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac ? tr("Rumble") : tr("Vibrate"));
+    rumble->setVisible(known && frondFirmware::capabilities(device).vibrate);
     showMips->setVisible(!m68k);
     contrastLabel->setVisible(frondFirmware::lcdContrast(device));
     contrast->setVisible(frondFirmware::lcdContrast(device));

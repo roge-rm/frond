@@ -1053,6 +1053,16 @@ EmCPU* EmDevice::CreateCPU(EmSession* session) const {
  *
  ***********************************************************************/
 
+template <typename Board>
+static void AddPalmUsbCradle(Board* board, emuptr address) {
+    auto* usb = new EmRegsUsbD12(address);
+    // The active-low D12 interrupt is wired to PD6 (IRQ3).
+    usb->onInterrupt = [board](bool asserted) { board->SetUsbIrq3Line(asserted); };
+    usb->onCable = [board](bool attached) { board->SetUsbCradle(attached); };
+    EmBankRegs::AddSubBank(board);
+    EmBankRegs::AddSubBank(usb);
+}
+
 void EmDevice::CreateRegs(void) const {
     switch (fDeviceID) {
         case kDevicePilot:
@@ -1128,8 +1138,7 @@ void EmDevice::CreateRegs(void) const {
         }
 
         case kDevicePalmM125:
-            EmBankRegs::AddSubBank(new EmRegsVZPalmM125);
-            EmBankRegs::AddSubBank(new EmRegsUSBPhilipsPDIUSBD12(0x1F000000));
+            AddPalmUsbCradle(new EmRegsVZPalmM125, 0x1f000000);
             break;
 
         case kDevicePalmM130: {
@@ -1167,30 +1176,27 @@ void EmDevice::CreateRegs(void) const {
         }
 
         case kDevicePalmM500:
-            EmBankRegs::AddSubBank(new EmRegsVZPalmM500);
-            EmBankRegs::AddSubBank(new EmRegsUSBPhilipsPDIUSBD12(0x10400000));
+            AddPalmUsbCradle(new EmRegsVZPalmM500, 0x10400000);
             break;
 
         case kDevicePalmM505: {
-            EmBankRegs::AddSubBank(new EmRegsVZPalmM505);
+            AddPalmUsbCradle(new EmRegsVZPalmM505, 0x10400000);
 
             EmRegsFrameBuffer* framebuffer = new EmRegsFrameBuffer(sed1376VideoMemStart);
 
             EmBankRegs::AddSubBank(
                 new EmRegsSED1376PalmGeneric(sed1376RegsAddr, sed1376VideoMemStart, *framebuffer));
             EmBankRegs::AddSubBank(framebuffer);
-            EmBankRegs::AddSubBank(new EmRegsUSBPhilipsPDIUSBD12(0x10400000));
         } break;
 
         case kDevicePalmM515: {
-            EmBankRegs::AddSubBank(new EmRegsVZPalmM505);
+            AddPalmUsbCradle(new EmRegsVZPalmM505, 0x10400000);
 
             EmRegsFrameBuffer* framebuffer = new EmRegsFrameBuffer(sed1376VideoMemStart);
 
             EmBankRegs::AddSubBank(
                 new EmRegsSED1376PalmGeneric(sed1376RegsAddr, sed1376VideoMemStart, *framebuffer));
             EmBankRegs::AddSubBank(framebuffer);
-            EmBankRegs::AddSubBank(new EmRegsUSBPhilipsPDIUSBD12(0x10400000));
         } break;
 
         case kDevicePalmM520: {

@@ -102,7 +102,7 @@ object RunningSheets {
         val rows = mutableListOf(AudioRow.SOUND)
         if (!device.runs68k || device.microphone) rows += AudioRow.MICROPHONE
         if (!device.runs68k) rows += AudioRow.AUDIO_PREVIEW
-        if (device.zodiac) rows += AudioRow.RUMBLE
+        if (device.vibrate) rows += AudioRow.RUMBLE
         return rows
     }
 

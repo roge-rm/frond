@@ -415,9 +415,8 @@ void EmSPISlaveADS784x::ProcessCommand(uint8 command) {
         }
 
         case kChannelDockTwister: {
-            // Say that we're undocked.
-
-            result = 0x0FFF;
+            // USB dock ID 0x10: the ROM compares the high eight bits with its board's table.
+            result = fTwisterDocked ? 24 << 4 : 0x0FFF;
             break;
         }
 

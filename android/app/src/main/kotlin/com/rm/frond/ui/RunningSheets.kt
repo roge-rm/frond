@@ -309,7 +309,7 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
         AudioRow.SOUND -> MachineSwitchRow("Sound", device.sound && state.sound, true, enabled = device.sound) { actions.toggleSound() }
         AudioRow.MICROPHONE -> MicrophoneRow(model)
         AudioRow.AUDIO_PREVIEW -> MachineAudioPreviewRow(device, model.settings, true, APPLIES_AT_NEXT_START) { model.changeSettings(it) }
-        AudioRow.RUMBLE -> MachineRumbleRow(model.settings, true) { model.changeSettings(it) }
+        AudioRow.RUMBLE -> MachineRumbleRow(device, model.settings, true) { model.changeSettings(it) }
     }
 }
 
