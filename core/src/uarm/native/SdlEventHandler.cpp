@@ -212,7 +212,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 KeyId builtIn = soc->GamepadAttached() ? clieGamepadHostKey(scan) : keyInvalid;
-                if (!builtIn) builtIn = builtInKeyboardKey((*shownControls), scan);
+                if (!builtIn) builtIn = builtInKeyboardKey((*inputControls), scan);
                 if (scan > SDL_SCANCODE_UNKNOWN && size_t(scan) < builtInHeld.size() && builtIn) {
                     if (!builtInHeld[scan]) {
                         builtInHeld[scan] = builtIn;
