@@ -27,6 +27,24 @@ inline uint64_t imx1StepsUntil(uint64_t phase, uint64_t den, uint64_t n, uint64_
             return steps ? steps : 1;
         }
     }
+    // Where d divides den (k = den / d), each step adds N = n * k units of 1/den: with target * d = A * n + B,
+    // target * den = A * N + B * k, so the count is A, one more when B * k passes the phase, and fewer by
+    // (phase - B * k) / N whole steps when it doesn't. The same count without a 128-bit divide.
+    if (den % d == 0) {
+        const uint64_t k = den / d;
+        uint64_t scaled, step, part;
+        if (!__builtin_mul_overflow(target, d, &scaled) && !__builtin_mul_overflow(n, k, &step) &&
+            !__builtin_mul_overflow(scaled % n, k, &part)) {
+            const uint64_t whole = scaled / n;
+            uint64_t steps;
+            if (part > phase) steps = whole + 1;
+            else {
+                const uint64_t back = (phase - part) / step;
+                steps = back < whole ? whole - back : 0;
+            }
+            return steps ? steps : 1;
+        }
+    }
     const __uint128_t max = ~__uint128_t(0);
     const __uint128_t whole = __uint128_t(target) * den;
     if (whole <= phase) return 1;
