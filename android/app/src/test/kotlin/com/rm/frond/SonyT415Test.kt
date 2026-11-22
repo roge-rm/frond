@@ -101,6 +101,20 @@ class SonyT415Test {
         assertNotNull(Firmware.check(t415, rom(0x320000, flags = 0x0020), null))
     }
 
+    @Test fun retailRomCanContainTwoCopiesOfTheFlash() {
+        val flash = rom(0x400000)
+        val contents = flash.readBytes()
+        flash.appendBytes(contents)
+        assertEquals(t415, Firmware.detect(flash))
+        assertNull(Firmware.check(t415, flash, null))
+        RandomAccessFile(flash, "rw").use {
+            it.seek(it.length() - 1)
+            it.write(1)
+        }
+        assertNull(Firmware.detect(flash))
+        assertNotNull(Firmware.check(t415, flash, null))
+    }
+
     @Test fun controllerKeysReachTheJogDial() {
         val map = ControllerMap.defaults(t415)
         assertEquals(PalmButton.JOG_UP, map.keys[android.view.KeyEvent.KEYCODE_BUTTON_L2])

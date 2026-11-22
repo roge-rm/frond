@@ -623,7 +623,21 @@ inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read)
     // Card flags: 0x0001 RAM only, 0x0020 runs on the 68EZ328, 0x0040 on the 68VZ328. A VZ ROM has a version 5
     // header whose company and HAL IDs name the device.
     if (info.headerVersion == 5 && (flags & 0x0040) && !(flags & 0x0021)) {
-        if (size > rom68kVzMaxSize5 || size % 0x1000 || cardBytes > size) return info;
+        const bool mirroredT415 = size > rom68kVzMaxSize5;
+        if (mirroredT415) {
+            const auto* t415 = deviceProfile5(deviceTypeT415);
+            if (info.companyId != t415->companyId || info.halId != t415->halId ||
+                size != 2 * rom68kVzMaxSize5) return info;
+            // The retail T415 dump can contain two copies of its 4 MiB flash.
+            std::vector<uint8_t> first(0x10000), mirror(first.size());
+            for (uint64_t at = 0; at < rom68kVzMaxSize5; at += first.size()) {
+                if (!read(at, first.data(), first.size()) ||
+                    !read(at + rom68kVzMaxSize5, mirror.data(), mirror.size()) || first != mirror)
+                    return info;
+            }
+            size = rom68kVzMaxSize5;
+        }
+        if (size % 0x1000 || cardBytes > size) return info;
         if (reset < rom68kVzBase5 || reset - rom68kVzBase5 >= size) return info;
         // A ROM split into a small card and a big one (m515, m130, m520) names its device in the big card's
         // header, as Cloudpilot reads it; the m520's small card carries the m505's IDs.
@@ -640,6 +654,7 @@ inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read)
         }
         for (const auto& p : deviceProfiles5) {
             if (p.detect != DeviceDetect5::romHeader68k || p.board != DeviceBoard5::vz328 ||
+                (mirroredT415 && p.deviceType != deviceTypeT415) ||
                 deviceTypeIsDana5(p.deviceType) || info.companyId != p.companyId || info.halId != p.halId) continue;
             info.profile = &p;
             return info;
