@@ -233,6 +233,9 @@ class PalmIIIxTest {
         assertEquals("fit=fit smooth=off contrast=30 buttons=on", s.displayArgument(m68k = true))
         assertEquals("fit=fit smooth=off contrast=30 buttons=off", s.displayArgument(m68k = true, touchHidden = true))
         assertEquals("fit=fit smooth=off buttons=on", s.displayArgument())
+        // The 68k core takes the same buttons start option and display field as the ARM one.
+        assertEquals("fit=fit smooth=off contrast=30 buttons=off", s.displayArgument(m68k = true, touchHidden = true))
+        assertTrue("--hide-buttons" in s.arguments(m68k = true, touchHidden = true))
         val back = MachineSettings.from(s.json())
         assertEquals(30, back.contrast)
         assertEquals(CpuSpeed.UNCAPPED, back.speed)
