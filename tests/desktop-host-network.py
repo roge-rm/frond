@@ -259,6 +259,11 @@ def emulator(session, label, audio=False):
                     assert fields[1] == (b"ok" if ok else b"error"), fields
                 return (fields[1] == b"ok", message) if ok is None else message
 
+            if a.wireless:
+                # On battery the probe's EvtSetAutoOffTimer(SetAtLeast, 300) sleeps the TX at once
+                # (auto-off 3 minutes or less), and sleep drops Wi-Fi and closes NetLib. Session files
+                # don't keep the battery setting, so set it in every emulator.
+                request("battery", "max charging")
             if audio:
                 request("audio-on")
                 deadline = time.monotonic() + 20
@@ -459,7 +464,11 @@ try:
         assert checkpoint_seen.wait(30), "second probe run did not finish"
         time.sleep(2)
         request("save", root / "connected.frond")
-    with emulator(root / "connected.frond", "restored") as request:
+    # A machine with card or NAND files saves into a folder of its own, connected/connected.frond.
+    connected = root / "connected.frond"
+    if not connected.is_file():
+        connected = root / "connected" / "connected.frond"
+    with emulator(connected, "restored") as request:
         assert request("network-state") == profile
         request("input-replay", read)
         time.sleep(2)
