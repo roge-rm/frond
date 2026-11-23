@@ -54,7 +54,7 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(model: HomeModel) {
-    val controls = model.controlsFor
+    val controls = model.controls
     if (controls != null) ControlsScreen(model, controls) else SettingsList(model)
 }
 
@@ -90,7 +90,7 @@ private fun SettingsList(model: HomeModel) {
             for (device in added) {
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(device.label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                    TextButton(onClick = { model.controlsFor = device }) { Text("Set controls") }
+                    TextButton(onClick = { model.openControls(device) }) { Text("Set controls") }
                 }
             }
         }
@@ -129,59 +129,22 @@ private fun DebuggerPort(port: Int, onChange: (Int) -> Unit) {
 // a stick to add it; its keys can be taken off one at a time there.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ControlsScreen(model: HomeModel, device: Device) {
+private fun ControlsScreen(model: HomeModel, editor: ControlsEditor) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("${device.label} controls") },
+                title = { Text("${editor.device.label} controls") },
                 navigationIcon = {
-                    IconButton(onClick = { model.capturing = null; model.controlsFor = null }) {
+                    IconButton(onClick = { model.closeControls() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
-                actions = { TextButton(onClick = { model.resetController(device) }) { Text("Reset to defaults") } },
+                actions = { TextButton(onClick = { editor.reset() }) { Text("Reset to defaults") } },
             )
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-            ControllerButtons(model, device)
-        }
-    }
-}
-
-@Composable
-private fun ControllerButtons(model: HomeModel, device: Device) {
-    val map = model.controllers[device] ?: return
-    for (button in PalmButton.listed(model.controllerDevices[device] ?: device)) {
-        val waiting = model.capturing == (device to button)
-        Row(
-            Modifier.fillMaxWidth()
-                .clickableRow { model.capturing = if (waiting) null else device to button }
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(button.label(device), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-            if (waiting) {
-                Text("Press a controller button", color = MaterialTheme.colorScheme.primary)
-                TextButton(onClick = { model.clearButton(device, button) }) { Text("Clear") }
-            } else {
-                val keys = map.keysFor(button)
-                Text(
-                    if (keys.isEmpty()) "None" else keys.joinToString(", ") { ControllerMap.keyName(it) },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        if (waiting) {
-            for (key in map.keysFor(button)) {
-                val name = ControllerMap.keyName(key)
-                Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(name, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    IconButton(onClick = { model.removeKey(device, key) }) {
-                        Icon(Icons.Default.Close, contentDescription = "Remove $name")
-                    }
-                }
-            }
+            ControllerButtons(editor)
         }
     }
 }

@@ -92,6 +92,7 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
                     Sheet.CARD -> CardSheet(model, actions)
                     Sheet.DISPLAY -> DisplaySheet(model, state, actions)
                     Sheet.CONNECTIONS -> ConnectionsSheet(model, state, actions)
+                    Sheet.CONTROLS -> state.controls?.let { ControlsSheet(it) }
                 }
             }
         }
@@ -238,7 +239,7 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
     val state = model.stateOf(n)
     val device = model.device
     val stick = device.memoryStick && n == 0
-    val rows = RunningSheets.cardRows(device, state, shown.linked != null, shown.linked != null && shown.linkedHolder == null, n, shown.oldPlace)
+    val rows = RunningSheets.cardRows(device, state, shown.linked != null, shown.linked != null && shown.linkedHolder == null, n, shown.oldPlace, shown.linkId != null)
     val heading = if (model.twoSlots) "Card ${n + 1}" else device.cardLabel
     if (rows.isNotEmpty()) Header(heading, Modifier.padding(start = 16.dp, end = 16.dp, top = if (n == 0) 8.dp else 16.dp))
     for (row in rows) when (row) {
@@ -261,6 +262,7 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
             headlineContent = { Text(if (shown.linkedHolder == null) "${shown.linked} is free" else "${shown.linked} is in ${shown.linkedHolder}") },
             colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         )
+        CardRow.UNLINK -> SheetAction("Unlink") { model.unlink(n) }
         CardRow.INSERT_LINKED -> SheetAction("Insert", R.drawable.ic_card_in) { model.insertLinked(n) }
         CardRow.FILES -> SheetAction("Files…", R.drawable.ic_folder) {
             if (state == SdCard.State.INSERTED) confirmFiles = true else if (model.selectSlot(n)) model.openFiles()
@@ -318,6 +320,21 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
         AudioRow.AUDIO_PREVIEW -> MachineAudioPreviewRow(device, model.settings, true, APPLIES_AT_NEXT_START) { model.changeSettings(it) }
         AudioRow.RUMBLE -> MachineRumbleRow(device, model.settings, true) { model.changeSettings(it) }
     }
+    if (RunningSheets.controlsShown(device)) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        Header("Controller", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
+        SheetAction("Set controls") {
+            state.controls = ControlsEditor(context, device)
+            actions.openSheet(Sheet.CONTROLS)
+        }
+    }
+}
+
+// The controller keys for each Palm button. The session sends the next controller key to the editor while a button waits for one.
+@Composable
+private fun ControlsSheet(editor: ControlsEditor) {
+    TextButton({ editor.reset() }, Modifier.padding(horizontal = 8.dp)) { Text("Reset to defaults") }
+    Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp)) { ControllerButtons(editor) }
 }
 
 @Composable

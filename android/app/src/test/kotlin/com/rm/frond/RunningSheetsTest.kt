@@ -64,6 +64,23 @@ class RunningSheetsTest {
         assertFalse(CardRow.WRITE_PROTECT in rows(SdCard.State.EJECTED))
     }
 
+    @Test fun unlinkShowsForALinkedSlotInAnyState() {
+        val sd = Device.entries.first { it.sdSlot && !it.memoryStick && !it.sdWriteProtection }
+        fun rows(state: SdCard.State, unlinkable: Boolean = true, linked: Boolean = false) =
+            RunningSheets.cardRows(sd, state, linked, false, unlinkable = unlinkable)
+        assertEquals(listOf(CardRow.SLOT, CardRow.LINKED, CardRow.UNLINK), rows(SdCard.State.NONE, linked = true))
+        assertEquals(listOf(CardRow.SLOT, CardRow.FILES, CardRow.EJECT, CardRow.UNLINK), rows(SdCard.State.INSERTED))
+        assertEquals(listOf(CardRow.SLOT, CardRow.INSERT, CardRow.FILES, CardRow.EXPORT_IMAGE, CardRow.UNLINK), rows(SdCard.State.EJECTED))
+        assertFalse(CardRow.UNLINK in rows(SdCard.State.INSERTED, unlinkable = false))
+        assertFalse(CardRow.UNLINK in rows(SdCard.State.UNKNOWN))
+        assertFalse(CardRow.UNLINK in RunningSheets.cardRows(sd, SdCard.State.INSERTED, false, false, oldPlace = true, unlinkable = true))
+    }
+
+    @Test fun setControlsShowsWhereThereAreButtonsToSet() {
+        for (device in Device.entries) assertEquals(device.id, PalmButton.listed(device).isNotEmpty(), RunningSheets.controlsShown(device))
+        assertEquals("Controls", RunningSheets.title(Sheet.CONTROLS, Device.TX))
+    }
+
     @Test fun palmWifiSharesThePrimaryMemoryCardSlot() {
         val supported = setOf("palm-e2", "palm-e2-franken", "palm-zire-72")
         for (device in Device.entries) {

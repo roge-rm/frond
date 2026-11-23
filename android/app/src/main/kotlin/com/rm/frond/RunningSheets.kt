@@ -3,7 +3,7 @@ package com.rm.frond
 // The bottom sheets over the running Palm: which ones a device gets and the rows in them, apart from the drawing in
 // ui/RunningSheets.kt. A 68k device lists only the hardware it has; the others grey out what isn't done yet.
 object RunningSheets {
-    enum class Sheet { APPLICATIONS, CARD, DISPLAY, CONNECTIONS }
+    enum class Sheet { APPLICATIONS, CARD, DISPLAY, CONNECTIONS, CONTROLS }
 
     // The sheets with a button on the bar, in order.
     // Storage is on every machine: Internal always, the slot where the device has one.
@@ -22,7 +22,11 @@ object RunningSheets {
         Sheet.CARD -> "Storage"
         Sheet.DISPLAY -> "Display"
         Sheet.CONNECTIONS -> "Connections"
+        Sheet.CONTROLS -> "Controls"
     }
+
+    // Controller keys can be set from the Display sheet on every device that has Palm buttons to set, as in Settings.
+    fun controlsShown(device: Device) = PalmButton.listed(device).isNotEmpty()
 
     // ---- Applications ----
 
@@ -50,12 +54,12 @@ object RunningSheets {
         SdCard.State.UNKNOWN -> CardIcon.NONE
     }
 
-    enum class CardRow { SLOT, LINKED, INSERT_LINKED, FILES, EJECT, INSERT, EXPORT_IMAGE, TRY_AGAIN, WRITE_PROTECT, INSERT_PALM_WIFI, EJECT_PALM_WIFI }
+    enum class CardRow { SLOT, LINKED, INSERT_LINKED, FILES, EJECT, INSERT, EXPORT_IMAGE, TRY_AGAIN, WRITE_PROTECT, INSERT_PALM_WIFI, EJECT_PALM_WIFI, UNLINK }
 
     // linked: the empty slot has a linked card; linkedFree: that card can go in now.
     // `n` is the slot: 1 for the second SD slot. `oldPlace`: a frond-68k card not in Cards yet,
-    // which doesn't open in Files.
-    fun cardRows(device: Device, state: SdCard.State, linked: Boolean, linkedFree: Boolean, n: Int = 0, oldPlace: Boolean = false): List<CardRow> {
+    // which doesn't open in Files. `unlinkable`: the slot is linked to a card, in or out.
+    fun cardRows(device: Device, state: SdCard.State, linked: Boolean, linkedFree: Boolean, n: Int = 0, oldPlace: Boolean = false, unlinkable: Boolean = false): List<CardRow> {
         if (!device.cardSupported || !Cards.hasSlot(device, n)) return emptyList()
         if (state == SdCard.State.PALM_WIFI) return listOf(CardRow.SLOT, CardRow.EJECT_PALM_WIFI)
         val rows = mutableListOf(CardRow.SLOT)
@@ -74,6 +78,7 @@ object RunningSheets {
             SdCard.State.UNKNOWN -> rows += CardRow.TRY_AGAIN
         }
         if (oldPlace) rows -= CardRow.FILES
+        if (unlinkable && !oldPlace && state != SdCard.State.UNKNOWN) rows += CardRow.UNLINK
         // frond-68k's stick takes its protection from Cards when it goes in.
         if (((device.memoryStick && !device.runs68k && n == 0) || device.sdWriteProtection) &&
             state != SdCard.State.NONE && state != SdCard.State.UNKNOWN) rows += CardRow.WRITE_PROTECT

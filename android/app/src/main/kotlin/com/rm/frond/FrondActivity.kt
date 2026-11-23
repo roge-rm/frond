@@ -644,6 +644,19 @@ open class FrondActivity : SDLActivity() {
             if (event.action == android.view.KeyEvent.ACTION_UP) back()
             return true
         }
+        // While the Controls sheet waits for a key, the next controller key is assigned and not sent to the Palm.
+        if (event.action == android.view.KeyEvent.ACTION_UP && assignedKey != 0 && event.keyCode == assignedKey) {
+            assignedKey = 0
+            return true
+        }
+        val editor = bar.controls
+        if (editor != null && editor.capturing != null && ControllerMap.fromController(event)) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                editor.assign(event.keyCode)
+                assignedKey = event.keyCode
+            }
+            return true
+        }
         // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
         // keyboard keys. Unused ones are swallowed too, or Android turns B into Back.
         if (ControllerMap.fromController(event)) {
@@ -661,8 +674,23 @@ open class FrondActivity : SDLActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    private var assignedKey = 0
     private val rightStick = RightStickAxes()
+    private val captureSticks = StickKeys()
+    private val captureRight = RightStickAxes()
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        val editor = bar.controls
+        if (editor != null && event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
+            // A stick pushed past half travel is assigned; the Palm gets nothing while a button waits.
+            val capture = editor.capturing != null
+            val assign = { key: Int, down: Boolean -> if (down && capture) editor.assign(key) }
+            captureSticks.update(event.deviceId, ControllerMap.STICK_LEFT,
+                event.getAxisValue(android.view.MotionEvent.AXIS_X), event.getAxisValue(android.view.MotionEvent.AXIS_Y), assign)
+            captureSticks.update(event.deviceId, ControllerMap.STICK_RIGHT,
+                captureRight.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
+                captureRight.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)), assign)
+            if (capture) return true
+        }
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             val pad = zodiacPad
             if (!leaving && pad != null) {
@@ -829,6 +857,7 @@ open class FrondActivity : SDLActivity() {
     // returns. Also runs when SDL asks the core to close (the core sends a "close" event).
     // Back closes the bar's menu first, then leaves the machine.
     private fun back() {
+        bar.controls?.let { if (it.capturing != null) { it.capturing = null; return } }
         when (RunningBar.backAction(touchHidden, barPeek, bar.sheet != null, bar.menuOpen)) {
             RunningBar.BackAction.CLOSE_SHEET -> openSheet(null)
             RunningBar.BackAction.CLOSE_MENU -> bar.menuOpen = false
@@ -858,6 +887,10 @@ open class FrondActivity : SDLActivity() {
     // Opens a sheet over the Palm, or closes it. The view covers the screen while one is open.
     private fun openSheet(sheet: RunningSheets.Sheet?) {
         if (leaving && sheet != null) return
+        if (bar.sheet == RunningSheets.Sheet.CONTROLS && sheet != RunningSheets.Sheet.CONTROLS) {
+            bar.controls = null
+            reloadControllerMaps()
+        }
         bar.menuOpen = false
         bar.sheet = sheet
         layoutBar()

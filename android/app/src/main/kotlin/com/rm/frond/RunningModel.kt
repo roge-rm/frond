@@ -275,7 +275,8 @@ class RunningModel(
     // frond-68k card still linked from where an older Frond kept it (it couldn't be moved into
     // Cards), which can be ejected, put back and exported, but not changed or opened in Files.
     data class SlotShown(val name: String, val linked: String? = null, val linkedId: String? = null,
-                         val linkedHolder: String? = null, val pending: Boolean = false, val oldPlace: Boolean = false)
+                         val linkedHolder: String? = null, val pending: Boolean = false, val oldPlace: Boolean = false,
+                         val linkId: String? = null)
     var slotShown by mutableStateOf(SlotShown("No card"))
         private set
 
@@ -295,11 +296,12 @@ class RunningModel(
             file != null -> Cards.kindName(Cards.kindOfFile(file))
             else -> label
         }
-        if (s != SdCard.State.NONE || slot.link == null) return SlotShown(name, pending = pending)
-        val card = Cards.readCard(Cards.entryDir(library, slot.link)) ?: return SlotShown(name, pending = pending)
+        // linkId is the slot's link whatever the card state, so Unlink shows with a card in as well.
+        if (s != SdCard.State.NONE || slot.link == null) return SlotShown(name, pending = pending, linkId = slot.link)
+        val card = Cards.readCard(Cards.entryDir(library, slot.link)) ?: return SlotShown(name, pending = pending, linkId = slot.link)
         val free = File(Cards.entryDir(library, slot.link), Cards.fileOfKind(card.kind)).isFile
         val holder = if (free) null else card.machine?.let { Cards.machineName(File(sessions, it)) } ?: "another machine"
-        return SlotShown(name, card.name, card.id, holder, pending)
+        return SlotShown(name, card.name, card.id, holder, pending, linkId = slot.link)
     }
 
     // The picker: its choices, the one picked and the card the slot holds now.
@@ -419,6 +421,19 @@ class RunningModel(
             pickerLinking = withContext(Dispatchers.IO) {
                 Cards.readCard(Cards.entryDir(Cards.libraryFor(sessions), id))?.let { it to CardChoices.linkOptions(sessions, id, dir, Cards.SlotRef(dir, cardSlot)) }
             }
+        }
+    }
+
+    // Takes this slot off its card's links and leaves the other machines' links. The card stays where it is:
+    // in this slot if it's in, otherwise in the drawer or the machine holding it.
+    fun unlink(n: Int) {
+        val dir = machineDir ?: return
+        val id = shownOf(n).linkId ?: return
+        if (busy != null) return
+        activity.lifecycleScope.launch {
+            val error = withContext(Dispatchers.IO) { Cards.setLinks(sessions, id, CardChoices.linksWithout(sessions, id, Cards.SlotRef(dir, n)), dir) }
+            if (error != null) alert = "Couldn't unlink the card" to error
+            refresh()
         }
     }
 

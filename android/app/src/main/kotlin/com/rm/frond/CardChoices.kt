@@ -243,6 +243,10 @@ object CardChoices {
         }
     }
 
+    // The slots linked to card `id` other than `ref`, for setLinks to keep when `ref` is unlinked.
+    fun linksWithout(sessions: File, id: String, ref: Cards.SlotRef): List<Cards.SlotRef> =
+        machines(sessions, ref.dir).filter { it.slot.link == id && it.ref.key != ref.key }.map { it.ref }
+
     // ---- Machine dialogs ----
 
     // What Duplicate offers for machine `dir`: nothing when it has no card (the copy is made as
