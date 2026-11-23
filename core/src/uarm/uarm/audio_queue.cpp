@@ -147,6 +147,7 @@ size_t audioQueuePopChunkIfGeneration(struct AudioQueue* audioQueue, uint32_t* d
         span->startNs = audioQueue->GuestNsOf(head);
         span->endNs = actualCount ? audioQueue->GuestNsOf(head + actualCount, true) : span->startNs;
         span->frames = actualCount;
+        span->newestNs = audioQueue->MarkAt(audioQueue->markCount - 1).guestNs;
         uint64_t widest = AudioQueueSpan::breakGapNs;
         for (size_t i = 1; i < audioQueue->markCount; ++i) {
             const auto& m = audioQueue->MarkAt(i);

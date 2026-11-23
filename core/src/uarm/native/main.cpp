@@ -1116,6 +1116,7 @@ bool gFastEngineMissing = false;
             // Straight from the hooks when no synth's helper hands it the events.
             if (!synthTakes) midiOut->attach(&zodiacMusic->MusicHooks());
             // Timed by the guest audio playing; with no audio device, by the host clock alone.
+            // The synth lag stays 0: a hardware synth's own lag is a few ms. A setting would go here.
             if (audioDriver.Running()) midiOut->setReference(&musicClock);
             midiOut->start();
         }

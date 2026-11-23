@@ -1,7 +1,8 @@
 // The Zodiac's MIDI out engine (native/ZodiacMidiOut.h) against a fake port and clock: real-time messages and a
 // song's messages at the host times they're due and never written early, a stop with all notes off, a hold
 // turning notes off and standing the clock still, lookahead for a port that schedules by timestamp, a forward
-// jump dropping skipped note-ons, a late event moving the clock back, a slow guest by the guest audio's clock, and
+// jump dropping skipped note-ons, a late event moving the clock back, a slow guest by the guest audio's clock, its
+// stamps in order through callback bursts, a resume waiting for a new period, the clock's two threads, and
 // the hooks, engine thread and a
 // steady clock together, with notes off at the end. Built with ASan and UBSan, and with TSan.
 #include "ZodiacMidiOut.h"
@@ -213,7 +214,8 @@ void jumpForward() {
     const auto s = log.copy();
     assert(s.size() == 1 + 3 + 32 + 1);
     assert(s[1].b == (Bytes{0xb0, 0x07, 0x50}) && s[2].b == (Bytes{0x80, 0x3c, 0}) && s[3].b == (Bytes{0x80, 0x3e, 0}));
-    assert(allOff(s, 4, 10100 * ms - 5000 * ms + 850 * ms));
+    // Stamped in the past by the old offset, so at the last stamp (the first note's): stamps never go back.
+    assert(allOff(s, 4, 10000 * ms));
     for (const auto& x : s) assert(x.b != (Bytes{0x90, 0x3e, 0x64}));
     assert(s.back().b == (Bytes{0x91, 0x40, 0x7f}) && s.back().hostNs == 10100 * ms);
 }
@@ -359,6 +361,120 @@ void guestPaced() {
     }
 }
 
+// Timestamps never go back, though the map moves under them: callbacks in bursts (two 1 ms apart, then a gap)
+// move each published period's host time, and with a lookahead messages go out by the older period.
+void stampsInOrder() {
+    Log log;
+    fakeNow = 10000 * ms;
+    GuestAudioClock clock;
+    auto out = make(log, 30 * ms);
+    out->setReference(&clock);
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, nextCallback = fakeNow.load(), pair = 0;
+    for (uint32_t i = 0; i < 200; ++i) out->offer(message(100 * ms + i * ms, 0x90, uint8_t(i & 0x7f), 0x40));
+    while (fakeNow.load() < 10600 * ms) {
+        if (fakeNow.load() >= nextCallback) {
+            AudioQueueSpan span;
+            span.known = true;
+            span.frames = period;
+            span.startNs = guestNs;
+            span.endNs = guestNs += periodNs;
+            span.newestNs = guestNs + 100 * ms;
+            clock.run(span, period, nextCallback);
+            nextCallback += ++pair % 2 ? ms : 2 * periodNs - ms;
+        }
+        fakeNow += ms;
+        out->work();
+    }
+    const auto s = log.copy();
+    assert(s.size() == 200);
+    for (size_t i = 1; i < s.size(); ++i) assert(s[i].hostNs >= s[i - 1].hostNs);
+}
+
+// A hold: the device plays on with the clock standing, nothing published. On resume the old period isn't timed
+// by: the next message waits for a new one, so it isn't stamped in the past or sent at once.
+void resumed() {
+    Log log;
+    fakeNow = 10000 * ms;
+    GuestAudioClock clock;
+    auto out = make(log);
+    out->setReference(&clock);
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, nextCallback = fakeNow.load(), holdNs = 0, resumeNs = 0;
+    out->offer(message(100 * ms, 0x90, 0x3c, 0x40));
+    out->offer(message(250 * ms, 0x90, 0x3e, 0x40));
+    while (fakeNow.load() < 11800 * ms) {
+        // Held from guest 245 ms for 1 s.
+        if (!holdNs && guestNs >= 245 * ms) {
+            holdNs = fakeNow.load();
+            clock.hold(true);
+            out->hold(true);
+        }
+        if (holdNs && !resumeNs && fakeNow.load() >= holdNs + 1000 * ms) {
+            resumeNs = fakeNow.load();
+            clock.hold(false);
+            out->hold(false);
+        }
+        if (fakeNow.load() >= nextCallback) {
+            AudioQueueSpan span;
+            span.known = true;
+            span.frames = period;
+            span.startNs = guestNs;
+            span.endNs = guestNs + periodNs;
+            span.newestNs = guestNs + 100 * ms;
+            if (!clock.held()) guestNs = span.endNs;
+            clock.run(span, period, nextCallback);
+            nextCallback += periodNs;
+        }
+        fakeNow += ms;
+        out->work();
+    }
+    const auto s = log.copy();
+    assert(resumeNs && s.size() == 2 + 32);
+    // The note, all notes off at the hold, then the second note after the resume, in a period published since.
+    assert(s[33].b == (Bytes{0x90, 0x3e, 0x40}) && s[33].at >= resumeNs && s[33].hostNs >= resumeNs + periodNs);
+}
+
+// The audio callback's side and the engine's thread at once, on the steady clock, for TSan: the seqlock's end and
+// read.
+void referenceThreads() {
+    Log log;
+    GuestAudioClock clock;
+    {
+        ZodiacMidiOut out(std::make_unique<FakePort>(log, ZodiacMidiOut::steadyNs));
+        out.setReference(&clock);
+        out.start();
+        for (uint32_t i = 0; i < 20; ++i) out.offer(message(20 * ms + i * 5 * ms, 0x90, uint8_t(60 + i), 0x40));
+        std::atomic<bool> done{false};
+        std::thread audio([&] {
+            constexpr size_t period = 256;
+            uint64_t guestNs = 0;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+                AudioQueueSpan span;
+                span.known = true;
+                span.frames = period;
+                span.startNs = guestNs;
+                span.endNs = guestNs += GuestAudioClock::framesNs(period);
+                span.newestNs = guestNs + 100 * ms;
+                clock.run(span, period, GuestAudioClock::steadyNs());
+                std::this_thread::sleep_for(std::chrono::microseconds(GuestAudioClock::framesNs(period) / 1000));
+            }
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (log.copy().size() < 20 && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        done = true;
+        audio.join();
+        out.stop();
+        const auto s = log.copy();
+        assert(s.size() >= 20);
+        for (uint32_t i = 0; i < 20; ++i) assert(s[i].b == (Bytes{0x90, uint8_t(60 + i), 0x40}));
+        for (size_t i = 1; i < 20; ++i) assert(s[i].hostNs >= s[i - 1].hostNs);
+    }
+}
+
 // Port names without the numbers that change with plug order.
 void portKeys() {
     assert(zodiacMidiPortKey("Midi Through:Midi Through Port-0 14:0") == "midi through:midi through port-0");
@@ -446,11 +562,14 @@ int main() {
     delayed();
     driftDelayed();
     guestPaced();
+    stampsInOrder();
+    resumed();
+    referenceThreads();
     portKeys();
     sleeps();
     threads();
     std::puts("PASS: Zodiac MIDI out (event stream, song times, never early, stop, hold, lookahead, forward jump, late event, delay, "
-              "drift after the delay, guest audio clock, port names, "
+              "drift after the delay, guest audio clock, stamps in order, resume, clock threads, port names, "
               "sleeping thread, hooks and engine thread, notes off at the end)");
     return 0;
 }

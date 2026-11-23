@@ -26,12 +26,16 @@ class GuestAudioClock {
     static constexpr uint64_t maxDriftNs = 250000000;
     // Run on this long with no guest audio, the guest audio coming back up to maxEaseNs ahead is steered to.
     static constexpr uint64_t gapNs = 100000000, maxEaseNs = 2000000000;
+    // A cue more than this past the guest's newest time (the queue's newest mark) is from before a load that set
+    // the guest time back: due now. A cue is made at most a run loop pass after the mark before it.
+    static constexpr uint64_t staleNs = maxDriftNs;
     enum class Jump { none, forward, back };
 
     // A published period: host ns when its first frame plays and the guest ns there, the same at its end. jumps
-    // counts the jumps so far, jumpNs is where the last one went, back whether it went back.
+    // counts the jumps so far, jumpNs is where the last one went, back whether it went back. newestNs: the guest's
+    // newest time then, 0 if not known.
     struct Reference {
-        uint64_t hostNs = 0, guestNs = 0, endHostNs = 0, endGuestNs = 0;
+        uint64_t hostNs = 0, guestNs = 0, endHostNs = 0, endGuestNs = 0, newestNs = 0;
         uint32_t jumps = 0;
         uint64_t jumpNs = 0;
         bool back = false;
@@ -43,14 +47,22 @@ class GuestAudioClock {
     }
     static uint64_t framesNs(uint64_t frames) { return frames * 1000000000ull / rate; }
 
-    // The run loop: true while the emulator is paused. The clock stands; begin says so.
+    // The run loop: true while the emulator is paused. The clock stands; begin says so. Meanwhile the device plays
+    // out the queue, so on resume the guest audio is ahead by it: steered to like after a gap, not jumped to.
     void hold(bool held) { held_.store(held, std::memory_order_relaxed); }
     bool held() const { return held_.load(std::memory_order_relaxed); }
 
     // Audio thread. A period of frames, rendered at host ns hostNs (steadyNs). False while held: then no next or
     // end for it.
     bool begin(uint64_t hostNs, size_t frames) {
-        if (held()) return false;
+        if (held()) {
+            wasHeld_ = true;
+            return false;
+        }
+        if (wasHeld_) {
+            wasHeld_ = false;
+            resumed_ = true;
+        }
         periodHostNs_ = hostNs + framesNs(frames);
         periodFrames_ = frames;
         first_ = true;
@@ -75,12 +87,16 @@ class GuestAudioClock {
             if (!known) return 0;
             clockNs_ = target;
             anchored_ = true;
-        } else if (known && !easing_ && runOnNs_ >= gapNs && target > clockNs_) {
-            // Guest audio back after a gap: it now plays with less queued before it, so it's ahead. Steered to,
-            // not jumped to, so no note is lost.
+        } else if (known && !easing_ && (runOnNs_ >= gapNs || resumed_) && target > clockNs_) {
+            // Guest audio back after a gap or a hold: it now plays with less queued before it, so it's ahead.
+            // Steered to, not jumped to, so no note is lost.
             easing_ = true;
         }
-        if (known) runOnNs_ = 0;
+        if (known) {
+            runOnNs_ = 0;
+            resumed_ = false;
+            newestNs_ = span.newestNs;
+        }
         else runOnNs_ += framesNs(n);
         // Done once caught up; further than maxEaseNs it jumps after all.
         if (known && easing_ && (target <= clockNs_ + framesNs(n) || target > clockNs_ + maxEaseNs)) easing_ = false;
@@ -117,6 +133,7 @@ class GuestAudioClock {
         guestNs_.store(periodGuestNs_, std::memory_order_release);
         endHostNs_.store(periodHostNs_ + framesNs(periodFrames_), std::memory_order_release);
         endGuestNs_.store(clockNs_, std::memory_order_release);
+        newestOut_.store(newestNs_, std::memory_order_release);
         jumpsOut_.store(jumps_, std::memory_order_release);
         jumpNsOut_.store(jumpNs_, std::memory_order_release);
         backOut_.store(jumpBack_, std::memory_order_release);
@@ -131,6 +148,19 @@ class GuestAudioClock {
     static constexpr size_t step = 64;
 
     bool anchored() const { return anchored_; }
+    // Audio thread: the guest's newest time from the last span, 0 before one.
+    uint64_t newestNs() const { return newestNs_; }
+
+    // Whether a cue of guest ns timeNs, ahead of the clock at nowNs, waits for its time: false when it's from
+    // before a load (past the guest's newest time), or with that unknown further than maxAheadNs ahead.
+    static constexpr uint64_t maxAheadNs = 2000000000;
+    static bool waits(uint64_t timeNs, uint64_t nowNs, uint64_t newestNs) {
+        if (timeNs <= nowNs) return false;
+        return newestNs ? timeNs <= newestNs + staleNs : timeNs <= nowNs + maxAheadNs;
+    }
+    // A reference that ended more than a period before host ns t: none published since, as through a hold. Not
+    // to time by until the next.
+    static bool stale(const Reference& r, uint64_t t) { return r.endHostNs + (r.endHostNs - r.hostNs) < t; }
 
     // Any thread: the last period published. False before the first.
     bool read(Reference& r) const {
@@ -142,6 +172,7 @@ class GuestAudioClock {
             r.guestNs = guestNs_.load(std::memory_order_acquire);
             r.endHostNs = endHostNs_.load(std::memory_order_acquire);
             r.endGuestNs = endGuestNs_.load(std::memory_order_acquire);
+            r.newestNs = newestOut_.load(std::memory_order_acquire);
             r.jumps = jumpsOut_.load(std::memory_order_acquire);
             r.jumpNs = jumpNsOut_.load(std::memory_order_acquire);
             r.back = backOut_.load(std::memory_order_acquire);
@@ -160,9 +191,9 @@ class GuestAudioClock {
         }
         return r.guestNs + (r.endGuestNs - r.guestNs) * (t - r.hostNs) / (r.endHostNs - r.hostNs);
     }
-    // Host ns when guest ns g plays by a reference: the inverse of guestAt. Inside a period that stood, its end.
+    // Host ns when guest ns g plays by a reference: the inverse of guestAt. At a period that stood, its end.
     static uint64_t hostAt(const Reference& r, uint64_t g) {
-        if (g <= r.guestNs) return r.hostNs > r.guestNs - g ? r.hostNs - (r.guestNs - g) : 0;
+        if (g < r.guestNs) return r.hostNs > r.guestNs - g ? r.hostNs - (r.guestNs - g) : 0;
         if (g >= r.endGuestNs) return r.endHostNs + (g - r.endGuestNs);
         return r.hostNs + (r.endHostNs - r.hostNs) * (g - r.guestNs) / (r.endGuestNs - r.guestNs);
     }
@@ -170,13 +201,13 @@ class GuestAudioClock {
    private:
     std::atomic<bool> held_{false};
     // Audio thread.
-    bool anchored_ = false, first_ = true, jumpBack_ = false, easing_ = false;
-    uint64_t runOnNs_ = 0, clockNs_ = 0, periodHostNs_ = 0, periodGuestNs_ = 0, jumpNs_ = 0;
+    bool anchored_ = false, first_ = true, jumpBack_ = false, easing_ = false, wasHeld_ = false, resumed_ = false;
+    uint64_t newestNs_ = 0, runOnNs_ = 0, clockNs_ = 0, periodHostNs_ = 0, periodGuestNs_ = 0, jumpNs_ = 0;
     size_t periodFrames_ = 0;
     uint32_t jumps_ = 0;
     // Published, under seq_ (odd while writing).
     std::atomic<uint32_t> seq_{0};
-    std::atomic<uint64_t> hostNs_{0}, guestNs_{0}, endHostNs_{0}, endGuestNs_{0}, jumpNsOut_{0};
+    std::atomic<uint64_t> hostNs_{0}, guestNs_{0}, endHostNs_{0}, endGuestNs_{0}, newestOut_{0}, jumpNsOut_{0};
     std::atomic<uint32_t> jumpsOut_{0};
     std::atomic<bool> backOut_{false};
 };
