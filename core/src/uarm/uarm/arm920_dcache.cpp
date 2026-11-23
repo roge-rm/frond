@@ -54,6 +54,15 @@ bool Arm920DataCache::maintain(uint32_t operand, bool index, bool cleaning, bool
     return true;
 }
 
+// Puts index first in a segment's recent lines.
+static inline void remember(uint8_t (&last)[4], uint8_t index) {
+    if (last[0] == index) return;
+    unsigned r = 1;
+    while (r < 3 && last[r] != index) ++r;
+    for (; r > 0; --r) last[r] = last[r - 1];
+    last[0] = index;
+}
+
 Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsigned size,
                                         bool write, void* data, bool enabled, bool roundRobin) {
     if (guard.active) return Arm920DataResult::unsupported;
@@ -64,9 +73,17 @@ Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsi
     if (enabled && !lean) {
         auto& segment = lines[(va >> 5) & 7];
         auto& last = recent[(va >> 5) & 7];
-        if (segment[last & 63].valid && segment[last & 63].va == (va & ~31u)) hit = &segment[last & 63];
-        else for (unsigned index = 0; index < 64; ++index)
-            if (segment[index].valid && segment[index].va == (va & ~31u)) { hit = &segment[index]; last = uint8_t(index); break; }
+        const uint32_t base = va & ~31u;
+        unsigned found = 64;
+        for (unsigned r = 0; r < 4; ++r)
+            if (segment[last[r] & 63].valid && segment[last[r] & 63].va == base) { found = last[r] & 63; break; }
+        if (found == 64)
+            for (unsigned index = 0; index < 64; ++index)
+                if (segment[index].valid && segment[index].va == base) { found = index; break; }
+        if (found != 64) {
+            hit = &segment[found];
+            remember(last, uint8_t(found));
+        }
     }
     // DDI0151C 4.3.2: changing C/B while a line is retained is a software error.
     if (hit && (!cacheable || hit->bufferable != bufferable)) {
@@ -138,7 +155,7 @@ Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsi
         line.dirty = 0;
         line.bufferable = bufferable;
         line.valid = true;
-        recent[segment] = uint8_t(index);
+        remember(recent[segment], uint8_t(index));
         if (roundRobin) ++victim[segment]; else random = nextRandom;
         hit = &line;
     }

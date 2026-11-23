@@ -56,6 +56,13 @@ bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privi
         *fsr = 3;
         return false;
     }
+    if (ic->arm920Prefetched) {
+        ic->arm920Prefetched = false;
+        if (va == ic->arm920PrefetchVa && size == ic->arm920PrefetchSize && privileged == ic->arm920PrefetchPrivileged) {
+            *word = ic->arm920PrefetchWord;
+            return true;
+        }
+    }
     const auto extract = [=](uint32_t value) {
         return size == 2 ? (value >> ((va & 2) * 8)) & 0xffff : value;
     };
@@ -129,6 +136,20 @@ bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privi
     *word = extract(words[(va & 31) / 4]);
     return true;
 }
+
+bool icacheArm920Prefetch(struct icache* ic, uint32_t va, unsigned size, bool privileged,
+                          uint_fast8_t* fsr, uint32_t* word) {
+    ic->arm920Prefetched = false;
+    if (!icacheArm920Fetch(ic, va, size, privileged, fsr, word)) return false;
+    ic->arm920Prefetched = true;
+    ic->arm920PrefetchVa = va;
+    ic->arm920PrefetchSize = uint8_t(size);
+    ic->arm920PrefetchPrivileged = privileged;
+    ic->arm920PrefetchWord = *word;
+    return true;
+}
+
+void icacheArm920DropPrefetch(struct icache* ic) { ic->arm920Prefetched = false; }
 
 bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
                       uint_fast8_t* fsr, uint32_t* word) {
@@ -353,6 +374,7 @@ bool icacheFetchUnwatched(const struct icache* ic) { return ic->fetchUnwatched; 
 #endif
 
 static void icacheInvalWhole(struct icache* ic, bool guest) {
+    ic->arm920Prefetched = false;  // a word runStep saved is gone with the cache
 #ifdef FROND_DYNARMIC
     if (ic->invalHook) ic->invalHook(ic->invalHookCtx, 0, 0, guest);
 #else

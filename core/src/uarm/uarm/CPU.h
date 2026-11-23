@@ -130,6 +130,10 @@ void cpuReset(struct ArmCpu *cpu, uint32_t pc);
 
 // Peeks the current ARM/Thumb instruction view without consuming a retained prefetch.
 bool cpuFetchInstruction(ArmCpu*, uint32_t va, uint32_t* word, uint_fast8_t* fsr);
+// cpuFetchInstruction, answered again by the next cpuCycle's fetch of it (ARM920T). For a caller that steps
+// right after; cpuDropPrefetch forgets it where it doesn't.
+bool cpuPrefetchInstruction(ArmCpu*, uint32_t va, uint32_t* word, uint_fast8_t* fsr);
+void cpuDropPrefetch(ArmCpu*);
 // Host code patches must discard decoded instructions as well as guest cache lines.
 void cpuInvalidateCodeCache(struct ArmCpu *cpu);
 // Drops the JIT's translated code only, when something it was translated with changes.
@@ -340,6 +344,8 @@ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader);
 void cpuArm920SetIcacheIndexCompatibility(ArmCpu*, bool);
 void cpuArm920SetMemoryCheck(ArmCpu*, Arm920MemoryCheck, void*);
 Arm920DataGuard cpuArm920DataGuard(ArmCpu*);
+// Where the ARM920T data cache keeps its guard, for a caller that checks it every step; null on other CPUs.
+const Arm920DataGuard* cpuArm920DataGuardAt(ArmCpu*);
 // Machine state between two run calls. Capture fails outside ARM920T, in PACE, asleep or
 // inside a native call. Apply takes a state that cpuArm920StateFits accepted, and leaves
 // translated code alone: drop it with cpuDropTranslatedCode.

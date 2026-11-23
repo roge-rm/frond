@@ -1674,6 +1674,15 @@ bool cpuFetchInstruction(ArmCpu *cpu, uint32_t va, uint32_t* word, uint_fast8_t*
     return icacheArm920Fetch(cpu->ic, va, cpu->T ? 2 : 4, cpu->privileged, fsr, word);
 }
 
+bool cpuPrefetchInstruction(ArmCpu *cpu, uint32_t va, uint32_t* word, uint_fast8_t* fsr) {
+    if (cpu->model != ArmCpuModel::arm920t) return false;
+    return icacheArm920Prefetch(cpu->ic, va, cpu->T ? 2 : 4, cpu->privileged, fsr, word);
+}
+
+void cpuDropPrefetch(ArmCpu *cpu) {
+    if (cpu->model == ArmCpuModel::arm920t) icacheArm920DropPrefetch(cpu->ic);
+}
+
 void cpuInvalidateCodeCache(struct ArmCpu *cpu) { icacheInval(cpu->ic); }
 
 void cpuDropTranslatedCode(struct ArmCpu *cpu) {
@@ -7715,6 +7724,10 @@ void cpuArm920SetMemoryCheck(ArmCpu* cpu, Arm920MemoryCheck check, void* context
     dc->check = check;
     dc->context = context;
 }
+const Arm920DataGuard* cpuArm920DataGuardAt(ArmCpu* cpu) {
+    return cpu->model == ArmCpuModel::arm920t ? &cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard : nullptr;
+}
+
 Arm920DataGuard cpuArm920DataGuard(ArmCpu* cpu) {
     return cpu->model == ArmCpuModel::arm920t ? cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard : Arm920DataGuard{};
 }

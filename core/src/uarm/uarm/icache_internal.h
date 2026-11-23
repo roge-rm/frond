@@ -73,6 +73,11 @@ struct icache {
     // The line each segment's last fetch hit, looked at first. A segment never holds two valid lines
     // with one base, as a line is only filled after a search found none. Not saved.
     uint8_t arm920Recent[8];
+    // A fetch runStep made just before the step (cpuPrefetchInstruction), answered again by the step's own
+    // fetch of the same VA, size and mode with nothing run between. Not saved.
+    bool arm920Prefetched, arm920PrefetchPrivileged;
+    uint8_t arm920PrefetchSize;
+    uint32_t arm920PrefetchVa, arm920PrefetchWord;
     // ARM920T Fast: answers a fetch from the lean decode cache or a plain host page, or returns false for
     // the model to read it uncached. While set the model fills no lines. Not saved.
     bool (*arm920LeanWord)(void* ctx, uint32_t va, unsigned size, bool privileged, uint32_t* word);

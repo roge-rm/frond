@@ -298,6 +298,7 @@ struct Probe {
     bool terminal = false, stopped = false;
     bool failed = false;
     ArmCpu* cpu = nullptr;
+    const Arm920DataGuard* dataGuard = nullptr;  // the CPU's data cache guard (cpuArm920DataGuardAt)
     ArmMem* mem = nullptr;
     Imx1ProbeOptions options{};
     Imx1Bootstrap peripherals;
@@ -342,12 +343,12 @@ struct Probe {
     } graphicsDma{*this};
     // graphicsGpu, graphicsDma, graphicsUndo and the lean read rates, left out of the saved layout's size, and
     // mmcsdCardId, saved in a section of its own, slot 2's card part, saved in its SD2 section, the pc stop, the code
-    // hooks and the quietWriteClocks memo.
+    // hooks, the quietWriteClocks memo and the data guard pointer.
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
                                            sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
                                            Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks) +
                                            sizeof(QuietWriteMemo) + Imx1GraphicsCommands::unsavedBytes +
-                                           sizeof(std::unique_ptr<Imx1GraphicsWorker>);
+                                           sizeof(std::unique_ptr<Imx1GraphicsWorker>) + sizeof(const Arm920DataGuard*);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -1635,9 +1636,9 @@ struct Probe {
     // once; the cycles wait in deferredCycles as the step's own do. The last rounds of the span run as steps and see
     // the change. hard is the most instructions the slice has left. Returns the instructions passed.
     uint64_t skipUartPollStepped(uint64_t hard) {
+        // Runs after every step: the checks on the probe's own state go first, the CPU calls after them.
         if (!uartPollSkip || failed || graphicsWireStatus != Imx1BootstrapAccess::ok || blPrefix || pcStop.armed ||
-            !quietCycles || linesPending || deferredHclk || cpuIsThumb(cpu) || cpuArm920ClockMode(cpu) != quietMode ||
-            !cpuArm920StepSkipAllowed(cpu) || retired < 3)
+            !quietCycles || linesPending || deferredHclk || retired < 3)
             return 0;
         const uint32_t* r = cpuGetRegisters(cpu);
         const uint32_t pc = r[15];
@@ -1648,6 +1649,7 @@ struct Probe {
             !test.plain || !branch.plain || load.pc != pc || test.pc != pc + 4 || branch.pc != pc + 8 ||
             load.bus != 1 || test.bus || branch.bus)
             return 0;
+        if (cpuIsThumb(cpu) || cpuArm920ClockMode(cpu) != quietMode || !cpuArm920StepSkipAllowed(cpu)) return 0;
         // As skipUartPoll: ldr with an immediate offset and no writeback, tst of the loaded register, branch back.
         const uint32_t w0 = load.instruction, w1 = test.instruction, w2 = branch.instruction;
         if ((w0 & 0xfff00000u) != 0xe5900000u || (w1 & 0xfff0f000u) != 0xe3100000u ||
@@ -2424,6 +2426,7 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     p->cpu = cpuInit(p->alias, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0,
                      patches, pace, createSystemState(), ArmCpuModel::arm920t, true);
     patchDispatchSetCpu(patches, p->cpu);
+    p->dataGuard = cpuArm920DataGuardAt(p->cpu);
     // ARM920T cost table only: the board's own bus, CS5 and cache models time its memory.
     cpuSetCostModel(p->cpu, true, uint8_t(cost::Core::arm920t), false);
     if (p->options.bootstrapPeripherals) cpuArm920EnableWait(p->cpu);
@@ -2602,7 +2605,9 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     uint_fast8_t fsr = 0;
     // A fetch that aborts goes to the prefetch abort vector in the step below, outside a Thumb BL pair.
     bool fetchAbort = false;
-    if (!cpuFetchInstruction(p->cpu, t.pc, &t.instruction, &fsr)) {
+    // The step's own fetch below takes this word again; a return before it forgets it.
+    struct DropPrefetch { ArmCpu* cpu; ~DropPrefetch() { cpuDropPrefetch(cpu); } } dropPrefetch{p->cpu};
+    if (!cpuPrefetchInstruction(p->cpu, t.pc, &t.instruction, &fsr)) {
         t.instruction = 0;
         t.fetched = false;
         if (p->failed) return false;
@@ -2663,8 +2668,8 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_ARM920T, false>(p->cpu, 1);
     if (p->failed) return false;
-    const auto dataGuard = cpuArm920DataGuard(p->cpu);
-    if (dataGuard.active) {
+    if (p->dataGuard->active) {
+        const auto dataGuard = *p->dataGuard;
         p->result.stop = Imx1ProbeStop::unsupportedDataCache;
         p->result.address = dataGuard.address;
         p->result.size = dataGuard.size;
