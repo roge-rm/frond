@@ -417,7 +417,7 @@ test: test-render-link
 test-render-link: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell sdl2-config --cflags) \
 		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/render-link.cpp $(shell sdl2-config --libs) -lpthread -o $(OBJ_ROOT)/test-render-link
+		tests/render-link.cpp core/src/uarm/native/WindowId.cpp $(shell sdl2-config --libs) -lpthread -o $(OBJ_ROOT)/test-render-link
 	$(OBJ_ROOT)/test-render-link
 
 test: test-shortcut-keys test-dana-host-keys
