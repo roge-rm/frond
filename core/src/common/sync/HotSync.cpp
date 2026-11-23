@@ -4,6 +4,7 @@
 #include <ctime>
 #include <random>
 
+#include "PalmConduit.h"
 #include "Sha256.h"
 
 namespace frondSync {
@@ -60,6 +61,7 @@ struct Session {
     SysInfo sys;
     UserInfo user;
     HotSyncResult result;
+    std::vector<uint32_t> conduits;
 
     Session(PacketLink& link, const SyncOptions& options, SyncManager& manager, Transport transport)
         : link(link),
@@ -128,6 +130,11 @@ struct Session {
         const auto selected = library.FindAssignment(result.deviceKey);
         if (!selected || selected->profileId != info.id) throw Failure("The device's profile assignment changed");
         assignment = *selected;
+        if (assignment.userId != user.userId || assignment.userName != user.name) {
+            assignment.userName = user.name;
+            assignment.userId = user.userId;
+            if (!library.RememberAssignmentUser(assignment, error)) throw Failure(error);
+        }
         result.fast = user.lastSyncPc == profile.PcId() && !assignment.slowNext && !newUser;
         manager.Update([&](SyncStatus& s) { s.profile = info.name, s.user = user.name; });
         Log(std::string(newUser ? "New user " : "HotSync with ") + user.name + " over " + TransportName(transport) +
@@ -273,6 +280,34 @@ struct Session {
         }
     }
 
+    void SyncVendorConduits(const std::atomic<bool>* stop) {
+        const auto scope = PimScope();
+        std::string error;
+        auto wasFast = [&](uint32_t creator) {
+            const auto key = "palm-conduit-sync-date-" + Hex(creator);
+            const bool fast = result.fast && profile.DeviceValue(scope, key) == std::to_string(user.lastSync);
+            if (!profile.SetDeviceValue(scope, key, "", &error)) throw Failure(error);
+            if (conduits.empty()) Stage("conduits");
+            conduits.push_back(creator);
+            return fast;
+        };
+        auto recovery = [&](const std::string& name, uint8_t card, std::string& why) {
+            if (card) {
+                why = "Recovery is available for main memory databases.";
+                return false;
+            }
+            const auto ram = ListRam();
+            const auto existing = std::find_if(ram.begin(), ram.end(), [&](const DbInfo& entry) { return entry.name == name; });
+            if (existing == ram.end()) return true;
+            PalmDb original;
+            std::string source;
+            return SaveRecovery(*existing, original, source, why);
+        };
+        if (!RunPalmConduits(dlp, library.ProfilePath(info), result.deviceKey, user, stop, wasFast, recovery,
+                            [&](const std::string& line) { Log(line); }, error))
+            throw Failure(error);
+    }
+
     void Backup() {
         Must(dlp.OpenConduit(), dlp, "Starting Backup");
         const auto list = ListRam();
@@ -380,6 +415,8 @@ struct Session {
         if (result.reset) dlp.ResetSystem();
         Must(dlp.EndOfSync(dlpTermNormal), dlp, "Ending the sync");
         profile.SetDeviceValue(PimScope(), "pim-sync-date", std::to_string(done.lastSync));
+        for (const auto creator : conduits)
+            profile.SetDeviceValue(PimScope(), "palm-conduit-sync-date-" + Hex(creator), std::to_string(done.lastSync));
         assignment.userName = user.name;
         assignment.userId = user.userId;
         assignment.lastSync = NowSeconds();
@@ -392,7 +429,7 @@ struct Session {
 }  // namespace
 
 HotSyncResult RunHotSync(PacketLink& link, const SyncOptions& options, const std::string& root, Transport transport,
-                         SyncManager& manager) {
+                         SyncManager& manager, const std::atomic<bool>* stop) {
     Session s(link, options, manager, transport);
     try {
         s.Stage("user");
@@ -401,6 +438,7 @@ HotSyncResult RunHotSync(PacketLink& link, const SyncOptions& options, const std
         s.Identify(root);
         s.Install();
         s.SyncPersonalData();
+        s.SyncVendorConduits(stop);
         s.Backup();
         s.Finish();
         s.result.ok = true;

@@ -22,6 +22,7 @@
 #include "Sha256.h"
 #include "SyncStore.h"
 #include "SyncStream.h"
+#include "SynceRapi.h"
 #include "../core/src/common/sync/vendor/sqlite/sqlite3.h"
 
 using namespace frondSync;
@@ -539,6 +540,36 @@ void TestActiveSyncProfileFiles(const std::string& root) {
     CHECK(contents == "Original");
 }
 
+void TestRapiDeadlines() {
+    struct Replies {
+        Bytes bytes = Words({8, 0, 1, 12, 0, 0, 0, 8, 0, 1});
+        size_t offset = 0;
+        std::vector<int> timeouts;
+    } replies;
+    auto* client = FrondRapiOpen({
+        &replies,
+        [](void* context, void* data, size_t size, int timeout) {
+            auto& input = *static_cast<Replies*>(context);
+            input.timeouts.push_back(timeout);
+            if (size > input.bytes.size() - input.offset) return false;
+            std::copy_n(input.bytes.begin() + input.offset, size, static_cast<uint8_t*>(data));
+            input.offset += size;
+            return true;
+        },
+        [](void*, const void*, size_t) { return true; },
+        [](void*) {},
+    });
+    CHECK(client != nullptr);
+    if (!client) return;
+    const uint16_t config[] = {'<', '>', 0};
+    uint16_t reply[1]{};
+    CHECK(FrondRapiReady(client));
+    CHECK(FrondRapiProvision(client, config, reply, 1));
+    CHECK(FrondRapiReady(client));
+    CHECK((replies.timeouts == std::vector<int>{15000, 15000, 60000, 60000, 15000, 15000}));
+    FrondRapiClose(client);
+}
+
 void TestActiveSync(const std::string& root) {
     std::string error;
     SyncLibrary library;
@@ -777,6 +808,9 @@ class InstallHandheld : public PacketLink {
         Bytes data;
         switch (command) {
             case dlpReadSysInfo: data = Bytes(10); break;
+            case dlpOpenConduit:
+                if (refuseConduit) status = dlpErrOpen;
+                break;
             case dlpReadUserInfo:
                 data = Bytes(30);
                 data[3] = 1;
@@ -825,6 +859,7 @@ class InstallHandheld : public PacketLink {
     }
     std::string Name() const override { return "install test"; }
 
+    bool refuseConduit{false};
     bool refuseRead{true};
     uint8_t record{1};
     unsigned deletes{0};
@@ -874,6 +909,27 @@ void TestInstallRecovery(const std::string& root) {
     }
 }
 
+void TestFailedPalmSyncKeepsUser(const std::string& root) {
+    std::string error;
+    SyncLibrary library;
+    CHECK(library.Open(root, error));
+    ProfileInfo initial, current;
+    CHECK(library.CreateProfile("Initial Palm", initial, error));
+    CHECK(library.CreateProfile("Moved Palm", current, error));
+    SyncOptions options;
+    options.machineKey = "failed-palm";
+    options.profile = current.name;
+    const auto deviceKey = MachineDeviceKey(options.machineKey);
+    CHECK(library.Assign(deviceKey, initial.id, error));
+    CHECK(library.Assign(deviceKey, current.id, error));
+    InstallHandheld handheld;
+    handheld.refuseConduit = true;
+    const auto result = RunHotSync(handheld, options, root, Transport::serial, SyncManager::Get());
+    const auto stored = library.FindAssignment(deviceKey);
+    CHECK(!result.ok && stored && stored->userId == 1 && stored->userName == "A");
+    CHECK(stored && stored->lastSync == 0 && stored->slowNext);
+}
+
 void TestStore(const std::string& root) {
     std::string error;
     SyncLibrary library;
@@ -884,13 +940,18 @@ void TestStore(const std::string& root) {
     CHECK(library.Assign("machine:a", home.id, error));
     auto a = library.FindAssignment("machine:a");
     CHECK(a && !a->slowNext);
-    const auto originalAssignment = *a;
+    auto originalAssignment = *a;
+    originalAssignment.userName = "Stale";
+    originalAssignment.userId = 42;
     CHECK(library.Assign("machine:a", work.id, error));
     a = library.FindAssignment("machine:a");
     CHECK(a && a->profileId == work.id && a->slowNext);  // a move makes the next sync slow
     CHECK(library.Assign("machine:a", home.id, error));
     const auto returned = library.FindAssignment("machine:a");
     CHECK(returned && returned->generation != originalAssignment.generation && returned->slowNext);
+    CHECK(library.RememberAssignmentUser(originalAssignment, error));
+    const auto afterStaleUser = library.FindAssignment("machine:a");
+    CHECK(afterStaleUser && afterStaleUser->userId == 0 && afterStaleUser->userName.empty() && afterStaleUser->slowNext);
     CHECK(library.FinishAssignment(originalAssignment, error));
     CHECK(library.FindAssignment("machine:a")->slowNext);
 
@@ -976,6 +1037,8 @@ int main(int argc, char** argv) {
     TestInstallerFiles();
     TestStore(argv[1]);
     TestInstallRecovery(argv[1]);
+    TestFailedPalmSyncKeepsUser(argv[1]);
+    TestRapiDeadlines();
     TestActiveSync(argv[1]);
     TestActiveSyncProfileFiles(argv[1]);
     std::filesystem::remove_all(argv[1]);

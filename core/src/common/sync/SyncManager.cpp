@@ -155,7 +155,7 @@ void SyncManager::Serve(SyncStream& stream, Transport transport, const std::atom
             s.state = SyncStatus::State::syncing, s.transport = TransportName(transport), s.stage = "connecting";
             s.done = s.total = 0, s.item.clear(), s.message.clear();
         });
-        const auto result = RunHotSync(*link, Options(), Root(), transport, *this);
+        const auto result = RunHotSync(*link, Options(), Root(), transport, *this, &stop);
         Update([&](SyncStatus& s) {
             s.state = result.ok ? SyncStatus::State::done : SyncStatus::State::failed;
             s.message = result.message, s.stage.clear(), s.item.clear(), s.done = s.total = 0;

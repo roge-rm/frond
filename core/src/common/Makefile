@@ -47,6 +47,7 @@ SOURCE_CXX = 						\
 	sync/SyncStore.cpp			\
 	sync/Dlp.cpp				\
 	sync/HotSync.cpp			\
+	sync/PalmConduit.cpp \
 	sync/Link.cpp				\
 	sync/SyncManager.cpp \
 	sync/ActiveSync.cpp \

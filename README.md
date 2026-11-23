@@ -156,6 +156,7 @@ On Linux use File → Firmware… or Add device, on Android import the firmware 
 - Zodiac music: Zodiac games can play their music through a SoundFont you have or a MIDI device, like a synth, instead of the FM chip. See [Music output](doc/using-frond.md#music-output).
 - Low-latency audio: less delay between a tap and the sound, for music apps like SunVox. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
 - [Sync Manager](doc/using-frond.md#sync-manager) syncs Palm OS contacts, calendar, tasks and memos. [External HotSync](doc/using-frond.md#usb-hotsync) can use pilot-link.
+- Desktop [Sync Manager](doc/using-frond.md#queue-applications-from-an-installer) unpacks supported Windows installers. On Linux and Windows it can also run compatible Palm conduits during HotSync.
 - [ActiveSync](doc/using-frond.md#activesync) also syncs rx1950 files and simple Notes. The built-in sync runs on Windows and external sync can use SynCE.
 
 ## For developers

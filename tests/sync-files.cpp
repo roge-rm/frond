@@ -151,6 +151,39 @@ void Reconcile(const fs::path& profilePath) {
         return record.id != memo.id && record.fields.at("text") == "note name reused";
     }));
 
+    // A file that acquires an unsupported layout stays as a file without changing its linked memo.
+    auto unsupported = guest.files.at("Test.pwi");
+    unsupported.push_back(0);
+    guest.files["Test.pwi"] = unsupported;
+    guest.files["Drawing.pwi"] = unsupported;
+    CHECK(pass().find("Notes kept as files: 2.") != std::string::npos);
+    CHECK(guest.files.at("Test.pwi") == unsupported);
+    CHECK(Get(folder / "Test.pwi") == unsupported);
+    CHECK(Get(folder / "Drawing.pwi") == unsupported);
+    CHECK(profile.PimRecords(PimKind::memos).size() == live.size());
+
+    PimRecord unsupportedMemo;
+    unsupportedMemo.category = "WM5 Notes";
+    unsupportedMemo.fields["text"] = "memo with unsupported text \xd0\x96";
+    CHECK(profile.SavePimRecord(unsupportedMemo, error));
+    CHECK(pass().find("Memos with unsupported text: 1.") != std::string::npos);
+    CHECK(!guest.files.count("Frond Memo " + std::to_string(unsupportedMemo.id) + ".pwi"));
+
+    // A missing file and an unwritable memo edit must leave the guest copy in place.
+    const auto originalNote = WritePwiNote("recover this note").value();
+    guest.files["Recover.pwi"] = originalNote;
+    pass();
+    live = profile.PimRecords(PimKind::memos);
+    auto recovery = std::find_if(live.begin(), live.end(), [](const auto& record) {
+        return record.fields.at("text") == "recover this note";
+    });
+    CHECK(recovery != live.end());
+    recovery->fields["text"] = unsupportedMemo.fields.at("text");
+    CHECK(profile.SavePimRecord(*recovery, error));
+    fs::remove(folder / "Recover.pwi");
+    CHECK(pass().find("Memos with unsupported text: 2.") != std::string::npos);
+    CHECK(guest.files.at("Recover.pwi") == originalNote);
+
     Put(folder / "interrupted.txt", {'a'});
     pass();
     Put(folder / "interrupted.txt", {'b'});

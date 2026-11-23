@@ -300,6 +300,14 @@ bool SyncLibrary::UpdateAssignment(const Assignment& a, std::string& error) {
     return true;
 }
 
+bool SyncLibrary::RememberAssignmentUser(const Assignment& a, std::string& error) {
+    Query q(db, "UPDATE assignment SET user_name=?,user_id=?"
+                " WHERE device_key=? AND profile_id=? AND generation=?");
+    q.Bind(1, a.userName).Bind(2, a.userId).Bind(3, a.deviceKey).Bind(4, a.profileId).Bind(5, a.generation);
+    if (!q.Run()) return error = LastError(db), false;
+    return true;
+}
+
 bool SyncLibrary::FinishAssignment(const Assignment& a, std::string& error) {
     // Respect an assignment changed by the frontend during the sync.
     Query q(db, "UPDATE assignment SET user_name=?,user_id=?,last_sync=?,slow_next=0,kind=?"

@@ -1,9 +1,11 @@
 #include "InstallerRunner.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDirIterator>
 #include <QDeadlineTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -13,6 +15,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QThread>
@@ -32,6 +35,11 @@
 #include <unistd.h>
 #endif
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <msiquery.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <memory>
@@ -39,6 +47,10 @@
 #include <utility>
 
 #include "SyncFiles.h"
+#ifdef Q_OS_WIN
+#include "sync/PalmConduitStorage.h"
+#include "sync/SyncStore.h"
+#endif
 
 namespace frondInstallerRunner {
 namespace {
@@ -94,12 +106,13 @@ void waitForWorker(InstallerWait& progress, Work&& work) {
 }
 
 template <typename Work>
-void finishOnWorker(QWidget* parent, Work&& work) {
+void finishOnWorker(QWidget* parent, Work&& work,
+                    const QString& message = QObject::tr("Checking installer files and cleaning up…")) {
     InstallerWait progress(parent);
     progress.setWindowTitle(QObject::tr("Windows installer"));
     progress.setWindowFlag(Qt::WindowCloseButtonHint, false);
     auto* layout = new QVBoxLayout(&progress);
-    layout->addWidget(new QLabel(QObject::tr("Checking installer files and cleaning up…"), &progress));
+    layout->addWidget(new QLabel(message, &progress));
     waitForWorker(progress, std::forward<Work>(work));
 }
 
@@ -409,28 +422,77 @@ bool unpackInstallShield(const ExtractionAttempt& attempt, const QString& progra
 struct MsiTables {
     QMap<QString, QString> names;
     QSet<QString> embeddedCabinets;
+    QSet<QString> externalCabinets;
+
+    void addFile(const QString& key, const QString& rawName) {
+        const auto name = rawName.section('|', -1);
+        if (!name.contains('/') && !name.contains('\\') && !name.contains(QChar::Null))
+            names.insert(key, name);
+    }
+
+    void addCabinet(const QString& name) {
+        if (name.startsWith('#')) {
+            embeddedCabinets.insert(name.mid(1));
+            return;
+        }
+        static const QRegularExpression basename(R"(^[A-Za-z0-9_][A-Za-z0-9_ .()+,-]{0,239}$)");
+        if (basename.match(name).hasMatch()) externalCabinets.insert(name);
+    }
 };
 
-MsiTables msiTables(const ExtractionAttempt& attempt, const QString& program, const QString& installer) {
+#ifdef Q_OS_WIN
+QString msiString(MSIHANDLE row, UINT column) {
+    wchar_t value[256];
+    DWORD length = std::size(value);
+    return MsiRecordGetStringW(row, column, value, &length) == ERROR_SUCCESS
+        ? QString::fromWCharArray(value, length)
+        : QString{};
+}
+
+template <class ReadRow>
+void readMsiTable(const ExtractionAttempt& attempt, MSIHANDLE database, const wchar_t* query, ReadRow readRow) {
+    MSIHANDLE view{};
+    if (MsiDatabaseOpenViewW(database, query, &view) != ERROR_SUCCESS) return;
+    const auto closeView = qScopeGuard([&] { MsiCloseHandle(view); });
+    if (MsiViewExecute(view, 0) != ERROR_SUCCESS) return;
+    for (unsigned i = 0; i < 32767 && !attempt.stopped(); ++i) {
+        MSIHANDLE row{};
+        if (MsiViewFetch(view, &row) != ERROR_SUCCESS) return;
+        const auto closeRow = qScopeGuard([&] { MsiCloseHandle(row); });
+        readRow(row);
+    }
+}
+#endif
+
+MsiTables msiTables(const ExtractionAttempt& attempt, const QString& installer) {
     MsiTables tables;
+#ifdef Q_OS_WIN
+    const auto path = QDir::toNativeSeparators(QFileInfo(installer).absoluteFilePath()).toStdWString();
+    MSIHANDLE database{};
+    if (MsiOpenDatabaseW(path.c_str(), nullptr, &database) != ERROR_SUCCESS) return tables;
+    const auto close = qScopeGuard([&] { MsiCloseHandle(database); });
+    readMsiTable(attempt, database, L"SELECT `File`, `FileName` FROM `File`",
+                 [&](MSIHANDLE row) { tables.addFile(msiString(row, 1), msiString(row, 2)); });
+    readMsiTable(attempt, database, L"SELECT `Cabinet` FROM `Media`",
+                 [&](MSIHANDLE row) { tables.addCabinet(msiString(row, 1)); });
+#else
+    const auto program = QStandardPaths::findExecutable("msiinfo");
     if (program.isEmpty()) return tables;
     QByteArray files;
     if (attempt.command(program, {"export", installer, "File"}, 1024 * 1024, &files)) {
         for (const auto& row : QString::fromUtf8(files).split('\n').mid(3)) {
             const auto columns = row.split('\t');
-            if (columns.size() < 3) continue;
-            const auto name = columns[2].section('|', -1);
-            if (!name.contains('/') && !name.contains('\\') && !name.contains(QChar::Null))
-                tables.names.insert(columns[0], name);
+            if (columns.size() >= 3) tables.addFile(columns[0], columns[2]);
         }
     }
     QByteArray media;
     if (attempt.command(program, {"export", installer, "Media"}, 1024 * 1024, &media)) {
         for (const auto& row : QString::fromUtf8(media).split('\n').mid(3)) {
             const auto columns = row.split('\t');
-            if (columns.size() > 3 && columns[3].startsWith('#')) tables.embeddedCabinets.insert(columns[3].mid(1));
+            if (columns.size() >= 4) tables.addCabinet(columns[3]);
         }
     }
+#endif
     return tables;
 }
 
@@ -453,60 +515,124 @@ bool mobileCabinet(const ExtractionAttempt& attempt, const QString& program, con
     return readMember(attempt, program, archive, members.front(), data) && data.startsWith(QByteArray("MSCE\0\0\0\0", 8));
 }
 
+bool unpackInno(const ExtractionAttempt& attempt, const QString& installer, const QString& syncRoot,
+                std::vector<frondSync::InstallerFile>& files);
+
+struct ArchivePeer {
+    const QString& archive;
+    const std::vector<ArchiveMember>& members;
+    const ArchiveMember& installer;
+    QSet<QString>& media;
+};
+
 struct ArchiveScan {
     const ExtractionAttempt& attempt;
     const QString program;
     const QString syncRoot;
-    const QString msiInfo;
     const QString unshield;
     std::vector<frondSync::InstallerFile>& files;
     qint64 total = 0;
     qint64 nestedBytes = 0;
     size_t nestedCount = 0;
 
-    bool unpack(const QString& installer, unsigned depth, bool& inspectedMsiMedia) {
+    bool reserveNested(qint64 bytes) {
+        if (nestedCount >= 8 || bytes > maxTotalSize - nestedBytes) return false;
+        ++nestedCount;
+        nestedBytes += bytes;
+        return true;
+    }
+
+    bool unpack(const QString& installer, unsigned depth, bool& inspectedMsiMedia, const ArchivePeer* peer = nullptr) {
+        const auto suffix = QFileInfo(installer).suffix().toLower();
+        const bool msi = suffix == "msi";
+        const auto tables = msi ? msiTables(attempt, installer) : MsiTables{};
+        const auto before = files.size();
         std::vector<ArchiveMember> members;
         if (archiveMembers(attempt, program, installer, members)) {
-            const bool msi = QFileInfo(installer).suffix().compare("msi", Qt::CaseInsensitive) == 0;
-            const auto tables = msi ? msiTables(attempt, msiInfo, installer) : MsiTables{};
-            const auto isCabinet = [&](const ArchiveMember& member) {
-                return msi && (tables.embeddedCabinets.contains(member.path) || member.leaf.endsWith(".cab", Qt::CaseInsensitive));
-            };
-            std::vector<ArchiveMember> direct;
-            for (const auto& member : members) {
-                if (isCabinet(member)) inspectedMsiMedia = true;
-                else direct.push_back(member);
-            }
-
-            if (!collectDirect(attempt, program, installer, direct, files, total)) return false;
-#ifdef Q_OS_UNIX
-            if (!unshield.isEmpty() && !unpackInstallShield(attempt, program, installer, members, unshield, syncRoot, files, total))
-                return false;
-#endif
+            QSet<QString> media;
             for (const auto& member : members) {
                 if (attempt.stopped()) return false;
-                const bool cabinet = isCabinet(member);
+                const bool cabinet = msi && (tables.embeddedCabinets.contains(member.path) ||
+                                              member.leaf.endsWith(".cab", Qt::CaseInsensitive));
+                if (cabinet) {
+                    media.insert(member.path);
+                    inspectedMsiMedia = true;
+                }
                 if (!cabinet && (depth >= 2 || !frondSync::IsInstallerFileName(member.leaf.toStdString()))) continue;
-                if (nestedCount >= 8 || member.size > maxTotalSize - nestedBytes) break;
-                ++nestedCount;
-                nestedBytes += member.size;
+                if (!reserveNested(member.size)) continue;
                 QTemporaryDir stage(QDir(syncRoot).filePath("unpack-installer-XXXXXX"));
-                if (!stage.isValid()) break;
+                if (!stage.isValid()) continue;
                 const auto inner = stage.filePath("archive." + (cabinet ? QStringLiteral("cab") : QFileInfo(member.leaf).suffix().toLower()));
                 if (!writeMember(attempt, program, installer, member, inner)) continue;
                 if (cabinet) {
                     if (!unpackMsiCabinet(inner, member.leaf, tables)) return false;
                     continue;
                 }
-                const auto before = files.size();
+                const auto beforeInner = files.size();
+                const ArchivePeer innerPeer{installer, members, member, media};
                 bool innerMsiMedia = false;
-                const bool opened = unpack(inner, depth + 1, innerMsiMedia);
+                const bool opened = unpack(inner, depth + 1, innerMsiMedia, &innerPeer);
                 inspectedMsiMedia |= innerMsiMedia;
                 if (!opened) return false;
-                if (files.size() == before && !innerMsiMedia && !unpackEmbedded(inner, member.leaf)) return false;
+                if (files.size() == beforeInner && !innerMsiMedia && !unpackEmbedded(inner, member.leaf)) return false;
             }
+
+            std::vector<ArchiveMember> direct;
+            for (const auto& member : members)
+                if (!media.contains(member.path)) direct.push_back(member);
+
+            if (!collectDirect(attempt, program, installer, direct, files, total)) return false;
+#ifdef Q_OS_UNIX
+            if (!unshield.isEmpty() && !unpackInstallShield(attempt, program, installer, members, unshield, syncRoot, files, total))
+                return false;
+#endif
+        }
+
+        inspectedMsiMedia |= !tables.externalCabinets.isEmpty() || !tables.embeddedCabinets.isEmpty();
+        if (msi && !unpackExternalMsi(installer, tables, peer)) return false;
+        if (suffix == "exe" && files.size() == before) {
+            std::vector<frondSync::InstallerFile> extracted;
+            if (unpackInno(attempt, installer, syncRoot, extracted) && !append(extracted)) return false;
         }
         return !attempt.stopped();
+    }
+
+    bool unpackExternalMsi(const QString& installer, const MsiTables& tables, const ArchivePeer* peer) {
+        const auto parent = QFileInfo(installer).absoluteDir();
+        auto cabinets = tables.externalCabinets.values();
+        std::sort(cabinets.begin(), cabinets.end());
+        for (const auto& name : cabinets) {
+            if (attempt.stopped()) return false;
+            if (peer) {
+                auto installerPath = peer->installer.path;
+                installerPath.replace('\\', '/');
+                const auto path = installerPath.left(installerPath.lastIndexOf('/') + 1) + name;
+                const ArchiveMember* media = nullptr;
+                bool ambiguous = false;
+                for (const auto& candidate : peer->members) {
+                    auto candidatePath = candidate.path;
+                    candidatePath.replace('\\', '/');
+                    if (candidatePath.compare(path, Qt::CaseInsensitive) != 0) continue;
+                    peer->media.insert(candidate.path);
+                    ambiguous |= media != nullptr;
+                    media = &candidate;
+                }
+                if (!media || ambiguous || !reserveNested(media->size)) continue;
+
+                QTemporaryDir stage(QDir(syncRoot).filePath("unpack-msi-media-XXXXXX"));
+                if (!stage.isValid()) continue;
+                const auto cabinet = stage.filePath("media.cab");
+                if (writeMember(attempt, program, peer->archive, *media, cabinet) &&
+                    !unpackMsiCabinet(cabinet, name, tables)) return false;
+            } else {
+                const auto candidates = parent.entryInfoList({name}, QDir::Files | QDir::NoSymLinks);
+                if (candidates.size() != 1) continue;
+                const auto& source = candidates.front();
+                if (source.size() <= 0 || source.size() > maxFileSize || !reserveNested(source.size())) continue;
+                if (!unpackMsiCabinet(source.absoluteFilePath(), name, tables)) return false;
+            }
+        }
+        return true;
     }
 
     bool unpackMsiCabinet(const QString& path, QString name, const MsiTables& tables) {
@@ -537,7 +663,11 @@ struct ArchiveScan {
         std::string error;
         if (!frondSync::UnpackInstaller(name.toStdString(), bytes, embedded, error, false,
                                        [&] { return attempt.stopped(); })) return !attempt.stopped();
-        for (auto& payload : embedded) {
+        return append(embedded);
+    }
+
+    bool append(std::vector<frondSync::InstallerFile>& extracted) {
+        for (auto& payload : extracted) {
             if (files.size() >= maxFiles || qint64(payload.bytes.size()) > maxTotalSize - total) return false;
             total += payload.bytes.size();
             files.push_back(std::move(payload));
@@ -546,18 +676,276 @@ struct ArchiveScan {
     }
 };
 
+bool unpackInno(const ExtractionAttempt& attempt, const QString& installer, const QString& syncRoot,
+                std::vector<frondSync::InstallerFile>& files) {
+    const auto program = QStandardPaths::findExecutable("innoextract");
+    if (program.isEmpty()) return false;
+
+    const QStringList options{"--silent", "--color=0", "--progress=0", "--no-gog-galaxy", "--no-extract-unknown"};
+    const auto archive = QFileInfo(installer).absoluteFilePath();
+    QByteArray listing;
+    if (!attempt.command(program, options + QStringList{"--list-sizes", "--", archive}, 1024 * 1024, &listing))
+        return false;
+
+    static const QRegularExpression component(R"(^[A-Za-z0-9_][A-Za-z0-9_ .()+,-]{0,239}$)");
+    QStringList includes;
+    std::vector<ArchiveMember> members;
+    QSet<QString> selectedEntries;
+    qint64 total = 0;
+    for (auto line : QString::fromUtf8(listing).split('\n')) {
+        if (line.endsWith('\r')) line.chop(1);
+        const auto offset = line.indexOf(' ');
+        if (offset <= 0) continue;
+        auto path = line.mid(offset + 1);
+        path.replace('\\', '/');
+        const auto leaf = path.section('/', -1);
+        if (!frondSync::IsInstallFileName(leaf.toStdString())) continue;
+        const auto parts = path.split('/');
+        if (!std::all_of(parts.begin(), parts.end(), [&](const QString& part) { return component.match(part).hasMatch(); }))
+            continue;
+        bool valid = false;
+        const auto size = line.left(offset).toLongLong(&valid);
+        if (!valid || size <= 0 || size > maxFileSize || size > maxTotalSize - total || members.size() >= maxFiles)
+            return false;
+        if (selectedEntries.contains(line)) return false;
+        selectedEntries.insert(line);
+        includes << "--include" << QDir::toNativeSeparators('/' + path);
+        members.push_back({path, leaf, size});
+        total += size;
+    }
+    if (members.empty()) return false;
+
+    // Include expressions also match directories. Check what they select before writing anything.
+    QByteArray selected;
+    if (!attempt.command(program, options + includes + QStringList{"--list-sizes", "--", archive}, 1024 * 1024, &selected))
+        return false;
+    for (auto line : QString::fromUtf8(selected).split('\n')) {
+        if (line.endsWith('\r')) line.chop(1);
+        if (!line.isEmpty() && !selectedEntries.remove(line)) return false;
+    }
+    if (!selectedEntries.isEmpty()) return false;
+    QTemporaryDir stage(QDir(syncRoot).filePath("unpack-inno-XXXXXX"));
+    if (!stage.isValid() ||
+        !attempt.command(program, options + includes + QStringList{"--extract", "--test", "--timestamps=none",
+                                                                   "--output-dir", stage.path(), "--", archive}, 0))
+        return false;
+    for (const auto& member : members) {
+        const QFileInfo info(stage.filePath(member.path));
+        if (!info.isFile() || info.isSymLink() || info.size() != member.size ||
+            !info.canonicalFilePath().startsWith(QDir(stage.path()).canonicalPath() + '/')) continue;
+        frondSync::InstallerFile payload{member.leaf.toStdString(), {}};
+        QString error;
+        if (frondSyncFiles::readDatabase(info.filePath(), payload.bytes, error) &&
+            qint64(payload.bytes.size()) == member.size && frondSync::IsInstallPayload(payload))
+            files.push_back(std::move(payload));
+    }
+    return !files.empty() && !attempt.stopped();
+}
+
 QString sevenZip() {
     const auto program = QStandardPaths::findExecutable("7z");
     return program.isEmpty() ? QStandardPaths::findExecutable("7zz") : program;
 }
 
+#ifdef Q_OS_LINUX
+bool legacyWinZipInstaller(const QString& installer) {
+    if (QFileInfo(installer).suffix().compare("exe", Qt::CaseInsensitive) != 0) return false;
+    QFile file(installer);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    const auto header = file.read(64 * 1024);
+    return header.startsWith("MZ") && header.contains("WinZip(R) Self-Extractor Copyright");
+}
+
+QString stagePalmInstallerRuntime(const QString& installer, const QString& root) {
+    // Some Palm installers ship MFC beside the app but need it before installing any files.
+    const auto program = sevenZip();
+    if (program.isEmpty()) return {};
+    const ExtractionAttempt attempt;
+    std::vector<ArchiveMember> members;
+    if (!archiveMembers(attempt, program, installer, members)) return {};
+    const ArchiveMember* selected = nullptr;
+    for (const auto& member : members) {
+        if (member.leaf.compare("mfc42.dll", Qt::CaseInsensitive) != 0 || member.size > 2 * 1024 * 1024) continue;
+        if (selected) return {};
+        selected = &member;
+    }
+    if (!selected) return {};
+    QByteArray dll;
+    if (!readMember(attempt, program, installer, *selected, dll) || dll.size() < 64 || !dll.startsWith("MZ")) return {};
+    const auto offset = qFromLittleEndian<quint32>(dll.constData() + 60);
+    if (offset > quint32(dll.size() - 24) || dll.mid(offset, 4) != QByteArray("PE\0\0", 4) ||
+        qFromLittleEndian<quint16>(dll.constData() + offset + 4) != 0x14c ||
+        !(qFromLittleEndian<quint16>(dll.constData() + offset + 22) & 0x2000)) return {};
+    QFile copy(QDir(root).filePath("mfc42.dll"));
+    return copy.open(QIODevice::WriteOnly | QIODevice::NewOnly) && copy.write(dll) == dll.size() && copy.flush()
+        ? copy.fileName() : QString();
+}
+
+QString stageLegacyWinZipSetup(const QString& installer, const QString& root) {
+    const auto program = sevenZip();
+    if (program.isEmpty()) return {};
+    const ExtractionAttempt attempt;
+    const auto archive = QFileInfo(installer).absoluteFilePath();
+    std::vector<ArchiveMember> members;
+    if (!archiveMembers(attempt, program, archive, members) || members.size() > maxFiles) return {};
+
+    static const QRegularExpression basename(R"(^[A-Za-z0-9_][A-Za-z0-9_ .()+,-]{0,239}$)");
+    QSet<QString> names;
+    QString setup;
+    qint64 total = 0;
+    for (const auto& member : members) {
+        const auto key = member.leaf.toCaseFolded();
+        if (member.leaf != member.path || !basename.match(member.leaf).hasMatch() ||
+            names.contains(key) || member.size > maxTotalSize - total) return {};
+        names.insert(key);
+        total += member.size;
+        if (key == "setup.exe") setup = member.leaf;
+    }
+    // The old WinZip wrapper can exit without starting its bundled InstallShield setup under Wine.
+    if (setup.isEmpty() || !names.contains("setup.ins") || !names.contains("data1.hdr") || !names.contains("data1.cab"))
+        return {};
+
+    QTemporaryDir stage(QDir(root).filePath("setup-XXXXXX"));
+    if (!stage.isValid()) return {};
+    for (const auto& member : members) {
+        if (!writeMember(attempt, program, archive, member, stage.filePath(member.leaf))) return {};
+    }
+    stage.setAutoRemove(false);
+    return stage.filePath(setup);
+}
+#endif
+
 bool unpackWith7z(const ExtractionAttempt& attempt, const QString& program, const QString& installer, const QString& syncRoot,
                  std::vector<frondSync::InstallerFile>& files, bool& inspectedMsiMedia) {
-    ArchiveScan scan{attempt, program, syncRoot, QStandardPaths::findExecutable("msiinfo"), QStandardPaths::findExecutable("unshield"), files};
+    ArchiveScan scan{attempt, program, syncRoot, QStandardPaths::findExecutable("unshield"), files};
     return scan.unpack(installer, 0, inspectedMsiMedia) && !files.empty();
 }
 
 }  // namespace
+
+namespace {
+
+struct PalmUserFiles {
+    unsigned entries{};
+    qint64 totalBytes{};
+
+    bool copy(const QDir& source, const QDir& destination, unsigned depth = 0) {
+        constexpr qint64 maxUserBytes = 1024ll * 1024 * 1024;
+        const QFileInfo root(source.path());
+        if (!root.exists() && !root.isSymLink()) return true;
+        if (!root.isDir() || root.isSymLink() || depth > 24) return false;
+        QDirIterator files(source.path(), QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+        while (files.hasNext()) {
+            files.next();
+            const auto file = files.fileInfo();
+            const auto name = file.fileName();
+            if (!depth && (!name.compare("Install", Qt::CaseInsensitive) || !name.compare("Received", Qt::CaseInsensitive)))
+                continue;
+            if (++entries > 8192 || file.isSymLink()) return false;
+            if (file.isDir()) {
+                if (!destination.exists(name) && !QDir().mkdir(destination.filePath(name))) return false;
+                if (!copy(QDir(file.filePath()), QDir(destination.filePath(name)), depth + 1)) return false;
+            } else {
+                if (!file.isFile() || file.size() < 0 || file.size() > maxUserBytes - totalBytes ||
+                    !QFile::copy(file.filePath(), destination.filePath(name))) return false;
+                totalBytes += file.size();
+            }
+        }
+        return true;
+    }
+};
+
+bool restorePrevious(const QString& current) {
+    const QFileInfo original(current), previous(current + ".previous");
+    if (original.isSymLink() || previous.isSymLink() || (original.exists() && !original.isDir()) ||
+        (previous.exists() && !previous.isDir())) return false;
+    if (!previous.exists()) return true;
+    return original.exists() ? QDir(previous.filePath()).removeRecursively()
+                             : QDir().rename(previous.filePath(), current);
+}
+
+bool replaceDirectory(const QString& current, const QString& replacement) {
+    const bool exists = QFileInfo::exists(current);
+    const auto previous = current + ".previous";
+    QDir files;
+    if (exists && !files.rename(current, previous)) return false;
+    if (!files.rename(replacement, current)) {
+        if (exists) files.rename(previous, current);
+        return false;
+    }
+    return !exists || QDir(previous).removeRecursively();
+}
+
+QByteArray installerDigest(const QString& installer) {
+    QFile executable(installer);
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!executable.open(QIODevice::ReadOnly) || !hash.addData(&executable)) return {};
+    return hash.result().toHex();
+}
+
+bool installMarker(const QString& marker, QByteArray value, const QString& profile = {}) {
+    if (value.isEmpty()) return false;
+    if (!profile.isEmpty()) {
+        value += '\n';
+        value += QCryptographicHash::hash(profile.toUtf8(), QCryptographicHash::Sha256).toHex();
+    }
+    const QFileInfo previous(marker);
+    if (previous.isSymLink()) return false;
+    if (previous.exists()) {
+        QFile current(marker);
+        return previous.isFile() && previous.size() == value.size() && current.open(QIODevice::ReadOnly) &&
+               current.readAll() == value;
+    }
+    QSaveFile pending(marker);
+    return pending.open(QIODevice::WriteOnly) && pending.write(value) == value.size() && pending.commit();
+}
+
+bool registrationFiles(const QDir& source, const QDir& destination) {
+    static const QRegularExpression leaf(QStringLiteral("^[0-9a-f]{8}\\.conf$"));
+    for (const auto& file : source.entryInfoList(QDir::Files | QDir::NoSymLinks)) {
+        if (!leaf.match(file.fileName()).hasMatch()) continue;
+        if (file.size() <= 0 || file.size() > 65536 || !QFile::copy(file.filePath(), destination.filePath(file.fileName())))
+            return false;
+    }
+    return true;
+}
+
+bool prepareRegistrations(const QDir& root, const QDir& staged) {
+    const auto registered = root.filePath("registered");
+    return restorePrevious(registered) && QDir().mkdir(staged.path()) && registrationFiles(QDir(registered), staged);
+}
+
+bool publishRegistrations(const QDir& root, const QDir& staged, bool& changed) {
+    QTemporaryDir checked(staged.absoluteFilePath("checked-XXXXXX"));
+    if (!checked.isValid() || !registrationFiles(staged, QDir(checked.path()))) return false;
+    const QDir current(root.filePath("registered"));
+    const QDir verified(checked.path());
+    const auto files = verified.entryList(QDir::Files);
+    changed = current.entryList(QDir::Files) != files;
+    if (!changed) {
+        for (const auto& name : files) {
+            QFile oldFile(current.filePath(name)), newFile(verified.filePath(name));
+            if (!oldFile.open(QIODevice::ReadOnly) || !newFile.open(QIODevice::ReadOnly)) return false;
+            if (oldFile.readAll() != newFile.readAll()) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) return true;
+    return replaceDirectory(current.path(), verified.path());
+}
+
+}  // namespace
+
+QString conduitHostPath() {
+    const QDir helpers(shims());
+    for (const auto* name : {"x86/PalmConduitHost.exe", "PalmConduitHost.exe"}) {
+        const QFileInfo host(helpers.filePath(QString::fromLatin1(name)));
+        if (host.isFile()) return host.absoluteFilePath();
+    }
+    return {};
+}
 
 bool available() {
     const QDir helpers(shims());
@@ -568,7 +956,9 @@ bool available() {
            helpers.exists("Instapp.exe") && helpers.exists("CEAppMgr.exe");
 }
 
-RunResult run(QWidget* parent, const QString& installer, const QString& user, bool windowsMobile, const QString& syncRoot) {
+RunResult run(QWidget* parent, const QString& installer, const QString& user, bool windowsMobile,
+              const QString& syncRoot, const QString& profileFolder, const QString& conduitUserKey,
+              uint32_t conduitUserId) {
     RunResult result;
     const auto report = [&](const QString& message) {
         if (!result.error.isEmpty()) result.error += '\n';
@@ -594,23 +984,115 @@ RunResult run(QWidget* parent, const QString& installer, const QString& user, bo
         return result;
     }
 
-    const auto folder = helperFolder(installer);
+    auto launchPath = installer;
+#ifdef Q_OS_LINUX
+    if (legacyWinZipInstaller(installer)) {
+        finishOnWorker(parent, [&] {
+            const auto setup = stageLegacyWinZipSetup(installer, stage.path());
+            if (!setup.isEmpty()) launchPath = setup;
+        }, QObject::tr("Preparing the installer…"));
+    }
+#endif
+    const auto folder = helperFolder(launchPath);
+    const bool manageConduits = !windowsMobile && !profileFolder.isEmpty() &&
+        QFileInfo::exists(QDir(folder).filePath("CondMgr.dll")) && QFileInfo::exists(QDir(folder).filePath("HotSync.exe")) &&
+        (QFileInfo::exists(QDir(folder).filePath("PalmConduitHost.exe")) ||
+         QFileInfo::exists(QDir(shims()).filePath("x86/PalmConduitHost.exe")));
+    const QDir conduitFolder(QDir(profileFolder).filePath("conduits"));
+    const QDir registrations(stage.filePath("conduits"));
+    const QDir userStage(stage.filePath("User"));
+    const auto marker = conduitFolder.filePath("installing");
+    const auto seed = conduitFolder.filePath("seed");
+    const auto data = conduitFolder.filePath("data");
+    const auto userFolder = conduitUserKey.isEmpty() ? seed : QDir(data).filePath(conduitUserKey);
+#ifdef Q_OS_WIN
+    frondSync::ProfileSyncLock nativeInstallLock;
+    const auto nativeMarker = QDir(syncRoot).filePath(QString::fromLatin1(frondSync::PalmConduitNativeInstallMarker));
+    std::string nativeLockError;
+    if (manageConduits && !nativeInstallLock.Acquire(syncRoot.toStdString(), frondSync::PalmConduitNativeLockId,
+                                                       nativeLockError)) {
+        report(QObject::tr("A Palm conduit is already running."));
+        finishOnWorker(parent, removeStage);
+        return result;
+    }
+#endif
+    if (manageConduits) {
+        bool ready = false;
+        finishOnWorker(parent, [&] {
+            static const QRegularExpression key(QStringLiteral("^[0-9a-f]{32}-[0-9a-f]{8}$"));
+            if (QFileInfo(conduitFolder.path()).isSymLink() || !QDir().mkpath(conduitFolder.path()) ||
+                (!conduitUserKey.isEmpty() && (!key.match(conduitUserKey).hasMatch() || QFileInfo(data).isSymLink() ||
+                 !QDir().mkpath(data))) || !restorePrevious(seed) || !restorePrevious(userFolder) ||
+                !prepareRegistrations(conduitFolder, registrations)) return;
+            const auto needsSeed = !conduitUserKey.isEmpty() && !QFileInfo::exists(userFolder);
+            if (!PalmUserFiles{}.copy(QDir(needsSeed ? seed : userFolder), userStage)) return;
+            const auto checksum = installerDigest(installer);
+#ifdef Q_OS_WIN
+            const auto nativeProfile = QFileInfo(profileFolder).canonicalFilePath();
+            if (nativeProfile.isEmpty() || !installMarker(nativeMarker, checksum, nativeProfile)) {
+                report(QObject::tr("Retry the previous Palm installer in its original sync profile."));
+                return;
+            }
+#endif
+            if (!installMarker(marker, checksum)) {
+                report(QObject::tr("Retry the previous Palm installer to finish updating this profile."));
+                return;
+            }
+            ready = true;
+        }, QObject::tr("Preparing the installer…"));
+        if (!ready) {
+            if (result.error.isEmpty()) report(QObject::tr("Couldn't prepare the Palm conduit folder."));
+            finishOnWorker(parent, removeStage);
+            return result;
+        }
+    }
     auto env = QProcessEnvironment::systemEnvironment();
     env.insert("FROND_INSTALL_STAGE", windowsPath(stage.path()));
     env.insert("FROND_INSTALL_SHIMS", windowsPath(folder));
     env.insert("FROND_INSTALL_USER", user);
     env.insert("FROND_INSTALL_KIND", windowsMobile ? "winmo" : "palm");
-    QStringList args{windowsPath(installer)};
+    if (manageConduits) env.insert("FROND_PALM_CONDUIT_STAGE", windowsPath(registrations.path()));
+    else env.remove("FROND_PALM_CONDUIT_STAGE");
+    if (manageConduits && conduitUserId) env.insert("FROND_INSTALL_USER_ID", QString::number(conduitUserId));
+    else env.remove("FROND_INSTALL_USER_ID");
+    QStringList args{windowsPath(launchPath)};
 #ifdef Q_OS_LINUX
-    // A private prefix lets us stop this Wine session and its Windows processes together.
-    const auto prefix = stage.filePath("wine");
+    // Palm conduits need their installed DLLs and desktop files on later syncs.
+    const auto prefix = manageConduits ? conduitFolder.filePath("wine") : stage.filePath("wine");
+    if (QFileInfo(prefix).isSymLink()) {
+        report(QObject::tr("Couldn't use the installer's Wine folder."));
+        finishOnWorker(parent, removeStage);
+        return result;
+    }
+    const bool freshConduitPrefix = manageConduits && !QFileInfo::exists(prefix);
+    env.remove("FROND_PALM_MFC42_STAGE");
+    env.remove("FROND_MANAGED_PALM_APP");
+    if (manageConduits) {
+        const auto drive = QDir(QDir(prefix).filePath("drive_c")).canonicalPath();
+        const auto program = QFileInfo(launchPath).canonicalFilePath();
+        if (!drive.isEmpty() && program.startsWith(drive + '/')) {
+            auto relative = program.mid(drive.size() + 1);
+            args.front() = QStringLiteral("C:\\") + relative.replace('/', '\\');
+            if (QFileInfo(launchPath).suffix().compare("exe", Qt::CaseInsensitive) == 0)
+                env.insert("FROND_MANAGED_PALM_APP", "1");
+        }
+        QString mfc;
+        finishOnWorker(parent, [&] { mfc = stagePalmInstallerRuntime(launchPath, stage.path()); },
+                       QObject::tr("Preparing the installer…"));
+        if (!mfc.isEmpty()) env.insert("FROND_PALM_MFC42_STAGE", windowsPath(mfc));
+    }
+    const auto overrides = env.value("WINEDLLOVERRIDES");
+    env.insert("WINEDLLOVERRIDES", overrides.isEmpty() ? "winemenubuilder.exe=d" : overrides + ";winemenubuilder.exe=d");
     env.insert("WINEPREFIX", prefix);
     env.insert("WINESERVER", wineServer());
     env.insert("FROND_INSTALL_WINE", "1");
     args.prepend(folder + "/RunInstaller.exe");
 #else
     env.remove("FROND_INSTALL_WINE");
+    env.remove("FROND_PALM_MFC42_STAGE");
+    env.remove("FROND_MANAGED_PALM_APP");
 #endif
+    const bool managedCompanion = env.value("FROND_MANAGED_PALM_APP") == "1";
 
 #ifdef Q_OS_WIN
     InstallerWait waiting(parent);
@@ -619,14 +1101,41 @@ RunResult run(QWidget* parent, const QString& installer, const QString& user, bo
 #endif
     waiting.setWindowTitle(QObject::tr("Windows installer"));
     auto* layout = new QVBoxLayout(&waiting);
-    layout->addWidget(new QLabel(QObject::tr("Finish the installer to choose its files."), &waiting));
+    auto* status = new QLabel(QObject::tr("Finish the installer to choose its files."), &waiting);
+    layout->addWidget(status);
+    if (manageConduits) layout->addWidget(new QLabel(QObject::tr("Installed Palm conduits can run during HotSync for this profile."), &waiting));
+    auto* buttons = new QDialogButtonBox(&waiting);
+    layout->addWidget(buttons);
 #ifdef Q_OS_WIN
     waiting.setWindowFlag(Qt::WindowCloseButtonHint, false);
+    buttons->hide();
 #else
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &waiting);
-    layout->addWidget(buttons);
+    buttons->addButton(QDialogButtonBox::Cancel);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &waiting, &QDialog::reject);
 #endif
+    QTimer ready;
+    if (manageConduits) {
+        auto* finish = buttons->addButton(QObject::tr("Finish"), QDialogButtonBox::ActionRole);
+        finish->setAutoDefault(false);
+        finish->hide();
+        QObject::connect(&ready, &QTimer::timeout, &waiting, [&, finish] {
+            const QFileInfo offered(stage.filePath("finish-ready"));
+            if (!offered.isFile() || offered.isSymLink()) return;
+            ready.stop();
+            status->setText(QObject::tr("Close the installer’s remaining windows before choosing Finish."));
+            finish->show();
+            buttons->show();
+        });
+        QObject::connect(finish, &QPushButton::clicked, &waiting, [&, finish] {
+            QFile request(stage.filePath("finish"));
+            if (!request.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+                status->setText(QObject::tr("Couldn't finish the installer."));
+                return;
+            }
+            finish->setEnabled(false);
+        });
+        ready.start(250);
+    }
 
     QProcess process;
     process.setProcessEnvironment(env);
@@ -718,13 +1227,42 @@ RunResult run(QWidget* parent, const QString& installer, const QString& user, bo
                 }
             }
             removeDuplicatePayloads(result.files);
-            if (result.files.empty() && result.error.isEmpty())
-                report(QObject::tr("The installer supplied no files for this device."));
         }
 
+        if (manageConduits && started && stopped && result.error.isEmpty()) {
+            QTemporaryDir checked(stage.filePath("palm-user-XXXXXX"));
+            PalmUserFiles desktopFiles;
+            bool saved = checked.isValid() && QFileInfo(userStage.path()).isDir() &&
+                         desktopFiles.copy(userStage, QDir(checked.path())) &&
+                         replaceDirectory(userFolder, checked.path()) &&
+                         publishRegistrations(conduitFolder, registrations, result.conduitsChanged) &&
+                         QFile::remove(marker);
+#ifdef Q_OS_WIN
+            saved = saved && QFile::remove(nativeMarker);
+#endif
+            if (saved) result.palmDesktopSaved = managedCompanion && desktopFiles.totalBytes > 0;
+            else report(QObject::tr("Couldn't save the Palm conduit registrations and user files."));
+        }
+        if (started && stopped && result.files.empty() && !result.conduitsChanged && !result.palmDesktopSaved &&
+            result.error.isEmpty()) report(QObject::tr("The installer supplied no files for this device."));
+#ifdef Q_OS_LINUX
+        if (stopped && freshConduitPrefix && !QFileInfo(conduitFolder.filePath("registered")).isDir() &&
+            !QDir(prefix).removeRecursively())
+            report(QObject::tr("Couldn't remove the installer's Wine folder."));
+#endif
         if (stopped) removeStage();
         else report(QObject::tr("The installer folder was kept at %1.").arg(stage.path()));
     });
+    if (result.error.isEmpty() && result.files.empty() && result.conduitsChanged && !result.palmDesktopSaved) {
+        std::vector<frondSync::InstallerFile> deferred;
+        QString error;
+        if (unpack(parent, installer, syncRoot, deferred, error)) {
+            deferred.erase(std::remove_if(deferred.begin(), deferred.end(), [](const auto& file) {
+                return QFileInfo(QString::fromStdString(file.name)).suffix().compare("cab", Qt::CaseInsensitive) == 0;
+            }), deferred.end());
+            result.files = std::move(deferred);
+        }
+    }
     return result;
 }
 
@@ -751,6 +1289,14 @@ static bool unpackFiles(const ExtractionAttempt& attempt, const QString& install
     if (!program.isEmpty() && unpackWith7z(attempt, program, installer, syncRoot, unpacked, inspectedMsiMedia)) {
         files = std::move(unpacked);
         return true;
+    }
+    if (attempt.stopped()) return false;
+    if (suffix == "exe" && program.isEmpty()) {
+        unpacked.clear();
+        if (unpackInno(attempt, installer, syncRoot, unpacked)) {
+            files = std::move(unpacked);
+            return true;
+        }
     }
     if (attempt.stopped()) return false;
     // A normal MSI media cabinet is itself MSCF, which the raw fallback cannot distinguish.

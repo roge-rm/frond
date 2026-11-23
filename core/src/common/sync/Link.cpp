@@ -226,8 +226,12 @@ class NetSyncLink final : public HandheldLink {
     bool SendAs(const Bytes& message, uint8_t id) {
         Bytes frame{1, id, uint8_t(message.size() >> 24), uint8_t(message.size() >> 16), uint8_t(message.size() >> 8),
                     uint8_t(message.size())};
+        const size_t headerSize = frame.size();
         frame.insert(frame.end(), message.begin(), message.end());
-        if (!stream.Write(frame.data(), frame.size())) return Fail("The handheld went away.");
+        const bool sent = transport == Transport::usb && frame.size() > 64
+                              ? stream.WriteWithHeader(frame.data(), frame.size(), headerSize)
+                              : stream.Write(frame.data(), frame.size());
+        if (!sent) return Fail("The handheld went away.");
         return true;
     }
 

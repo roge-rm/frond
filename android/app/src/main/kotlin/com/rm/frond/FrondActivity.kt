@@ -65,6 +65,7 @@ open class FrondActivity : SDLActivity() {
     @Volatile private var destroyed = false
     // Why the core wasn't started, for the home screen.
     @Volatile private var startRefused: String? = null
+    private var launchCards = emptyList<String>()
     private var keyboardButton: View? = null
     // The running bar over the Palm: its state, view and the owner its ComposeView needs.
     private val bar = com.rm.frond.ui.RunningBarState()
@@ -375,7 +376,7 @@ open class FrondActivity : SDLActivity() {
         }
         if (saved != null) {
             arguments += saved.path
-            arguments += cardArguments()
+            arguments += launchCards
         } else {
             val device = Device.byId(extras?.getString(EXTRA_DEVICE)) ?: Device.TX
             val nor = extras?.getString(EXTRA_NOR) ?: Firmware.nor(this, device).path
@@ -389,8 +390,6 @@ open class FrondActivity : SDLActivity() {
             }
             // frond-68k links its cards by path from the machine's folder, which Add device's cards go into.
             if (device.linkedCards) session?.let { File(it).parentFile }?.takeIf { it.canonicalFile != Sessions.folder(this).canonicalFile }?.mkdirs()
-            // Not saved yet: only the run lock, as there's no slot to load.
-            cardArguments()
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd,
@@ -429,39 +428,48 @@ open class FrondActivity : SDLActivity() {
     // alone. Without it no core runs: SDL finds no such function, returns and ends the activity,
     // and the home screen shows startRefused.
     override fun getMainFunction(): String {
-        val folder = machineFolder() ?: return super.getMainFunction()
+        val folder = machineFolder()
+        if (folder == null) {
+            launchCards = cardArguments(null)
+            return super.getMainFunction()
+        }
         val deadline = System.currentTimeMillis() + 10_000
         while (runLock == null) {
             runLock = Cards.tryRunLock(folder)
             if (runLock != null || System.currentTimeMillis() > deadline) break
             Thread.sleep(100)
         }
-        if (runLock != null) return super.getMainFunction()
-        Log.w(TAG, "couldn't take ${folder.name}/${Cards.RUN_LOCK}, not starting")
-        startRefused = "Couldn't start ${Sessions.forPath(this, sessionPath)?.name ?: folder.name}: Frond is still using it. Try again in a moment."
-        return "frond_not_started"
+        if (runLock == null) {
+            Log.w(TAG, "couldn't take ${folder.name}/${Cards.RUN_LOCK}, not starting")
+            startRefused = "Couldn't start ${Sessions.forPath(this, sessionPath)?.name ?: folder.name}: Frond is still using it. Try again in a moment."
+        } else {
+            launchCards = cardArguments(folder)
+        }
+        return if (startRefused == null) super.getMainFunction() else "frond_not_started"
     }
 
-    // Takes a linked card if it is free and gives the core the card flags slot.json asks for, once
-    // getMainFunction has the run lock. frond-68k takes only --card-swap and its cards by path once
+    // Takes a linked card if it is free and gives the core the card flags slot.json asks for, under
+    // the run lock for machines in the sessions folder. frond-68k takes only --card-swap and its cards by path once
     // it runs (RunningModel); first the cards an older Frond kept in dana-cards/ move into the
     // machine and Cards. 68k devices with no card slot get nothing. Runs on SDL's thread.
-    private fun cardArguments(): List<String> {
+    private fun cardArguments(folder: File?): List<String> {
         val device = launchDevice()
-        val folder = machineFolder() ?: return if (device.runs68k && device.linkedCards)
+        if (folder == null) return if (device.runs68k && device.linkedCards)
             sessionPath?.let { Sessions.folder(this).let { sessions -> Cards.outsideArguments(File(it), sessions, Cards.oldCardsFor(sessions)) } }.orEmpty() else emptyList()
-        if ((device.runs68k && !device.linkedCards) || runLock == null) return emptyList()
+        if (device.runs68k && !device.linkedCards) return emptyList()
         return try {
             if (device.runs68k) {
                 val sessions = Sessions.folder(this)
                 Cards.moveLinkedIn(sessions, folder, Cards.oldCardsFor(sessions))
             }
             val start = Cards.takeAtStart(Sessions.folder(this), folder, device.runs68k)
+            startRefused = start.error
             start.heldBy?.let { Log.i(TAG, "linked card is in $it") }
             start.heldBy2?.let { Log.i(TAG, "linked card 2 is in $it") }
             start.arguments
         } catch (e: Exception) {
             Log.e(TAG, "card start: ${e.message}")
+            startRefused = "Couldn't prepare this session's cards."
             emptyList()
         }
     }

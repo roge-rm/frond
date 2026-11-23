@@ -25,7 +25,7 @@ struct HotSyncResult {
 };
 
 HotSyncResult RunHotSync(PacketLink& link, const SyncOptions& options, const std::string& root, Transport transport,
-                         SyncManager& manager);
+                         SyncManager& manager, const std::atomic<bool>* stop = nullptr);
 
 }  // namespace frondSync
 

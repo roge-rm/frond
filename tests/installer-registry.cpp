@@ -1,4 +1,5 @@
 #include "../installer-shims/InstallBridge.h"
+#include "../installer-shims/PalmHotSync.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -93,14 +94,20 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(SetEnvironmentVariableW(exitName, (name + L".finish").c_str()));
     CHECK(SetEnvironmentVariableW(childName, (name + L".child").c_str()));
 
-    constexpr REGSAM view = sizeof(void*) == 4 ? KEY_WOW64_32KEY : KEY_WOW64_64KEY;
+    const bool wine = Environment(L"FROND_INSTALL_WINE") == L"1";
+    const HKEY mobileHive = wine ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
+    const REGSAM view = wine ? (sizeof(void*) == 4 ? KEY_WOW64_32KEY : KEY_WOW64_64KEY) : 0;
     const Registration pilot = WindowsMobile()
-        ? Registration{HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows CE Services", view}
+        ? Registration{mobileHive, L"Software\\Microsoft\\Windows CE Services", view}
         : Registration{HKEY_CURRENT_USER, L"Software\\U.S. Robotics\\Pilot Desktop", 0};
     const Registration companion = WindowsMobile()
-        ? Registration{HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\CEAppMgr.exe", view}
+        ? Registration{mobileHive, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\CEAppMgr.exe", view}
         : Registration{HKEY_CURRENT_USER, L"Software\\Palm, Inc.\\Palm Desktop", 0};
-    CHECK(!pilot.Exists() && !companion.Exists());
+    const Registration core{HKEY_CURRENT_USER, L"Software\\U.S. Robotics\\Pilot Desktop\\Core", 0};
+    const bool hosted = !WindowsMobile() && !Environment(L"FROND_PALM_CONDUIT_STAGE").empty();
+    const auto active = [&] { return pilot.Exists() && companion.Exists() && (WindowsMobile() || core.Exists() == hosted); };
+    const auto cleared = [&] { return !pilot.Exists() && !companion.Exists() && (WindowsMobile() || !core.Exists()); };
+    CHECK(cleared());
 
     HKEY foreign{};
     DWORD disposition{};
@@ -116,12 +123,24 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(SetEnvironmentVariableW(crashName, L"1"));
     auto process = Launch(runner, self);
     CHECK(WaitForSingleObject(started, deadline) == WAIT_OBJECT_0);
-    CHECK(pilot.Exists() && companion.Exists());
+    CHECK(active());
+    if (hosted) {
+        const auto window = FindPalmHotSyncWindow();
+        CHECK(window && !IsWindowVisible(window));
+        const auto library = LoadLibraryW((runner.parent_path() / L"HSAPI.dll").c_str());
+        CHECK(library);
+        const auto status = reinterpret_cast<LONG (WINAPI*)(DWORD*)>(GetProcAddress(library, "HsGetSyncStatus"));
+        DWORD syncing = 1;
+        CHECK(status && status(&syncing) == 0 && !syncing);
+        CHECK(status(nullptr) == 0x1000000a);
+        CHECK(FreeLibrary(library));
+    }
     CHECK(Wait(Launch(otherRunner, self)) == ERROR_BUSY);
-    CHECK(pilot.Exists() && companion.Exists());
+    CHECK(active());
     CHECK(SetEvent(finish));
     CHECK(Wait(process) == 91);
-    CHECK(!pilot.Exists() && !companion.Exists());
+    CHECK(cleared());
+    if (hosted) CHECK(!FindPalmHotSyncWindow());
     CHECK(SetEnvironmentVariableW(crashName, nullptr));
     CHECK(WaitForSingleObject(child, deadline) == WAIT_ABANDONED);
     CHECK(ReleaseMutex(child));
@@ -130,9 +149,10 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(WaitForSingleObject(started, deadline) == WAIT_OBJECT_0);
     CHECK(TerminateProcess(process, 92));
     CHECK(Wait(process) == 92);
+    if (hosted) CHECK(!FindPalmHotSyncWindow());
     CHECK(WaitForSingleObject(child, deadline) == WAIT_ABANDONED);
     CHECK(ReleaseMutex(child));
-    CHECK(pilot.Exists() && companion.Exists());
+    CHECK(active());
 
     CHECK(RegOpenKeyExW(pilot.root, pilot.path, 0, KEY_SET_VALUE | pilot.view, &foreign) == ERROR_SUCCESS);
     CHECK(RegSetValueExW(foreign, L"TestForeign", 0, REG_SZ, reinterpret_cast<const BYTE*>(L"Existing"), sizeof(L"Existing")) ==
@@ -144,10 +164,34 @@ int wmain(int argc, wchar_t** argv) {
 
     process = Launch(runner, self);
     CHECK(WaitForSingleObject(started, deadline) == WAIT_OBJECT_0);
-    CHECK(pilot.Exists() && companion.Exists());
+    CHECK(active());
     CHECK(SetEvent(finish));
     CHECK(Wait(process) == 0);
-    CHECK(!pilot.Exists() && !companion.Exists());
+    CHECK(cleared());
+    if (hosted) {
+        const Registration vendor{HKEY_CURRENT_USER, L"Software\\U.S. Robotics\\Pilot Desktop\\TestVendor", 0};
+        process = Launch(runner, self);
+        CHECK(WaitForSingleObject(started, deadline) == WAIT_OBJECT_0);
+        CHECK(active());
+        HKEY settings{};
+        CHECK(RegCreateKeyExW(vendor.root, vendor.path, 0, nullptr, 0, KEY_SET_VALUE, nullptr,
+                             &settings, &disposition) == ERROR_SUCCESS && disposition == REG_CREATED_NEW_KEY);
+        RegCloseKey(settings);
+        CHECK(SetEvent(finish));
+        CHECK(Wait(process) == 0);
+        CHECK(vendor.Exists() && !core.Exists() && !companion.Exists());
+        CHECK(RegOpenKeyExW(pilot.root, pilot.path, 0, KEY_QUERY_VALUE, &settings) == ERROR_SUCCESS);
+        CHECK(RegQueryValueExW(settings, L"Path", nullptr, nullptr, nullptr, nullptr) == ERROR_FILE_NOT_FOUND);
+        RegCloseKey(settings);
+        process = Launch(runner, self);
+        CHECK(WaitForSingleObject(started, deadline) == WAIT_OBJECT_0);
+        CHECK(active() && vendor.Exists());
+        CHECK(SetEvent(finish));
+        CHECK(Wait(process) == 0);
+        CHECK(vendor.Exists() && !core.Exists() && !companion.Exists());
+        CHECK(RegDeleteKeyExW(vendor.root, vendor.path, 0, 0) == ERROR_SUCCESS);
+        CHECK(RegDeleteKeyExW(pilot.root, pilot.path, 0, 0) == ERROR_SUCCESS);
+    }
     CloseHandle(child);
     CloseHandle(finish);
     CloseHandle(started);

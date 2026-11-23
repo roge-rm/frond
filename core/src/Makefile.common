@@ -20,6 +20,10 @@ EXE_SUFFIX ?=
 # The variables below should be defined as necessary
 
 CFLAGS_COMMON ?= -Wextra -Wall
+ifeq ($(HOST_OS),windows)
+# MinGW selects the stat ABI when the headers are first read.
+CFLAGS_COMMON += -D_FILE_OFFSET_BITS=64
+endif
 CXXFLAGS_COMMON ?= $(CFLAGS_COMMON)
 
 STD_C ?= -std=c99

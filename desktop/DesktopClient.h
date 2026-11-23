@@ -11,7 +11,8 @@ class DesktopClient : public QObject {
  public:
     explicit DesktopClient(QObject* parent = nullptr);
     ~DesktopClient();
-    bool start(const QString& core, const QStringList& arguments);
+    bool start(const QString& core, const QStringList& arguments,
+               const QProcessEnvironment& environment = QProcessEnvironment(QProcessEnvironment::InheritFromParent));
     bool request(const QString& command, const QString& argument = {});
     // A read-only query that doesn't take the request slot: available() and the pending command are
     // untouched, and the answer comes as backgroundResult. Sent only when the slot is free and no other

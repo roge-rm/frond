@@ -29,14 +29,17 @@ inline fs::path UserDirectory() {
 
 inline bool WindowsMobile() { return Environment(L"FROND_INSTALL_KIND") == L"winmo"; }
 
-inline bool Stage(const fs::path& file) {
-    auto user = UserDirectory();
-    if (user.empty()) return false;
+inline bool InstallFormat(const fs::path& file) {
     auto extension = file.extension().wstring();
     for (auto& c : extension)
         if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
     const bool cab = extension == L".cab";
-    if (WindowsMobile() != cab || (!cab && extension != L".prc" && extension != L".pdb" && extension != L".pqa")) return false;
+    return WindowsMobile() ? cab : extension == L".prc" || extension == L".pdb" || extension == L".pqa";
+}
+
+inline bool Stage(const fs::path& file) {
+    const auto user = UserDirectory();
+    if (user.empty() || !InstallFormat(file)) return false;
     const auto attr = GetFileAttributesW(file.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES || (attr & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return false;
     return CopyFileW(file.c_str(), (user / L"Received" / file.filename()).c_str(), TRUE) != 0;

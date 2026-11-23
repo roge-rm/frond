@@ -15,13 +15,13 @@ inline constexpr char noteFileField[] = "wm5-note-file";
 inline constexpr char noteTextField[] = "wm5-note-text";
 void DetachPwiMemo(PimRecord& memo);
 
-// Reads the observed WM5 Notes default-font single-line ASCII format.
+// Reads the observed WM5 Notes default-font plain text format.
 std::optional<std::string> ReadPwiNote(const Bytes& data);
 
-// Builds a default-font note from 1 to 21 printable ASCII characters.
+// Builds a default-font note from printable ASCII, Latin-1, the euro sign and line breaks.
 std::optional<Bytes> WritePwiNote(std::string_view text);
 
-// Replaces a recognised note with a supported line, leaving it intact on failure.
+// Replaces a recognised note with new text, leaving it intact on failure.
 bool ReplacePwiNoteText(Bytes& data, std::string_view text);
 
 }  // namespace frondSync

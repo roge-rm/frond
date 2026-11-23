@@ -1,0 +1,33 @@
+LIBRARY SYNC20
+EXPORTS
+  SyncRegisterConduit @22
+  SyncUnRegisterConduit @23
+  SyncReadUserID @24
+  SyncOpenDB @26
+  SyncCreateDB @27
+  SyncCloseDB @28
+  SyncDeleteDB @29
+  SyncResetSyncFlags @31
+  SyncWriteRec @32
+  SyncDeleteRec @33
+  SyncReadRecordById @35
+  SyncReadRecordByIndex @36
+  SyncReadNextModifiedRec @37
+  SyncReadDBAppInfoBlock @38
+  SyncWriteDBAppInfoBlock @39
+  SyncPurgeDeletedRecs @40
+  SyncPurgeAllRecs @41
+  SyncAddLogEntry @42
+  SyncWriteResourceRec @43
+  SyncFindDbByName @60
+  SyncFindDbByTypeCreator @61
+  SyncGetDBRecordCount @63
+  SyncReadAppPreference @74
+  SyncReadFeature @76
+  SyncReadSingleCardInfo @84
+  SyncReadSysDateTime @85
+  SyncWriteAppPreference @89
+  SyncYieldCycles @93
+  FrondConduitConnect
+  FrondConduitComplete
+  FrondConduitLog
