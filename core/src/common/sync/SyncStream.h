@@ -22,6 +22,8 @@ class SyncStream {
     virtual long Read(uint8_t* out, size_t max, int timeoutMs) = 0;
     // Queues all of data, waiting for room. False once closed.
     virtual bool Write(const uint8_t* data, size_t size) = 0;
+    // USB transports can send the NetSync header in a separate bulk packet.
+    virtual bool WriteWithHeader(const uint8_t* data, size_t size, size_t) { return Write(data, size); }
     // Drops bytes already received, as after a line error.
     virtual void Flush() {}
     // Ends every wait: Read returns -1 and Write false from now on. Any thread.

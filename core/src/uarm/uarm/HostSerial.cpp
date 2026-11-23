@@ -45,6 +45,7 @@ struct Shared {
     std::mutex mutex;
     std::condition_variable queueChanged;
     std::deque<uint8_t> rx, tx;  // host to guest, guest to host
+    size_t rxPacketEnd{0};  // bytes through the end of a separate USB packet
     std::atomic<size_t> rxSize{0}, txSize{0};
     std::atomic<bool> connected{false}, stop{false};
     std::atomic<uint64_t> received{0}, sent{0}, rxDiscarded{0}, txDropped{0};
@@ -63,7 +64,7 @@ struct Shared {
         ++txGeneration;
     }
     void ClearReceive() { // caller holds mutex
-        rxDiscarded += rx.size();rx.clear();rxSize=0;++receiveGeneration;
+        rxDiscarded += rx.size();rx.clear();rxSize=0;rxPacketEnd=0;++receiveGeneration;
     }
     void Wake() {
         if (wake < 0) {
@@ -245,12 +246,22 @@ class SharedStream final : public frondSync::SyncStream {
         s.sent += n;
         return long(n);
     }
-    bool Write(const uint8_t* data, size_t size) override {
+    bool Write(const uint8_t* data, size_t size) override { return Queue(data, size, 0); }
+    bool WriteWithHeader(const uint8_t* data, size_t size, size_t headerSize) override {
+        return Queue(data, size, headerSize);
+    }
+    void Abort() override { s.Stop(); }
+
+   private:
+    bool Queue(const uint8_t* data, size_t size, size_t headerSize) {
         std::unique_lock lock(s.mutex);
         while (size) {
-            s.queueChanged.wait_for(lock, std::chrono::milliseconds(10), [&] {
-                return s.stop || (s.scopedReceive && !s.receiveEnabled) || s.rx.size() < HostSerial::queueBytes;
+            const bool ready = s.queueChanged.wait_for(lock, std::chrono::milliseconds(10), [&] {
+                const auto room = HostSerial::queueBytes - s.rx.size();
+                return s.stop || (s.scopedReceive && !s.receiveEnabled) ||
+                       (headerSize ? !s.rxPacketEnd && room >= headerSize : room != 0);
             });
+            if (!ready) continue;
             if (s.stop) return false;
             if (s.scopedReceive && !s.receiveEnabled) {
                 s.rxDiscarded += size;
@@ -258,6 +269,10 @@ class SharedStream final : public frondSync::SyncStream {
                 return true;
             }
             const size_t n = std::min(size, HostSerial::queueBytes - s.rx.size());
+            if (headerSize) {
+                s.rxPacketEnd = s.rx.size() + headerSize;
+                headerSize = 0;
+            }
             s.rx.insert(s.rx.end(), data, data + n);
             s.rxSize = s.rx.size();
             s.received += n;
@@ -266,9 +281,7 @@ class SharedStream final : public frondSync::SyncStream {
         }
         return true;
     }
-    void Abort() override { s.Stop(); }
 
-   private:
     Shared& s;
 };
 
@@ -767,6 +780,10 @@ size_t HostByteLink::Receive(uint8_t* out, size_t max) {
     {
         std::lock_guard lock(s->mutex);
         count = std::min(max, s->rx.size());
+        if (s->rxPacketEnd) {
+            count = std::min(count, s->rxPacketEnd);
+            s->rxPacketEnd -= count;
+        }
         std::copy(s->rx.begin(), s->rx.begin() + count, out);
         s->rx.erase(s->rx.begin(), s->rx.begin() + count);
         left = s->rxSize = s->rx.size();
@@ -813,6 +830,7 @@ void HostByteLink::Clear() {
         s->rxDiscarded += s->rx.size();
         s->rx.clear();
         s->rxSize = 0;
+        s->rxPacketEnd = 0;
         s->ClearTx();
     }
     if (wasFull) s->Wake();

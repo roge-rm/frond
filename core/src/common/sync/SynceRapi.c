@@ -8,6 +8,7 @@
 struct _SynceSocket {
     FrondRapiStream stream;
     bool closed;
+    int readTimeoutMs;
 };
 
 struct FrondRapi {
@@ -17,7 +18,7 @@ struct FrondRapi {
 
 bool synce_socket_read(SynceSocket* socket, void* data, size_t size) {
     if (socket->closed) return false;
-    if (socket->stream.read(socket->stream.context, data, size, 15000)) return true;
+    if (socket->stream.read(socket->stream.context, data, size, socket->readTimeoutMs)) return true;
     synce_socket_close(socket);
     return false;
 }
@@ -73,6 +74,7 @@ FrondRapi* FrondRapiOpen(FrondRapiStream stream) {
     FrondRapi* client = calloc(1, sizeof(*client));
     if (!client) return NULL;
     client->socket.stream = stream;
+    client->socket.readTimeoutMs = 15000;
     client->rapi.socket = &client->socket;
     client->rapi.send_buffer = rapi_buffer_new();
     client->rapi.recv_buffer = rapi_buffer_new();
@@ -107,7 +109,13 @@ bool FrondRapiProvision(FrondRapi* client, const uint16_t* config, uint16_t* rep
     // CeProcessConfig with CONFIG_PROCESS.
     if (!rapi_context_begin_command(rapi, 0x0e) ||
         !rapi2_buffer_write_string(rapi->send_buffer, config) ||
-        !rapi_buffer_write_uint32(rapi->send_buffer, 1) || !rapi2_context_call(rapi)) return false;
+        !rapi_buffer_write_uint32(rapi->send_buffer, 1)) return false;
+    // WM5 can take longer to apply provisioning than to read a file.
+    const int previousTimeout = client->socket.readTimeoutMs;
+    client->socket.readTimeoutMs = 60000;
+    const bool called = rapi2_context_call(rapi);
+    client->socket.readTimeoutMs = previousTimeout;
+    if (!called) return false;
     uint32_t status, bytes;
     if (!rapi_buffer_read_uint32(rapi->recv_buffer, &rapi->last_error) ||
         !rapi_buffer_read_uint32(rapi->recv_buffer, &status) || (status & 0x80000000u) ||

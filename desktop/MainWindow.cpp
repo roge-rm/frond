@@ -3,6 +3,7 @@
 #include <QtConcurrent>
 #include "DimText.h"
 #include "MainWindow.h"
+#include "InstallerRunner.h"
 #include "DanaViewControls.h"
 #include "LicencesDialog.h"
 #include "FirmwareInput.h"
@@ -2870,7 +2871,13 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     arguments << "--save-on-disconnect" << QFileInfo(target).absoluteFilePath();
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;
-    const bool launched = client.start(coreFor(startDevice), arguments);
+    const QString host = frondInstallerRunner::conduitHostPath();
+    QProcessEnvironment environment(QProcessEnvironment::InheritFromParent);
+    if (!host.isEmpty() && qEnvironmentVariableIsEmpty("FROND_PALM_CONDUIT_HOST")) {
+        environment = QProcessEnvironment::systemEnvironment();
+        environment.insert(QStringLiteral("FROND_PALM_CONDUIT_HOST"), host);
+    }
+    const bool launched = client.start(coreFor(startDevice), arguments, environment);
     if (!launched) { busy = false; sessionLock.reset(); }
     else { attachInfrared(); attachSerial(); attachBluetooth(); }
     refresh(); notify(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));

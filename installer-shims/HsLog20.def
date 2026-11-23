@@ -1,0 +1,3 @@
+LIBRARY HSLOG20
+EXPORTS
+  LogAddEntry @52

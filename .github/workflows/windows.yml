@@ -71,7 +71,7 @@ jobs:
       - name: Build the 32-bit installer shims
         if: inputs.build_run == ''
         run: |
-          PATH="/mingw32/bin:$PATH" make installer-shims WINDOWS_SHIM_OUT=build/out/desktop/installer-shims/x86
+          PATH="/mingw32/bin:$PATH" make installer-shims WINDOWS_SHIM_WINDRES=windres WINDOWS_SHIM_OUT=build/out/desktop/installer-shims/x86
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: inputs.build_run == ''

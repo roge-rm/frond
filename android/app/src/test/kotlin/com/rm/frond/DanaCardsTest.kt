@@ -204,6 +204,7 @@ class DanaCardsTest {
     private lateinit var old: File
     private val toolCalls = mutableListOf<List<String>>()
     private var refuse: String? = null
+    private var recoverAfterRename = true
 
     @Before fun setUp() {
         val data = tmp.newFolder("files")
@@ -234,6 +235,14 @@ class DanaCardsTest {
                 if (!from.isFile) return "error read Missing card."
                 from.copyTo(File(args[2]))
                 "ok copied"
+            }
+            "recover-linked" -> {
+                val card = File(args[1])
+                val dir = requireNotNull(card.parentFile)
+                File(dir, ".settling-${card.name}").delete()
+                if (recoverAfterRename)
+                    dir.listFiles { f -> f.name.startsWith(".gen-${card.name}-") }.orEmpty().forEach { it.delete() }
+                "ok recovered"
             }
             "settle-linked" -> {
                 val card = File(args[1])
@@ -504,10 +513,54 @@ class DanaCardsTest {
     @Test fun cutOffSettleIsFinishedAtStart() {
         val file = File(sessions, "Dana/sd.frondsd")
         val dir = machine("Dana", rows = row(0, file, key))
+        val card = sdCard()
+        file.writeBytes(card)
+        val mark = File(dir, ".settling-sd.frondsd").apply { writeText("1 2 3\n") }
+        val root = File(dir, ".gen-sd.frondsd-root").apply { writeText("old root") }
+
+        val start = Cards.takeAtStart(sessions, dir, true)
+
+        assertNull(start.error)
+        assertEquals(listOf(listOf("recover-linked", file.path)), toolCalls)
+        assertEquals(listOf("--card-swap"), start.arguments)
+        assertFalse(mark.exists())
+        assertFalse(root.exists())
+        assertArrayEquals(card, file.readBytes())
+        assertEquals(Cards.attachArgument(sessions, dir, 0), Cards.startAttachArgument(sessions, dir, 0))
+        assertNotNull(Cards.startAttachArgument(sessions, dir, 0))
+    }
+
+    @Test fun cutOffSettleBeforeRenameUsesSavedKey() {
+        recoverAfterRename = false
+        val file = File(sessions, "Dana/sd.frondsd")
+        val dir = machine("Dana", rows = row(0, file, key))
         file.writeBytes(sdCard())
         File(dir, ".settling-sd.frondsd").writeText("1 2 3\n")
-        Cards.takeAtStart(sessions, dir, true)
-        assertEquals("settle-linked", toolCalls.first()[0]); assertEquals(file.path, toolCalls.first()[1])
-        assertTrue(file.isFile)
+        val root = File(dir, ".gen-sd.frondsd-root").apply { writeText("current root") }
+
+        val start = Cards.takeAtStart(sessions, dir, true)
+
+        assertNull(start.error)
+        assertEquals(listOf(listOf("recover-linked", file.path), listOf("settle-linked", file.path, key)), toolCalls)
+        assertFalse(root.exists())
+    }
+
+    @Test fun refusedRecoveryKeepsCardAndStopsLaunch() {
+        val file = File(sessions, "Dana/sd.frondsd")
+        val dir = machine("Dana", rows = row(0, file, key))
+        val card = sdCard()
+        file.writeBytes(card)
+        val mark = File(dir, ".settling-sd.frondsd").apply { writeText("1 2 3\n") }
+        val root = File(dir, ".gen-sd.frondsd-root").apply { writeText("old root") }
+        refuse = "Couldn't lock the session's card file."
+
+        val start = Cards.takeAtStart(sessions, dir, true)
+
+        assertEquals(refuse, start.error)
+        assertTrue(start.arguments.isEmpty())
+        assertEquals(listOf(listOf("recover-linked", file.path)), toolCalls)
+        assertTrue(mark.isFile)
+        assertTrue(root.isFile)
+        assertArrayEquals(card, file.readBytes())
     }
 }

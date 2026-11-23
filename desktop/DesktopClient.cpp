@@ -54,7 +54,7 @@ DesktopClient::~DesktopClient() {
     process.disconnect(this);
     if (running()) { process.kill(); process.waitForFinished(3000); }
 }
-bool DesktopClient::start(const QString& core, const QStringList& arguments) {
+bool DesktopClient::start(const QString& core, const QStringList& arguments, const QProcessEnvironment& environment) {
     if (running()) return false;
     if (socket) { socket->disconnect(this); socket->deleteLater(); socket = nullptr; }
     lostConnection.stop();
@@ -63,6 +63,7 @@ bool DesktopClient::start(const QString& core, const QStringList& arguments) {
     if (!directory->isValid()) { emit error(tr("Could not create the private control directory.")); return false; }
     server.setSocketOptions(QLocalServer::UserAccessOption);
     if (!server.listen(directory->path() + "/control")) { emit error(server.errorString()); return false; }
+    process.setProcessEnvironment(environment);
     process.setProgram(core);
     process.setArguments(arguments + QStringList{"--desktop-socket", server.fullServerName()});
     deadline.start(30000);

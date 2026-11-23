@@ -47,6 +47,8 @@ class SyncWindow : public QDialog {
     void showQueue();
     void queueFiles();
     void runWindowsInstaller();
+    void showPalmConduits();
+    void setPalmConduits(bool enabled);
     void choosePayloads(std::vector<frondSync::InstallerFile>& candidates, std::vector<frondSync::InstallerFile>& selected);
     void queuePayloads(const std::vector<frondSync::InstallerFile>& files, QStringList failed);
     void removeQueued();
@@ -57,7 +59,7 @@ class SyncWindow : public QDialog {
     int64_t profileId{0};
     QComboBox *profiles, *recordKind, *backupDevice;
     QTabWidget* tabs;
-    QCheckBox *showPrivate, *showArchived;
+    QCheckBox *showPrivate, *showArchived, *palmConduits;
     QTableWidget *records, *backups, *queue, *log;
     QPushButton *rename, *remove, *edit, *deleteRecord, *exportFile, *exportDb, *restore, *removeFiles;
 };

@@ -151,6 +151,18 @@ struct DlpRecord {
     Bytes data;
 };
 
+struct DlpCardInfo {
+    uint16_t version{0}, romDbs{0}, ramDbs{0};
+    uint32_t created{0}, romSize{0}, ramSize{0}, freeRam{0};
+    std::string name, manufacturer;
+};
+
+struct DlpFindInfo {
+    uint8_t card{0};
+    uint32_t localId{0}, openRef{0}, records{0}, totalBytes{0}, dataBytes{0};
+    DbInfo db;
+};
+
 struct OpenDbInfo {
     uint16_t records{0};
 };
@@ -202,6 +214,16 @@ class DlpClient {
     int WriteResource(uint8_t handle, const PalmRecord& resource);
     int ResetSystem();
     int ReadFeature(uint32_t creator, uint16_t number, uint32_t& value);
+    int ReadConduitRecord(uint8_t handle, uint32_t idOrIndex, bool byId, bool modified, uint16_t& index, DlpRecord& out);
+    int PurgeRecords(uint8_t handle);
+    int WriteConduitRecord(uint8_t handle, const DlpRecord& record, uint32_t& newUid);
+    int FindByName(uint8_t options, uint8_t card, const std::string& name, DlpFindInfo& info);
+    int FindByTypeCreator(uint8_t options, uint8_t search, uint32_t type, uint32_t creator, DlpFindInfo& info);
+    int ReadCardInfo(uint8_t card, DlpCardInfo& info);
+    int ReadAppPreference(uint32_t creator, uint16_t id, uint16_t requested, bool backedUp,
+                          uint16_t& version, uint16_t& actual, Bytes& data);
+    int WriteAppPreference(uint32_t creator, uint16_t id, uint16_t version, bool backedUp, const Bytes& data);
+
 
    private:
     PacketLink& link;

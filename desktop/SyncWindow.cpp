@@ -33,6 +33,7 @@
 #include "SyncFiles.h"
 #include "InstallerRunner.h"
 #include "sync/InstallerFiles.h"
+#include "sync/PalmConduitStorage.h"
 #include "SessionStore.h"
 
 using namespace frondSync;
@@ -597,6 +598,10 @@ SyncWindow::SyncWindow(QWidget* parent) : QDialog(parent) {
     installLayout->addWidget(queue, 1);
     auto* installButtons = new QHBoxLayout;
     installLayout->addLayout(installButtons);
+    palmConduits = new QCheckBox(tr("Run Palm conduits"), installs);
+    palmConduits->setObjectName("profilePalmConduits");
+    palmConduits->hide();
+    installButtons->addWidget(palmConduits);
     installButtons->addStretch();
     addButton(installs, installButtons, tr("Queue files…"), "installQueue", [this] { queueFiles(); });
     auto* runInstaller = addButton(installs, installButtons, tr("Run Windows installer…"), "runInstaller",
@@ -616,6 +621,7 @@ SyncWindow::SyncWindow(QWidget* parent) : QDialog(parent) {
     connect(recordKind, &QComboBox::currentIndexChanged, this, &SyncWindow::showRecords);
     connect(showPrivate, &QCheckBox::toggled, this, &SyncWindow::showRecords);
     connect(showArchived, &QCheckBox::toggled, this, &SyncWindow::showRecords);
+    connect(palmConduits, &QCheckBox::toggled, this, &SyncWindow::setPalmConduits);
     connect(backupDevice, &QComboBox::currentIndexChanged, this, &SyncWindow::showBackups);
     connect(records, &QTableWidget::itemSelectionChanged, this, [this] {
         const auto count = selectedRows(records).size();
@@ -657,6 +663,7 @@ void SyncWindow::changeProfile() {
         if (!openProfile(library, profile, profileId, problem)) showError(this, problem);
     }
     tabs->setEnabled(profile.IsOpen());
+    showPalmConduits();
     {
         const QSignalBlocker blocked(backupDevice);
         const auto previous = backupDevice->currentData();
@@ -922,6 +929,40 @@ void SyncWindow::queueFiles() {
     queuePayloads(files, std::move(failed));
 }
 
+void SyncWindow::showPalmConduits() {
+    const QSignalBlocker blocked(palmConduits);
+    const auto info = profile.IsOpen() ? library.FindProfile(profileId) : std::nullopt;
+    if (!info) {
+        palmConduits->hide();
+        return;
+    }
+    const QDir root(text(library.ProfilePath(*info)) + "/conduits");
+    const QDir current(root.filePath("registered"));
+    const QDir registered(current.exists() ? current.path() : root.filePath("registered.previous"));
+    palmConduits->setVisible(!registered.entryList({"*.conf"}, QDir::Files | QDir::NoSymLinks).isEmpty());
+    palmConduits->setChecked(!root.exists("disabled"));
+}
+
+void SyncWindow::setPalmConduits(bool enabled) {
+    const auto info = profile.IsOpen() ? library.FindProfile(profileId) : std::nullopt;
+    if (!info) return;
+    ProfileSyncLock lock;
+    std::string problem;
+    if (!lock.Acquire(library.Root(), info->id, problem)) showError(this, text(problem));
+    else {
+        const auto confirmed = library.FindProfile(info->id);
+        if (!confirmed || confirmed->folder != info->folder || confirmed->created != info->created)
+            showError(this, tr("The sync profile was changed."));
+        else {
+            QFile disabled(text(library.ProfilePath(*confirmed)) + "/conduits/disabled");
+            const bool changed = enabled ? (!disabled.exists() || disabled.remove()) :
+                                           (disabled.exists() || disabled.open(QIODevice::WriteOnly | QIODevice::NewOnly));
+            if (!changed) showError(this, tr("Couldn't change the Palm conduit setting."));
+        }
+    }
+    showPalmConduits();
+}
+
 void SyncWindow::runWindowsInstaller() {
     if (!profile.IsOpen()) return;
     const auto path = QFileDialog::getOpenFileName(this, tr("Run Windows installer"), {},
@@ -946,7 +987,48 @@ void SyncWindow::runWindowsInstaller() {
     if (!extract && method.clickedButton() != run) return;
 #endif
     if (!extract) {
-        launch = frondInstallerRunner::run(this, path, profiles->currentText(), windowsMobile, syncRoot);
+        const auto info = library.FindProfile(profileId);
+        if (!info) return showError(this, tr("The sync profile was changed."));
+        ProfileSyncLock installerLock;
+        std::string problem;
+        if (!installerLock.Acquire(library.Root(), info->id, problem)) return showError(this, text(problem));
+        const auto confirmed = library.FindProfile(info->id);
+        if (!confirmed || confirmed->folder != info->folder || confirmed->created != info->created)
+            return showError(this, tr("The sync profile was changed."));
+        auto user = profiles->currentText();
+        QString userKey;
+        uint32_t userId = 0;
+        if (!windowsMobile) {
+            const auto assignments = library.Assignments();
+            std::vector<const Assignment*> palmUsers;
+            QStringList labels;
+            for (const auto& item : assignments) {
+                if (item.profileId != info->id || item.kind != "palm" || !item.userId || item.userName.empty()) continue;
+                const auto name = text(item.userName);
+                const auto key = text(item.deviceKey);
+                auto label = tr("%1 (%2)").arg(name, machineNames.value(key, key));
+                if (labels.contains(label)) label = tr("%1 (%2)").arg(name, key);
+                labels << label;
+                palmUsers.push_back(&item);
+            }
+            if (!palmUsers.empty()) {
+                int selected = 0;
+                if (palmUsers.size() > 1) {
+                    bool chosen = false;
+                    const auto label = QInputDialog::getItem(this, tr("Run Windows installer"), tr("Palm user"),
+                                                             labels, 0, false, &chosen);
+                    if (!chosen) return;
+                    selected = labels.indexOf(label);
+                }
+                const auto& target = *palmUsers.at(selected);
+                user = text(target.userName);
+                userId = target.userId;
+                userKey = text(PalmConduitDataKey(target.deviceKey, userId));
+            }
+        }
+        launch = frondInstallerRunner::run(this, path, user, windowsMobile, syncRoot,
+                                          text(library.ProfilePath(*confirmed)), userKey, userId);
+        showPalmConduits();
         if (!launch.error.isEmpty()) {
             QMessageBox fallback(QMessageBox::Warning, tr("Run Windows installer"), launch.error, QMessageBox::Cancel, this);
             auto* staged = launch.files.empty() ? nullptr : fallback.addButton(tr("Choose staged files"), QMessageBox::AcceptRole);
@@ -967,6 +1049,12 @@ void SyncWindow::runWindowsInstaller() {
         if (unpacked.empty()) return showError(this, tr("The extracted files are for a different device type."));
         frondInstallerRunner::removeDuplicatePayloads(unpacked);
         launch.files = std::move(unpacked);
+    }
+    if (launch.files.empty()) {
+        if (launch.palmDesktopSaved) QMessageBox::information(this, tr("Run Windows installer"), tr("Palm desktop files saved."));
+        else if (launch.conduitsChanged)
+            QMessageBox::information(this, tr("Run Windows installer"), tr("Palm conduit registrations updated."));
+        return;
     }
     std::vector<InstallerFile> files;
     choosePayloads(launch.files, files);

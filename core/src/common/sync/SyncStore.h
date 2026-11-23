@@ -83,6 +83,7 @@ class SyncLibrary {
     // Assigns or moves a device. Moving it to another profile makes its next sync slow.
     bool Assign(const std::string& deviceKey, int64_t profileId, std::string& error, const std::string& kind = {});
     bool UpdateAssignment(const Assignment& assignment, std::string& error);
+    bool RememberAssignmentUser(const Assignment& assignment, std::string& error);
     bool FinishAssignment(const Assignment& assignment, std::string& error);
     bool Unassign(const std::string& deviceKey, std::string& error);
 

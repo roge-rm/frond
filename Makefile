@@ -274,22 +274,38 @@ test: test-sync-pwi
 test-sync-pwi:
 	mkdir -p $(OBJ_ROOT)
 	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-pwi.cpp core/src/common/sync/PwiNote.cpp \
+		core/src/common/sync/PimRecord.cpp \
 		-o $(OBJ_ROOT)/test-sync-pwi
 	$(OBJ_ROOT)/test-sync-pwi
 
 # Build the PE shims for a Linux desktop that runs installers through Wine.
 WINDOWS_SHIM_CXX ?= i686-w64-mingw32-g++
+WINDOWS_SHIM_WINDRES ?= $(shell $(WINDOWS_SHIM_CXX) -dumpmachine)-windres
 WINDOWS_SHIM_OUT ?= out/installer-shims
 .PHONY: installer-shims
 installer-shims:
 	mkdir -p "$(WINDOWS_SHIM_OUT)"
+	$(WINDOWS_SHIM_WINDRES) -I installer-shims -i installer-shims/as-invoker.rc -o "$(WINDOWS_SHIM_OUT)/as-invoker.o"
 	$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -shared -Wl,--kill-at \
 		installer-shims/InstAide.cpp -o "$(WINDOWS_SHIM_OUT)/InstAide.dll"
+	$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -shared -Wl,--kill-at \
+		installer-shims/CondMgr.cpp -o "$(WINDOWS_SHIM_OUT)/CondMgr.dll"
+	$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -shared -Wl,--kill-at \
+		installer-shims/HsApi.cpp -o "$(WINDOWS_SHIM_OUT)/HSAPI.dll"
+	$(WINDOWS_SHIM_WINDRES) -i installer-shims/hotsync-version.rc -o "$(WINDOWS_SHIM_OUT)/hotsync-version.o"
+	$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -municode installer-shims/HotSync.cpp \
+		"$(WINDOWS_SHIM_OUT)/hotsync-version.o" "$(WINDOWS_SHIM_OUT)/as-invoker.o" -o "$(WINDOWS_SHIM_OUT)/HotSync.exe"
+	if $(WINDOWS_SHIM_CXX) -dumpmachine | grep -q '^i686-'; then \
+		$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -shared installer-shims/Sync20.cpp installer-shims/Sync20.def -o "$(WINDOWS_SHIM_OUT)/Sync20.dll" && \
+		$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -shared installer-shims/HsLog20.cpp installer-shims/HsLog20.def -o "$(WINDOWS_SHIM_OUT)/HsLog20.dll" && \
+		$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -municode installer-shims/PalmConduitHost.cpp "$(WINDOWS_SHIM_OUT)/as-invoker.o" -o "$(WINDOWS_SHIM_OUT)/PalmConduitHost.exe"; \
+	fi
 	$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -municode \
-		installer-shims/InstallApp.cpp -o "$(WINDOWS_SHIM_OUT)/Instapp.exe"
+		installer-shims/InstallApp.cpp "$(WINDOWS_SHIM_OUT)/as-invoker.o" -o "$(WINDOWS_SHIM_OUT)/Instapp.exe"
 	cp "$(WINDOWS_SHIM_OUT)/Instapp.exe" "$(WINDOWS_SHIM_OUT)/CEAppMgr.exe"
 	$(WINDOWS_SHIM_CXX) -std=c++17 -O2 -static -municode \
-		installer-shims/RunInstaller.cpp -ladvapi32 -o "$(WINDOWS_SHIM_OUT)/RunInstaller.exe"
+		installer-shims/RunInstaller.cpp "$(WINDOWS_SHIM_OUT)/as-invoker.o" -ladvapi32 -o "$(WINDOWS_SHIM_OUT)/RunInstaller.exe"
+	rm "$(WINDOWS_SHIM_OUT)/as-invoker.o" "$(WINDOWS_SHIM_OUT)/hotsync-version.o"
 
 # The sync manager's profiles, install queue and backups from the command line.
 out/frond-sync: $(COMMON_LIB) core/src/common/sync/SyncTool.cpp
@@ -3226,7 +3242,7 @@ test-rx1950-boot: $(OBJ_ROOT)/rx1950-boot
 
 .PHONY: test-linked-card-lock test-linked-card-lock-wine
 test-linked-card-lock:
-	bash tests/linked-card-lock.sh linux
+	bash tests/linked-card-lock.sh $(if $(filter windows,$(HOST_OS)),windows,linux)
 
 test-linked-card-lock-wine:
 	bash tests/linked-card-lock.sh wine

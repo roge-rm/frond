@@ -286,7 +286,8 @@ void SaveNoteLink(SyncProfile& profile, PimRecord& memo, const std::string& key,
 }
 
 struct NotePass {
-    std::set<std::string> blocked, conflicts;
+    std::set<std::string> blocked, conflicts, fileOnly;
+    unsigned unwrittenMemos{0};
 };
 
 NotePass ExportNotes(SyncProfile& profile, const fs::path& folder, bool syncNotes) {
@@ -307,7 +308,10 @@ NotePass ExportNotes(SyncProfile& profile, const fs::path& folder, bool syncNote
             if (linked.empty()) {
                 if (!text || memo.category != notesCategory) continue;
                 const auto data = WritePwiNote(*text);
-                if (!data) continue;
+                if (!data) {
+                    ++result.unwrittenMemos;
+                    continue;
+                }
                 const auto name = "Frond Memo " + std::to_string(memo.id) + ".pwi";
                 const auto key = FileKey(name);
                 if (folderFiles.blocked.count(key)) continue;
@@ -326,12 +330,18 @@ NotePass ExportNotes(SyncProfile& profile, const fs::path& folder, bool syncNote
             const auto file = folderFiles.files.find(linked);
             if (file == folderFiles.files.end()) {
                 // A stop after parking the old copy must not turn a memo edit into a file deletion.
-                if (text)
+                if (text) {
                     if (const auto data = WritePwiNote(*text)) WriteHostFile(folder, linked, *data);
+                    else {
+                        ++result.unwrittenMemos;
+                        result.blocked.insert(linked);
+                    }
+                }
                 continue;
             }
             const auto old = ReadHostFile(folder, file->second);
             const auto fileText = ReadPwiNote(old);
+            if (!fileText) result.fileOnly.insert(linked);
             if (fileText != originalText) {
                 if (!text || text != fileText) result.conflicts.insert(linked);
                 continue;
@@ -341,7 +351,10 @@ NotePass ExportNotes(SyncProfile& profile, const fs::path& folder, bool syncNote
                 continue;
             }
             auto replacement = old;
-            if (ReplacePwiNoteText(replacement, *text)) ChangeHostFile(folder, file->second, old, &replacement);
+            if (ReplacePwiNoteText(replacement, *text))
+                ChangeHostFile(folder, file->second, old, &replacement);
+            else
+                ++result.unwrittenMemos;
         }
         if (!profile.CommitPimChange(error)) throw std::runtime_error(error);
     } catch (...) {
@@ -385,6 +398,7 @@ void ImportNotes(SyncProfile& profile, const fs::path& folder, const std::set<st
                 continue;
             }
             const auto updated = ReadPwiNote(ReadHostFile(folder, file->second));
+            if (!updated) notes.fileOnly.insert(key);
             if (updated == base) continue;
             if (text != base && text != updated) {
                 notes.conflicts.insert(key);
@@ -401,6 +415,8 @@ void ImportNotes(SyncProfile& profile, const fs::path& folder, const std::set<st
                 memo.category = notesCategory;
                 memo.fields["text"] = *text;
                 SaveNoteLink(profile, memo, key, *text);
+            } else {
+                notes.fileOnly.insert(key);
             }
         }
         if (!profile.CommitPimChange(error)) throw std::runtime_error(error);
@@ -561,7 +577,9 @@ std::string ExchangeActiveSyncFiles(FrondRapi* client, SyncProfile& profile, con
            std::to_string(removed) + " removed." +
            (removed || sent || received ? " Replaced and removed files are kept in .frond-recovery." : "") +
            (deferred.empty() ? "" : " File exchange will continue on the next sync.") +
-           (notes.conflicts.empty() ? "" : " Notes: " + std::to_string(notes.conflicts.size()) + " differed.");
+           (notes.conflicts.empty() ? "" : " Notes: " + std::to_string(notes.conflicts.size()) + " differed.") +
+           (notes.fileOnly.empty() ? "" : " Notes kept as files: " + std::to_string(notes.fileOnly.size()) + ".") +
+           (notes.unwrittenMemos == 0 ? "" : " Memos with unsupported text: " + std::to_string(notes.unwrittenMemos) + ".");
 }
 
 }  // namespace frondSync

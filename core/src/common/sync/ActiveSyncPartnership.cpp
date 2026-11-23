@@ -34,8 +34,10 @@ std::string Provision(FrondRapi* client, const std::string& xml) {
     std::vector<uint16_t> request(document.begin(), document.end());
     request.push_back(0);
     std::vector<uint16_t> reply(32768);
-    if (!FrondRapiProvision(client, request.data(), reply.data(), reply.size()))
+    if (!FrondRapiProvision(client, request.data(), reply.data(), reply.size())) {
+        if (!FrondRapiConnected(client)) throw std::runtime_error("The ActiveSync connection closed during partnership setup.");
         throw std::runtime_error("Windows Mobile refused the partnership configuration request.");
+    }
     std::string text;
     for (const auto character : reply) {
         if (!character) break;

@@ -445,28 +445,25 @@ object Cards {
     // when there are none.
     fun settleGenerations(library: File, dir: File, n: Int): String? {
         val file = cardFileIn(dir, n) ?: return null
-        if (!hasGenerations(dir, file)) return null
+        val cutOff = File(dir, ".settling-$file").exists()
+        if (!cutOff && !hasGenerations(dir, file)) return null
         val frond = sessionFile(dir)
         val linked = linkedSession(frond)
-        if (!linked && frond != null && frond.isFile) return null
+        if (!cutOff && !linked && frond != null && frond.isFile) return null
         val slot = readSlot(dir, n)
         val key = slot.card?.let { readCard(entryDir(library, it)) }?.key?.takeIf { validKey(it) }
             ?: (if (linked) linkedRowFor(frond, n)?.key?.takeIf { validKey(it) } else null)
-            ?: return if (linked) "The card's saved changes can't be read." else null
+        val unreadable = "The card's saved changes can't be read."
+        if (!cutOff && key == null) return if (linked) unreadable else null
         if (!slot.swap && !writeSlot(dir, slot.copy(present = true, swap = true), n)) return "Couldn't write the card's saved changes."
-        val r = runTool(arrayOf("settle-linked", File(dir, file).path, key))
+        val path = File(dir, file).path
+        if (cutOff) {
+            val recovered = runTool(arrayOf("recover-linked", path))
+            if (!recovered.ok) return recovered.message
+            if (!hasGenerations(dir, file)) return null
+        }
+        val r = runTool(arrayOf("settle-linked", path, key ?: return unreadable))
         return if (r.ok) null else r.message
-    }
-
-    // A settle-linked cut off beside slot n's card (its .settling-<file> mark is there) is finished
-    // before frond-68k sees the card, so the card isn't left out of its slot. Machine held.
-    fun finishCutOffSettle(library: File, dir: File, n: Int) {
-        val file = cardFileIn(dir, n) ?: return
-        if (!File(dir, ".settling-$file").exists()) return
-        if (hasGenerations(dir, file) && settleGenerations(library, dir, n) == null) return
-        // No saved changes left: the tool only clears the mark, and the key isn't used.
-        val key = readSlot(dir, n).card?.let { readCard(entryDir(library, it)) }?.key?.takeIf { validKey(it) } ?: "0".repeat(32)
-        runTool(arrayOf("settle-linked", File(dir, file).path, key))
     }
 
     // A drawer card into an empty slot. Library lock and machine held.
@@ -793,7 +790,7 @@ object Cards {
     }
 
     // The flags for the core, and per slot the name of the machine holding a linked card when it's elsewhere.
-    class Start(val arguments: List<String>, val heldBy: String?, val heldBy2: String? = null)
+    class Start(val arguments: List<String>, val heldBy: String?, val heldBy2: String? = null, val error: String? = null)
 
     // Machine start: reconcile, then each linked slot that is empty takes its card if it is in the
     // drawer.
@@ -801,8 +798,13 @@ object Cards {
         val library = libraryFor(sessions)
         val heldBy = arrayOfNulls<String>(SLOTS)
         // The run lock is held, so this machine's cards can be settled even if the library is busy.
+        if (m68k) for (n in 0 until SLOTS) {
+            val file = cardFileIn(dir, n) ?: continue
+            if (File(dir, ".settling-$file").exists()) {
+                settleGenerations(library, dir, n)?.let { return Start(emptyList(), null, error = it) }
+            }
+        }
         for (n in 0 until SLOTS) cardFileIn(dir, n)?.let { CardFile.settle(File(dir, it)) }
-        if (m68k) for (n in 0 until SLOTS) finishCutOffSettle(library, dir, n)
         LibraryLock(library).use { lock ->
             if (lock.ok) {
                 reconcileLocked(sessions, dir)
