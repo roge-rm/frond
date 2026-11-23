@@ -4,6 +4,10 @@ BUILD_JOBS ?= 4
 # desktop build and the test binaries. out/ holds the binaries you run. The rest of build/ is
 # evidence and results, so OBJ_ROOT and out/ can each be a link to a faster disk.
 OBJ_ROOT ?= build/out
+# The Docker package builds (deb-arm64, appimage) keep their work folders, build/arm64 and
+# build/appimage, under PKG_ROOT: on the scratch disk when it's there, else in build/.
+PKG_ROOT ?= $(if $(wildcard /mnt/scratch/frond),/mnt/scratch/frond/pkg,build)
+export FROND_PKG_ROOT = $(abspath $(PKG_ROOT))
 # A link left pointing at a wiped folder stops the build here.
 $(foreach l,$(OBJ_ROOT) out,$(if $(shell test -L '$(l)' && test ! -e '$(l)' && echo x),$(error $(l) is a link to a missing folder ($(shell readlink '$(l)')): recreate that folder, or remove the link)))
 $(shell mkdir -p $(OBJ_ROOT))
@@ -601,34 +605,36 @@ build/bluetooth-provider/emulator/btvirt: tools/bluez-bdaddr.patch
 
 # arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker and the BlueZ
 # checkout from tools/build-bluetooth-provider.py --fetch (btvirt is cross built from it).
-# core/ is copied fresh to build/arm64/source and mounted over core/, away from the host's objects.
+# core/ is copied fresh to $(PKG_ROOT)/arm64/source and mounted over core/, away from the host's objects.
 ARM64_JOBS ?= 10
 .PHONY: deb-arm64
 deb-arm64:
 # btvirt is cross built from the BlueZ checkout as it stands, so it must carry the current patch.
 	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
 		{ echo "$(BLUETOOTH_PROVIDER) doesn't carry tools/bluez-bdaddr.patch: run python3 tools/build-bluetooth-provider.py" >&2; exit 1; }
-	rm -rf build/arm64/source
-	python3 tools/copy-core.py $(CURDIR)/build/arm64/source
+	mkdir -p $(PKG_ROOT)/arm64 build/arm64
+	rm -rf $(PKG_ROOT)/arm64/source
+	python3 tools/copy-core.py $(abspath $(PKG_ROOT))/arm64/source
 	docker build -t frond-arm64-cross tools/arm64
 	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(ARM64_JOBS) \
 		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
-		-v $(CURDIR):/src -v $(CURDIR)/build/arm64/source:/src/core \
+		-v $(CURDIR):/src -v $(abspath $(PKG_ROOT))/arm64:/src/build/arm64 -v $(abspath $(PKG_ROOT))/arm64/source:/src/core \
 		-w /src frond-arm64-cross tools/arm64/build.sh
 
 # AppImages for x86-64 and arm64, built in Docker on Debian 12 so they run on glibc 2.36 and newer
 # (tools/appimage/). Needs Docker and the BlueZ checkout from tools/build-bluetooth-provider.py --fetch.
-# core/ is copied fresh to build/appimage/ARCH/source. The arm64 one is cross built.
+# core/ is copied fresh to $(PKG_ROOT)/appimage/ARCH/source. The arm64 one is cross built.
 APPIMAGE_JOBS ?= 10
 define build-appimage
 	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
 		{ echo "$(BLUETOOTH_PROVIDER) doesn't carry tools/bluez-bdaddr.patch: run python3 tools/build-bluetooth-provider.py" >&2; exit 1; }
-	rm -rf build/appimage/$(1)/source
-	python3 tools/copy-core.py $(CURDIR)/build/appimage/$(1)/source
+	mkdir -p $(PKG_ROOT)/appimage build/appimage
+	rm -rf $(PKG_ROOT)/appimage/$(1)/source
+	python3 tools/copy-core.py $(abspath $(PKG_ROOT))/appimage/$(1)/source
 	docker build -t frond-appimage-$(2) --build-arg ARCH=$(2) tools/appimage
 	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(APPIMAGE_JOBS) -e ARCH=$(1) \
 		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
-		-v $(CURDIR):/src -w /src frond-appimage-$(2) tools/appimage/build.sh
+		-v $(CURDIR):/src -v $(abspath $(PKG_ROOT))/appimage:/src/build/appimage -w /src frond-appimage-$(2) tools/appimage/build.sh
 	SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} python3 tools/appimage/make-appimage.py --arch $(1)
 endef
 .PHONY: appimage appimage-arm64

@@ -6,7 +6,7 @@
 #   tools/commit-build.sh prune N [--tinydeck] [--dry-run]
 #                                       keep the newest N folders (and HEAD's), delete the rest and
 #                                       any temporary folders left by a stopped build or copy
-# The folder is out-<10 hex of the commit> in the main checkout's build/ and holds frond,
+# The folder is out-<10 hex of the commit> in /mnt/scratch/frond/commit-builds (the main checkout's build/ when the scratch disk is missing) and holds frond,
 # frond-68k and benchmark-replay, plus COMMIT. Only a clean tree is built and shared: with
 # uncommitted changes this builds in the normal places and exits 3 without printing a folder.
 # The shared build is made in a fresh detached worktree of the commit
@@ -21,7 +21,10 @@ set -eu
 cd "$(dirname "$0")/.."
 tree=$PWD
 main=$(dirname "$(readlink -f "$(git rev-parse --git-common-dir)")")
-store=$main/build
+# build-slot.sh stays in the main checkout's build/; the out-<hash> folders, locks and temporary
+# folders go to the scratch disk when it's there (FROND_COMMIT_STORE overrides).
+slots=$main/build
+store=${FROND_COMMIT_STORE:-$([ -d /mnt/scratch/frond ] && echo /mnt/scratch/frond/commit-builds || echo "$main/build")}
 host=${SPEED_HOST:-lab@tinydeck}
 key=${SPEED_SSH_KEY:-$HOME/.ssh/tinydeck-lab}
 remote=/var/lib/lab/frond-speed
@@ -40,7 +43,7 @@ build() {
     if complete "$dir"; then return; fi
     if dirty; then
         echo "commit-build: the tree has uncommitted changes, so there is no shared build for $hash; building in place" >&2
-        "$store/build-slot.sh" heavy build make -j"${BUILD_JOBS:-32}" BUILD_JOBS="${BUILD_JOBS:-32}" out/frond out/frond-68k benchmark-replay >&2
+        "$slots/build-slot.sh" heavy build make -j"${BUILD_JOBS:-32}" BUILD_JOBS="${BUILD_JOBS:-32}" out/frond out/frond-68k benchmark-replay >&2
         exit 3
     fi
     mkdir -p "$store"
@@ -61,7 +64,7 @@ build() {
         ln -s "$scratch/out" "$src/out"
     fi
     echo "commit-build: building $hash in $src" >&2
-    (cd "$src" && "$store/build-slot.sh" heavy build make -j"${BUILD_JOBS:-32}" BUILD_JOBS="${BUILD_JOBS:-32}" out/frond out/frond-68k benchmark-replay) >&2
+    (cd "$src" && "$slots/build-slot.sh" heavy build make -j"${BUILD_JOBS:-32}" BUILD_JOBS="${BUILD_JOBS:-32}" out/frond out/frond-68k benchmark-replay) >&2
     if dirty "$src" || [ "$(git -C "$src" rev-parse HEAD)" != "$full" ]; then
         echo "commit-build: the build changed tracked files in $src, not sharing it" >&2
         git -C "$src" status --short >&2
