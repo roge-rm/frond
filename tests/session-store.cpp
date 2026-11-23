@@ -1040,6 +1040,11 @@ class SessionStoreTest : public QObject {
         QVERIFY(readPreferences(path, &loaded));
         QVERIFY(loaded.controllerMapSet);
         QCOMPARE(loaded.controllerMap, QString("none"));
+        // A hand-edited empty map is the defaults, as the core takes it.
+        prefs.controllerMap = "";
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        QVERIFY(readPreferences(path, &loaded));
+        QVERIFY(!loaded.controllerMapSet);
     }
     void batteryPreferences() {
         const auto path = filePath(folder(), "Battery Default");

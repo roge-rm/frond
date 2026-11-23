@@ -105,6 +105,7 @@ SdlEventHandler::SdlEventHandler(SoC* soc, const DeviceControlProfile& controls,
                                  DisplayConfiguration& deviceDisplayConfiguration, Rotation rotation, DeviceControlView controlView)
     : soc(soc), shownControls(&controls), inputControls(&controls), controlView(controlView), scale(scale), rotation(rotation) {
     if (const auto* profile = deviceProfile5(soc->GetDeviceType())) controllerMap = controllerDefaults(*profile);
+    padAttachedSeen = soc->GamepadAttached();
     width = deviceDisplayConfiguration.width;
     height = deviceDisplayConfiguration.height + deviceDisplayConfiguration.graffitiHeight;
 }
@@ -112,6 +113,13 @@ SdlEventHandler::SdlEventHandler(SoC* soc, const DeviceControlProfile& controls,
 void SdlEventHandler::HandleEvents() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) HandleEvent(event);
+    FollowGamepadAttach();
+}
+
+void SdlEventHandler::FollowGamepadAttach() {
+    if (soc->GamepadAttached() == padAttachedSeen) return;
+    padAttachedSeen = soc->GamepadAttached();
+    UpdateGamepad();
 }
 
 void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
@@ -277,7 +285,9 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
             // A game controller, for the Zodiac, the CLIÉ game controller and a controller map with keys. It is
             // opened so SDL reports its buttons and axes.
             case SDL_CONTROLLERDEVICEADDED:
-                if (ControllersWanted()) SDL_GameControllerOpen(event.cdevice.which);
+                if (ControllersWanted() &&
+                    !SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(event.cdevice.which)))
+                    SDL_GameControllerOpen(event.cdevice.which);
                 break;
 
             case SDL_CONTROLLERDEVICEREMOVED:

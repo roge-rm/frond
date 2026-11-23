@@ -1452,6 +1452,7 @@ bool gFastEngineMissing = false;
                     sdlEventHandler.SetLayout(input.windowLayout, inputFitted);
                     soc->SetFramebufferDirty();
                 }
+                sdlEventHandler.FollowGamepadAttach();
                 if (sdlEventHandler.QuitRequested()) {
                     if (!desktop) break;
                     desktop->event("close");

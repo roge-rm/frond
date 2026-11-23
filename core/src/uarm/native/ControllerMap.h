@@ -285,6 +285,10 @@ inline PadKeyMask padKeysHeld(PadReading& pad) {
     axis(PadKey::leftRight, pad.leftX);
     axis(PadKey::leftUp, -int(pad.leftY));
     axis(PadKey::leftDown, pad.leftY);
+    // The d-pad wins over the left stick on its axis.
+    const auto bits = [](PadKey a, PadKey b) { return padKeyBit(a) | padKeyBit(b); };
+    if (held & bits(PadKey::dpadLeft, PadKey::dpadRight)) held &= ~bits(PadKey::leftLeft, PadKey::leftRight);
+    if (held & bits(PadKey::dpadUp, PadKey::dpadDown)) held &= ~bits(PadKey::leftUp, PadKey::leftDown);
     axis(PadKey::rightLeft, -int(pad.rightX));
     axis(PadKey::rightRight, pad.rightX);
     axis(PadKey::rightUp, -int(pad.rightY));

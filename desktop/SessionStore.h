@@ -204,7 +204,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     if (const auto music = object.value("musicOutput").toString(); music == "soundfont" || music == "midi") result->musicOutput = music;
     result->soundFont = object.value("soundFont").toString();
     result->midiOutPort = object.value("midiOutPort").toString();
-    result->controllerMapSet = object.value("controllerMap").isString();
+    result->controllerMapSet = !object.value("controllerMap").toString().isEmpty();
     result->controllerMap = object.value("controllerMap").toString();
     result->gamepadSet = object.value("gamepad").isBool();
     result->gamepad = object.value("gamepad").toBool(false);

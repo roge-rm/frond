@@ -1586,6 +1586,7 @@ static void tg50JogBesideKeyboard() {
 }
 
 static void tg50HostKeyboard();
+static void tg50PadAttachWhileHeld();
 // Windows Mobile iPAQs: no board yet. Strips 480 units wide under 480- and 240-wide screens:
 // four app keys either side of a five-way, and the h4350's thumb keyboard, which hides.
 static void ipaqArt() {
@@ -1748,6 +1749,7 @@ static void zireAndM515() {
     t415Art();
     tg50JogBesideKeyboard();
     tg50HostKeyboard();
+    tg50PadAttachWhileHeld();
     viewsLeaveOlderDevices();
     ipaqArt();
 }
@@ -2068,6 +2070,25 @@ static void lcdScaling() {
     assert(fittingWindowScale(320,564,1280,800)==1.25f);
     assert(fittingWindowScale(320,564,500,2000)==1.5f);
     assert(fittingWindowScale(320,564,300,500)==1.f);
+}
+
+// The CLIÉ game controller attached or detached while a controller button is held: the button
+// moves between the pad's key and the TG50's own.
+struct CliePadGuest : Guest {
+    CliePadGuest() : Guest(deviceTypeTG50) {setDisplay({320,320,0,224});}
+    bool padAttached=false;
+    bool GamepadSupported() const override {return true;}
+    bool GamepadAttached() const override {return padAttached;}
+};
+static void tg50PadAttachWhileHeld() {
+    CliePadGuest guest;auto display=guest.display();
+    TouchInput input(&guest,1,display,Rotation::portrait_0);
+    SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_DPAD_UP;input.HandleEvent(e);
+    guest.expect({{keyIdUp,true}});
+    input.FollowGamepadAttach();guest.expect({});
+    guest.padAttached=true;input.FollowGamepadAttach();guest.expect({{keyIdUp,false},{keyIdPadUp,true}});
+    guest.padAttached=false;input.FollowGamepadAttach();guest.expect({{keyIdUp,true},{keyIdPadUp,false}});
+    e.type=SDL_CONTROLLERBUTTONUP;input.HandleEvent(e);guest.expect({{keyIdUp,false}});
 }
 
 // Add beside tg50Art() in tests/device-controls.cpp, call from main.

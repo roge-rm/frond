@@ -162,6 +162,10 @@ static void clieDefaults() {
     assert(apply(map, stick, false, true).keys == deviceKeyBit(keyIdPadLeft));
     stick.leftX = 0; stick.leftY = 20000;
     assert(apply(map, stick, false, true).keys == deviceKeyBit(keyIdPadDown));
+    // The d-pad wins over the stick on its axis.
+    PadReading both = buttons({PadKey::dpadLeft});
+    both.leftX = 20000; both.leftY = 20000;
+    assert(apply(map, both, false, true).keys == (deviceKeyBit(keyIdPadLeft) | deviceKeyBit(keyIdPadDown)));
     // L1 is the first app button either way.
     assert(apply(map, buttons({PadKey::leftShoulder}), false, true).keys == deviceKeyBit(keyIdHard1));
     assert(apply(map, buttons({PadKey::leftShoulder}), false, false).keys == deviceKeyBit(keyIdHard1));

@@ -50,6 +50,9 @@ class SdlEventHandler {
     // map held and the new one doesn't are let go.
     void SetControllerMap(const ControllerMap& map);
     const ControllerMap& GetControllerMap() const { return controllerMap; }
+    // Attaching or detaching the CLIÉ game controller since the last call moves the buttons the
+    // controllers hold between its keys and the CLIÉ's own.
+    void FollowGamepadAttach();
 
     void SetRotation(Rotation rotation);
     Rotation DrawnRotation() const { return rotation; }
@@ -137,6 +140,7 @@ class SdlEventHandler {
     GamepadDirections padDirections;
     SDL_JoystickID lastStickPad{-1};
     bool padFocused{true};
+    bool padAttachedSeen{false};
     // The rumble is on, and when it was last sent; SDL stops it after rumbleMs unless sent again.
     bool rumbling{false};
     uint64_t rumbleSentUsec{0};
