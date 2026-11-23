@@ -1,7 +1,8 @@
 // The Zodiac's MIDI out engine (native/ZodiacMidiOut.h) against a fake port and clock: real-time messages and a
 // song's messages at the host times they're due and never written early, a stop with all notes off, a hold
 // turning notes off and standing the clock still, lookahead for a port that schedules by timestamp, a forward
-// jump dropping skipped note-ons, a late event moving the clock back, and the hooks, engine thread and a
+// jump dropping skipped note-ons, a late event moving the clock back, a slow guest by the guest audio's clock, and
+// the hooks, engine thread and a
 // steady clock together, with notes off at the end. Built with ASan and UBSan, and with TSan.
 #include "ZodiacMidiOut.h"
 #include "ZodiacRtMidi.h"
@@ -297,6 +298,67 @@ void driftDelayed() {
     assert(s.size() == 3 && s[2].at == 12200 * ms && s[2].hostNs == 12200 * ms);
 }
 
+// On the guest audio's clock: a guest at half real speed (every other period an underrun), its song's messages go
+// out when the guest audio of their time plays, by the periods the clock published, not at real speed from the
+// first event. synthLag takes the external synth's own lag off the timestamps.
+void guestPaced() {
+    for (const uint64_t lagNs : {uint64_t(0), 20 * ms}) {
+        Log log;
+        fakeNow = 10000 * ms;
+        GuestAudioClock clock;
+        auto out = make(log);
+        out->setReference(&clock);
+        out->setSynthLag(lagNs);
+        constexpr size_t period = 512;
+        const uint64_t periodNs = GuestAudioClock::framesNs(period);
+        uint64_t guestNs = 0, nextCallback = fakeNow.load();
+        // Host ns when each full period's guest audio plays, with its guest ns.
+        std::vector<std::pair<uint64_t, uint64_t>> plays;
+        bool full = true, offered = false;
+        while (fakeNow.load() < 11500 * ms) {
+            if (fakeNow.load() >= nextCallback) {
+                AudioQueueSpan span;
+                span.known = true;
+                span.startNs = span.endNs = guestNs;
+                if (full) {
+                    span.frames = period;
+                    span.endNs = guestNs + periodNs;
+                    plays.push_back({nextCallback + periodNs, guestNs});
+                    guestNs = span.endNs;
+                }
+                clock.run(span, period, nextCallback);
+                full = !full;
+                nextCallback += periodNs;
+            }
+            if (!offered && guestNs >= 50 * ms) {
+                out->offer(play(100 * ms, 7, body));
+                offered = true;
+            }
+            fakeNow += ms;
+            out->work();
+        }
+        // When the guest audio of guest ns g plays.
+        const auto playsAt = [&](uint64_t g) {
+            for (const auto& p : plays)
+                if (g < p.second + periodNs) return p.first + (g - p.second);
+            return uint64_t(0);
+        };
+        const auto s = log.copy();
+        assert(s.size() == 5);
+        const uint64_t due[] = {100 * ms, 350 * ms, 350 * ms, 600 * ms, 600 * ms};
+        for (size_t i = 0; i < s.size(); ++i) {
+            const int64_t off = int64_t(s[i].hostNs + lagNs) - int64_t(playsAt(due[i]));
+            // Within a period (the clock runs on over each underrun and stands to wait); sent the lag ahead, its
+            // time is a guess past the last period at real speed, so up to the lag early with this slow a guest.
+            assert(off > -int64_t(periodNs + lagNs + 2 * ms) && off < int64_t(periodNs + 2 * ms));
+            // Never written after it's due, nor much before (the engine's 5 ms wake).
+            assert(s[i].at <= s[i].hostNs + ms && s[i].at + 6 * ms >= s[i].hostNs);
+        }
+        // Half speed: the 250 ms between the notes take about 500 ms.
+        assert(s[1].hostNs - s[0].hostNs > 450 * ms && s[1].hostNs - s[0].hostNs < 550 * ms);
+    }
+}
+
 // Port names without the numbers that change with plug order.
 void portKeys() {
     assert(zodiacMidiPortKey("Midi Through:Midi Through Port-0 14:0") == "midi through:midi through port-0");
@@ -383,11 +445,12 @@ int main() {
     lateEvent();
     delayed();
     driftDelayed();
+    guestPaced();
     portKeys();
     sleeps();
     threads();
     std::puts("PASS: Zodiac MIDI out (event stream, song times, never early, stop, hold, lookahead, forward jump, late event, delay, "
-              "drift after the delay, port names, "
+              "drift after the delay, guest audio clock, port names, "
               "sleeping thread, hooks and engine thread, notes off at the end)");
     return 0;
 }

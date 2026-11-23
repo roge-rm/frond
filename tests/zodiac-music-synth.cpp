@@ -2,7 +2,8 @@
 // until the guest's note on, sound once it's due, nothing changed in frames before it, quiet again after the note
 // off and its release, a late event moving the clock, a song from the guest's memory played through and its Held
 // freed, hold, a backlog bigger than the rings with its Stop kept, refusing a file that isn't a SoundFont, the clock
-// on the guest audio through an audio queue's marks (queue depth, an underrun, no guest audio), and the three
+// on the guest audio through an audio queue's marks (queue depth, a stall, the guest's sound stopping and starting
+// again), a stale cue from before a load, the queue's marks kept in order with a gap as a break, and the three
 // threads (hooks, helper, audio) at once, which the TSan build checks. Built with ASan and UBSan, and with TSan.
 #define TSF_IMPLEMENTATION
 #include "ZodiacMusicSynth.h"
@@ -12,6 +13,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -231,11 +233,99 @@ void heldAndBacklog(const Bytes& font) {
     assert(synth.playing() == 0 && !synth.outstanding());
 }
 
-// The clock on the guest audio, through an AudioQueue as the app has it: the guest runs 150 ms ahead of the device
-// and marks the queue every 16 ms, the device pops 512-frame periods and passes the span. A song played at guest
-// 1 s sounds where the guest audio of 1 s plays, not 150 ms early; after a 116 ms underrun its second note still
-// lines up with the guest audio of 2 s; with no guest audio at all (SSI off) a later song still plays, by the marks.
-void guestClock(const Bytes& font) {
+// One queue for every run, cleared for each (the queue has no destroy).
+AudioQueue* sharedQueue() {
+    static AudioQueue* const queue = audioQueueCreate(1 << 18);
+    audioQueueClear(queue);
+    return queue;
+}
+
+// The app's audio chain around a synth: an AudioQueue with marks, a guest running leadNs ahead of the device in
+// 16 ms slices, and a device popping periods with SdlAudioDriver's buffering (start at 6 periods, an underrun
+// below 1, refill to 3). The guest can stall (its time lost) and its SSI can stop and start again. Every note-on
+// the synth plays is kept with its device frame, and every device frame with the guest frame it played (-1 for
+// silence).
+struct Chain {
+    ZodiacMusicSynth& synth;
+    zodiac_music::Hooks& hooks;
+    size_t period;
+    uint64_t leadNs;
+    AudioQueue* queue = sharedQueue();
+    uint64_t guestNs = 0, pushed = 0, lostNs = 0;
+    bool ssiOn = true, stalled = false, buffering = true, starting = true;
+    std::vector<int64_t> played;
+    std::vector<uint64_t> noteOns;
+    std::function<void(uint64_t from, uint64_t to)> calls;  // the guest's calls in its slice
+    // The guest leads by what the device needs to start, as when it paces to wall time while the device waits.
+    Chain(ZodiacMusicSynth& s, zodiac_music::Hooks& h, size_t p)
+        : synth(s), hooks(h), period(p), leadNs(uint64_t(p) * 13 / 2 * 1000000000ull / 44100 + 20 * ms) {
+        synth.monitor([this](uint64_t frame, const uint8_t* b, size_t n) {
+            if (n == 3 && (b[0] & 0xf0) == 0x90 && b[2]) noteOns.push_back(frame);
+        });
+    }
+    uint64_t deviceNs() const { return uint64_t(played.size()) * 1000000000ull / 44100; }
+    void runGuest(uint64_t untilNs) {
+        while (guestNs < untilNs) {
+            const uint64_t to = std::min(untilNs, guestNs - guestNs % (16 * ms) + 16 * ms);
+            if (calls) calls(guestNs, to);
+            if (ssiOn)
+                for (const uint64_t want = to * 441 / 10000000; pushed < want; ++pushed) audioQueuePush(queue, uint32_t(pushed));
+            else
+                pushed = to * 441 / 10000000;
+            guestNs = to;
+            audioQueueMark(queue, guestNs);
+        }
+    }
+    void periodOnce() {
+        if (stalled) lostNs += period * 1000000000ull / 44100;
+        else runGuest(deviceNs() + leadNs - lostNs);
+        synth.pump();
+        const auto st = audioQueueGetState(queue);
+        if (buffering && st.pendingSamples > (starting ? 6 : 3) * period) buffering = starting = false;
+        if (!buffering && st.pendingSamples < period) buffering = true;
+        std::vector<uint32_t> pcm(period);
+        AudioQueueSpan span;
+        const size_t got = audioQueuePopChunkIfGeneration(queue, pcm.data(), buffering ? 0 : period, st.generation, &span);
+        assert(span.known && span.frames == got);
+        for (size_t i = 0; i < period; ++i) played.push_back(i < got ? int64_t(pcm[i]) : -1);
+        std::vector<int16_t> out(period * 2, 0);
+        synth.mix(out.data(), period, span);
+    }
+    // The device frame where the guest audio of guest ns t played, or -1.
+    int64_t frameOf(uint64_t t) const {
+        const int64_t want = int64_t(t * 441 / 10000000);
+        for (size_t f = 0; f < played.size(); ++f)
+            if (played[f] >= want) return int64_t(f);
+        return -1;
+    }
+};
+
+// A song of 60 short notes 100 ms apart (96 ppq at 96000 us a quarter: a tick is 1 ms), at manyAt.
+constexpr uint32_t manyAt = 0x2400;
+constexpr int manyNotes = 60;
+void putMany(Guest& g) {
+    Bytes trk = {0x00, 0xff, 0x51, 0x03, 0x01, 0x77, 0x00};
+    for (int i = 0; i < manyNotes; ++i) {
+        const Bytes note = {uint8_t(i ? 80 : 0), 0x90, 0x3c, 0x64, 20, 0x80, 0x3c, 0x00};
+        trk.insert(trk.end(), note.begin(), note.end());
+    }
+    const Bytes end = {0x00, 0xff, 0x2f, 0x00};
+    trk.insert(trk.end(), end.begin(), end.end());
+    Bytes smf = {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 96, 'M', 'T', 'r', 'k'};
+    for (int i = 3; i >= 0; --i) smf.push_back(uint8_t(trk.size() >> (8 * i)));
+    smf.insert(smf.end(), trk.begin(), trk.end());
+    assert(manyAt + smf.size() <= handleAt);
+    std::copy(smf.begin(), smf.end(), g.mem.begin() + manyAt);
+}
+
+// One run of the song played at guest 1 s through a Chain; what happens to the guest is up to `event`, called
+// each device period with the device's time. cueNs: the time on the Open and Play cues.
+struct ManyRun {
+    std::vector<uint64_t> noteOns;
+    std::vector<int64_t> guestAudio;  // where the guest audio of each note's time played
+};
+ManyRun manyRun(const Bytes& font, size_t period, const std::function<void(Chain&, uint64_t deviceNs)>& event,
+                uint64_t cueNs = 1000 * ms) {
     ZodiacMusicSynth synth;
     const bool loaded = synth.load(font.data(), int(font.size()));
     assert(loaded);
@@ -244,80 +334,112 @@ void guestClock(const Bytes& font) {
     hooks.enable();
     synth.attach(&hooks);
     Guest guest;
-    // Kept for the run (the queue has no destroy).
-    static AudioQueue* const queue = audioQueueCreate(1 << 16);
-    constexpr size_t period = 512;
-    uint64_t guestNs = 0, pushed = 0;
-    bool played = false, playedAgain = false, ssiOn = true;
-    // The guest's frame index each device frame played, or -1 for silence; the music on its own.
-    std::vector<int64_t> played_;
-    std::vector<int16_t> music;
-    const auto runGuest = [&](uint64_t untilNs) {
-        while (guestNs < untilNs) {
-            const uint64_t to = std::min(untilNs, guestNs - guestNs % (16 * ms) + 16 * ms);
-            if (!played && to > 1000 * ms) {
-                call(hooks, guest, openPc, 1000 * ms, handleAt, twoAt, 0, 0);
-                std::memcpy(guest.mem.data() + handleAt, &handle, 4);
-                call(hooks, guest, playPc, 1000 * ms, handle, 0, 0, 0);
-                played = true;
-            }
-            if (!playedAgain && to > 5000 * ms) {
-                call(hooks, guest, playPc, 5000 * ms, handle, 0, 0, 0);
-                playedAgain = true;
-            }
-            if (ssiOn)
-                for (const uint64_t want = to * 441 / 10000000; pushed < want; ++pushed) audioQueuePush(queue, uint32_t(pushed));
-            guestNs = to;
-            audioQueueMark(queue, guestNs);
-        }
+    putMany(guest);
+    Chain chain(synth, hooks, period);
+    bool played = false;
+    chain.calls = [&](uint64_t, uint64_t to) {
+        if (played || to <= 1000 * ms) return;
+        call(hooks, guest, openPc, cueNs, handleAt, manyAt, 0, 0);
+        std::memcpy(guest.mem.data() + handleAt, &handle, 4);
+        call(hooks, guest, playPc, cueNs, handle, 0, 0, 0);
+        played = true;
     };
-    const auto device = [&](bool underrun) {
-        std::vector<uint32_t> pcm(period);
-        AudioQueueSpan span;
-        const size_t got = audioQueuePopChunkIfGeneration(queue, pcm.data(), underrun ? 0 : period,
-                                                          audioQueueGetState(queue).generation, &span);
-        assert(span.known && span.frames == got);
-        for (size_t i = 0; i < period; ++i) played_.push_back(i < got ? int64_t(pcm[i]) : -1);
-        std::vector<int16_t> out(period * 2, 0);
-        synth.mix(out.data(), period, span);
-        music.insert(music.end(), out.begin(), out.end());
-    };
-    runGuest(150 * ms);
-    uint64_t lostNs = 0;
-    for (int p = 0; p < 690; ++p) {  // about 8 s of device frames
-        synth.pump();
-        const uint64_t deviceNs = uint64_t(played_.size()) * 1000000000ull / 44100;
-        // An underrun at 1.5 s: the guest stalls for 10 periods and that time is lost.
-        const bool underrun = p >= 130 && p < 140;
-        if (underrun) lostNs += period * 1000000000ull / 44100;
-        else runGuest(deviceNs + 150 * ms - lostNs);
-        if (deviceNs > 4000 * ms) ssiOn = false;
-        device(underrun);
+    while (chain.deviceNs() < 9000 * ms) {
+        event(chain, chain.deviceNs());
+        chain.periodOnce();
     }
-    // Onsets: sound after 300 ms of quiet.
-    std::vector<size_t> onsets;
-    size_t quiet = 1 << 30;
-    for (size_t f = 0; f < music.size() / 2; ++f) {
-        if (music[2 * f] || music[2 * f + 1]) {
-            if (quiet > 13230) onsets.push_back(f);
-            quiet = 0;
-        } else {
-            ++quiet;
-        }
-    }
-    assert(onsets.size() == 4);
-    // Where the guest audio of guest 1 s and 2 s plays: the music is there within one 64-frame step.
-    for (int i = 0; i < 2; ++i) {
-        const int64_t frame = int64_t(1000 * (i + 1)) * 441 / 10;
-        size_t at = 0;
-        while (at < played_.size() && played_[at] < frame) ++at;
-        assert(onsets[i] >= at && onsets[i] < at + ZodiacMusicSynth::step + 1);
-    }
-    // With no guest audio from 4 s on, the clock follows the marks, the guest's time now: the second Play at guest
-    // 5 s sounds when the guest gets there, 34 ms before the device's 5 s (150 ms ahead less the 116 ms lost).
-    const double again = double(onsets[2]) / 44100;
-    assert(again > 4.96 && again < 4.99);
+    ManyRun r;
+    r.noteOns = chain.noteOns;
+    for (int i = 0; i < manyNotes; ++i) r.guestAudio.push_back(chain.frameOf((1000 + 100 * uint64_t(i)) * ms));
+    return r;
 }
+
+constexpr int64_t noteGap = 4410, stepFrames = int64_t(ZodiacMusicSynth::step);
+
+// Note i within one step of the guest audio of its time.
+bool onGuestAudio(const ManyRun& r, int i) {
+    return r.guestAudio[i] >= 0 && int64_t(r.noteOns[i]) >= r.guestAudio[i] &&
+           int64_t(r.noteOns[i]) <= r.guestAudio[i] + stepFrames;
+}
+
+// The clock on the guest audio through the chain, across every change in it. Steady: each note within a step of
+// where the guest audio of its time plays, at a 512 and at an 8192 frame period. A stall the guest never makes
+// up (an underrun): back on the guest audio after it. The SSI stopping and starting again: no note dropped or
+// played at once with another, every gap within a step of 100 ms while there is no guest audio, so not only at
+// period boundaries, and back on the guest audio after it starts again.
+void guestClock(const Bytes& font) {
+    for (const size_t period : {size_t(512), size_t(8192)}) {
+        const ManyRun steady = manyRun(font, period, [](Chain&, uint64_t) {});
+        assert(steady.noteOns.size() == manyNotes);
+        for (int i = 0; i < manyNotes; ++i) assert(onGuestAudio(steady, i));
+    }
+
+    const ManyRun stall = manyRun(font, 512, [](Chain& c, uint64_t t) { c.stalled = t >= 2000 * ms && t < 2300 * ms; });
+    assert(stall.noteOns.size() == manyNotes);
+    for (int i = 0; i < manyNotes; ++i) {
+        if (i < 9 || i > 35) assert(onGuestAudio(stall, i));
+        if (i) assert(int64_t(stall.noteOns[i] - stall.noteOns[i - 1]) >= noteGap * 3 / 4);
+    }
+
+    for (const size_t period : {size_t(512), size_t(4096)}) {
+        // The SSI off from guest 2.5 s to 4.5 s; songs keep the guest's time meanwhile.
+        const ManyRun gap = manyRun(font, period, [](Chain& c, uint64_t) {
+            c.ssiOn = !(c.guestNs >= 2500 * ms && c.guestNs < 4500 * ms);
+        });
+        assert(gap.noteOns.size() == manyNotes);
+        for (int i = 1; i < manyNotes; ++i) {
+            const int64_t d = int64_t(gap.noteOns[i] - gap.noteOns[i - 1]);
+            assert(d >= noteGap * 3 / 4 && d <= noteGap * 2);
+            // From the last guest audio before the stop to the first after the start: on the device's frames.
+            if (i > 16 && i < 33) assert(d >= noteGap - stepFrames && d <= noteGap + stepFrames);
+        }
+        for (int i = 0; i < 14; ++i) assert(onGuestAudio(gap, i));
+        for (int i = 50; i < manyNotes; ++i) assert(onGuestAudio(gap, i));
+    }
+
+    // A cue far ahead of the clock, as from a state loaded back while later cues wait: taken as due now, so its
+    // song starts then and plays at its pace, neither silent until its time nor all at once.
+    const ManyRun stale = manyRun(font, 512, [](Chain&, uint64_t) {}, 6000 * ms);
+    assert(stale.noteOns.size() == manyNotes);
+    // It's seen when the guest makes it, ahead of the guest audio of then by the queue.
+    assert(int64_t(stale.noteOns[0]) + 6615 > stale.guestAudio[0] && int64_t(stale.noteOns[0]) <= stale.guestAudio[0]);
+    for (int i = 1; i < manyNotes; ++i) {
+        const int64_t d = int64_t(stale.noteOns[i] - stale.noteOns[i - 1]);
+        assert(d >= noteGap - stepFrames && d <= noteGap + stepFrames);
+    }
+}
+
+// The marks stay in order: guest time set back with no clear starts them again, so the frames after it get the
+// earlier times, and those before it keep theirs.
+void marksInOrder() {
+    AudioQueue* queue = sharedQueue();
+    for (uint32_t i = 0; i < 4410; ++i) audioQueuePush(queue, i);
+    audioQueueMark(queue, 5000 * ms);
+    for (uint32_t i = 0; i < 4410; ++i) audioQueuePush(queue, i);
+    audioQueueMark(queue, 1100 * ms);
+    for (uint32_t i = 0; i < 4410; ++i) audioQueuePush(queue, i);
+    audioQueueMark(queue, 1200 * ms);
+    std::vector<uint32_t> pcm(4410);
+    AudioQueueSpan span;
+    const uint64_t generation = audioQueueGetState(queue).generation;
+    audioQueuePopChunkIfGeneration(queue, pcm.data(), 4410, generation, &span);
+    assert(span.known && span.startNs == 1000 * ms - 100 * ms);
+    audioQueuePopChunkIfGeneration(queue, pcm.data(), 4410, generation, &span);
+    assert(span.startNs == 1000 * ms && span.endNs == 1100 * ms && span.breakAt > span.frames);
+    audioQueuePopChunkIfGeneration(queue, pcm.data(), 4410, generation, &span);
+    assert(span.startNs == 1100 * ms && span.endNs == 1200 * ms);
+
+    // A gap (no frames from 1.2 s to 3 s) inside a pop is a break at the first frame after it.
+    for (uint32_t i = 0; i < 441; ++i) audioQueuePush(queue, i);
+    audioQueueMark(queue, 1210 * ms);
+    audioQueueMark(queue, 3000 * ms);
+    for (uint32_t i = 0; i < 441; ++i) audioQueuePush(queue, i);
+    audioQueueMark(queue, 3010 * ms);
+    audioQueuePopChunkIfGeneration(queue, pcm.data(), 882, generation, &span);
+    assert(span.frames == 882 && span.breakAt == 441 && span.breakNs == 3000 * ms);
+    assert(span.startNs == 1200 * ms && span.endNs == 3010 * ms);
+}
+
 }  // namespace
 
 int main() {
@@ -385,9 +507,10 @@ int main() {
 
     heldAndBacklog(font);
     guestClock(font);
+    marksInOrder();
     threads(font);
     std::printf("PASS: Zodiac music synth (SoundFont load and refusal, nothing before the first note, note on and off "
                 "on time, release, late events, a guest song through the helper, Helds freed, hold, backlog, clock on the guest "
-                "audio, three threads)\n");
+                "audio across stalls and gaps, a stale cue, marks in order, three threads)\n");
     return 0;
 }

@@ -46,10 +46,11 @@ struct AudioQueue {
     std::array<Mark, markSlots> marks{};
     size_t markFirst{}, markCount{};
     const Mark& MarkAt(size_t i) const { return marks[(markFirst + i) % markSlots]; }
-    // Guest ns of frame `index` (counted as committed counts them), from the newest mark at or before it.
-    uint64_t GuestNsOf(uint64_t index) const {
+    // Guest ns of frame `index` (counted as committed counts them), from the newest mark at or before it. carried:
+    // from the newest before it instead, so a gap at index isn't counted (the end of the frames before it).
+    uint64_t GuestNsOf(uint64_t index, bool carried = false) const {
         size_t i = markCount;
-        while (i > 0 && MarkAt(i - 1).committed > index) --i;
+        while (i > 0 && (MarkAt(i - 1).committed > index || (carried && MarkAt(i - 1).committed == index))) --i;
         if (i == 0) {
             const Mark& oldest = MarkAt(0);
             const uint64_t back = (oldest.committed - index) * 1000000000ull / frameRate;
@@ -144,8 +145,22 @@ size_t audioQueuePopChunkIfGeneration(struct AudioQueue* audioQueue, uint32_t* d
     if (span && audioQueue->markCount) {
         span->known = true;
         span->startNs = audioQueue->GuestNsOf(head);
-        span->endNs = audioQueue->GuestNsOf(head + actualCount);
+        span->endNs = actualCount ? audioQueue->GuestNsOf(head + actualCount, true) : span->startNs;
         span->frames = actualCount;
+        uint64_t widest = AudioQueueSpan::breakGapNs;
+        for (size_t i = 1; i < audioQueue->markCount; ++i) {
+            const auto& m = audioQueue->MarkAt(i);
+            if (m.committed <= head) continue;
+            if (m.committed >= head + actualCount) break;
+            const auto& before = audioQueue->MarkAt(i - 1);
+            const uint64_t carried =
+                before.guestNs + (m.committed - before.committed) * 1000000000ull / AudioQueue::frameRate;
+            if (m.guestNs > carried + widest) {
+                widest = m.guestNs - carried;
+                span->breakAt = size_t(m.committed - head);
+                span->breakNs = m.guestNs;
+            }
+        }
     }
     return actualCount;
 }
@@ -155,12 +170,16 @@ void audioQueueMark(struct AudioQueue* audioQueue, uint64_t guestNs) {
     const uint64_t committed = audioQueue->accounting.committed;
     if (audioQueue->markCount) {
         auto& last = audioQueue->marks[(audioQueue->markFirst + audioQueue->markCount - 1) % AudioQueue::markSlots];
-        // No frame since: the newer time says more about the frames still to come.
-        if (last.committed == committed) {
+        // Earlier than the last (guest time set back with no clear): the marks start again, so they stay in order.
+        if (guestNs < last.guestNs) {
+            audioQueue->markCount = 0;
+        } else if (last.committed == committed) {
+            // No frame since: the newer time says more about the frames still to come.
             last.guestNs = guestNs;
             return;
+        } else if (guestNs < last.guestNs + AudioQueue::markSpacingNs) {
+            return;
         }
-        if (guestNs < last.guestNs + AudioQueue::markSpacingNs && guestNs >= last.guestNs) return;
     }
     if (audioQueue->markCount == AudioQueue::markSlots) {
         audioQueue->markFirst = (audioQueue->markFirst + 1) % AudioQueue::markSlots;

@@ -6,13 +6,12 @@
 // Threads: the emulation thread only pushes the hooks' events. A helper thread (pump) takes them, parses files and
 // hands cues to the audio thread through a second ring; the audio thread (mix) sequences and renders, and sends
 // every Held it is done with back through a third ring for the helper to free. mix doesn't allocate, free or lock.
-// The music's clock is the guest time of the guest's own sound playing, from the audio queue's marks (the span mix
-// is given), so the music keeps with it through the queue's depth, underruns and lag: it stands while the device
-// plays silence and moves on with the guest's sound. Without a known span (no marks yet, a test) the clock is the
-// frames the device plays, with guest time mapped onto them through an offset set at the first cue and moved when
-// a cue drifts from it by more than maxDriftNs either way. Either clock stands while the emulator is paused (hold,
-// from the run loop). On a forward jump the songs' skipped note-ons are dropped and only their state (programs,
-// controllers, note-offs) goes out.
+// The music's clock is a GuestAudioClock (its own, or the app's shared with the MIDI out, setClock): the guest time
+// of the guest's own sound as the device plays it, from the audio queue's marks (the span mix is given). Until it
+// knows a span (no marks yet, a test) the clock is the frames the device plays, with guest time mapped onto them
+// through an offset set at the first cue and moved when a cue drifts from it by more than maxDriftNs either way.
+// Either clock stands while the emulator is paused (hold, from the run loop). On a forward jump the songs' skipped
+// note-ons are dropped and only their state (programs, controllers, note-offs) goes out.
 // The helper always drains the hooks' ring: while the audio side is behind, events wait in its own queue, where
 // note-ons and note-offs may be dropped (notes off on the channel then follow) and every other event is kept.
 // One file defines TSF_IMPLEMENTATION before including this.
@@ -28,6 +27,7 @@
 #include <vector>
 
 #include "../../../../vendor/tinysoundfont/tsf.h"
+#include "GuestAudioClock.h"
 #include "audio_queue.h"
 #include "zodiac_music_player.h"
 
@@ -37,8 +37,8 @@ class ZodiacMusicSynth {
     // Frames rendered between cue checks, about 1.5 ms.
     static constexpr size_t step = 64;
     static constexpr uint64_t maxDriftNs = 250000000;
-    // With the guest's clock, a cue further ahead than this is from before a load and goes at once. The guest runs
-    // at most the queue's depth ahead: 8 periods of 8192 frames, about 1.5 s.
+    // With the guest's clock, a cue further ahead than this is from before a load and goes at once, as if due now.
+    // The guest runs at most the queue's depth ahead: 8 periods of 8192 frames, about 1.5 s.
     static constexpr uint64_t maxAheadNs = 2000000000;
     static constexpr int maxVoices = 64;
     // Under the guest's own sound so the two don't clip together often.
@@ -58,6 +58,7 @@ class ZodiacMusicSynth {
               returns_.push(std::move(h));
           }),
           sink_([this](uint64_t, const uint8_t* b, size_t n, bool escape) {
+              if (monitor_) monitor_(frame_, b, n);
               if (!escape) apply(b, n);
           }) {}
     ~ZodiacMusicSynth() {
@@ -136,66 +137,78 @@ class ZodiacMusicSynth {
     // and the song clock stands still.
     void hold(bool held) { held_.store(held, std::memory_order_relaxed); }
 
+    // The clock to run, shared with the MIDI out; it must outlive the synth. Before any mix.
+    void setClock(GuestAudioClock* clock) { clock_ = clock ? clock : &ownClock_; }
+    // Tests: called on the audio thread with each message sent to the SoundFont and the device frame it lands on.
+    // Before any mix.
+    void monitor(std::function<void(uint64_t frame, const uint8_t* bytes, size_t size)> f) { monitor_ = std::move(f); }
+
     // Audio thread. Mixes frames of music into stereo (interleaved left and right), saturating: frames is the whole
     // period the device plays, guest audio or not. span: the guest times of the guest audio at the start of stereo,
-    // as the audio queue popped it.
-    void mix(int16_t* stereo, size_t frames, const AudioQueueSpan& span = AudioQueueSpan{}) {
+    // as the audio queue popped it. hostNs: when the callback runs (GuestAudioClock::steadyNs), for the MIDI out.
+    void mix(int16_t* stereo, size_t frames, const AudioQueueSpan& span = AudioQueueSpan{}, uint64_t hostNs = 0) {
         if (!font_ || held_.load(std::memory_order_relaxed)) return;
+        GuestAudioClock& clock = *clock_;
+        if (!clock.begin(hostNs, frames)) return;
         // Bounded work: at most one ring's worth of cues and maxSongEvents song events a period.
         size_t cueBudget = maxCues, eventBudget = maxSongEvents;
         for (size_t at = 0; at < frames;) {
             const size_t n = frames - at < step ? frames - at : step;
-            const uint64_t hostNs = frame_ * 1000000000ull / rate;
-            zodiac_music::Cue* c = cues_.front();
-            uint64_t now;
-            if (span.known) {
-                // The guest audio's time at this frame; after the guest audio (an underrun) it stands.
-                now = span.endNs;
-                if (at < span.frames && span.endNs > span.startNs)
-                    now = span.startNs + (span.endNs - span.startNs) * at / span.frames;
-                if (anchored_ && now + maxDriftNs < clockNs_) {
-                    player_.skipBefore(0);  // back in time: a load
-                } else if (anchored_ && now > clockNs_ + maxDriftNs) {
-                    player_.skipBefore(now);  // a jump forward, as when the queue overflows
-                } else if (anchored_ && now < clockNs_) {
-                    now = clockNs_;  // a little back between marks: hold
+            GuestAudioClock::Jump jump;
+            const uint64_t guest = clock.next(span, at, n, &jump);
+            if (clock.anchored()) {
+                if (jump == GuestAudioClock::Jump::forward) player_.skipBefore(guest);
+                if (jump == GuestAudioClock::Jump::back) player_.skipBefore(0);
+                for (zodiac_music::Cue* c; (c = cues_.front()) && cueBudget; --cueBudget) {
+                    if (c->timeNs > guest && c->timeNs <= guest + maxAheadNs) break;
+                    // The songs up to the cue first; out of budget, the cue waits for the next period. One late,
+                    // or stale from before a load, is taken as due now, so a Play starts here with its whole song.
+                    if (!player_.advance(c->timeNs < guest ? c->timeNs : guest, sink_, &eventBudget)) break;
+                    zodiac_music::Cue cue = *c;
+                    if (cue.timeNs > guest) cue.timeNs = guest;
+                    cues_.pop();
+                    player_.feed(cue, sink_);
                 }
-                offsetNs_ = int64_t(now) - int64_t(hostNs);
-                anchored_ = true;
+                player_.advance(guest, sink_, &eventBudget);
             } else {
-                if (!anchored_ && c) {
-                    offsetNs_ = int64_t(c->timeNs) - int64_t(hostNs);
-                    anchored_ = true;
-                }
-                now = guestNs(hostNs);
+                frameClock(cueBudget, eventBudget);
             }
-            for (; c && cueBudget; c = cues_.front(), --cueBudget) {
-                if (span.known) {
-                    if (c->timeNs > now && c->timeNs <= now + maxAheadNs) break;
-                } else if (c->timeNs > now + maxDriftNs) {
-                    // Ahead: the span skipped gives only its state.
-                    offsetNs_ = int64_t(c->timeNs) - int64_t(hostNs);
-                    now = c->timeNs;
-                    player_.skipBefore(now);
-                } else if (c->timeNs + maxDriftNs < now) {
-                    offsetNs_ = int64_t(c->timeNs) - int64_t(hostNs);
-                    now = c->timeNs;
-                    player_.skipBefore(0);
-                } else if (c->timeNs > now) {
-                    break;
-                }
-                // The songs up to the cue first; out of budget, the cue waits for the next period.
-                if (!player_.advance(c->timeNs < now ? c->timeNs : now, sink_, &eventBudget)) break;
-                const zodiac_music::Cue cue = *c;
-                cues_.pop();
-                player_.feed(cue, sink_);
-            }
-            player_.advance(now, sink_, &eventBudget);
-            clockNs_ = now;
             tsf_render_short(font_, stereo + at * 2, int(n), 1);
             at += n;
             frame_ += n;
         }
+        clock.end();
+    }
+
+    // One step on the device's frames, before the clock knows a span: guest time through an offset set at the
+    // first cue and moved by a cue more than maxDriftNs off.
+    void frameClock(size_t& cueBudget, size_t& eventBudget) {
+        const uint64_t hostNs = frame_ * 1000000000ull / rate;
+        zodiac_music::Cue* c = cues_.front();
+        if (!anchored_ && c) {
+            offsetNs_ = int64_t(c->timeNs) - int64_t(hostNs);
+            anchored_ = true;
+        }
+        uint64_t now = guestNs(hostNs);
+        for (; c && cueBudget; c = cues_.front(), --cueBudget) {
+            if (c->timeNs > now + maxDriftNs) {
+                // Ahead: the span skipped gives only its state.
+                offsetNs_ = int64_t(c->timeNs) - int64_t(hostNs);
+                now = c->timeNs;
+                player_.skipBefore(now);
+            } else if (c->timeNs + maxDriftNs < now) {
+                offsetNs_ = int64_t(c->timeNs) - int64_t(hostNs);
+                now = c->timeNs;
+                player_.skipBefore(0);
+            } else if (c->timeNs > now) {
+                break;
+            }
+            if (!player_.advance(c->timeNs, sink_, &eventBudget)) break;
+            const zodiac_music::Cue cue = *c;
+            cues_.pop();
+            player_.feed(cue, sink_);
+        }
+        player_.advance(now, sink_, &eventBudget);
     }
 
     // One MIDI message to the SoundFont: notes, controllers, programs, pitch bend and the Universal SysEx master
@@ -296,9 +309,11 @@ class ZodiacMusicSynth {
     const zodiac_music::Sink sink_;
     std::atomic<bool> held_{false};
     uint64_t frame_ = 0;
-    int64_t offsetNs_ = 0;
-    uint64_t clockNs_ = 0;  // guest ns the songs were last played up to
+    int64_t offsetNs_ = 0;  // the frame clock's, until clock_ knows a span
     bool anchored_ = false;
+    GuestAudioClock ownClock_;
+    GuestAudioClock* clock_ = &ownClock_;
+    std::function<void(uint64_t, const uint8_t*, size_t)> monitor_;
 };
 
 #endif
