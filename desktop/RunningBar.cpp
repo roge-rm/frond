@@ -154,8 +154,7 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     keyboardAction->setVisible(false);
     applicationsAction = button("apps", "barApplications", tr("Applications (Ctrl+1)"), Button::Applications);
     cardAction = button("card-out", "barCard", tr("Storage (Ctrl+2)"), Button::Card);
-    syncAction = button({}, "barSync", tr("HotSync"), Button::Sync);
-    static_cast<QToolButton*>(widgetForAction(syncAction))->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    syncAction = button("hotsync", "barSync", tr("HotSync"), Button::Sync);
     syncAction->setVisible(false);
     soundAction = button("sound-on", "barSound", tr("Sound"), Button::Sound);
     soundAction->setCheckable(true);
@@ -195,7 +194,8 @@ void RunningBar::setOpenPanel(int index) {
     cardAction->setChecked(index == 1);
 }
 
-void RunningBar::setSyncButton(const QString& label, bool enabled) {
+void RunningBar::setSyncButton(const QString& label, const QString& icon, bool enabled) {
+    if (syncIcon != icon) { syncIcon = icon; syncAction->setIcon(frondIcons::icon(icon)); }
     syncAction->setText(label);
     syncAction->setToolTip(label);
     syncAction->setVisible(!label.isEmpty());

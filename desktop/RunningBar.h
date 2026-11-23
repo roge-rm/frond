@@ -17,7 +17,7 @@ class RunningBar : public QToolBar {
     void setMachine(const QString& name, const QString& subtitle);
     // Shows a message beside the name for `ms`, or until the next one with 0.
     void say(const QString& text, int ms = 5000);
-    void setSyncButton(const QString& label, bool enabled);
+    void setSyncButton(const QString& label, const QString& icon, bool enabled);
     void setForceStop(bool shown);
     // Updates every row and button; `networks` are the modes (mode, label) the core offers.
     void apply(const runningRules::Traits& traits, const runningRules::State& state, runningRules::CardIcon card,
@@ -38,6 +38,7 @@ class RunningBar : public QToolBar {
     QTimer* statusTimer;
     std::map<runningRules::Id, QAction*> actions;
     std::map<runningRules::Id, QString> keyText;  // the keys shown beside a row
+    QString syncIcon = "hotsync";
     QAction *stopAction, *applicationsAction, *cardAction, *syncAction, *soundAction, *powerAction, *keyboardAction, *forceAction;
     bool shown{true}, wantVisible{false};
 };
