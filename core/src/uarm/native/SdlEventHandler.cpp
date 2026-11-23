@@ -104,6 +104,8 @@ SdlEventHandler::SdlEventHandler(SoC* soc, float scale,
 SdlEventHandler::SdlEventHandler(SoC* soc, const DeviceControlProfile& controls, float scale,
                                  DisplayConfiguration& deviceDisplayConfiguration, Rotation rotation, DeviceControlView controlView)
     : soc(soc), shownControls(&controls), inputControls(&controls), controlView(controlView), scale(scale), rotation(rotation) {
+    if (const auto* profile = deviceProfile5(soc->GetDeviceType())) controllerMap = controllerDefaults(*profile);
+    padAttachedSeen = soc->GamepadAttached();
     width = deviceDisplayConfiguration.width;
     height = deviceDisplayConfiguration.height + deviceDisplayConfiguration.graffitiHeight;
 }
@@ -111,6 +113,13 @@ SdlEventHandler::SdlEventHandler(SoC* soc, const DeviceControlProfile& controls,
 void SdlEventHandler::HandleEvents() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) HandleEvent(event);
+    FollowGamepadAttach();
+}
+
+void SdlEventHandler::FollowGamepadAttach() {
+    if (soc->GamepadAttached() == padAttachedSeen) return;
+    padAttachedSeen = soc->GamepadAttached();
+    UpdateGamepad();
 }
 
 void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
@@ -273,9 +282,11 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 break;
             }
 
-            // A game controller, for the Zodiac and the CLIÉ game controller. It is opened so SDL reports its buttons and axes.
+            // A game controller, for the Zodiac, the CLIÉ game controller and a controller map with keys. It is
+            // opened so SDL reports its buttons and axes.
             case SDL_CONTROLLERDEVICEADDED:
-                if (inputControls->style == DeviceControlStyle::zodiac || soc->GamepadSupported())
+                if (ControllersWanted() &&
+                    !SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(event.cdevice.which)))
                     SDL_GameControllerOpen(event.cdevice.which);
                 break;
 
@@ -287,38 +298,35 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 break;
 
             case SDL_CONTROLLERAXISMOTION: {
-                GamepadState& one = pads[event.caxis.which];
-                if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) one.leftX = event.caxis.value;
-                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) one.leftY = event.caxis.value;
-                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTX) { one.rightX = event.caxis.value; UpdateGamepad(); break; }
-                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY) { one.rightY = event.caxis.value; UpdateGamepad(); break; }
-                else break;
-                lastStickPad = event.caxis.which;
+                PadReading& one = pads[event.caxis.which];
+                const int16_t value = event.caxis.value;
+                switch (event.caxis.axis) {
+                    case SDL_CONTROLLER_AXIS_LEFTX: one.leftX = value; lastStickPad = event.caxis.which; break;
+                    case SDL_CONTROLLER_AXIS_LEFTY: one.leftY = value; lastStickPad = event.caxis.which; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTX: one.rightX = value; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTY: one.rightY = value; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: one.leftTrigger = value; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: one.rightTrigger = value; break;
+                    default: break;
+                }
                 UpdateGamepad();
                 break;
             }
 
             case SDL_CONTROLLERBUTTONDOWN:
             case SDL_CONTROLLERBUTTONUP: {
-                GamepadState& pad = pads[event.cbutton.which];
-                const bool down = event.type == SDL_CONTROLLERBUTTONDOWN;
-                switch (event.cbutton.button) {
-                    case SDL_CONTROLLER_BUTTON_A: pad.a = down; break;
-                    case SDL_CONTROLLER_BUTTON_B: pad.b = down; break;
-                    case SDL_CONTROLLER_BUTTON_X: pad.x = down; break;
-                    case SDL_CONTROLLER_BUTTON_Y: pad.y = down; break;
-                    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: pad.leftShoulder = down; break;
-                    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: pad.rightShoulder = down; break;
-                    case SDL_CONTROLLER_BUTTON_LEFTSTICK: pad.leftStick = down; break;
-                    case SDL_CONTROLLER_BUTTON_BACK: pad.back = down; break;
-                    case SDL_CONTROLLER_BUTTON_START: pad.start = down; break;
-                    case SDL_CONTROLLER_BUTTON_GUIDE: pad.guide = down; break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: pad.dpadX = down ? -1 : pad.dpadX == -1 ? 0 : pad.dpadX; break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: pad.dpadX = down ? 1 : pad.dpadX == 1 ? 0 : pad.dpadX; break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_UP: pad.dpadY = down ? -1 : pad.dpadY == -1 ? 0 : pad.dpadY; break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: pad.dpadY = down ? 1 : pad.dpadY == 1 ? 0 : pad.dpadY; break;
-                    default: break;
-                }
+                // PadKey numbers the buttons as SDL does.
+                static_assert(SDL_CONTROLLER_BUTTON_A == int(PadKey::a) && SDL_CONTROLLER_BUTTON_BACK == int(PadKey::back) &&
+                              SDL_CONTROLLER_BUTTON_RIGHTSHOULDER == int(PadKey::rightShoulder) &&
+                              SDL_CONTROLLER_BUTTON_DPAD_RIGHT == int(PadKey::dpadRight), "SDL's button numbers");
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+                static_assert(SDL_CONTROLLER_BUTTON_TOUCHPAD == int(PadKey::touchpad), "SDL's button numbers");
+#endif
+                PadReading& pad = pads[event.cbutton.which];
+                const int button = event.cbutton.button;
+                if (button < 0 || button >= padButtonCount) break;
+                if (event.type == SDL_CONTROLLERBUTTONDOWN) pad.buttons |= uint32_t(1) << button;
+                else pad.buttons &= ~(uint32_t(1) << button);
                 UpdateGamepad();
                 break;
             }
@@ -525,10 +533,11 @@ void SdlEventHandler::ReleaseInputs() {
     stickKeys = 0;
     // The controllers' buttons are let go with the built-in holds below. Their sticks are only
     // taken off the device: the axes stay, so a stick still pushed is back when focus returns.
-    for (auto& entry : pads) { GamepadState kept; kept.leftX = entry.second.leftX; kept.leftY = entry.second.leftY; entry.second = kept; }
+    for (auto& entry : pads) { PadReading kept; kept.leftX = entry.second.leftX; kept.leftY = entry.second.leftY; entry.second = kept; }
     padFocused = false;
     padKeys = 0;
     padStick = {};
+    padDirections = {};
     UpdateStick();
     hostKeys.fill(false); codeHolds.fill(0);
     for (unsigned key=1;key<hardKeys.size();++key) {
@@ -577,10 +586,6 @@ void SdlEventHandler::UpdateStick() {
     soc->AnalogStick(stick.x, stick.y);
     redrawRequested = true;
 }
-// A key the controller holds counts with the built-in holds, so a key held some other way too goes
-// down once and comes up when the last of them lets go.
-// A button is down if any controller holds it. The stick is the one moved last, or while that one
-// is at rest or gone, the first controller with its stick pushed.
 bool SdlEventHandler::Rumble(bool on, uint64_t nowUsec) {
     // Sent for 1 s and again every 0.5 s, so a missed off or a controller added meanwhile is never far behind.
     constexpr uint32_t rumbleMs = 1000;
@@ -603,31 +608,35 @@ bool SdlEventHandler::Rumble(bool on, uint64_t nowUsec) {
     return opened;
 }
 
-GamepadState SdlEventHandler::CombinedPads() const {
-    GamepadState all;
-    const GamepadState* stickPad = nullptr;
-    if (auto it = pads.find(lastStickPad); it != pads.end() && (it->second.leftX || it->second.leftY)) stickPad = &it->second;
-    for (const auto& entry : pads) {
-        const GamepadState& one = entry.second;
-        all.a |= one.a; all.b |= one.b; all.x |= one.x; all.y |= one.y;
-        all.leftShoulder |= one.leftShoulder; all.rightShoulder |= one.rightShoulder; all.leftStick |= one.leftStick;
-        all.back |= one.back; all.start |= one.start; all.guide |= one.guide;
-        if (!all.dpadX) all.dpadX = one.dpadX;
-        if (!all.dpadY) all.dpadY = one.dpadY;
-        if (!stickPad && (one.leftX || one.leftY)) stickPad = &one;
-        // The right stick only presses keys, so the furthest push on each axis counts.
-        if (std::abs(int(one.rightX)) > std::abs(int(all.rightX))) all.rightX = one.rightX;
-        if (std::abs(int(one.rightY)) > std::abs(int(all.rightY))) all.rightY = one.rightY;
-    }
-    if (stickPad) { all.leftX = stickPad->leftX; all.leftY = stickPad->leftY; }
-    return all;
+bool SdlEventHandler::ControllersWanted() const {
+    return inputControls->style == DeviceControlStyle::zodiac || soc->GamepadSupported() || !controllerMap.keys.empty();
 }
+// A map with keys on a device that had none opens the controllers already connected.
+void SdlEventHandler::SetControllerMap(const ControllerMap& map) {
+    controllerMap = map;
+    if (ControllersWanted() && SDL_WasInit(SDL_INIT_GAMECONTROLLER))
+        for (int i = 0; i < SDL_NumJoysticks(); ++i)
+            if (SDL_IsGameController(i) && !SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i)))
+                SDL_GameControllerOpen(i);
+    UpdateGamepad();
+}
+// A controller key is held if any controller holds it. The Zodiac's stick is the one moved last, or
+// while that one is at rest or gone, the first controller with its stick pushed.
+// A key the controller holds counts with the built-in holds, so a key held some other way too goes
+// down once and comes up when the last of them lets go.
 void SdlEventHandler::UpdateGamepad() {
-    const bool clie = soc->GamepadAttached();
-    if (inputControls->style != DeviceControlStyle::zodiac && !clie && !padKeys) return;
+    const bool zodiac = inputControls->style == DeviceControlStyle::zodiac;
+    if (!zodiac && controllerMap.keys.empty() && !padKeys) return;
     if (!padFocused) return;
-    const GamepadInput input = inputControls->style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads(), &rightHeld)
-                               : clie ? clieGamepadInput(CombinedPads()) : GamepadInput{};
+    PadKeyMask held = 0;
+    const PadReading* stickPad = nullptr;
+    if (auto it = pads.find(lastStickPad); it != pads.end() && (it->second.leftX || it->second.leftY)) stickPad = &it->second;
+    for (auto& entry : pads) {
+        held |= padKeysHeld(entry.second);
+        if (!stickPad && (entry.second.leftX || entry.second.leftY)) stickPad = &entry.second;
+    }
+    const GamepadInput input = gamepadInput(controllerMap, held, stickPad ? stickPad->leftX : 0, stickPad ? stickPad->leftY : 0,
+                                            zodiac, soc->GamepadAttached(), &padDirections);
     for (unsigned key = 1; key < keyIdCount; ++key) {
         const DeviceKeyMask bit = deviceKeyBit(KeyId(key));
         if ((input.keys & bit) == (padKeys & bit)) continue;

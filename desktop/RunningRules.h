@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <vector>
 #include "FirmwareInput.h"
+#include "ControllerMap.h"
 
 // Rules for the running bar and the Machine menu, kept free of widgets so tests can run them
 // alone. The same rows as the Android bar's menu.
@@ -27,6 +28,8 @@ struct Traits {
     // Takes the CLIÉ game controller on its connector.
     bool gamepad{false};
     bool syncManager{false};
+    // Has buttons a game controller map can press (ControllerMap.h).
+    bool controls{false};
 };
 
 inline Traits traitsFor(frondFirmware::Device device) {
@@ -47,11 +50,12 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.cardSlot = profile.frontend.sdSlot || profile.frontend.memoryStick;
     t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
     t.gamepad = profile.frontend.clieGamepad;
+    t.controls = !controllerPalmKeys(profile).empty();
     return t;
 }
 
 enum class Id { Hold, Keyboard, Gamepad, Microphone, Network, SyncManager, Display, Connections, Screenshot, HideBar, FullScreen,
-                Save, SaveCopy, Log, Reset, HardReset, SaveStop };
+                Save, SaveCopy, Log, Reset, HardReset, SaveStop, Controls };
 
 struct Row {
     Id id;
@@ -103,6 +107,7 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     if (t.syncManager) out.push_back({Id::SyncManager, QObject::tr("Sync Manager…"), std::nullopt, {}, true, false, 0});
     out.push_back({Id::Display, QObject::tr("Display…"), std::nullopt, {}, true, false, 1});
     out.push_back({Id::Connections, QObject::tr("Connections…"), std::nullopt, {}, true, false, 1});
+    if (t.controls) out.push_back({Id::Controls, QObject::tr("Controls…"), std::nullopt, {}, true, false, 1});
     out.push_back({Id::Screenshot, QObject::tr("Screenshot"), std::nullopt, {}, ready, false, 1});
     out.push_back({Id::HideBar, s.barShown ? QObject::tr("Hide bar") : QObject::tr("Show bar"), std::nullopt, {}, true, false, 2});
     out.push_back({Id::FullScreen, s.fullScreen ? QObject::tr("Leave full screen") : QObject::tr("Full screen"), std::nullopt, {},

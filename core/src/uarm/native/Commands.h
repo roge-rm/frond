@@ -53,6 +53,9 @@ namespace commands {
         std::string sessionPath{};        // the session file or folder loaded into sessionFolder, else empty
         // Queues a display change for the SDL thread; unset where there is no window to change.
         std::function<void(const DisplayChange&)> changeDisplay{};
+        // Sets the game controller map from its text (ControllerMap.h) and gives the map now in use; unset
+        // without a window.
+        std::function<std::string(const std::string&)> setControllerMap{};
         // The window's X11 id as "x11 ID" for the desktop app to embed, empty without one.
         std::function<std::string()> windowId{};
         // The fitted device's rectangle in the window as "x y width height windowWidth windowHeight", empty without one.

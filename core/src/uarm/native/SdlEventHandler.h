@@ -46,6 +46,14 @@ class SdlEventHandler {
     // Called with the shortcut name for the keys the desktop app owns (see ShortcutKeys.h).
     void SetShortcutSink(std::function<void(const std::string&)> sink) { shortcutSink = std::move(sink); }
 
+    // Which controller buttons press which Palm buttons; the device's defaults until set. Keys the old
+    // map held and the new one doesn't are let go.
+    void SetControllerMap(const ControllerMap& map);
+    const ControllerMap& GetControllerMap() const { return controllerMap; }
+    // Attaching or detaching the CLIÉ game controller since the last call moves the buttons the
+    // controllers hold between its keys and the CLIÉ's own.
+    void FollowGamepadAttach();
+
     void SetRotation(Rotation rotation);
     Rotation DrawnRotation() const { return rotation; }
     // A new set of shown controls and window scale; releases pointers and touches held on
@@ -88,7 +96,8 @@ class SdlEventHandler {
     void TapStickPress();
     // Sends what the game controller holds now: its keys that changed and the stick.
     void UpdateGamepad();
-    GamepadState CombinedPads() const;
+    // Game controllers are opened: the Zodiac, a CLIÉ that takes the game controller, or a map with keys.
+    bool ControllersWanted() const;
 
    private:
     SoC* soc;
@@ -126,10 +135,12 @@ class SdlEventHandler {
     uint8_t stickKeys{0};
     // Each game controller as last reported (by instance id), the one whose stick moved last, and
     // the keys and stick they hold on the device together. Off while the window has lost focus.
-    std::map<SDL_JoystickID, GamepadState> pads;
-    GamepadRightHeld rightHeld;
+    std::map<SDL_JoystickID, PadReading> pads;
+    ControllerMap controllerMap;
+    GamepadDirections padDirections;
     SDL_JoystickID lastStickPad{-1};
     bool padFocused{true};
+    bool padAttachedSeen{false};
     // The rumble is on, and when it was last sent; SDL stops it after rumbleMs unless sent again.
     bool rumbling{false};
     uint64_t rumbleSentUsec{0};

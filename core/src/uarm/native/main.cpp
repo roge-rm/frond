@@ -140,6 +140,7 @@ struct Options {
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
+    optional<string> controllerMap;  // --controller-map
     bool headphonesIn;       // --headphones-in
     BatteryPower battery;    // --battery
 };
@@ -1308,6 +1309,14 @@ bool gFastEngineMissing = false;
         };
         sdlEventHandler.SetDirectCapture(false);
         if (desktop) sdlEventHandler.SetShortcutSink([&](const string& name) { desktop->event("shortcut", name); });
+        // The controller map from --controller-map and the desktop's controller-map, on the guest thread like the events.
+        if (const auto* profile = deviceProfile5(soc->GetDeviceType())) {
+            if (options.controllerMap) sdlEventHandler.SetControllerMap(decodeControllerMap(*options.controllerMap, *profile));
+            commandContext.setControllerMap = [&sdlEventHandler, profile](const string& text) {
+                sdlEventHandler.SetControllerMap(decodeControllerMap(text, *profile));
+                return sdlEventHandler.GetControllerMap().encode();
+            };
+        }
         commandContext.windowId = [&]() {
             string id;
             link.Call([&] { id = x11WindowId(window); });
@@ -1443,6 +1452,7 @@ bool gFastEngineMissing = false;
                     sdlEventHandler.SetLayout(input.windowLayout, inputFitted);
                     soc->SetFramebufferDirty();
                 }
+                sdlEventHandler.FollowGamepadAttach();
                 if (sdlEventHandler.QuitRequested()) {
                     if (!desktop) break;
                     desktop->event("close");
@@ -1882,6 +1892,66 @@ bool gFastEngineMissing = false;
 
 }  // namespace
 
+#ifndef __ANDROID__
+// --controller-listen: "ready", then each game controller key as it goes down, by its ControllerMap.h
+// name, a line each. For the desktop's press-to-assign, which stops it; it ends by itself after 60 s.
+static int listenControllers() {
+    if (SDL_Init(SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) < 0) {
+        cerr << "no game controllers: " << SDL_GetError() << endl;
+        return 1;
+    }
+    cout << "ready" << endl;
+    std::map<SDL_JoystickID, PadReading> pads;
+    std::map<SDL_JoystickID, PadKeyMask> held;
+    const uint32_t end = SDL_GetTicks() + 60000;
+    while (!SDL_TICKS_PASSED(SDL_GetTicks(), end)) {
+        SDL_Event event;
+        if (!SDL_WaitEventTimeout(&event, 500)) continue;
+        SDL_JoystickID which = -1;
+        switch (event.type) {
+            case SDL_CONTROLLERDEVICEADDED: SDL_GameControllerOpen(event.cdevice.which); break;
+            case SDL_CONTROLLERDEVICEREMOVED:
+                if (auto* controller = SDL_GameControllerFromInstanceID(event.cdevice.which)) SDL_GameControllerClose(controller);
+                pads.erase(event.cdevice.which);
+                held.erase(event.cdevice.which);
+                break;
+            case SDL_CONTROLLERBUTTONDOWN:
+            case SDL_CONTROLLERBUTTONUP: {
+                which = event.cbutton.which;
+                auto& pad = pads[which];
+                if (event.cbutton.button >= padButtonCount) break;
+                const uint32_t bit = uint32_t(1) << event.cbutton.button;
+                pad.buttons = event.type == SDL_CONTROLLERBUTTONDOWN ? pad.buttons | bit : pad.buttons & ~bit;
+                break;
+            }
+            case SDL_CONTROLLERAXISMOTION: {
+                which = event.caxis.which;
+                auto& pad = pads[which];
+                const int16_t value = event.caxis.value;
+                switch (event.caxis.axis) {
+                    case SDL_CONTROLLER_AXIS_LEFTX: pad.leftX = value; break;
+                    case SDL_CONTROLLER_AXIS_LEFTY: pad.leftY = value; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTX: pad.rightX = value; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTY: pad.rightY = value; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: pad.leftTrigger = value; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: pad.rightTrigger = value; break;
+                    default: break;
+                }
+                break;
+            }
+            default: break;
+        }
+        if (which < 0 || !pads.count(which)) continue;
+        const PadKeyMask now = padKeysHeld(pads[which]), pressed = now & ~held[which];
+        held[which] = now;
+        for (int key = 0; key < int(PadKey::count); ++key)
+            if (pressed & padKeyBit(PadKey(key))) cout << padKeyId(PadKey(key)) << endl;
+    }
+    SDL_Quit();
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
     // A launcher that dies leaves stdout and stderr without a reader; the core still has to save.
 #ifdef SIGPIPE
@@ -1971,6 +2041,15 @@ int main(int argc, char** argv) {
         .metavar("<frames>")
         .scan<'u', unsigned int>()
         .default_value(512u);
+
+    program.add_argument("--controller-map")
+        .help("game controller buttons for the device's buttons, as KEY:BUTTON,... (SDL button names), or none")
+        .metavar("<map>");
+
+    program.add_argument("--controller-listen")
+        .help("print each game controller button as it is pressed, for 60 s, and exit")
+        .default_value(false)
+        .implicit_value(true);
 
     program.add_argument("--no-rumble")
         .help("Zodiac: no rumble on game controllers or in the window")
@@ -2165,6 +2244,8 @@ int main(int argc, char** argv) {
         for (size_t p = 0; p < ports.size(); ++p) cout << p << ": " << ports[p] << endl;
         return 0;
     }
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--controller-listen") return listenControllers();
 #endif
 
     try {
@@ -2232,6 +2313,7 @@ int main(int argc, char** argv) {
                        .fastEngine = program.get("--engine") == "fast",
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),
+                       .controllerMap = program.present("--controller-map"),
                        .headphonesIn = program.get<bool>("--headphones-in")};
     BatteryPower::Parse(program.get("--battery"), options.battery);
 

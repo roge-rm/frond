@@ -420,6 +420,10 @@ class MainWindow : public QMainWindow {
     bool syncRunning{false};
     QPushButton* syncSettingsButton{nullptr};
     void showSyncManager();
+    // The running machine's controller map, saved and sent to the core on each change.
+    void showControls();
+    // A map the core hasn't taken yet, sent once its request slot is free; empty for none.
+    QString controllerMapUnsent;
     bool editSyncSettings(const QString& session, QWidget* parent);
     void startSync();
     void showSyncStatus(const QString& state);

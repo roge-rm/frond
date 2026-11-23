@@ -1221,6 +1221,11 @@ class DesktopControl {
             if (layout.empty()) return {false, "unsupported", "There is no window."};
             return {true, "layout", layout};
         }
+        if (command == "controller-map") {
+            // KEY:BUTTON,... or none; entries the device can't use are dropped.
+            if (!ctx.setControllerMap) return {false, "unsupported", "This device takes no game controller."};
+            return {true, "controller-map", ctx.setControllerMap(path)};
+        }
         if (command == "display") {
             // Queued for the SDL thread, which applies it once the app is in the foreground.
             if (!ctx.changeDisplay) return {false, "unsupported", "There is no window to change."};

@@ -1586,6 +1586,7 @@ static void tg50JogBesideKeyboard() {
 }
 
 static void tg50HostKeyboard();
+static void tg50PadAttachWhileHeld();
 // Windows Mobile iPAQs: no board yet. Strips 480 units wide under 480- and 240-wide screens:
 // four app keys either side of a five-way, and the h4350's thumb keyboard, which hides.
 static void ipaqArt() {
@@ -1748,6 +1749,7 @@ static void zireAndM515() {
     t415Art();
     tg50JogBesideKeyboard();
     tg50HostKeyboard();
+    tg50PadAttachWhileHeld();
     viewsLeaveOlderDevices();
     ipaqArt();
 }
@@ -2070,6 +2072,25 @@ static void lcdScaling() {
     assert(fittingWindowScale(320,564,300,500)==1.f);
 }
 
+// The CLIÉ game controller attached or detached while a controller button is held: the button
+// moves between the pad's key and the TG50's own.
+struct CliePadGuest : Guest {
+    CliePadGuest() : Guest(deviceTypeTG50) {setDisplay({320,320,0,224});}
+    bool padAttached=false;
+    bool GamepadSupported() const override {return true;}
+    bool GamepadAttached() const override {return padAttached;}
+};
+static void tg50PadAttachWhileHeld() {
+    CliePadGuest guest;auto display=guest.display();
+    TouchInput input(&guest,1,display,Rotation::portrait_0);
+    SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_DPAD_UP;input.HandleEvent(e);
+    guest.expect({{keyIdUp,true}});
+    input.FollowGamepadAttach();guest.expect({});
+    guest.padAttached=true;input.FollowGamepadAttach();guest.expect({{keyIdUp,false},{keyIdPadUp,true}});
+    guest.padAttached=false;input.FollowGamepadAttach();guest.expect({{keyIdUp,true},{keyIdPadUp,false}});
+    e.type=SDL_CONTROLLERBUTTONUP;input.HandleEvent(e);guest.expect({{keyIdUp,false}});
+}
+
 // Add beside tg50Art() in tests/device-controls.cpp, call from main.
 static void tg50HostKeyboard() {
     Guest guest(deviceTypeTG50); guest.setDisplay({320,320,0,224});
@@ -2364,10 +2385,15 @@ static void clieGamepadJog(const char* directory) {
     }
 }
 
+// The Zodiac's default controller map on one controller's reading, which keeps its axis keys' state.
+static GamepadInput zodiacGamepadInput(PadReading& pad) {
+    const auto map=controllerDefaults(*deviceProfile5(deviceTypeZodiac2));
+    return gamepadInput(map,padKeysHeld(pad),pad.leftX,pad.leftY,true,false);
+}
+
 static void zodiacRightStick() {
-    GamepadRightHeld held;
-    GamepadState pad;
-    auto down=[&](int rightY) {pad.rightY=int16_t(rightY);return (zodiacGamepadInput(pad,&held).keys&deviceKeyBit(keyIdHard1))!=0;};
+    PadReading pad;
+    auto down=[&](int rightY) {pad.rightY=int16_t(rightY);return (zodiacGamepadInput(pad).keys&deviceKeyBit(keyIdHard1))!=0;};
     assert(!down(16384));
     assert(down(16385));
     assert(down(12000) && down(11500));
@@ -2375,7 +2401,7 @@ static void zodiacRightStick() {
     assert(!down(12000));
     assert(down(20000) && !down(0));
     // Without held state the press point alone decides.
-    pad.rightY=12000;
+    pad.rightY=12000;pad.axisHeld=0;
     assert(!(zodiacGamepadInput(pad).keys&deviceKeyBit(keyIdHard1)));
 }
 
@@ -2741,21 +2767,21 @@ static void zodiacControls() {
     guest.expect({});guest.noStick();
     // A game controller, as the mapping alone and through the handler's events.
     {
-        GamepadState s;
+        PadReading s;
         assert(zodiacGamepadInput(s).keys==0 && zodiacGamepadInput(s).stick==DeviceStick{});
-        const std::pair<bool GamepadState::*,KeyId> buttons[]={{&GamepadState::a,keyIdHard1},{&GamepadState::b,keyIdHard2},
-            {&GamepadState::x,keyIdHard3},{&GamepadState::y,keyIdHard4},{&GamepadState::leftShoulder,keyIdTriggerLeft},
-            {&GamepadState::rightShoulder,keyIdTriggerRight},{&GamepadState::leftStick,keyIdStickPress},
-            {&GamepadState::start,keyIdHome},{&GamepadState::guide,keyIdHome},{&GamepadState::back,keyIdFunction}};
+        const std::pair<PadKey,KeyId> buttons[]={{PadKey::a,keyIdHard1},{PadKey::b,keyIdHard2},
+            {PadKey::x,keyIdHard3},{PadKey::y,keyIdHard4},{PadKey::leftShoulder,keyIdTriggerLeft},
+            {PadKey::rightShoulder,keyIdTriggerRight},{PadKey::leftStick,keyIdStickPress},
+            {PadKey::start,keyIdHome},{PadKey::guide,keyIdHome},{PadKey::back,keyIdFunction}};
         DeviceKeyMask all=0;
-        for(const auto& [member,key]:buttons) {
-            GamepadState one;one.*member=true;
+        for(const auto& [button,key]:buttons) {
+            PadReading one;one.buttons=uint32_t(1)<<int(button);
             assert(zodiacGamepadInput(one).keys==deviceKeyBit(key) && !zodiacGamepadInput(one).stick.held);
-            s.*member=true;all|=deviceKeyBit(key);
+            s.buttons|=uint32_t(1)<<int(button);all|=deviceKeyBit(key);
         }
         assert(zodiacGamepadInput(s).keys==all);
         // The right stick: the Action keys by place past half travel, nothing short of it.
-        auto right=[](int x,int y) {GamepadState g;g.rightX=int16_t(x);g.rightY=int16_t(y);return zodiacGamepadInput(g);};
+        auto right=[](int x,int y) {PadReading g;g.rightX=int16_t(x);g.rightY=int16_t(y);return zodiacGamepadInput(g);};
         assert(right(16384,0).keys==0 && right(32767,0).keys==deviceKeyBit(keyIdHard2) && !right(32767,0).stick.held);
         assert(right(-32768,0).keys==deviceKeyBit(keyIdHard3) && right(0,-32768).keys==deviceKeyBit(keyIdHard4));
         assert(right(0,32767).keys==deviceKeyBit(keyIdHard1));
@@ -2764,7 +2790,7 @@ static void zodiacControls() {
         for(unsigned k=1;k<keyIdCount;++k) if(all&deviceKeyBit(KeyId(k))) assert(zodiacControlFor(KeyId(k))>=0);
         assert(!(all&(deviceKeyBit(keyIdBluetooth)|deviceKeyBit(keyIdPower))));
         // The stick: at rest near the centre, full at the ends of each axis and in the corners.
-        auto at=[](int x,int y) {GamepadState g;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
+        auto at=[](int x,int y) {PadReading g;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
         assert(!at(3000,-2000).held && at(3000,-2000).x==0 && at(3000,-2000).y==0);
         assert(at(32767,0).held && at(32767,0).x==1 && at(32767,0).y==0);
         assert(at(-32768,0).x==-1 && at(0,32767).y==1 && at(0,-32768).y==-1);
@@ -2772,7 +2798,12 @@ static void zodiacControls() {
         const auto half=at(16384,0),small=at(4200,0);
         assert(half.x>0.4f && half.x<0.5f && half.y==0 && small.held && small.x>0 && small.x<0.02f);
         // The d-pad is full travel on its axis and wins over the left stick there.
-        auto dpad=[](int dx,int dy,int x=0,int y=0) {GamepadState g;g.dpadX=dx;g.dpadY=dy;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
+        auto dpad=[](int dx,int dy,int x=0,int y=0) {
+            PadReading g;g.leftX=int16_t(x);g.leftY=int16_t(y);
+            if(dx) g.buttons|=uint32_t(1)<<int(dx<0 ? PadKey::dpadLeft : PadKey::dpadRight);
+            if(dy) g.buttons|=uint32_t(1)<<int(dy<0 ? PadKey::dpadUp : PadKey::dpadDown);
+            return zodiacGamepadInput(g).stick;
+        };
         assert(dpad(-1,0).held && dpad(-1,0).x==-1 && dpad(-1,0).y==0);
         assert(dpad(1,0).x==1 && dpad(0,-1).y==-1 && dpad(0,1).y==1);
         assert(dpad(-1,0,32767,32767).x==-1 && dpad(-1,0,32767,32767).y==1);
@@ -2825,6 +2856,16 @@ static void zodiacControls() {
     padButton(SDL_CONTROLLER_BUTTON_A,true);keyEvent(SDLK_F1,true);guest.expect({{keyIdHard1,true}});
     padButton(SDL_CONTROLLER_BUTTON_A,false);guest.expect({});assert(input.PressedButtons()==deviceKeyBit(keyIdHard1));
     keyEvent(SDLK_F1,false);guest.expect({{keyIdHard1,false}});
+    // A new map applies at once: a key held under the old one moves to its new button.
+    {
+        const ControllerMap defaults=input.GetControllerMap();
+        ControllerMap moved=defaults;moved.assign(PalmKey::app2,PadKey::a);
+        padButton(SDL_CONTROLLER_BUTTON_A,true);guest.expect({{keyIdHard1,true}});
+        input.SetControllerMap(moved);guest.expect({{keyIdHard1,false},{keyIdHard2,true}});
+        input.SetControllerMap(ControllerMap{});guest.expect({{keyIdHard2,false}});
+        padButton(SDL_CONTROLLER_BUTTON_A,false);guest.expect({});
+        input.SetControllerMap(defaults);guest.expect({});
+    }
     // The controller's stick over its range; it wins over the arrow keys and the pointer wins over it.
     padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);st=guest.lastStick();assert(st.x==1 && st.y==0 && input.Stick().held);
     padAxis(SDL_CONTROLLER_AXIS_LEFTY,-32768);st=guest.lastStick();assert(st.x==1 && st.y==-1);
@@ -2897,8 +2938,10 @@ static void zodiacControls() {
     SdlEventHandler txInput(&tx,1.f,txDisplay,Rotation::portrait_0);
     for(SDL_Keycode k:{SDLK_F7,SDLK_F8,SDLK_F9,SDLK_F10}) {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=k;txInput.HandleEvent(e);}
     tx.expect({});
-    // A game controller does nothing on the TX.
-    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({});}
+    // A game controller presses the TX's keys by Android's defaults: A is Select, and the left stick
+    // isn't mapped, so it never moves a stick the TX hasn't got.
+    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({{keyIdSelect,true}});}
+    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONUP;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({{keyIdSelect,false}});}
     {SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.axis=SDL_CONTROLLER_AXIS_LEFTX;e.caxis.value=32767;txInput.HandleEvent(e);tx.expect({});}
     {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=SDLK_RIGHT;txInput.HandleEvent(e);tx.expect({{keyIdRight,true}});}
     // At 90 and 270 the shown LCD is 320x480: keys, the stick and its press follow it in both arrangements.

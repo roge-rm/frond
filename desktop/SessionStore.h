@@ -138,6 +138,9 @@ struct Preferences {
     // to the MIDI output port midiOutPort ("midi", a port name or "virtual"). Applied at start.
     QString musicOutput{"fm"};
     QString soundFont, midiOutPort;
+    // Game controller buttons for the device's buttons (ControllerMap.h text); unset follows the device's defaults.
+    bool controllerMapSet{false};
+    QString controllerMap;
 };
 // The core's arguments for the Music output setting: none for FM, or for a choice with nothing picked.
 inline QStringList musicArguments(const Preferences& prefs) {
@@ -201,6 +204,8 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     if (const auto music = object.value("musicOutput").toString(); music == "soundfont" || music == "midi") result->musicOutput = music;
     result->soundFont = object.value("soundFont").toString();
     result->midiOutPort = object.value("midiOutPort").toString();
+    result->controllerMapSet = !object.value("controllerMap").toString().isEmpty();
+    result->controllerMap = object.value("controllerMap").toString();
     result->gamepadSet = object.value("gamepad").isBool();
     result->gamepad = object.value("gamepad").toBool(false);
     result->jogLandscape = readJogLandscape(object);
@@ -238,6 +243,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     if (prefs.musicOutput != "fm") object.insert("musicOutput", prefs.musicOutput);
     if (!prefs.soundFont.isEmpty()) object.insert("soundFont", prefs.soundFont);
     if (!prefs.midiOutPort.isEmpty()) object.insert("midiOutPort", prefs.midiOutPort);
+    if (prefs.controllerMapSet) object.insert("controllerMap", prefs.controllerMap);
     if (prefs.gamepadSet) object.insert("gamepad", prefs.gamepad);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
     if (prefs.usbPort == "printer") object.insert("usbPrinter", true);

@@ -28,6 +28,7 @@
 #include "WindowScale.h"
 #include <QSpinBox>
 #include "LinkCommon.h"
+#include "ControlsEditor.h"
 
 using frondFirmware::Device;
 
@@ -211,7 +212,7 @@ QString midiPortKey(const QString& name) {
 }
 
 MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool automaticScale, QWidget* parent)
-    : QWidget(parent), automaticScale(automaticScale), originalPreferences(prefs) {
+    : QWidget(parent), automaticScale(automaticScale), originalPreferences(prefs), controllerPrefs(prefs) {
     auto* layout = new QVBoxLayout(this);
     auto* display = new QGroupBox(tr("Display"), this);
     auto* displayLayout = new QVBoxLayout(display);
@@ -321,6 +322,23 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     connect(musicOutput, &QComboBox::currentIndexChanged, this, [this] { showMusic(); });
     showMusic();
     layout->addWidget(sound);
+    controllerGroup = new QGroupBox(tr("Game controller"), this);
+    auto* controllerLayout = new QHBoxLayout(controllerGroup);
+    auto* controls = new QPushButton(tr("Controls…"), controllerGroup);
+    controls->setObjectName("machineControls");
+    controllerLayout->addWidget(controls);
+    controllerLayout->addStretch();
+    connect(controls, &QPushButton::clicked, this, [this] {
+        if (device == Device::automatic) return;
+        const auto& profile = frondFirmware::profile(device);
+        ControlsDialog dialog(profile, controllerMapFor(controllerPrefs, profile), this);
+        connect(&dialog, &ControlsDialog::changed, this, [this](const ControllerMap& map, bool defaults) {
+            controllerPrefs.controllerMapSet = !defaults;
+            controllerPrefs.controllerMap = defaults ? QString() : QString::fromStdString(map.encode());
+        });
+        dialog.exec();
+    });
+    layout->addWidget(controllerGroup);
     auto* batteryGroup = new QGroupBox(tr("Battery"), this);
     auto* batteryLayout = new QVBoxLayout(batteryGroup);
     batteryMode = new QComboBox(batteryGroup);
@@ -529,6 +547,8 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.audio = audio->isChecked();
     prefs.fastAudio = fastAudio->isChecked();
     prefs.rumble = rumble->isChecked();
+    prefs.controllerMapSet = controllerPrefs.controllerMapSet;
+    prefs.controllerMap = controllerPrefs.controllerMap;
     if (device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac) {
         prefs.musicOutput = musicOutput->currentData().toString();
         prefs.soundFont = soundFont->text().trimmed();
@@ -572,7 +592,13 @@ void MachineSettings::showPeripherals(bool shown) {
     setDevice(device);
 }
 void MachineSettings::setDevice(Device device) {
+    // A map made for another device starts again from the new one's defaults.
+    if (device != this->device && this->device != Device::automatic) {
+        controllerPrefs.controllerMapSet = false;
+        controllerPrefs.controllerMap.clear();
+    }
     this->device = device;
+    controllerGroup->setVisible(device != Device::automatic && controlsShown(frondFirmware::profile(device)));
     const bool known = peripheralsShown && device != Device::automatic;
     const bool hasInfrared = known && frondFirmware::capabilities(device).infrared;
     const bool hasSerial = known && frondFirmware::capabilities(device).serial && !frondFirmware::serialAbsent(device);
