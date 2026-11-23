@@ -1399,7 +1399,7 @@ test: test-controller-map
 test-controller-map:
 	@mkdir -p $(OBJ_ROOT)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) \
-		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Icore/src/cloudpilot/frond \
 		tests/controller-map.cpp -o $(OBJ_ROOT)/test-controller-map
 	$(OBJ_ROOT)/test-controller-map
 

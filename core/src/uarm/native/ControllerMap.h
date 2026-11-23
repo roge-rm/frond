@@ -79,15 +79,14 @@ inline bool zodiacController(const DeviceProfile5& profile) { return profile.art
 
 // The Palm buttons a device's controls list, in order. The Zodiac has its own list. Elsewhere the
 // device table's buttons, without Menu and a silkscreen Home, which are taps on the screen; a CLIÉ
-// that takes the game controller adds the pad's buttons. Empty for the 68k devices: frond-68k reads no
-// game controller.
+// that takes the game controller adds the pad's buttons. As Android lists them, the 68k devices included
+// (the Dana lists none).
 inline std::vector<PalmKey> controllerPalmKeys(const DeviceProfile5& profile) {
     using K = PalmKey;
     if (zodiacController(profile))
         return {K::up, K::down, K::left, K::right, K::stickPress, K::app1, K::app2, K::app3, K::app4, K::home,
                 K::function, K::triggerLeft, K::triggerRight};
     std::vector<PalmKey> keys;
-    if (deviceProfileRuns68k5(int(profile.deviceType))) return keys;
     const std::string text = profile.frontend.buttons ? profile.frontend.buttons : "";
     size_t start = 0;
     while (start <= text.size() && !text.empty()) {
