@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
     double seconds = 0;
     bool interactive = false;
     bool fastEngine = true, digest = false, serialCable = false;
-    BatteryPower battery;  // Maximum on battery, the machine setting's default
+    BatteryPower battery;  // Maximum on the charger, the machine setting's default
     std::vector<std::pair<unsigned, unsigned>> lowPins;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];

@@ -185,7 +185,6 @@ struct Options {
     double runFor{0};
     optional<string> framebufferOutput;
     optional<string> inputReplay;
-    bool batteryChargingGiven = false;  // --battery said charging
     Speed speed{};
     optional<int> contrast;
     float windowScale{2};
@@ -1014,12 +1013,8 @@ class Runner {
           lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
               profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
-        // The default is on the charger; a device that can't show it stays on battery, with a warning only when
-        // --battery asked for charging.
-        if (gBattery.charging && !BatteryChargingSupported()) {
-            if (options.batteryChargingGiven) cerr << "this device's charging can't be set yet, it stays on battery" << endl;
-            gBattery.charging = false;
-        }
+        // The default is on the charger, and the frontends always pass it; a device that can't show it stays on battery.
+        if (gBattery.charging && !BatteryChargingSupported()) gBattery.charging = false;
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
         SetSpeed(options.speed);
@@ -3879,7 +3874,6 @@ bool parseOptions(int argc, char** argv, Options& options) {
         } else if (arg == "--battery") {
             const char* v = value();
             if (!v || !BatteryPower::Parse(v, gBattery)) return false;
-            options.batteryChargingGiven = string(v).find("charging") != string::npos;
         } else if (arg == "--speed") {
             const char* v = value();
             if (v && IsSpeed8x(v)) cerr << "--speed " << kSpeed8x68k << endl;
