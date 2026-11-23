@@ -2,7 +2,8 @@
 // song's messages at the host times they're due and never written early, a stop with all notes off, a hold
 // turning notes off and standing the clock still, lookahead for a port that schedules by timestamp, a forward
 // jump dropping skipped note-ons, a late event moving the clock back, a slow guest by the guest audio's clock, its
-// stamps in order through callback bursts, a resume waiting for a new period, the clock's two threads, and
+// stamps in order through callback bursts, a resume waiting for a new period, the clock's two threads, audio off
+// on the host clock, a queue clear after a hold, and
 // the hooks, engine thread and a
 // steady clock together, with notes off at the end. Built with ASan and UBSan, and with TSan.
 #include "ZodiacMidiOut.h"
@@ -380,7 +381,7 @@ void stampsInOrder() {
             span.frames = period;
             span.startNs = guestNs;
             span.endNs = guestNs += periodNs;
-            span.newestNs = guestNs + 100 * ms;
+            clock.noteNewest(guestNs + 100 * ms);
             clock.run(span, period, nextCallback);
             nextCallback += ++pair % 2 ? ms : 2 * periodNs - ms;
         }
@@ -423,7 +424,7 @@ void resumed() {
             span.frames = period;
             span.startNs = guestNs;
             span.endNs = guestNs + periodNs;
-            span.newestNs = guestNs + 100 * ms;
+            clock.noteNewest(guestNs + 100 * ms);
             if (!clock.held()) guestNs = span.endNs;
             clock.run(span, period, nextCallback);
             nextCallback += periodNs;
@@ -458,7 +459,7 @@ void referenceThreads() {
                 span.frames = period;
                 span.startNs = guestNs;
                 span.endNs = guestNs += GuestAudioClock::framesNs(period);
-                span.newestNs = guestNs + 100 * ms;
+                clock.noteNewest(guestNs + 100 * ms);
                 clock.run(span, period, GuestAudioClock::steadyNs());
                 std::this_thread::sleep_for(std::chrono::microseconds(GuestAudioClock::framesNs(period) / 1000));
             }
@@ -473,6 +474,71 @@ void referenceThreads() {
         for (uint32_t i = 0; i < 20; ++i) assert(s[i].b == (Bytes{0x90, uint8_t(60 + i), 0x40}));
         for (size_t i = 1; i < 20; ++i) assert(s[i].hostNs >= s[i - 1].hostNs);
     }
+}
+
+// Audio off: the callback stops and the reference goes (setReference(nullptr)); the music carries on by the
+// host clock from the guest time it reached, and goes back to the reference when audio is on again.
+void audioOff() {
+    Log log;
+    fakeNow = 10000 * ms;
+    GuestAudioClock clock;
+    auto out = make(log);
+    out->setReference(&clock);
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, nextCallback = fakeNow.load();
+    for (const uint64_t t : {100 * ms, 300 * ms, 500 * ms}) out->offer(message(t, 0x90, uint8_t(t / ms / 10), 0x40));
+    bool on = true;
+    while (fakeNow.load() < 11000 * ms) {
+        if (on && guestNs >= 200 * ms) {
+            on = false;
+            out->setReference(nullptr);
+        }
+        if (on && fakeNow.load() >= nextCallback) {
+            AudioQueueSpan span;
+            span.known = true;
+            span.frames = period;
+            span.startNs = guestNs;
+            span.endNs = guestNs += periodNs;
+            clock.noteNewest(guestNs + 100 * ms);
+            clock.run(span, period, nextCallback);
+            nextCallback += periodNs;
+        }
+        fakeNow += ms;
+        out->work();
+    }
+    const auto s = log.copy();
+    assert(s.size() == 3);
+    assert(s[2].hostNs - s[1].hostNs > 198 * ms && s[2].hostNs - s[1].hostNs < 202 * ms);
+    assert(s[1].hostNs - s[0].hostNs > 190 * ms && s[1].hostNs - s[0].hostNs < 215 * ms);
+    assert(onTime(s, 0, ms + periodNs));
+}
+
+// A queue clear (no marks: spans not known) after a hold: the next guest audio, 1 s ahead, is a jump, not eased
+// to as the resume would have been.
+void clearAfterHold() {
+    GuestAudioClock clock;
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, hostNs = 10000 * ms;
+    const auto full = [&](uint64_t startNs) {
+        AudioQueueSpan span;
+        span.known = true;
+        span.frames = period;
+        span.startNs = startNs;
+        span.endNs = startNs + periodNs;
+        clock.run(span, period, hostNs += periodNs);
+    };
+    for (int i = 0; i < 20; ++i, guestNs += periodNs) full(guestNs);
+    clock.hold(true);
+    full(guestNs);
+    clock.hold(false);
+    clock.run(AudioQueueSpan{}, period, hostNs += periodNs);
+    full(guestNs + 1000 * ms);
+    GuestAudioClock::Reference r;
+    const bool read = clock.read(r);
+    assert(read && r.jumps == 1 && !r.back && r.jumpNs == guestNs + 1000 * ms);
+    (void)read;
 }
 
 // Port names without the numbers that change with plug order.
@@ -565,11 +631,13 @@ int main() {
     stampsInOrder();
     resumed();
     referenceThreads();
+    audioOff();
+    clearAfterHold();
     portKeys();
     sleeps();
     threads();
     std::puts("PASS: Zodiac MIDI out (event stream, song times, never early, stop, hold, lookahead, forward jump, late event, delay, "
-              "drift after the delay, guest audio clock, stamps in order, resume, clock threads, port names, "
+              "drift after the delay, guest audio clock, stamps in order, resume, clock threads, audio off, a clear after a hold, port names, "
               "sleeping thread, hooks and engine thread, notes off at the end)");
     return 0;
 }

@@ -251,6 +251,9 @@ struct Chain {
     size_t period;
     uint64_t leadNs;
     AudioQueue* queue = sharedQueue();
+    GuestAudioClock clock;
+    // Guest ns between the run loop's marks: 0 for each slice, more for an Uncapped guest's long passes.
+    uint64_t markEveryNs = 0, markedNs = 0;
     uint64_t guestNs = 0, pushed = 0, lostNs = 0;
     bool ssiOn = true, stalled = false, buffering = true, starting = true;
     std::vector<int64_t> played;
@@ -259,6 +262,7 @@ struct Chain {
     // The guest leads by what the device needs to start, as when it paces to wall time while the device waits.
     Chain(ZodiacMusicSynth& s, zodiac_music::Hooks& h, size_t p)
         : synth(s), hooks(h), period(p), leadNs(uint64_t(p) * 13 / 2 * 1000000000ull / 44100 + 20 * ms) {
+        synth.setClock(&clock);
         synth.monitor([this](uint64_t frame, const uint8_t* b, size_t n) {
             if (n == 3 && (b[0] & 0xf0) == 0x90 && b[2]) noteOns.push_back(frame);
         });
@@ -273,7 +277,11 @@ struct Chain {
             else
                 pushed = to * 441 / 10000000;
             guestNs = to;
-            audioQueueMark(queue, guestNs);
+            if (guestNs >= markedNs + markEveryNs) {
+                audioQueueMark(queue, guestNs);
+                clock.noteNewest(guestNs);
+                markedNs = guestNs;
+            }
         }
     }
     void periodOnce() {
@@ -286,7 +294,8 @@ struct Chain {
         std::vector<uint32_t> pcm(period);
         AudioQueueSpan span;
         const size_t got = audioQueuePopChunkIfGeneration(queue, pcm.data(), buffering ? 0 : period, st.generation, &span);
-        assert(span.known && span.frames == got);
+        // Known from the first mark on.
+        assert(span.known ? span.frames == got : !markedNs);
         for (size_t i = 0; i < period; ++i) played.push_back(i < got ? int64_t(pcm[i]) : -1);
         std::vector<int16_t> out(period * 2, 0);
         synth.mix(out.data(), period, span);
@@ -320,13 +329,14 @@ void putMany(Guest& g) {
 
 // One run of the song played at guest 1 s through a Chain; what happens to the guest is up to `event`, called
 // each device period with the device's time. cueNs: the time on the Open and Play cues; playNs: the guest time
-// they're made at; leadNs: the guest's lead on the device, if not the Chain's.
+// they're made at; leadNs: the guest's lead on the device, if not the Chain's; markEveryNs: the Chain's.
 struct ManyRun {
     std::vector<uint64_t> noteOns;
     std::vector<int64_t> guestAudio;  // where the guest audio of each note's time played
 };
 ManyRun manyRun(const Bytes& font, size_t period, const std::function<void(Chain&, uint64_t deviceNs)>& event,
-                uint64_t cueNs = 1000 * ms, uint64_t playNs = 1000 * ms, uint64_t leadNs = 0) {
+                uint64_t cueNs = 1000 * ms, uint64_t playNs = 1000 * ms, uint64_t leadNs = 0,
+                uint64_t markEveryNs = 0) {
     ZodiacMusicSynth synth;
     const bool loaded = synth.load(font.data(), int(font.size()));
     assert(loaded);
@@ -338,6 +348,7 @@ ManyRun manyRun(const Bytes& font, size_t period, const std::function<void(Chain
     putMany(guest);
     Chain chain(synth, hooks, period);
     if (leadNs) chain.leadNs = leadNs;
+    chain.markEveryNs = markEveryNs;
     bool played = false;
     chain.calls = [&](uint64_t, uint64_t to) {
         if (played || to <= playNs) return;
@@ -415,6 +426,12 @@ void guestClock(const Bytes& font) {
     const ManyRun deep = manyRun(font, 4096, [](Chain&, uint64_t) {}, 5000 * ms, 5000 * ms, 2500 * ms);
     assert(deep.noteOns.size() == manyNotes);
     for (int i = 0; i < manyNotes; ++i) assert(onGuestAudio(deep, i));
+
+    // Uncapped-like passes, 400 ms of guest time each with one mark at the end: a Play late in a pass is 350 ms
+    // past the newest time, still fresh, so it waits for its time.
+    const ManyRun uncapped = manyRun(font, 512, [](Chain&, uint64_t) {}, 1150 * ms, 1150 * ms, 0, 400 * ms);
+    assert(uncapped.noteOns.size() == manyNotes);
+    for (int i = 0; i < manyNotes; ++i) assert(onGuestAudio(uncapped, i));
 
     // A cue far ahead of the clock, as from a state loaded back while later cues wait: taken as due now, so its
     // song starts then and plays at its pace, neither silent until its time nor all at once.

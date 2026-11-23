@@ -27,6 +27,8 @@ class SdlAudioDriver {
     void SetHeadless(bool);
     bool Muted() const { return muted.load(std::memory_order_relaxed); }
     bool Running() const { return initialized; }
+    // Open and not paused (audio-off pauses it): the callback runs. Any thread.
+    bool Playing() const { return playing.load(std::memory_order_relaxed); }
     uint64_t GetUnderrunCount() const;
 
     // Leaves the device open at destruction. SDL's Android pause holds the device lock on the
@@ -67,6 +69,7 @@ class SdlAudioDriver {
     std::atomic<bool> audioBuffering{true};
     std::atomic<bool> audioBackpressure{false};
     std::atomic<bool> muted{false};
+    std::atomic<bool> playing{false};
     // The callback runs the mixer only while mixerOn, and says so in inMixer (both sequentially consistent, so
     // ClearMixer sees it inside or it sees mixerOn off).
     std::atomic<bool> mixerOn{false}, inMixer{false};

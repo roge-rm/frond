@@ -1465,6 +1465,8 @@ bool gFastEngineMissing = false;
                     if (musicSynth) musicSynth->hold(musicHeld);
                     if (midiOut) {
                         midiOut->hold(musicHeld);
+                        // Audio off stops the callback: the host clock times the music meanwhile.
+                        midiOut->setReference(audioDriver.Playing() ? &musicClock : nullptr);
                         midiOut->poke();
                         if (fmBackOnPortFail && midiOut->portFailed()) {
                             zodiacMusic->SetFmMuted(false);
@@ -1524,7 +1526,10 @@ bool gFastEngineMissing = false;
                 }
                 // The music's clock follows the guest audio playing: the queue notes the guest time its frames
                 // reached.
-                if (musicSynth || midiOut) audioQueueMark(audioQueue, soc->GetTime());
+                if (musicSynth || midiOut) {
+                    audioQueueMark(audioQueue, soc->GetTime());
+                    musicClock.noteNewest(soc->GetTime());
+                }
                 inputTrace::note("cycle", true, "end");
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.
                 if (sdInsertPending || msInsertPending) {

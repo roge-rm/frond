@@ -28,12 +28,11 @@ size_t audioQueuePendingSamples(struct AudioQueue* audioQueue);
 // A gap in the guest audio (the guest's sound stopped and started again) inside the popped frames is a break: the
 // frames from breakAt on start at breakNs, those before it are older. The largest gap over breakGapNs is taken;
 // breakAt is past the frames with none. endNs carries on from the last frame, so a gap right after the span isn't in it.
-// newestNs: the newest mark's guest ns, the guest's time as of the last mark.
 // known is false until there is a mark, and after a clear until the next one.
 struct AudioQueueSpan {
     static constexpr uint64_t breakGapNs = 20000000;
     bool known = false;
-    uint64_t startNs = 0, endNs = 0, breakNs = 0, newestNs = 0;
+    uint64_t startNs = 0, endNs = 0, breakNs = 0;
     size_t frames = 0, breakAt = ~size_t(0);
 };
 void audioQueueMark(struct AudioQueue* audioQueue, uint64_t guestNs);

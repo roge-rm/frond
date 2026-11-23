@@ -26,16 +26,16 @@ class GuestAudioClock {
     static constexpr uint64_t maxDriftNs = 250000000;
     // Run on this long with no guest audio, the guest audio coming back up to maxEaseNs ahead is steered to.
     static constexpr uint64_t gapNs = 100000000, maxEaseNs = 2000000000;
-    // A cue more than this past the guest's newest time (the queue's newest mark) is from before a load that set
-    // the guest time back: due now. A cue is made at most a run loop pass after the mark before it.
-    static constexpr uint64_t staleNs = maxDriftNs;
+    // A cue more than staleAfterNs past the guest's newest time (noteNewest) is from before a load that set the
+    // guest time back: due now. A cue is made at most a run loop pass after the newest time before it, and a pass
+    // covers far more guest time Uncapped, so the limit is maxDriftNs plus two of the last pass, up to maxPassNs.
+    static constexpr uint64_t maxPassNs = 5000000000;
     enum class Jump { none, forward, back };
 
     // A published period: host ns when its first frame plays and the guest ns there, the same at its end. jumps
-    // counts the jumps so far, jumpNs is where the last one went, back whether it went back. newestNs: the guest's
-    // newest time then, 0 if not known.
+    // counts the jumps so far, jumpNs is where the last one went, back whether it went back.
     struct Reference {
-        uint64_t hostNs = 0, guestNs = 0, endHostNs = 0, endGuestNs = 0, newestNs = 0;
+        uint64_t hostNs = 0, guestNs = 0, endHostNs = 0, endGuestNs = 0;
         uint32_t jumps = 0;
         uint64_t jumpNs = 0;
         bool back = false;
@@ -76,6 +76,11 @@ class GuestAudioClock {
         // frames over them.
         const bool broken = span.breakAt < span.frames;
         const bool known = span.known && at < span.frames && (!broken || at >= span.breakAt);
+        // No marks (a queue clear, a new generation): no gap or hold to ease over, so what comes next may jump.
+        if (!span.known) {
+            resumed_ = false;
+            runOnNs_ = 0;
+        }
         uint64_t target = 0;
         if (known) {
             const size_t from = broken ? span.breakAt : 0;
@@ -95,7 +100,6 @@ class GuestAudioClock {
         if (known) {
             runOnNs_ = 0;
             resumed_ = false;
-            newestNs_ = span.newestNs;
         }
         else runOnNs_ += framesNs(n);
         // Done once caught up; further than maxEaseNs it jumps after all.
@@ -133,7 +137,6 @@ class GuestAudioClock {
         guestNs_.store(periodGuestNs_, std::memory_order_release);
         endHostNs_.store(periodHostNs_ + framesNs(periodFrames_), std::memory_order_release);
         endGuestNs_.store(clockNs_, std::memory_order_release);
-        newestOut_.store(newestNs_, std::memory_order_release);
         jumpsOut_.store(jumps_, std::memory_order_release);
         jumpNsOut_.store(jumpNs_, std::memory_order_release);
         backOut_.store(jumpBack_, std::memory_order_release);
@@ -148,15 +151,22 @@ class GuestAudioClock {
     static constexpr size_t step = 64;
 
     bool anchored() const { return anchored_; }
-    // Audio thread: the guest's newest time from the last span, 0 before one.
-    uint64_t newestNs() const { return newestNs_; }
+    // Emulation thread, each run loop pass: the guest's time now.
+    void noteNewest(uint64_t ns) {
+        const uint64_t last = newestNs_.load(std::memory_order_relaxed);
+        const uint64_t pass = last && ns > last ? ns - last : 0;
+        passNs_.store(pass < maxPassNs ? pass : maxPassNs, std::memory_order_relaxed);
+        newestNs_.store(ns, std::memory_order_relaxed);
+    }
 
-    // Whether a cue of guest ns timeNs, ahead of the clock at nowNs, waits for its time: false when it's from
-    // before a load (past the guest's newest time), or with that unknown further than maxAheadNs ahead.
+    // Any thread: whether a cue of guest ns timeNs, ahead of guest ns nowNs, waits for its time. False when it's
+    // from before a load (past the guest's newest time), or with that unknown further than maxAheadNs ahead.
     static constexpr uint64_t maxAheadNs = 2000000000;
-    static bool waits(uint64_t timeNs, uint64_t nowNs, uint64_t newestNs) {
+    bool waits(uint64_t timeNs, uint64_t nowNs) const {
         if (timeNs <= nowNs) return false;
-        return newestNs ? timeNs <= newestNs + staleNs : timeNs <= nowNs + maxAheadNs;
+        const uint64_t newest = newestNs_.load(std::memory_order_relaxed);
+        if (!newest) return timeNs <= nowNs + maxAheadNs;
+        return timeNs <= newest + maxDriftNs + 2 * passNs_.load(std::memory_order_relaxed);
     }
     // A reference that ended more than a period before host ns t: none published since, as through a hold. Not
     // to time by until the next.
@@ -172,7 +182,6 @@ class GuestAudioClock {
             r.guestNs = guestNs_.load(std::memory_order_acquire);
             r.endHostNs = endHostNs_.load(std::memory_order_acquire);
             r.endGuestNs = endGuestNs_.load(std::memory_order_acquire);
-            r.newestNs = newestOut_.load(std::memory_order_acquire);
             r.jumps = jumpsOut_.load(std::memory_order_acquire);
             r.jumpNs = jumpNsOut_.load(std::memory_order_acquire);
             r.back = backOut_.load(std::memory_order_acquire);
@@ -202,12 +211,14 @@ class GuestAudioClock {
     std::atomic<bool> held_{false};
     // Audio thread.
     bool anchored_ = false, first_ = true, jumpBack_ = false, easing_ = false, wasHeld_ = false, resumed_ = false;
-    uint64_t newestNs_ = 0, runOnNs_ = 0, clockNs_ = 0, periodHostNs_ = 0, periodGuestNs_ = 0, jumpNs_ = 0;
+    uint64_t runOnNs_ = 0, clockNs_ = 0, periodHostNs_ = 0, periodGuestNs_ = 0, jumpNs_ = 0;
     size_t periodFrames_ = 0;
     uint32_t jumps_ = 0;
     // Published, under seq_ (odd while writing).
     std::atomic<uint32_t> seq_{0};
-    std::atomic<uint64_t> hostNs_{0}, guestNs_{0}, endHostNs_{0}, endGuestNs_{0}, newestOut_{0}, jumpNsOut_{0};
+    std::atomic<uint64_t> hostNs_{0}, guestNs_{0}, endHostNs_{0}, endGuestNs_{0}, jumpNsOut_{0};
+    // The emulation thread's.
+    std::atomic<uint64_t> newestNs_{0}, passNs_{0};
     std::atomic<uint32_t> jumpsOut_{0};
     std::atomic<bool> backOut_{false};
 };

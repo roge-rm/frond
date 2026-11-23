@@ -9,7 +9,7 @@
 // Clock: with a reference (setReference, the GuestAudioClock the audio callback runs), each message goes out when
 // the guest sound playing reaches its guest time, less the synth's own lag (setSynthLag), so it keeps with the
 // guest's sound through the queue's depth, underruns and a guest slower than real time. The reference's jumps
-// drop the songs' skipped note-ons. With no reference yet (no audio device), host time from the clock function,
+// drop the songs' skipped note-ons. With no reference (no audio device, audio off), host time from the clock function,
 // held while the emulator is paused (hold), with guest time mapped onto it through an offset set at the first
 // event and moved when an event drifts from it by more than maxDriftNs either way (a forward jump drops skipped
 // note-ons); messages then go out delayNs after the guest made them (setDelay). Either way a hold, stop and the
@@ -85,8 +85,10 @@ class ZodiacMidiOut {
     void poke() {
         if (hooks_ && hooks_->pending()) wake();
     }
-    // The audio callback's clock to time by; it must outlive this. Before start.
-    void setReference(const GuestAudioClock* clock) { reference_ = clock; }
+    // The audio callback's clock to time by, it must outlive this; nullptr while the audio device doesn't run
+    // (audio off), then the clock function times the music, carrying on from where the reference left it. Any
+    // thread.
+    void setReference(const GuestAudioClock* clock) { reference_.store(clock, std::memory_order_relaxed); }
     // With a reference: how much earlier than its sound messages go out, for the synth's own lag. Before start.
     void setSynthLag(uint64_t ns) { synthLagNs_ = ns; }
 
@@ -127,12 +129,18 @@ class ZodiacMidiOut {
             }
             return;
         }
-        if (reference_ && reference_->read(ref_)) {
+        passReference_ = reference_.load(std::memory_order_relaxed);
+        if (passReference_ && passReference_->read(ref_)) {
             byReference();
             return;
         }
-        byReference_ = false;
         music += lookaheadNs_;
+        if (byReference_) {
+            // The reference went (audio off): on from the guest time it reached.
+            offsetNs_ = int64_t(lastGuestNs_ + delay()) - int64_t(music);
+            anchored_ = true;
+            byReference_ = false;
+        }
         if (!anchored_ && !cues_.empty()) {
             offsetNs_ = int64_t(cues_.front().timeNs) - int64_t(music);
             anchored_ = true;
@@ -253,7 +261,7 @@ class ZodiacMidiOut {
         }
         while (!cues_.empty()) {
             zodiac_music::Cue cue = cues_.front();
-            if (GuestAudioClock::waits(cue.timeNs, due, ref_.newestNs)) break;
+            if (passReference_->waits(cue.timeNs, due)) break;
             // Late, or stale from before a load: due now, so a Play starts here with its whole song.
             if (cue.timeNs > due) cue.timeNs = due;
             cues_.pop_front();
@@ -334,7 +342,8 @@ class ZodiacMidiOut {
     bool anchored_ = false, quiet_ = true;
     uint64_t lastGuestNs_ = 0;
     uint64_t passDelayNs_ = 0;  // the delay this pass sends with
-    const GuestAudioClock* reference_ = nullptr;
+    std::atomic<const GuestAudioClock*> reference_{nullptr};
+    const GuestAudioClock* passReference_ = nullptr;  // this pass's
     GuestAudioClock::Reference ref_;  // this pass's
     bool byReference_ = false;
     uint32_t jumpsSeen_ = 0;

@@ -32,6 +32,7 @@ void SdlAudioDriver::Start() {
         starting = true;
         audioBackpressure = false;
         OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 0); });
+        playing = true;
 
         return;
     }
@@ -70,6 +71,7 @@ void SdlAudioDriver::Start() {
     backpressureThresholdStop = audioSpecActual.samples * (lowLatencyStartup ? 5 : 6);
 
     initialized = true;
+    playing = true;
     OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 0); });
 }
 
@@ -78,6 +80,7 @@ void SdlAudioDriver::Pause() {
 
     soc->SetPcmOutputEnabled(false);
     OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 1); });
+    playing = false;
 }
 
 bool SdlAudioDriver::GetAudioBackpressure() const {
@@ -146,6 +149,7 @@ void SdlAudioDriver::Abandon() {
     // The device stays open, so nothing it calls may outlive this.
     ClearMixer();
     initialized = false;
+    playing = false;
 }
 
 void SdlAudioDriver::SetHeadless(bool value) {

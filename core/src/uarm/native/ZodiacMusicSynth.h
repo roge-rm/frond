@@ -163,7 +163,7 @@ class ZodiacMusicSynth {
                 if (jump == GuestAudioClock::Jump::forward) player_.skipBefore(guest);
                 if (jump == GuestAudioClock::Jump::back) player_.skipBefore(0);
                 for (zodiac_music::Cue* c; (c = cues_.front()) && cueBudget; --cueBudget) {
-                    if (GuestAudioClock::waits(c->timeNs, guest, clock.newestNs())) break;
+                    if (clock.waits(c->timeNs, guest)) break;
                     // The songs up to the cue first; out of budget, the cue waits for the next period. One late,
                     // or stale from before a load, is taken as due now, so a Play starts here with its whole song.
                     if (!player_.advance(c->timeNs < guest ? c->timeNs : guest, sink_, &eventBudget)) break;
