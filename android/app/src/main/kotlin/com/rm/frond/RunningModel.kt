@@ -430,8 +430,10 @@ class RunningModel(
         val dir = machineDir ?: return
         val id = shownOf(n).linkId ?: return
         if (busy != null) return
+        busy = "Unlinking"
         activity.lifecycleScope.launch {
             val error = withContext(Dispatchers.IO) { Cards.setLinks(sessions, id, CardChoices.linksWithout(sessions, id, Cards.SlotRef(dir, n)), dir) }
+            busy = null
             if (error != null) alert = "Couldn't unlink the card" to error
             refresh()
         }

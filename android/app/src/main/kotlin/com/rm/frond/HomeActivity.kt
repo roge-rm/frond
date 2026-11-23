@@ -173,6 +173,7 @@ class HomeModel(private val activity: HomeActivity) {
         sessions = Sessions.list(activity)
         firmwareReady = Device.shown.associateWith { Firmware.ready(activity, it) }
         settings = Settings.load(activity)
+        controls?.reload()
         controllerDevices = Device.shown.associateWith { Firmware.runningDevice(it, null, Firmware.nor(activity, it)) }
         cards?.reload()
     }

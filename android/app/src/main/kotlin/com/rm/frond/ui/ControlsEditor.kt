@@ -36,6 +36,9 @@ class ControlsEditor(private val context: Context, val device: Device, val mapDe
         change(map.assign(button, key))
     }
 
+    // Reads the saved map again, after the session changed it.
+    fun reload() { map = ControllerMap.load(context, mapDevice) }
+
     fun removeKey(key: Int) = change(map.remove(key))
 
     fun clearButton(button: PalmButton) {
