@@ -405,6 +405,50 @@ void TestInstallerFiles() {
     if (files.size() == 1) CHECK(files[0].name == "Setup-1.cab" && files[0].bytes == cabinet);
     setup.pop_back();
     CHECK(!UnpackInstaller("Setup.exe", setup, files, error) && files.empty());
+
+    // A ZIP may hold install files alongside a nested self-extracting Windows installer.
+    setup.push_back(cabinet.back());
+    mz_zip_archive outer{};
+    if (!mz_zip_writer_init_heap(&outer, 0, 0)) { CHECK(false); return; }
+    CHECK(mz_zip_writer_add_mem(&outer, "nested/folder/Suite.zip", archive.data(), archive.size(), 0));
+    CHECK(mz_zip_writer_add_mem(&outer, "nested/Setup.exe", setup.data(), setup.size(), 0));
+    CHECK(mz_zip_writer_add_mem(&outer, "App.PDB", palm.data(), palm.size(), 0));
+    buffer = nullptr;
+    size = 0;
+    CHECK(mz_zip_writer_finalize_heap_archive(&outer, &buffer, &size));
+    CHECK(mz_zip_writer_end(&outer));
+    if (!buffer) return;
+    data = static_cast<const uint8_t*>(buffer);
+    const Bytes mixed(data, data + size);
+    mz_free(buffer);
+    CHECK(UnpackInstaller("mixed.zip", mixed, files, error));
+    CHECK(files.size() == 3);
+    if (files.size() == 3) {
+        CHECK(files[0].name == "App.PDB" && files[0].bytes == palm);
+        CHECK(files[1].name == "App.cab" && files[1].bytes == cabinet);
+        CHECK(files[2].name == "Setup-1.cab" && files[2].bytes == cabinet);
+    }
+
+    int checks = 0;
+    CHECK(!UnpackInstaller("mixed.zip", mixed, files, error, true, [&] { return ++checks == 4; }));
+    CHECK(files.empty() && error == "Extraction was cancelled.");
+
+    mz_zip_archive repeated{};
+    if (!mz_zip_writer_init_heap(&repeated, 0, 0)) { CHECK(false); return; }
+    for (unsigned i = 0; i < 129; ++i) {
+        const auto name = std::to_string(i) + "/App.PDB";
+        CHECK(mz_zip_writer_add_mem(&repeated, name.c_str(), palm.data(), palm.size(), 0));
+    }
+    buffer = nullptr;
+    size = 0;
+    CHECK(mz_zip_writer_finalize_heap_archive(&repeated, &buffer, &size));
+    CHECK(mz_zip_writer_end(&repeated));
+    if (!buffer) return;
+    data = static_cast<const uint8_t*>(buffer);
+    const Bytes copies(data, data + size);
+    mz_free(buffer);
+    CHECK(!UnpackInstaller("duplicates.zip", copies, files, error));
+    CHECK(files.empty() && error.find("too many files") != std::string::npos);
 }
 
 void TestPalmDb() {

@@ -1,5 +1,7 @@
 #include "PwiNote.h"
 
+#include "PimRecord.h"
+
 #include <algorithm>
 #include <array>
 #include <utility>
@@ -124,6 +126,11 @@ bool ReplacePwiNoteText(Bytes& data, std::string_view text) {
     SetWord(*replacement, 0x01a, Word(data, 0x01a));
     data = std::move(*replacement);
     return true;
+}
+
+void DetachPwiMemo(PimRecord& memo) {
+    memo.extras.erase(noteFileField);
+    memo.extras.erase(noteTextField);
 }
 
 }  // namespace frondSync

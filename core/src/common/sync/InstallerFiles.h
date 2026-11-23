@@ -1,6 +1,8 @@
 #ifndef FROND_SYNC_INSTALLER_FILES_H
 #define FROND_SYNC_INSTALLER_FILES_H
 
+#include <functional>
+
 #include "PalmDb.h"
 
 namespace frondSync {
@@ -13,7 +15,8 @@ struct InstallerFile {
 bool IsInstallPayload(const InstallerFile& file);
 bool IsInstallFileName(const std::string& name);
 bool IsInstallerFileName(const std::string& name);
-bool UnpackInstaller(const std::string& name, const Bytes& bytes, std::vector<InstallerFile>& files, std::string& error);
+bool UnpackInstaller(const std::string& name, const Bytes& bytes, std::vector<InstallerFile>& files, std::string& error,
+                     bool openNested = true, const std::function<bool()>& stopped = {});
 
 }  // namespace frondSync
 #endif

@@ -310,11 +310,7 @@ Protocol protocol(frondFirmware::Device device) {
 }
 
 bool available(Protocol protocol) {
-#ifdef Q_OS_WIN
-    return protocol == Protocol::hotSync;
-#else
     return protocol != Protocol::none;
-#endif
 }
 
 QString readMachineId(const QString& session) {
@@ -906,7 +902,7 @@ void SyncWindow::showQueue() {
 void SyncWindow::queueFiles() {
     if (!profile.IsOpen()) return;
     const auto paths = QFileDialog::getOpenFileNames(
-        this, tr("Queue files"), {}, tr("Applications and installers (*.prc *.pdb *.pqa *.cab *.zip *.exe *.msi)"));
+        this, tr("Queue files"), {}, tr("Applications and installers (*.prc *.pdb *.pqa *.cab *.zip *.exe *.msi *.7z *.rar)"));
     if (paths.isEmpty()) return;
     std::vector<InstallerFile> files;
     QStringList failed;

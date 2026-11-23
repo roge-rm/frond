@@ -339,7 +339,8 @@ void ActiveSyncSession::Run() {
         progress("files", 0, 0, {});
         std::string files;
         try {
-            files = ExchangeActiveSyncFiles(client.get(), library.ProfilePath(*confirmed));
+            files = ExchangeActiveSyncFiles(client.get(), profile, key + ":" + info.guid, library.ProfilePath(*confirmed),
+                                            profile.GetPimAction(key, PimKind::memos) != PimAction::skip);
         } catch (const std::exception& failure) {
             files = "File exchange failed: " + std::string(failure.what());
             profile.Log(key, "ActiveSync: " + files);

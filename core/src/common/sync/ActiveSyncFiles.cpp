@@ -7,9 +7,13 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
+#include "PwiNote.h"
+#include "Sha256.h"
 #include "SyncStore.h"
 
 namespace frondSync {
@@ -51,13 +55,13 @@ std::string FileKey(std::string name) {
 
 struct Listing {
     Files files;
+    std::set<std::string> blocked;
     unsigned skipped{};
 };
 
 bool GuestEntry(void* opaque, const uint16_t* name, size_t length, uint32_t attributes, uint64_t size) {
     auto& listing = *static_cast<Listing*>(opaque);
-    // Ignore directories, reparse points, and temporary files from incomplete copies.
-    if (attributes & (0x10 | 0x400)) return true;
+    // Ignore temporary files from incomplete copies.
     if (length && name[0] == '.') return true;
     if (std::any_of(name, name + length, [](uint16_t c) { return c < ' ' || c > '~'; })) {
         ++listing.skipped;
@@ -65,7 +69,8 @@ bool GuestEntry(void* opaque, const uint16_t* name, size_t length, uint32_t attr
     }
     std::string display(name, name + length);
     const auto key = FileKey(display);
-    if (key.empty() || size > maxFileSize) {
+    if (key.empty() || size > maxFileSize || (attributes & (0x10 | 0x400))) {
+        if (!key.empty()) listing.blocked.insert(key);
         ++listing.skipped;
         return true;
     }
@@ -79,10 +84,14 @@ Listing ReadHostDirectory(const fs::path& folder) {
         if (++entries > 1024) throw std::runtime_error("Too many files in the profile Files folder.");
         const auto name = entry.path().filename().u8string();
         if (!name.empty() && name.front() == '.') continue;
-        if (!fs::is_regular_file(entry.symlink_status())) continue;
         const auto key = FileKey(name);
+        if (!fs::is_regular_file(entry.symlink_status())) {
+            if (!key.empty()) listing.blocked.insert(key);
+            continue;
+        }
         const auto size = entry.file_size();
         if (key.empty() || size > maxFileSize) {
+            if (!key.empty()) listing.blocked.insert(key);
             ++listing.skipped;
             continue;
         }
@@ -166,6 +175,241 @@ void WriteHostFile(const fs::path& folder, const std::string& name, const Bytes&
     }
 }
 
+std::string FileHash(const Bytes& data) {
+    return Sha256Hex(data.data(), data.size());
+}
+
+using Baseline = std::map<std::string, std::string>;
+
+Baseline ReadBaseline(const std::string& value) {
+    Baseline result;
+    std::istringstream input(value);
+    for (std::string line; std::getline(input, line);) {
+        if (line.size() <= 65 || line[64] != '\t') continue;
+        const auto key = line.substr(65);
+        if (FileKey(key) == key) result.emplace(key, line.substr(0, 64));
+    }
+    return result;
+}
+
+std::string EncodeBaseline(const Baseline& baseline) {
+    std::string result;
+    for (const auto& [key, hash] : baseline) result += hash + "\t" + key + "\n";
+    return result;
+}
+
+std::string RecoveryName(const std::string& name) {
+    return std::to_string(std::random_device{}()) + "-" + name;
+}
+
+fs::path HostRecoveryFolder(const fs::path& folder) {
+    const auto recovery = folder / ".frond-recovery";
+    fs::create_directory(recovery);
+    if (!fs::is_directory(fs::symlink_status(recovery)))
+        throw std::runtime_error("Couldn't open the profile file recovery folder.");
+    return recovery;
+}
+
+void ChangeHostFile(const fs::path& folder, const File& old, const Bytes& expected, const Bytes* replacement) {
+    const auto recovery = HostRecoveryFolder(folder);
+    const auto parkedName = RecoveryName(old.name);
+    const auto parked = recovery / fs::u8path(parkedName);
+    const auto original = folder / fs::u8path(old.name);
+    // The exclusive directory keeps a concurrent rename from replacing a recovery copy.
+    if (!fs::create_directory(parked)) throw std::runtime_error("Couldn't reserve a file recovery folder.");
+    const auto parkedFile = parked / fs::u8path(old.name);
+    try {
+        fs::rename(original, parkedFile);
+    } catch (...) {
+        std::error_code unused;
+        fs::remove(parked, unused);
+        throw;
+    }
+    try {
+        if (ReadHostFile(parked, old) != expected)
+            throw std::runtime_error("The profile file changed during sync.");
+        if (replacement) WriteHostFile(folder, old.name, *replacement);
+    } catch (...) {
+        // Put the original back only if its name is still free.
+        std::error_code error;
+        fs::create_hard_link(parkedFile, original, error);
+        if (!error) {
+            fs::remove(parkedFile, error);
+            fs::remove(parked, error);
+        }
+        throw;
+    }
+}
+
+void ChangeGuestFile(FrondRapi* client, const File& old, const Bytes& expected, const Bytes* replacement) {
+    const auto recovery = GuestPath(".frond-recovery");
+    if (!FrondRapiMakeDirectory(client, recovery.data()))
+        throw std::runtime_error("Couldn't create the Windows Mobile file recovery folder.");
+    const std::string parkedName = ".frond-recovery\\" + RecoveryName(old.name);
+    const auto parked = GuestPath(parkedName);
+    const auto original = GuestPath(old.name);
+    if (!FrondRapiMove(client, original.data(), parked.data()))
+        throw std::runtime_error("Couldn't move " + old.name + " to the Windows Mobile file recovery folder.");
+    try {
+        if (ReadGuestFile(client, {parkedName, old.size}) != expected)
+            throw std::runtime_error("The Windows Mobile file changed during sync.");
+        if (replacement) WriteGuestFile(client, old.name, *replacement);
+    } catch (...) {
+        // An intervening guest save can occupy the name. The parked file stays recoverable.
+        if (FrondRapiConnected(client)) FrondRapiMove(client, parked.data(), original.data());
+        throw;
+    }
+}
+
+constexpr char notesCategory[] = "WM5 Notes";
+
+bool IsNoteFile(const std::string& key) {
+    return key.size() > 4 && key.compare(key.size() - 4, 4, ".pwi") == 0;
+}
+
+std::string NoteField(const PimRecord& memo, const char* key) {
+    const auto field = memo.extras.find(key);
+    return field == memo.extras.end() ? std::string{} : std::string(field->second.begin(), field->second.end());
+}
+
+std::optional<std::string> MemoText(const PimRecord& memo) {
+    const auto text = memo.fields.find("text");
+    if (memo.deleted || text == memo.fields.end()) return std::nullopt;
+    return text->second;
+}
+
+void SaveNoteLink(SyncProfile& profile, PimRecord& memo, const std::string& key, const std::string& text) {
+    memo.extras[noteFileField] = Bytes(key.begin(), key.end());
+    memo.extras[noteTextField] = Bytes(text.begin(), text.end());
+    std::string error;
+    if (!profile.SavePimRecord(memo, error)) throw std::runtime_error(error);
+}
+
+struct NotePass {
+    std::set<std::string> blocked, conflicts;
+};
+
+NotePass ExportNotes(SyncProfile& profile, const fs::path& folder, bool syncNotes) {
+    NotePass result;
+    std::string error;
+    if (!profile.BeginPimChange(error)) throw std::runtime_error(error);
+    try {
+        std::vector<PimRecord> memos;
+        if (!profile.ReadPimRecords(PimKind::memos, true, memos, error)) throw std::runtime_error(error);
+        const auto folderFiles = ReadHostDirectory(folder);
+        for (auto& memo : memos) {
+            const auto linked = NoteField(memo, noteFileField);
+            if (!syncNotes || memo.secret || memo.archived) {
+                if (!linked.empty()) result.blocked.insert(linked);
+                continue;
+            }
+            const auto text = MemoText(memo);
+            if (linked.empty()) {
+                if (!text || memo.category != notesCategory) continue;
+                const auto data = WritePwiNote(*text);
+                if (!data) continue;
+                const auto name = "Frond Memo " + std::to_string(memo.id) + ".pwi";
+                const auto key = FileKey(name);
+                if (folderFiles.blocked.count(key)) continue;
+                if (const auto file = folderFiles.files.find(key); file != folderFiles.files.end()) {
+                    if (ReadPwiNote(ReadHostFile(folder, file->second)) != text) continue;
+                } else {
+                    WriteHostFile(folder, name, *data);
+                }
+                SaveNoteLink(profile, memo, key, *text);
+                continue;
+            }
+
+            const auto originalText = NoteField(memo, noteTextField);
+            if (text && *text == originalText) continue;
+            if (!IsNoteFile(linked) || FileKey(linked) != linked || folderFiles.blocked.count(linked)) continue;
+            const auto file = folderFiles.files.find(linked);
+            if (file == folderFiles.files.end()) {
+                // A stop after parking the old copy must not turn a memo edit into a file deletion.
+                if (text)
+                    if (const auto data = WritePwiNote(*text)) WriteHostFile(folder, linked, *data);
+                continue;
+            }
+            const auto old = ReadHostFile(folder, file->second);
+            const auto fileText = ReadPwiNote(old);
+            if (fileText != originalText) {
+                if (!text || text != fileText) result.conflicts.insert(linked);
+                continue;
+            }
+            if (!text) {
+                ChangeHostFile(folder, file->second, old, nullptr);
+                continue;
+            }
+            auto replacement = old;
+            if (ReplacePwiNoteText(replacement, *text)) ChangeHostFile(folder, file->second, old, &replacement);
+        }
+        if (!profile.CommitPimChange(error)) throw std::runtime_error(error);
+    } catch (...) {
+        profile.RollBackPimChange();
+        throw;
+    }
+    return result;
+}
+
+void ImportNotes(SyncProfile& profile, const fs::path& folder, const std::set<std::string>& unsettled,
+                 bool complete, NotePass& notes) {
+    const auto files = ReadHostDirectory(folder);
+    const auto available = [&](const std::string& key) {
+        return !unsettled.count(key) && !files.blocked.count(key);
+    };
+    std::string error;
+    if (!profile.BeginPimChange(error)) throw std::runtime_error(error);
+    try {
+        std::vector<PimRecord> memos;
+        if (!profile.ReadPimRecords(PimKind::memos, true, memos, error)) throw std::runtime_error(error);
+        std::set<std::string> linkedFiles;
+        for (auto& memo : memos) {
+            const auto key = NoteField(memo, noteFileField);
+            if (!IsNoteFile(key)) continue;
+            if (!available(key) || memo.secret || memo.archived) {
+                linkedFiles.insert(key);
+                continue;
+            }
+            const auto text = MemoText(memo);
+            const auto base = NoteField(memo, noteTextField);
+            const auto file = files.files.find(key);
+            if (file == files.files.end() && complete && (memo.deleted || text == base)) {
+                memo.deleted = true;
+                DetachPwiMemo(memo);
+                if (!profile.SavePimRecord(memo, error)) throw std::runtime_error(error);
+                continue;
+            }
+            linkedFiles.insert(key);
+            if (file == files.files.end()) {
+                if (complete && text != base) notes.conflicts.insert(key);
+                continue;
+            }
+            const auto updated = ReadPwiNote(ReadHostFile(folder, file->second));
+            if (updated == base) continue;
+            if (text != base && text != updated) {
+                notes.conflicts.insert(key);
+                continue;
+            }
+            if (memo.deleted || !updated) continue;
+            memo.fields["text"] = *updated;
+            SaveNoteLink(profile, memo, key, *updated);
+        }
+        for (const auto& [key, file] : files.files) {
+            if (!IsNoteFile(key) || !available(key) || linkedFiles.count(key)) continue;
+            if (const auto text = ReadPwiNote(ReadHostFile(folder, file))) {
+                PimRecord memo;
+                memo.category = notesCategory;
+                memo.fields["text"] = *text;
+                SaveNoteLink(profile, memo, key, *text);
+            }
+        }
+        if (!profile.CommitPimChange(error)) throw std::runtime_error(error);
+    } catch (...) {
+        profile.RollBackPimChange();
+        throw;
+    }
+}
+
 }  // namespace
 
 std::vector<std::string> ListActiveSyncFiles(const std::string& profileFolder) {
@@ -207,10 +451,12 @@ void ExportActiveSyncFile(const std::string& profileFolder, const std::string& n
     if (!output) throw std::runtime_error("Couldn't save the profile file.");
 }
 
-std::string ExchangeActiveSyncFiles(FrondRapi* client, const std::string& profileFolder) {
+std::string ExchangeActiveSyncFiles(FrondRapi* client, SyncProfile& profile, const std::string& device,
+                                    const std::string& profileFolder, bool syncNotes) {
     const auto enabled = ActiveSyncFilesFolder(profileFolder);
     if (enabled.empty()) return {};
     const auto folder = fs::u8path(enabled);
+    auto notes = ExportNotes(profile, folder, syncNotes);
     if (!FrondRapiMakeDirectory(client, WideAscii(guestFolder).data()))
         throw std::runtime_error("Couldn't create the Windows Mobile Frond Sync folder.");
     const auto host = ReadHostDirectory(folder);
@@ -218,34 +464,104 @@ std::string ExchangeActiveSyncFiles(FrondRapi* client, const std::string& profil
     if (!FrondRapiList(client, GuestPath("*").data(), GuestEntry, &guest))
         throw std::runtime_error("Couldn't list the Windows Mobile Frond Sync folder.");
 
-    uint64_t remaining = maxTransferSize;
-    const auto reserve = [&](uint64_t size) {
-        if (size > remaining) throw std::runtime_error("The file exchange exceeds 128 MB.");
-        remaining -= size;
+    constexpr char baselineKey[] = "activesync-files-v1";
+    constexpr char cursorKey[] = "activesync-files-cursor";
+    auto baseline = ReadBaseline(profile.DeviceValue(device, baselineKey));
+    const auto save = [&] {
+        std::string error;
+        if (!profile.SetDeviceValue(device, baselineKey, EncodeBaseline(baseline), &error))
+            throw std::runtime_error(error);
     };
-    unsigned sent = 0, received = 0, conflicts = 0;
-    for (const auto& [key, file] : host.files) {
-        if (const auto existing = guest.files.find(key); existing != guest.files.end()) {
-            if (file.size != existing->second.size) {
-                ++conflicts;
-            } else {
-                reserve(file.size);
-                if (ReadHostFile(folder, file) != ReadGuestFile(client, existing->second)) ++conflicts;
-            }
-        } else {
-            reserve(file.size);
-            WriteGuestFile(client, file.name, ReadHostFile(folder, file));
-            ++sent;
+    std::set<std::string> keys;
+    for (const auto& [key, hash] : baseline) keys.insert(key);
+    for (const auto& [key, file] : host.files) keys.insert(key);
+    for (const auto& [key, file] : guest.files) keys.insert(key);
+
+    uint64_t remaining = maxTransferSize;
+    const auto first = keys.lower_bound(profile.DeviceValue(device, cursorKey));
+    std::vector<std::string> order(first, keys.end());
+    order.insert(order.end(), keys.begin(), first);
+    std::string deferred;
+    unsigned sent = 0, received = 0, conflicts = 0, removed = 0;
+    std::set<std::string> unsettled = guest.blocked;
+    for (const auto& key : order) {
+        if (!deferred.empty() || host.blocked.count(key) || guest.blocked.count(key) || notes.blocked.count(key) ||
+            notes.conflicts.count(key)) {
+            unsettled.insert(key);
+            continue;
         }
+        const auto local = host.files.find(key);
+        const auto remote = guest.files.find(key);
+        const bool hasLocal = local != host.files.end(), hasRemote = remote != guest.files.end();
+        const auto previous = baseline.find(key);
+        const auto base = previous == baseline.end() ? std::string{} : previous->second;
+        if (!hasLocal && !hasRemote) {
+            baseline.erase(key);
+            continue;
+        }
+        if (base.empty() && hasLocal && hasRemote && local->second.size != remote->second.size) {
+            ++conflicts;
+            unsettled.insert(key);
+            continue;
+        }
+        if (hasRemote && remote->second.size > remaining) {
+            deferred = key;
+            unsettled.insert(key);
+            continue;
+        }
+        if (hasRemote) remaining -= remote->second.size;
+        const auto localData = hasLocal ? ReadHostFile(folder, local->second) : Bytes{};
+        const auto remoteData = hasRemote ? ReadGuestFile(client, remote->second) : Bytes{};
+        const auto localHash = hasLocal ? FileHash(localData) : std::string{};
+        const auto remoteHash = hasRemote ? FileHash(remoteData) : std::string{};
+        if (localHash == remoteHash) {
+            baseline[key] = localHash;
+            continue;
+        }
+
+        const bool send = remoteHash == base;
+        const bool receive = localHash == base;
+        if (!send && !receive) {
+            ++conflicts;
+            unsettled.insert(key);
+            continue;
+        }
+        const auto cost = send ? localData.size() + remoteData.size() : 0;
+        if (cost > remaining) {
+            deferred = key;
+            unsettled.insert(key);
+            continue;
+        }
+        remaining -= cost;
+        if (!base.empty()) {
+            // After an interruption, a missing original may be parked, rather than deleted by a user.
+            baseline.erase(key);
+            save();
+        }
+        if (send) {
+            if (hasRemote) ChangeGuestFile(client, remote->second, remoteData, hasLocal ? &localData : nullptr);
+            else WriteGuestFile(client, local->second.name, localData);
+            if (hasLocal) ++sent;
+            else ++removed;
+        } else {
+            if (hasLocal) ChangeHostFile(folder, local->second, localData, hasRemote ? &remoteData : nullptr);
+            else WriteHostFile(folder, remote->second.name, remoteData);
+            if (hasRemote) ++received;
+            else ++removed;
+        }
+        const auto& agreed = send ? localHash : remoteHash;
+        if (!agreed.empty()) baseline[key] = agreed;
     }
-    for (const auto& [key, file] : guest.files) {
-        if (host.files.count(key)) continue;
-        reserve(file.size);
-        WriteHostFile(folder, file.name, ReadGuestFile(client, file));
-        ++received;
-    }
+    save();
+    std::string error;
+    if (!profile.SetDeviceValue(device, cursorKey, deferred, &error)) throw std::runtime_error(error);
+    if (syncNotes) ImportNotes(profile, folder, unsettled, deferred.empty(), notes);
     return "Files: " + std::to_string(sent) + " sent, " + std::to_string(received) + " received, " +
-           std::to_string(conflicts) + " differed, " + std::to_string(host.skipped + guest.skipped) + " skipped.";
+           std::to_string(conflicts) + " differed, " + std::to_string(host.skipped + guest.skipped) + " skipped, " +
+           std::to_string(removed) + " removed." +
+           (removed || sent || received ? " Replaced and removed files are kept in .frond-recovery." : "") +
+           (deferred.empty() ? "" : " File exchange will continue on the next sync.") +
+           (notes.conflicts.empty() ? "" : " Notes: " + std::to_string(notes.conflicts.size()) + " differed.");
 }
 
 }  // namespace frondSync

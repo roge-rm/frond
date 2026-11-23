@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "PimSync.h"
+#include "PwiNote.h"
 
 using namespace frondSync;
 
@@ -324,12 +325,22 @@ void TestConduit(const Example& example, const std::filesystem::path& folder) {
     local = *profile.FindPimRecord(local.id);
     CHECK(local.category == "Work renamed");
 
+    if (example.kind == PimKind::memos) {
+        local.extras[noteFileField] = {'a', '.', 'p', 'w', 'i'};
+        local.extras[noteTextField] = {'a'};
+    }
     local.fields[example.field] = "Desktop conflict";
     CHECK(profile.SavePimRecord(local, error));
     editGuest(device.records.front(), "Palm conflict");
     const auto conflict = sync(true);
     CHECK(conflict.conflicts == 1 && conflict.uploaded == 1);
     CHECK(profile.PimRecords(example.kind).size() == 2 && device.records.size() == 2);
+    if (example.kind == PimKind::memos) {
+        for (const auto& record : profile.PimRecords(example.kind)) {
+            CHECK(record.extras.count(noteFileField) == (record.id == local.id));
+            CHECK(record.extras.count(noteTextField) == (record.id == local.id));
+        }
+    }
 
     local.fields[example.field] = "Change beats delete";
     CHECK(profile.SavePimRecord(local, error));
