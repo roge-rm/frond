@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdio>
 #include <string>
+#include <tuple>
 
 #include "Gamepad.h"
 
@@ -87,7 +88,17 @@ static void lists() {
         const auto defaults = controllerDefaults(profile);
         assert(decodeControllerMap(defaults.encode(), profile) == defaults);
     }
-    assert(controllerDefaults(tx).keys.empty() && controllerDefaults(e2).keys.empty());
+    // Android's defaults, only the buttons the device has: the T|X has no Home key, so Start is its
+    // first app button; the E2's Home is on the silkscreen and Select's Menu is a tap, so neither is mapped.
+    assert(controllerDefaults(tx).encode() ==
+           "a:centre,x:app2,y:app3,start:app1,leftshoulder:app1,rightshoulder:app4,dpup:up,dpdown:down,dpleft:left,dpright:right");
+    assert(controllerDefaults(e2).encode() ==
+           "a:centre,x:app2,y:app3,leftshoulder:app1,rightshoulder:app4,dpup:up,dpdown:down,dpleft:left,dpright:right");
+    const auto rx1950 = controllerDefaults(named("hp-ipaq-rx1950"));
+    assert(rx1950.keys.at(PadKey::a) == PalmKey::centre && rx1950.keys.at(PadKey::start) == PalmKey::app1);
+    assert(!rx1950.keys.count(PadKey::b) && !rx1950.keys.count(PadKey::back));
+    const auto zire72 = controllerDefaults(named("palm-zire-72"));
+    assert(zire72.keys.size() == 9 && !zire72.keys.count(PadKey::start));
 }
 
 // The defaults press what the fixed mapping did before maps.
@@ -135,26 +146,32 @@ static void zodiacDefaults() {
 static void clieDefaults() {
     const auto& tg50 = named("sony-clie-tg50");
     const auto map = controllerDefaults(tg50);
-    const std::pair<PadKey, KeyId> fixed[] = {
-        {PadKey::a, keyIdPadA}, {PadKey::b, keyIdPadB}, {PadKey::x, keyIdPadX}, {PadKey::y, keyIdPadY},
-        {PadKey::start, keyIdPadHome}, {PadKey::guide, keyIdPadHome}, {PadKey::back, keyIdPadMenu},
-        {PadKey::rightShoulder, keyIdPadHold}, {PadKey::dpadUp, keyIdPadUp}, {PadKey::dpadDown, keyIdPadDown},
-        {PadKey::dpadLeft, keyIdPadLeft}, {PadKey::dpadRight, keyIdPadRight}};
-    for (const auto& [button, key] : fixed) {
+    // Attached, then detached: the arrows, Home, X, Y and Hold go to the TG50's own buttons.
+    const std::tuple<PadKey, KeyId, KeyId> fixed[] = {
+        {PadKey::a, keyIdPadA, keyInvalid}, {PadKey::b, keyIdPadB, keyInvalid}, {PadKey::x, keyIdPadX, keyIdHard2},
+        {PadKey::y, keyIdPadY, keyIdHard3}, {PadKey::start, keyIdPadHome, keyIdHome}, {PadKey::guide, keyIdPadHome, keyIdHome},
+        {PadKey::back, keyIdPadMenu, keyInvalid}, {PadKey::rightShoulder, keyIdPadHold, keyIdHard4},
+        {PadKey::dpadUp, keyIdPadUp, keyIdUp}, {PadKey::dpadDown, keyIdPadDown, keyIdDown},
+        {PadKey::dpadLeft, keyIdPadLeft, keyInvalid}, {PadKey::dpadRight, keyIdPadRight, keyInvalid}};
+    for (const auto& [button, key, detached] : fixed) {
         assert(apply(map, buttons({button}), false, true).keys == deviceKeyBit(key));
-        // Nothing while the game controller isn't attached.
-        assert(apply(map, buttons({button}), false, false).keys == 0);
+        assert(apply(map, buttons({button}), false, false).keys == (detached ? deviceKeyBit(detached) : 0));
     }
     PadReading stick;
     stick.leftX = -20000;
     assert(apply(map, stick, false, true).keys == deviceKeyBit(keyIdPadLeft));
     stick.leftX = 0; stick.leftY = 20000;
     assert(apply(map, stick, false, true).keys == deviceKeyBit(keyIdPadDown));
-    assert(apply(map, buttons({PadKey::leftShoulder}), false, true).keys == 0);
-    // The TG50's own buttons can be added and work with the controller detached.
+    // L1 is the first app button either way.
+    assert(apply(map, buttons({PadKey::leftShoulder}), false, true).keys == deviceKeyBit(keyIdHard1));
+    assert(apply(map, buttons({PadKey::leftShoulder}), false, false).keys == deviceKeyBit(keyIdHard1));
+    PadReading trigger;
+    trigger.leftTrigger = 30000;
+    assert(apply(map, trigger, false, true).keys == 0);
+    // The TG50's own buttons can be added.
     ControllerMap own = map;
-    own.assign(PalmKey::app1, PadKey::leftShoulder);
-    assert(apply(own, buttons({PadKey::leftShoulder}), false, false).keys == deviceKeyBit(keyIdHard1));
+    own.assign(PalmKey::app4, PadKey::leftTrigger);
+    assert(apply(own, trigger, false, false).keys == deviceKeyBit(keyIdHard4));
 }
 
 static void triggers() {

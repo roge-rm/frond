@@ -63,11 +63,25 @@ struct GamepadDirections {
     int x{0}, y{0};
 };
 
+// The CLIÉ's own button a game controller button presses while the controller is detached; count for none.
+inline PalmKey clieDetachedKey(PalmKey key) {
+    switch (key) {
+        case PalmKey::padUp: return PalmKey::up;
+        case PalmKey::padDown: return PalmKey::down;
+        case PalmKey::padHome: return PalmKey::home;
+        case PalmKey::padX: return PalmKey::app2;
+        case PalmKey::padY: return PalmKey::app3;
+        case PalmKey::padHold: return PalmKey::app4;
+        default: return PalmKey::count;
+    }
+}
+
 // What the controllers hold on the device, from the controller keys held (padKeysHeld over every
 // controller) through the map. On the Zodiac (zodiac) the left stick (leftX, leftY) is the analogue
 // stick over its whole range, and Up, Down, Left and Right push it to full travel on their axis,
-// winning over the left stick there, the one pressed last if both are held. The CLIÉ game controller's buttons count only while it is
-// attached (padAttached).
+// winning over the left stick there, the one pressed last if both are held. The CLIÉ game controller's
+// buttons reach it only while it is attached (padAttached); detached, its arrows, Home, X, Y and Hold
+// press the CLIÉ's own Up, Down, Home and second to fourth app buttons, as on Android.
 inline GamepadInput gamepadInput(const ControllerMap& map, PadKeyMask held, int16_t leftX, int16_t leftY, bool zodiac,
                                  bool padAttached, GamepadDirections* directions = nullptr) {
     GamepadInput input;
@@ -77,7 +91,10 @@ inline GamepadInput gamepadInput(const ControllerMap& map, PadKeyMask held, int1
         const auto key = PalmKey(i);
         if (!on(key)) continue;
         if (zodiac && key >= PalmKey::up && key <= PalmKey::right) continue;
-        if (clieGamepadPalmKey(key) && !padAttached) continue;
+        if (clieGamepadPalmKey(key) && !padAttached) {
+            if (const KeyId id = palmKeyToKeyId(clieDetachedKey(key))) input.keys |= deviceKeyBit(id);
+            continue;
+        }
         if (const KeyId id = palmKeyToKeyId(key)) input.keys |= deviceKeyBit(id);
     }
     if (!zodiac) return input;

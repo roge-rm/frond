@@ -2917,8 +2917,10 @@ static void zodiacControls() {
     SdlEventHandler txInput(&tx,1.f,txDisplay,Rotation::portrait_0);
     for(SDL_Keycode k:{SDLK_F7,SDLK_F8,SDLK_F9,SDLK_F10}) {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=k;txInput.HandleEvent(e);}
     tx.expect({});
-    // A game controller does nothing on the TX.
-    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({});}
+    // A game controller presses the TX's keys by Android's defaults: A is Select, and the left stick
+    // isn't mapped, so it never moves a stick the TX hasn't got.
+    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({{keyIdSelect,true}});}
+    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONUP;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({{keyIdSelect,false}});}
     {SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.axis=SDL_CONTROLLER_AXIS_LEFTX;e.caxis.value=32767;txInput.HandleEvent(e);tx.expect({});}
     {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=SDLK_RIGHT;txInput.HandleEvent(e);tx.expect({{keyIdRight,true}});}
     // At 90 and 270 the shown LCD is 320x480: keys, the stick and its press follow it in both arrangements.

@@ -199,15 +199,19 @@ struct ControllerMap {
     }
 };
 
-// Today's fixed mappings, so nobody's controls change. The Zodiac: the d-pad pushes the stick, A, B, X
-// and Y and the right stick are the Action keys by place, the shoulders the triggers, Start and Guide
-// Home, Select Function and L3 the stick's press. The CLIÉ game controller: the same face buttons by
-// name, the d-pad and left stick its arrows, Start and Guide Home, Select Menu, R1 Hold. Other devices
-// start with nothing.
+// The Zodiac: the d-pad pushes the stick, A, B, X and Y and the right stick are the Action keys by
+// place, the shoulders the triggers, Start and Guide Home, Select Function and L3 the stick's press.
+// The CLIÉ game controller: the same face buttons by name, the d-pad and left stick its arrows, Start
+// and Guide Home, Select Menu, R1 Hold, and L1 the first app button. Other devices as Android's
+// ControllerMap.defaults: the d-pad and A for the 5-way, L1, X, Y and R1 the app buttons left to right,
+// Start Home (or the first app button on a device with no Home at all), L2, R2, R3 and L3 the Jog Dial and Back, B
+// nothing; only the buttons the device lists.
 inline ControllerMap controllerDefaults(const DeviceProfile5& profile) {
     using P = PadKey;
     using K = PalmKey;
     ControllerMap map;
+    const auto allowed = controllerPalmKeys(profile);
+    auto has = [&](PalmKey key) { return std::find(allowed.begin(), allowed.end(), key) != allowed.end(); };
     if (zodiacController(profile)) {
         map.keys = {{P::dpadUp, K::up}, {P::dpadDown, K::down}, {P::dpadLeft, K::left}, {P::dpadRight, K::right},
                     {P::leftStick, K::stickPress}, {P::a, K::app1}, {P::b, K::app2}, {P::x, K::app3}, {P::y, K::app4},
@@ -218,8 +222,21 @@ inline ControllerMap controllerDefaults(const DeviceProfile5& profile) {
         map.keys = {{P::a, K::padA}, {P::b, K::padB}, {P::x, K::padX}, {P::y, K::padY},
                     {P::start, K::padHome}, {P::guide, K::padHome}, {P::back, K::padMenu}, {P::rightShoulder, K::padHold},
                     {P::dpadUp, K::padUp}, {P::dpadDown, K::padDown}, {P::dpadLeft, K::padLeft}, {P::dpadRight, K::padRight},
-                    {P::leftUp, K::padUp}, {P::leftDown, K::padDown}, {P::leftLeft, K::padLeft}, {P::leftRight, K::padRight}};
+                    {P::leftUp, K::padUp}, {P::leftDown, K::padDown}, {P::leftLeft, K::padLeft}, {P::leftRight, K::padRight},
+                    {P::leftShoulder, K::app1}};
+    } else {
+        // Start is Home on a device with one, a silkscreen Home too (a tap the desktop doesn't offer yet).
+        const std::string buttons = std::string("|") + (profile.frontend.buttons ? profile.frontend.buttons : "") + "|";
+        const bool homeButton = buttons.find("|home|") != std::string::npos;
+        const std::pair<PadKey, PalmKey> keys[] = {
+            {P::dpadUp, K::up}, {P::dpadDown, K::down}, {P::dpadLeft, K::left}, {P::dpadRight, K::right},
+            {P::a, K::centre}, {P::leftShoulder, K::app1}, {P::x, K::app2}, {P::y, K::app3}, {P::rightShoulder, K::app4},
+            {P::start, homeButton ? K::home : K::app1},
+            {P::leftTrigger, K::jogUp}, {P::rightTrigger, K::jogDown}, {P::rightStick, K::jogPress}, {P::leftStick, K::back}};
+        for (const auto& [key, button] : keys)
+            if (has(button)) map.keys[key] = button;
     }
+    for (auto it = map.keys.begin(); it != map.keys.end();) it = has(it->second) ? std::next(it) : map.keys.erase(it);
     return map;
 }
 
