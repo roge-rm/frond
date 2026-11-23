@@ -68,10 +68,11 @@ class Rumble(private val context: Context, private val notification: Boolean = f
         runningPad = if (vibrator === pad) padId else null
     }
 
-    // Real game controllers, not virtual devices.
+    // Real external game controllers. A handheld's built-in pad doesn't count, so its own motor still buzzes.
     private fun connectedControllers(): List<Int> = InputDevice.getDeviceIds().filter { id ->
         val d = InputDevice.getDevice(id) ?: return@filter false
-        !d.isVirtual && (d.sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
+        val external = Build.VERSION.SDK_INT < 29 || d.isExternal
+        !d.isVirtual && external && (d.sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
             d.sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK)
     }
 
