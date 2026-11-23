@@ -123,6 +123,8 @@ void ad7873setVbatt(struct Ad7873 *ad, uint16_t mV)	//Vref is 2.5V
 	ad->vBattAdcVal = (mV / 4) * 4096 / 2500;
 }
 
+void ad7873setVbattCount(struct Ad7873 *ad, uint16_t count) { ad->vBattAdcVal = count > 4095 ? 4095 : count; }
+
 void ad7873setVaux(struct Ad7873 *ad, uint16_t mV)
 {
 	const uint32_t code = uint32_t(mV) * 4096 / 2500;

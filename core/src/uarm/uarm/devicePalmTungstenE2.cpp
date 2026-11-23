@@ -12,6 +12,7 @@
 #include "CsrBcspRadio.h"
 #include "device_type5.h"
 #include "device_profile5.h"
+#include "pxa_battery.h"
 #include "mmiodev_DirectNAND.h"
 #include "savestate/savestateAll.h"
 #include "uartdev_bcm2035.h"
@@ -137,20 +138,23 @@ struct Device {
     BatteryPower battery;
 };
 
-// The battery input on each board: the TG50's AD7873 VBAT, the WM9712L BMON input (behind a divide by
-// three) on the E2, TX and Zire 72. The charger: the TG50's uc A13 and A14 (tg50BoardSetCharging), the Zire 72's
+// The battery input on each board: the TG50's AD7873 VBAT, the WM9712L BMON input on the E2, TX and Zire 72, at
+// the count each DAL reads as the set percent (pxa_battery.h). The charger: the TG50's uc A13 and A14 (tg50BoardSetCharging), the Zire 72's
 // GPIO99 low (DAL dock status 0x2009c344), the TX's GPIO90 high (DAL dock status 0x2009b7d0) and
 // the E2's GPIO9 high (DAL dock status 0x2009c66c).
 static void deviceApplyBattery(Device *dev) {
-    const uint32_t mV = BatteryPower::LiIonMilliVolts(dev->battery.Percent());
     const bool charging = dev->battery.ExternalPower();
+    const unsigned percent = dev->battery.Percent();
     if (dev->tg50) {
-        tg50BoardSetBatteryMilliVolts(dev->tg50, uint16_t(mV));
+        tg50BoardSetBatteryCount(dev->tg50, pxaBatteryCount(PxaBatteryBoard::tg50, percent, charging));
         tg50BoardSetCharging(dev->tg50, charging, dev->battery.ChargeInProgress());
         return;
     }
     if (!dev->wm9712L) return;
-    wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, mV / 3);
+    const PxaBatteryBoard board = dev->type == DeviceType5::deviceTypeZire72 ? PxaBatteryBoard::zire72
+                                  : dev->type == DeviceType5::deviceTypeTX   ? PxaBatteryBoard::tx
+                                                                              : PxaBatteryBoard::e2;
+    wm9712LsetAuxCount(dev->wm9712L, WM9712LauxPinBmon, pxaBatteryCount(board, percent, charging));
     if (dev->type == DeviceType5::deviceTypeZire72) pxaGpioSetState(dev->gpio, 99, !charging);
     else if (dev->type == DeviceType5::deviceTypeTX) pxaGpioSetState(dev->gpio, 90, charging);
     else if (deviceProfileIsE2Board5(dev->type)) pxaGpioSetState(dev->gpio, 9, charging);

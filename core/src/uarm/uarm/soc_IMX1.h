@@ -137,6 +137,7 @@ class SocIMX1 : public SoC {
     uint16_t BatterySample() const { return imx1MachineAspUInput(machine); }
     uint32_t BatteryGaugeSample() const { return imx1MachineGraphicsMode1(machine); }
     bool ChargerInputLow() const { return !(imx1MachineGpioInput(machine, 1) & (1u << 14)); }
+    bool ChargeDoneInputHigh() const { return imx1MachineGpioInput(machine, 0) & (1u << 14); }
     bool HeadphoneInputHigh() const { return imx1MachineGpioInput(machine, 1) & (1u << 16); }
     bool CradleInputLow() const { return !(imx1MachineGpioInput(machine, 3) & (1u << 22)); }
     // Headphones on GPIO B16, high while they are in (the DAL's 20097d40 then mutes the speaker path).

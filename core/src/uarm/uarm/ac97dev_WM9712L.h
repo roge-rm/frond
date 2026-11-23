@@ -29,6 +29,8 @@ struct WM9712L *wm9712LInit(struct PxaAC97 *ac97, struct PxaGpio *gpio, int8_t p
 void wm9712Lperiodic(struct WM9712L *wm);
 
 void wm9712LsetAuxVoltage(struct WM9712L *wm, enum WM9712LauxPin which, uint32_t mV);
+// The raw 12-bit conversion result for an aux input.
+void wm9712LsetAuxCount(struct WM9712L *wm, enum WM9712LauxPin which, uint16_t count);
 void wm9712LsetPen(struct WM9712L *wm, int16_t x, int16_t y,
                    int16_t press);  // raw ADC values, negative for pen up
 void wm9712LsetHeadphones(WM9712L* wm, bool in);

@@ -1,5 +1,5 @@
 // The Zodiac's battery setting: the level as the ASP U word on the ROM's own count-to-voltage chain, Maximum
-// exactly the fixed 0x9b00, Charging on GPIO B14, the setting not saved with the state and put back after every load and reset.
+// exactly the fixed 0x9b00, Charging on GPIO B14 and charge done on A14, the setting not saved with the state and put back after every load and reset.
 // Also the headphones, the cradle button and the cradle, and the USB bridge's cable through the cradle. Made-up ROM,
 // no firmware.
 #include <cassert>
@@ -79,7 +79,7 @@ void machine() {
     SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), why);
     assert(soc && soc->BatterySupported());
     assert(soc->Battery() == BatteryPower{} && soc->BatterySample() == zodiacBatteryFullSample);
-    assert(soc->ChargerInputLow());  // the default is on the charger
+    assert(soc->ChargerInputLow() && soc->ChargeDoneInputHigh());  // the default is full on the charger
     assert(soc->BatteryGaugeSample() == zodiacBatteryFullMode1);
     const auto atMaximum = save(*soc);
 
@@ -106,6 +106,18 @@ void machine() {
     soc->Reset();
     assert(soc->ChargerInputLow() && soc->BatterySample() == zodiacBatterySample(40));
     assert(soc->SetBattery(battery("level 40 battery")) && !soc->ChargerInputLow());
+
+    // A14 is charge done: high only on the charger at 100%, through a load and a reset too.
+    assert(soc->SetBattery(battery("max")) && soc->ChargeDoneInputHigh());
+    assert(soc->SetBattery(battery("level 99 charging")) && !soc->ChargeDoneInputHigh());
+    assert(soc->SetBattery(battery("max battery")) && !soc->ChargeDoneInputHigh() && !soc->ChargerInputLow());
+    assert(soc->SetBattery(battery("level 40 charging")) && !soc->ChargeDoneInputHigh());
+    assert(soc->SetBattery(battery("max charging")) && soc->ChargeDoneInputHigh() && soc->ChargerInputLow());
+    load(*soc, atMaximum);
+    assert(soc->ChargeDoneInputHigh());
+    soc->Reset();
+    assert(soc->ChargeDoneInputHigh());
+    assert(soc->SetBattery(battery("level 40 battery")) && !soc->ChargeDoneInputHigh());
 
     // A state made at another level loads at the setting the machine has.
     assert(soc->SetBattery(battery("level 5 battery")));
