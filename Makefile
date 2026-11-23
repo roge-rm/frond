@@ -1377,6 +1377,16 @@ test: test-tg50-voicerec
 test-tg50-voicerec: out/frond
 	python3 tests/tg50-voicerec.py
 
+# The game controller map: saved text, each device's buttons and defaults, and how the core applies it.
+.PHONY: test-controller-map
+test: test-controller-map
+test-controller-map:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) \
+		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/controller-map.cpp -o $(OBJ_ROOT)/test-controller-map
+	$(OBJ_ROOT)/test-controller-map
+
 # CLIÉ game controller: the pad model alone, then on the TG50: plug-in ID, buttons, Hold, live detach and re-attach, save and reload;
 # skips without the TG50 smoke session (tests/clie-gamepad.py).
 .PHONY: test-clie-gamepad

@@ -140,6 +140,7 @@ struct Options {
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
+    optional<string> controllerMap;  // --controller-map
     bool headphonesIn;       // --headphones-in
     BatteryPower battery;    // --battery
 };
@@ -1308,6 +1309,14 @@ bool gFastEngineMissing = false;
         };
         sdlEventHandler.SetDirectCapture(false);
         if (desktop) sdlEventHandler.SetShortcutSink([&](const string& name) { desktop->event("shortcut", name); });
+        // The controller map from --controller-map and the desktop's controller-map, on the guest thread like the events.
+        if (const auto* profile = deviceProfile5(soc->GetDeviceType())) {
+            if (options.controllerMap) sdlEventHandler.SetControllerMap(decodeControllerMap(*options.controllerMap, *profile));
+            commandContext.setControllerMap = [&sdlEventHandler, profile](const string& text) {
+                sdlEventHandler.SetControllerMap(decodeControllerMap(text, *profile));
+                return sdlEventHandler.GetControllerMap().encode();
+            };
+        }
         commandContext.windowId = [&]() {
             string id;
             link.Call([&] { id = x11WindowId(window); });
@@ -1972,6 +1981,10 @@ int main(int argc, char** argv) {
         .scan<'u', unsigned int>()
         .default_value(512u);
 
+    program.add_argument("--controller-map")
+        .help("game controller buttons for the device's buttons, as KEY:BUTTON,... (SDL button names), or none")
+        .metavar("<map>");
+
     program.add_argument("--no-rumble")
         .help("Zodiac: no rumble on game controllers or in the window")
         .default_value(false)
@@ -2232,6 +2245,7 @@ int main(int argc, char** argv) {
                        .fastEngine = program.get("--engine") == "fast",
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),
+                       .controllerMap = program.present("--controller-map"),
                        .headphonesIn = program.get<bool>("--headphones-in")};
     BatteryPower::Parse(program.get("--battery"), options.battery);
 
