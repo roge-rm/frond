@@ -111,6 +111,17 @@ int main() {
                 const unsigned shown = pxaBatteryGuestPercent(board, pxaBatteryCount(board, percent, charger), charger);
                 check((shown > percent ? shown - percent : percent - shown) <= 1, "every percent within 1");
             }
+    // A percent the DAL can't show gets the count of the nearest one it can, never a count below the empty one.
+    // The TG50 shows only 25, 35 and 45 between 20% and 50% (one centivolt per 8 counts).
+    for (auto board : {PxaBatteryBoard::tx, PxaBatteryBoard::e2, PxaBatteryBoard::zire72, PxaBatteryBoard::tg50})
+        for (bool charger : {false, true})
+            for (unsigned percent = 1; percent <= 100; ++percent) {
+                const unsigned count = pxaBatteryCount(board, percent, charger);
+                const unsigned shown = pxaBatteryGuestPercent(board, count, charger);
+                check(count >= pxaBatteryCount(board, 0, charger), "no count below empty");
+                check((shown > percent ? shown - percent : percent - shown) <= (board == PxaBatteryBoard::tg50 ? 5u : 2u),
+                      "every percent within 2, TG50 5");
+            }
     check(pxaBatteryCount(PxaBatteryBoard::tx, 100, true) == pxaBatteryFullBmon &&
               pxaBatteryCount(PxaBatteryBoard::tg50, 100, false) == pxaBatteryFullVbat,
           "Maximum keeps the old full counts");

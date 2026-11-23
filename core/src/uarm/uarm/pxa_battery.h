@@ -99,7 +99,7 @@ constexpr unsigned pxaBatteryGuestPercent(PxaBatteryBoard board, unsigned count,
 constexpr uint16_t pxaBatteryCount(PxaBatteryBoard board, unsigned percent, bool externalPower) {
     const bool tg50 = board == PxaBatteryBoard::tg50;
     if (percent >= 100) return tg50 ? pxaBatteryFullVbat : pxaBatteryFullBmon;
-    unsigned first = 0, last = 0, bestCount = 0, bestDistance = 1000;
+    unsigned first = 0, last = 0, bestShown = 0, bestDistance = 1000;
     bool found = false;
     for (unsigned count = 0; count < 4096; ++count) {
         const unsigned shown = pxaBatteryGuestPercent(board, count, externalPower);
@@ -111,9 +111,9 @@ constexpr uint16_t pxaBatteryCount(PxaBatteryBoard board, unsigned percent, bool
             break;
         }
         const unsigned distance = shown > percent ? shown - percent : percent - shown;
-        if (distance < bestDistance) bestDistance = distance, bestCount = count;
+        if (distance < bestDistance) bestDistance = distance, bestShown = shown;
     }
-    if (!found) return uint16_t(bestCount);
+    if (!found) return pxaBatteryCount(board, bestShown, externalPower);
     return uint16_t(percent == 0 ? last : (first + last) / 2);
 }
 
