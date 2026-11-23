@@ -1760,7 +1760,8 @@ void MainWindow::refresh() {
                       caps.sound && runningPreferences.audio, modes);
     const auto syncLabel = protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
                            protocol == frondDesktopSync::Protocol::activeSync ? tr("ActiveSync") : QString();
-    runningBar->setSyncButton(syncLabel, syncAvailable && !syncRunning && enabled);
+    runningBar->setSyncButton(syncLabel, protocol == frondDesktopSync::Protocol::activeSync ? "activesync" : "hotsync",
+                              syncAvailable && !syncRunning && enabled);
     if (fullScreenOn) showOverlayBar(overlayBarShown);
     else runningBar->setVisible(running && runningBar->barShown());
 }

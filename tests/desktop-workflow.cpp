@@ -3888,6 +3888,7 @@ for line in s.makefile('rb'):
         QVERIFY(sync);
         QTRY_VERIFY_WITH_TIMEOUT(sync->isVisible() && sync->isEnabled(), 5000);
         QCOMPARE(sync->text(), QString("HotSync"));
+        QVERIFY(!sync->icon().isNull());
         auto* menu = bar->findChild<QAction*>("machineSyncManager");
         QVERIFY(menu && menu->isVisible());
         QCOMPARE(bar->menu()->actions().indexOf(menu), bar->menu()->actions().indexOf(window.findChild<QAction*>("machineNetwork")) + 1);
