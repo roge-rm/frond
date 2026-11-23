@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the binaries and the AppDir for one AppImage inside the frond-appimage-ARCH image.
-# The checkout is at /src and core/ is copied to build/appimage/ARCH/source.
+# The checkout is at /src with the prepared source mounted over core/.
 # ARCH is x86_64 or aarch64; aarch64 is cross built.
 set -eu
 cd /src
@@ -8,7 +8,7 @@ JOBS=${JOBS:-10}
 ARCH=${ARCH:?}
 TRIPLE=$ARCH-linux-gnu
 WORK=/src/build/appimage/$ARCH
-SRC=$WORK/source/src
+SRC=/src/core/src
 if [ "$ARCH" = x86_64 ]; then
     CROSS=""
     TOOLCHAIN=""
@@ -53,7 +53,7 @@ mkdir -p $OUT
 cp $SRC/uarm/cp-uarm $OUT/frond
 mk -C $SRC/cloudpilot FROND_68K=1 frond-68k "LD_NATIVE=$CXX $STATIC"
 cp $SRC/cloudpilot/frond-68k $OUT/frond-68k
-cmake -S desktop -B $WORK/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $TOOLCHAIN $QTHOST -DFROND_PREPARED_SOURCE=$WORK/source
+cmake -S desktop -B $WORK/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $TOOLCHAIN $QTHOST -DFROND_PREPARED_SOURCE=/src/core
 cmake --build $WORK/desktop --target frond-desktop --parallel "$JOBS"
 cp $WORK/desktop/frond-desktop $OUT/frond-desktop
 # btvirt, This Frond's Bluetooth radio, from the patched BlueZ checkout: the same files as tools/arm64/build.sh.

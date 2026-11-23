@@ -526,7 +526,7 @@ On desktop, **Run Windows installer…** opens an EXE or MSI that expects Palm D
 
 ### ActiveSync
 
-On the rx1950, click **ActiveSync** in the top bar to connect to the assigned profile. It uses USB by default. Choose **Serial** under **Connection** in the machine’s sync settings to use the serial cable. Use **Sync Manager** to queue a Windows Mobile CAB. ActiveSync sends one CAB at a time to the installer on the device, where you can finish the installation. Contacts, calendar, tasks and notes on Windows Mobile aren't synced yet.
+On the rx1950, click **ActiveSync** in the top bar to connect to the assigned profile. It uses USB by default. Choose **Serial** under **Connection** in the machine’s sync settings to use the serial cable. Use **Sync Manager** to queue a Windows Mobile CAB. ActiveSync sends one CAB at a time to the installer on the device, where you can finish the installation. Contacts, calendar, tasks and pictures sync. Notes don't sync.
 
 For file exchange from the command line, run `frond-sync files PROFILE` to make and print the profile’s Files folder. ActiveSync copies new files between it and `My Documents\Frond Sync` on the device. Same-name files with different contents stay on both sides and are counted in the sync log.
 

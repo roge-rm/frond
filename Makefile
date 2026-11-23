@@ -612,18 +612,18 @@ deb-arm64:
 # btvirt is cross built from the BlueZ checkout as it stands, so it must carry the current patch.
 	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
 		{ echo "$(BLUETOOTH_PROVIDER) doesn't carry tools/bluez-bdaddr.patch: run python3 tools/build-bluetooth-provider.py" >&2; exit 1; }
-	mkdir -p $(PKG_ROOT)/arm64 build/arm64
+	mkdir -p $(PKG_ROOT)/arm64 build/arm64 out
 	rm -rf $(PKG_ROOT)/arm64/source
 	python3 tools/copy-core.py $(abspath $(PKG_ROOT))/arm64/source
 	docker build -t frond-arm64-cross tools/arm64
 	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(ARM64_JOBS) \
 		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
 		-v $(CURDIR):/src -v $(abspath $(PKG_ROOT))/arm64:/src/build/arm64 -v $(abspath $(PKG_ROOT))/arm64/source:/src/core \
-		-w /src frond-arm64-cross tools/arm64/build.sh
+		-v "$$(realpath out):/frond-package-out" -w /src frond-arm64-cross tools/arm64/build.sh
 
 # AppImages for x86-64 and arm64, built in Docker on Debian 12 so they run on glibc 2.36 and newer
 # (tools/appimage/). Needs Docker and the BlueZ checkout from tools/build-bluetooth-provider.py --fetch.
-# core/ is copied fresh to $(PKG_ROOT)/appimage/ARCH/source. The arm64 one is cross built.
+# The prepared copy of core/ is mounted over /src/core. The arm64 one is cross built.
 APPIMAGE_JOBS ?= 10
 define build-appimage
 	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
@@ -634,7 +634,8 @@ define build-appimage
 	docker build -t frond-appimage-$(2) --build-arg ARCH=$(2) tools/appimage
 	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(APPIMAGE_JOBS) -e ARCH=$(1) \
 		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
-		-v $(CURDIR):/src -v $(abspath $(PKG_ROOT))/appimage:/src/build/appimage -w /src frond-appimage-$(2) tools/appimage/build.sh
+		-v $(CURDIR):/src -v $(abspath $(PKG_ROOT))/appimage:/src/build/appimage \
+		-v $(abspath $(PKG_ROOT))/appimage/$(1)/source:/src/core -w /src frond-appimage-$(2) tools/appimage/build.sh
 	SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} python3 tools/appimage/make-appimage.py --arch $(1)
 endef
 .PHONY: appimage appimage-arm64

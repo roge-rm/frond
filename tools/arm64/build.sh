@@ -66,4 +66,5 @@ $TRIPLE-g++ -pthread $PHONE/peer.o $PHONE/dun.o $PHONE/hotsync.o $PHONE/bthost.o
     core/src/common/libcommon-net.a core/src/common/libcommon.a $SLIRP -o build/arm64/out/bluetooth-phone
 export QEMU_LD_PREFIX=/
 python3 tools/package-deb.py --core build/arm64/out/frond --core-68k build/arm64/out/frond-68k --desktop build/arm64/out/frond-desktop \
-    --btvirt build/arm64/out/btvirt --phone build/arm64/out/bluetooth-phone --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64
+    --btvirt build/arm64/out/btvirt --phone build/arm64/out/bluetooth-phone --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64 \
+    --output-dir /frond-package-out

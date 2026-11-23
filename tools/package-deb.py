@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def package(root=ROOT, core='out/frond', desktop='out/frond-desktop',
             core68k='out/frond-68k', btvirt='build/bluetooth-provider/emulator/btvirt',
             phone='build/bluetooth-opp-peer/bluetooth-opp-peer', architecture=None,
-            strip='strip', runner=()):
+            strip='strip', runner=(), output_dir='out'):
     # A cross build passes its own binaries, architecture, strip tool and an emulator runner.
     version = (root / 'VERSION').read_text().strip()
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
@@ -120,13 +120,15 @@ Description: Native Palm OS emulator
                 directory.chmod(0o755)
             os.utime(directory, (int(epoch), int(epoch)))
         check_stage(stage)
-        temporary_output = work / 'frond.deb'
-        subprocess.run(['dpkg-deb', '--root-owner-group', '--uniform-compression', '-Zxz', '-z6',
-                        '--build', str(stage), str(temporary_output)], env=env, check=True)
-        check_deb(temporary_output, package_version, architecture)
-        output = root / 'out' / f'frond_{package_version}_{architecture}.deb'
+        output = root / output_dir / f'frond_{package_version}_{architecture}.deb'
         output.parent.mkdir(exist_ok=True)
-        temporary_output.replace(output)
+        # Keep the final rename on the output filesystem when out/ is on another disk.
+        with tempfile.TemporaryDirectory(prefix='.deb-', dir=output.parent) as archive_dir:
+            temporary_output = Path(archive_dir) / output.name
+            subprocess.run(['dpkg-deb', '--root-owner-group', '--uniform-compression', '-Zxz', '-z6',
+                            '--build', str(stage), str(temporary_output)], env=env, check=True)
+            check_deb(temporary_output, package_version, architecture)
+            temporary_output.replace(output)
     print(output)
     return output
 
@@ -143,9 +145,10 @@ if __name__ == '__main__':
     parser.add_argument('--architecture', help='Debian architecture; defaults to the host')
     parser.add_argument('--strip', default='strip', help='strip tool for the binaries')
     parser.add_argument('--runner', default='', help='emulator that runs the binaries for their version check')
+    parser.add_argument('--output-dir', default='out', help='directory for the finished package')
     args = parser.parse_args()
     try:
         package(core=args.core, core68k=args.core_68k, desktop=args.desktop, btvirt=args.btvirt, phone=args.phone, architecture=args.architecture,
-                strip=args.strip, runner=args.runner.split())
+                strip=args.strip, runner=args.runner.split(), output_dir=args.output_dir)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit(str(error))
