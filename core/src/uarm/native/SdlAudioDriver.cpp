@@ -32,6 +32,7 @@ void SdlAudioDriver::Start() {
         starting = true;
         audioBackpressure = false;
         OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 0); });
+        playing = true;
 
         return;
     }
@@ -70,6 +71,7 @@ void SdlAudioDriver::Start() {
     backpressureThresholdStop = audioSpecActual.samples * (lowLatencyStartup ? 5 : 6);
 
     initialized = true;
+    playing = true;
     OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 0); });
 }
 
@@ -78,6 +80,7 @@ void SdlAudioDriver::Pause() {
 
     soc->SetPcmOutputEnabled(false);
     OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 1); });
+    playing = false;
 }
 
 bool SdlAudioDriver::GetAudioBackpressure() const {
@@ -112,17 +115,21 @@ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
     if (!audioBackpressure && samplesPending > backpressureThresholdStart) audioBackpressure = true;
     if (audioBackpressure && samplesPending < backpressureThresholdStop) audioBackpressure = false;
 
-    if (!audioBuffering) {
+    // While buffering nothing is popped, and the span gives the guest time of the next frame.
+    const bool mixing = mixerOn.load();
+    AudioQueueSpan span;
+    if (!audioBuffering || mixing) {
         samplesRemaining -=
             audioQueuePopChunkIfGeneration(audioQueue, reinterpret_cast<uint32_t*>(stream),
-                                          samplesRemaining, queueGeneration);
+                                          audioBuffering ? 0 : samplesRemaining, queueGeneration,
+                                          mixing ? &span : nullptr);
     }
 
     // The mixer gets the whole period, guest audio or silence, and runs muted and headless too, so its clock keeps
     // to the device's.
     if (samplesRemaining > 0) memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
     inMixer.store(true);
-    if (mixerOn.load()) mixer(reinterpret_cast<int16_t*>(stream), size_t(len) / 4);
+    if (mixerOn.load()) mixer(reinterpret_cast<int16_t*>(stream), size_t(len) / 4, span);
     inMixer.store(false);
     if (muted.load(std::memory_order_relaxed) || headlessOut.load(std::memory_order_relaxed)) {
         memset(stream, 0, len);
@@ -142,6 +149,7 @@ void SdlAudioDriver::Abandon() {
     // The device stays open, so nothing it calls may outlive this.
     ClearMixer();
     initialized = false;
+    playing = false;
 }
 
 void SdlAudioDriver::SetHeadless(bool value) {

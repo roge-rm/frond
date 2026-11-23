@@ -1057,6 +1057,8 @@ bool gFastEngineMissing = false;
         // on its own thread. Declared before the driver, and the mixer cleared at the end of the scope, so the
         // callback never runs into a freed synth; the MIDI out before the synth, whose helper may feed it.
         auto* const zodiacMusic = dynamic_cast<SocIMX1*>(soc);
+        // The music's clock on the guest audio playing, for both; it outlives them and the mixer.
+        GuestAudioClock musicClock;
         std::unique_ptr<ZodiacMidiOut> midiOut;
         if (zodiacMusic && zodiacMusic->MusicHooksOn() && options.musicMidiOut) {
             std::string opened = "the app's MIDI output", error;
@@ -1091,10 +1093,18 @@ bool gFastEngineMissing = false;
             } else {
                 musicSynth->attach(&zodiacMusic->MusicHooks());
                 if (midiOut) musicSynth->tap([out = midiOut.get()](const zodiac_music::Event& e) { out->offer(e); });
+                musicSynth->setClock(&musicClock);
                 musicSynth->start();
-                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count) { synth->mix(frames, count); });
+                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                    synth->mix(frames, count, span, GuestAudioClock::steadyNs());
+                });
             }
         }
+        // MIDI out alone: the callback only runs the clock.
+        if (midiOut && !musicSynth && !options.disableAudio)
+            audioDriver.SetMixer([clock = &musicClock](int16_t*, size_t count, const AudioQueueSpan& span) {
+                clock->run(span, count, GuestAudioClock::steadyNs());
+            });
         if (!options.disableAudio) audioDriver.Start();
         if (musicSynth && !audioDriver.Running()) {
             audioDriver.ClearMixer();
@@ -1105,6 +1115,9 @@ bool gFastEngineMissing = false;
         if (midiOut) {
             // Straight from the hooks when no synth's helper hands it the events.
             if (!synthTakes) midiOut->attach(&zodiacMusic->MusicHooks());
+            // Timed by the guest audio playing; with no audio device, by the host clock alone.
+            // The synth lag stays 0: a hardware synth's own lag is a few ms. A setting would go here.
+            if (audioDriver.Running()) midiOut->setReference(&musicClock);
             midiOut->start();
         }
         // Nobody takes the music events: print them with --music-hooks, else the hooks go off.
@@ -1117,8 +1130,6 @@ bool gFastEngineMissing = false;
         if (zodiacMusic && (synthTakes || midiOut)) zodiacMusic->SetFmMuted(true);
         // Only the MIDI output plays the music: when its port fails, the FM comes back.
         bool fmBackOnPortFail = zodiacMusic && midiOut && !synthTakes;
-        // MIDI out waits for the audio queue: the frames queued and the one period the device is playing, smoothed.
-        double midiDelayFrames = 0;
 
         commands::Register();
         if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
@@ -1450,14 +1461,12 @@ bool gFastEngineMissing = false;
                 // The music's clock stands with the guest's.
                 {
                     const bool musicHeld = (sdlEventHandler.InBackground() && !headless) || replay.Paused();
+                    musicClock.hold(musicHeld);
                     if (musicSynth) musicSynth->hold(musicHeld);
                     if (midiOut) {
                         midiOut->hold(musicHeld);
-                        if (audioDriver.Running()) {
-                            const double queued = double(audioQueueGetState(audioQueue).pendingSamples) + audioPeriod;
-                            midiDelayFrames += (queued - midiDelayFrames) / 32;
-                            midiOut->setDelay(uint64_t(midiDelayFrames * 1e9 / 44100));
-                        }
+                        // Audio off stops the callback: the host clock times the music meanwhile.
+                        midiOut->setReference(audioDriver.Playing() ? &musicClock : nullptr);
                         midiOut->poke();
                         if (fmBackOnPortFail && midiOut->portFailed()) {
                             zodiacMusic->SetFmMuted(false);
@@ -1514,6 +1523,12 @@ bool gFastEngineMissing = false;
                     zodiacSpeed->Emulated(timestampUsec() - cycleStart);
                 } else {
                     mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
+                }
+                // The music's clock follows the guest audio playing: the queue notes the guest time its frames
+                // reached.
+                if (musicSynth || midiOut) {
+                    audioQueueMark(audioQueue, soc->GetTime());
+                    musicClock.noteNewest(soc->GetTime());
                 }
                 inputTrace::note("cycle", true, "end");
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.

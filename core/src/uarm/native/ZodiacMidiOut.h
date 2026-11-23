@@ -6,11 +6,14 @@
 // Threads: the emulation thread only pushes the hooks' events. The engine's own thread (start) takes them, either
 // from the hooks (attach) or from the SoundFont synth's helper (offer), sequences and writes to the port, so the
 // port's writes never happen on the emulation thread or the audio callback.
-// Clock: host time from the clock function, held while the emulator is paused (hold). Guest time maps onto it
-// through an offset set at the first event; when an event drifts from it by more than maxDriftNs either way the
-// offset moves to it, and on a forward jump the songs' skipped note-ons are dropped. A hold, stop and the end
-// send all notes off. Messages go out delayNs after the guest made them (setDelay, the audio queue's depth), so
-// they reach the synth when the guest's own sound of that moment reaches the speaker.
+// Clock: with a reference (setReference, the GuestAudioClock the audio callback runs), each message goes out when
+// the guest sound playing reaches its guest time, less the synth's own lag (setSynthLag), so it keeps with the
+// guest's sound through the queue's depth, underruns and a guest slower than real time. The reference's jumps
+// drop the songs' skipped note-ons. With no reference (no audio device, audio off), host time from the clock function,
+// held while the emulator is paused (hold), with guest time mapped onto it through an offset set at the first
+// event and moved when an event drifts from it by more than maxDriftNs either way (a forward jump drops skipped
+// note-ons); messages then go out delayNs after the guest made them (setDelay). Either way a hold, stop and the
+// end send all notes off. Timestamps never go back.
 // The thread sleeps until the next message is due, or until offer, hold, poke or stop wake it.
 #include <atomic>
 #include <chrono>
@@ -22,6 +25,7 @@
 #include <mutex>
 #include <thread>
 
+#include "GuestAudioClock.h"
 #include "zodiac_music_player.h"
 
 class ZodiacMidiOut {
@@ -43,6 +47,8 @@ class ZodiacMidiOut {
     static constexpr uint64_t maxDelayNs = 200000000;
     // With the hooks attached and nothing due, the longest sleep: poke normally wakes it sooner.
     static constexpr auto idleWait = std::chrono::milliseconds(100);
+    // With a reference, the longest sleep while something is due, so the thread follows the clock as it steers.
+    static constexpr uint64_t referenceWaitNs = 5000000;
 
     static uint64_t steadyNs() {
         return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -53,7 +59,7 @@ class ZodiacMidiOut {
     explicit ZodiacMidiOut(std::unique_ptr<Port> port, uint64_t lookaheadNs = 0, Clock clock = steadyNs)
         : port_(std::move(port)), clock_(std::move(clock)), lookaheadNs_(lookaheadNs),
           player_([this](zodiac_music::Held* h) { prep_.release(h); }),
-          sink_([this](uint64_t timeNs, const uint8_t* b, size_t n, bool) { port_->send(hostNs(timeNs) + passDelayNs_, b, n); }) {}
+          sink_([this](uint64_t timeNs, const uint8_t* b, size_t n, bool) { port_->send(stamp(timeNs), b, n); }) {}
     ~ZodiacMidiOut() {
         stop();
         if (!quiet_) zodiac_music::Player::allNotesOff(lastGuestNs_, sink_);
@@ -79,7 +85,15 @@ class ZodiacMidiOut {
     void poke() {
         if (hooks_ && hooks_->pending()) wake();
     }
-    // How long after the guest made them messages go out, in ns, up to maxDelayNs. Any thread.
+    // The audio callback's clock to time by, it must outlive this; nullptr while the audio device doesn't run
+    // (audio off), then the clock function times the music, carrying on from where the reference left it. Any
+    // thread.
+    void setReference(const GuestAudioClock* clock) { reference_.store(clock, std::memory_order_relaxed); }
+    // With a reference: how much earlier than its sound messages go out, for the synth's own lag. Before start.
+    void setSynthLag(uint64_t ns) { synthLagNs_ = ns; }
+
+    // Without a reference: how long after the guest made them messages go out, in ns, up to maxDelayNs. Any
+    // thread.
     void setDelay(uint64_t ns) { delayNs_.store(ns < maxDelayNs ? ns : maxDelayNs, std::memory_order_relaxed); }
     uint64_t delay() const { return delayNs_.load(std::memory_order_relaxed); }
 
@@ -115,7 +129,18 @@ class ZodiacMidiOut {
             }
             return;
         }
+        passReference_ = reference_.load(std::memory_order_relaxed);
+        if (passReference_ && passReference_->read(ref_)) {
+            byReference();
+            return;
+        }
         music += lookaheadNs_;
+        if (byReference_) {
+            // The reference went (audio off): on from the guest time it reached.
+            offsetNs_ = int64_t(lastGuestNs_ + delay()) - int64_t(music);
+            anchored_ = true;
+            byReference_ = false;
+        }
         if (!anchored_ && !cues_.empty()) {
             offsetNs_ = int64_t(cues_.front().timeNs) - int64_t(music);
             anchored_ = true;
@@ -165,6 +190,13 @@ class ZodiacMidiOut {
         uint64_t guest = player_.nextNs();
         if (!cues_.empty() && cues_.front().timeNs < guest) guest = cues_.front().timeNs;
         if (guest == UINT64_MAX) return UINT64_MAX;
+        if (byReference_) {
+            const uint64_t soonest = clock_() + referenceWaitNs;
+            if (GuestAudioClock::stale(ref_, clock_())) return soonest;
+            const uint64_t at = GuestAudioClock::hostAt(ref_, guest), early = synthLagNs_ + lookaheadNs_;
+            const uint64_t t = at > early ? at - early : 0;
+            return t < soonest ? t : soonest;
+        }
         const int64_t t = int64_t(hostNs(guest)) + int64_t(passDelayNs_) - int64_t(lookaheadNs_);
         return t < 0 ? 0 : uint64_t(t);
     }
@@ -216,6 +248,44 @@ class ZodiacMidiOut {
     size_t outstanding() const { return prep_.outstanding(); }
 
    private:
+    // One pass by the reference: what is due is the guest sound playing at the clock's time, plus the lookahead
+    // and the synth's lag.
+    void byReference() {
+        byReference_ = true;
+        // None published for a while (a hold just ended): wait for the next period, not run on from the old one.
+        if (GuestAudioClock::stale(ref_, clock_())) return;
+        const uint64_t due = GuestAudioClock::guestAt(ref_, clock_() + lookaheadNs_ + synthLagNs_);
+        if (ref_.jumps != jumpsSeen_) {
+            jumpsSeen_ = ref_.jumps;
+            player_.skipBefore(ref_.back ? 0 : ref_.jumpNs);
+        }
+        while (!cues_.empty()) {
+            zodiac_music::Cue cue = cues_.front();
+            if (passReference_->waits(cue.timeNs, due)) break;
+            // Late, or stale from before a load: due now, so a Play starts here with its whole song.
+            if (cue.timeNs > due) cue.timeNs = due;
+            cues_.pop_front();
+            quiet_ = false;
+            player_.feed(cue, sink_);
+        }
+        player_.advance(due, sink_);
+        if (player_.playing()) quiet_ = false;
+        lastGuestNs_ = due;
+    }
+    // The clock's ns a message of guest ns timeNs is due at the port. Never before the last one: the guest to
+    // host map moves (callback jitter, steering, jumps) and a port that schedules by timestamp would reorder.
+    uint64_t stamp(uint64_t timeNs) {
+        uint64_t at;
+        if (!byReference_) {
+            at = hostNs(timeNs) + passDelayNs_;
+        } else {
+            at = GuestAudioClock::hostAt(ref_, timeNs);
+            at = at > synthLagNs_ ? at - synthLagNs_ : 0;
+        }
+        if (at < lastStampNs_) at = lastStampNs_;
+        lastStampNs_ = at;
+        return at;
+    }
     void wake() {
         {
             std::lock_guard<std::mutex> lock(wakeLock_);
@@ -272,6 +342,12 @@ class ZodiacMidiOut {
     bool anchored_ = false, quiet_ = true;
     uint64_t lastGuestNs_ = 0;
     uint64_t passDelayNs_ = 0;  // the delay this pass sends with
+    std::atomic<const GuestAudioClock*> reference_{nullptr};
+    const GuestAudioClock* passReference_ = nullptr;  // this pass's
+    GuestAudioClock::Reference ref_;  // this pass's
+    bool byReference_ = false;
+    uint32_t jumpsSeen_ = 0;
+    uint64_t synthLagNs_ = 0, lastStampNs_ = 0;
     std::atomic<uint64_t> delayNs_{0};
     std::atomic<uint64_t> passes_{0};
     std::thread thread_;

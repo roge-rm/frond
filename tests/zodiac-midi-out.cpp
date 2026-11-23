@@ -1,7 +1,10 @@
 // The Zodiac's MIDI out engine (native/ZodiacMidiOut.h) against a fake port and clock: real-time messages and a
 // song's messages at the host times they're due and never written early, a stop with all notes off, a hold
 // turning notes off and standing the clock still, lookahead for a port that schedules by timestamp, a forward
-// jump dropping skipped note-ons, a late event moving the clock back, and the hooks, engine thread and a
+// jump dropping skipped note-ons, a late event moving the clock back, a slow guest by the guest audio's clock, its
+// stamps in order through callback bursts, a resume waiting for a new period, the clock's two threads, audio off
+// on the host clock, a queue clear after a hold, and
+// the hooks, engine thread and a
 // steady clock together, with notes off at the end. Built with ASan and UBSan, and with TSan.
 #include "ZodiacMidiOut.h"
 #include "ZodiacRtMidi.h"
@@ -212,7 +215,8 @@ void jumpForward() {
     const auto s = log.copy();
     assert(s.size() == 1 + 3 + 32 + 1);
     assert(s[1].b == (Bytes{0xb0, 0x07, 0x50}) && s[2].b == (Bytes{0x80, 0x3c, 0}) && s[3].b == (Bytes{0x80, 0x3e, 0}));
-    assert(allOff(s, 4, 10100 * ms - 5000 * ms + 850 * ms));
+    // Stamped in the past by the old offset, so at the last stamp (the first note's): stamps never go back.
+    assert(allOff(s, 4, 10000 * ms));
     for (const auto& x : s) assert(x.b != (Bytes{0x90, 0x3e, 0x64}));
     assert(s.back().b == (Bytes{0x91, 0x40, 0x7f}) && s.back().hostNs == 10100 * ms);
 }
@@ -295,6 +299,246 @@ void driftDelayed() {
     runTo(*out, 12200 * ms);
     s = log.copy();
     assert(s.size() == 3 && s[2].at == 12200 * ms && s[2].hostNs == 12200 * ms);
+}
+
+// On the guest audio's clock: a guest at half real speed (every other period an underrun), its song's messages go
+// out when the guest audio of their time plays, by the periods the clock published, not at real speed from the
+// first event. synthLag takes the external synth's own lag off the timestamps.
+void guestPaced() {
+    for (const uint64_t lagNs : {uint64_t(0), 20 * ms}) {
+        Log log;
+        fakeNow = 10000 * ms;
+        GuestAudioClock clock;
+        auto out = make(log);
+        out->setReference(&clock);
+        out->setSynthLag(lagNs);
+        constexpr size_t period = 512;
+        const uint64_t periodNs = GuestAudioClock::framesNs(period);
+        uint64_t guestNs = 0, nextCallback = fakeNow.load();
+        // Host ns when each full period's guest audio plays, with its guest ns.
+        std::vector<std::pair<uint64_t, uint64_t>> plays;
+        bool full = true, offered = false;
+        while (fakeNow.load() < 11500 * ms) {
+            if (fakeNow.load() >= nextCallback) {
+                AudioQueueSpan span;
+                span.known = true;
+                span.startNs = span.endNs = guestNs;
+                if (full) {
+                    span.frames = period;
+                    span.endNs = guestNs + periodNs;
+                    plays.push_back({nextCallback + periodNs, guestNs});
+                    guestNs = span.endNs;
+                }
+                clock.run(span, period, nextCallback);
+                full = !full;
+                nextCallback += periodNs;
+            }
+            if (!offered && guestNs >= 50 * ms) {
+                out->offer(play(100 * ms, 7, body));
+                offered = true;
+            }
+            fakeNow += ms;
+            out->work();
+        }
+        // When the guest audio of guest ns g plays.
+        const auto playsAt = [&](uint64_t g) {
+            for (const auto& p : plays)
+                if (g < p.second + periodNs) return p.first + (g - p.second);
+            return uint64_t(0);
+        };
+        const auto s = log.copy();
+        assert(s.size() == 5);
+        const uint64_t due[] = {100 * ms, 350 * ms, 350 * ms, 600 * ms, 600 * ms};
+        for (size_t i = 0; i < s.size(); ++i) {
+            const int64_t off = int64_t(s[i].hostNs + lagNs) - int64_t(playsAt(due[i]));
+            // Within a period (the clock runs on over each underrun and stands to wait); sent the lag ahead, its
+            // time is a guess past the last period at real speed, so up to the lag early with this slow a guest.
+            assert(off > -int64_t(periodNs + lagNs + 2 * ms) && off < int64_t(periodNs + 2 * ms));
+            // Never written after it's due, nor much before (the engine's 5 ms wake).
+            assert(s[i].at <= s[i].hostNs + ms && s[i].at + 6 * ms >= s[i].hostNs);
+        }
+        // Half speed: the 250 ms between the notes take about 500 ms.
+        assert(s[1].hostNs - s[0].hostNs > 450 * ms && s[1].hostNs - s[0].hostNs < 550 * ms);
+    }
+}
+
+// Timestamps never go back, though the map moves under them: callbacks in bursts (two 1 ms apart, then a gap)
+// move each published period's host time, and with a lookahead messages go out by the older period.
+void stampsInOrder() {
+    Log log;
+    fakeNow = 10000 * ms;
+    GuestAudioClock clock;
+    auto out = make(log, 30 * ms);
+    out->setReference(&clock);
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, nextCallback = fakeNow.load(), pair = 0;
+    for (uint32_t i = 0; i < 200; ++i) out->offer(message(100 * ms + i * ms, 0x90, uint8_t(i & 0x7f), 0x40));
+    while (fakeNow.load() < 10600 * ms) {
+        if (fakeNow.load() >= nextCallback) {
+            AudioQueueSpan span;
+            span.known = true;
+            span.frames = period;
+            span.startNs = guestNs;
+            span.endNs = guestNs += periodNs;
+            clock.noteNewest(guestNs + 100 * ms);
+            clock.run(span, period, nextCallback);
+            nextCallback += ++pair % 2 ? ms : 2 * periodNs - ms;
+        }
+        fakeNow += ms;
+        out->work();
+    }
+    const auto s = log.copy();
+    assert(s.size() == 200);
+    for (size_t i = 1; i < s.size(); ++i) assert(s[i].hostNs >= s[i - 1].hostNs);
+}
+
+// A hold: the device plays on with the clock standing, nothing published. On resume the old period isn't timed
+// by: the next message waits for a new one, so it isn't stamped in the past or sent at once.
+void resumed() {
+    Log log;
+    fakeNow = 10000 * ms;
+    GuestAudioClock clock;
+    auto out = make(log);
+    out->setReference(&clock);
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, nextCallback = fakeNow.load(), holdNs = 0, resumeNs = 0;
+    out->offer(message(100 * ms, 0x90, 0x3c, 0x40));
+    out->offer(message(250 * ms, 0x90, 0x3e, 0x40));
+    while (fakeNow.load() < 11800 * ms) {
+        // Held from guest 245 ms for 1 s.
+        if (!holdNs && guestNs >= 245 * ms) {
+            holdNs = fakeNow.load();
+            clock.hold(true);
+            out->hold(true);
+        }
+        if (holdNs && !resumeNs && fakeNow.load() >= holdNs + 1000 * ms) {
+            resumeNs = fakeNow.load();
+            clock.hold(false);
+            out->hold(false);
+        }
+        if (fakeNow.load() >= nextCallback) {
+            AudioQueueSpan span;
+            span.known = true;
+            span.frames = period;
+            span.startNs = guestNs;
+            span.endNs = guestNs + periodNs;
+            clock.noteNewest(guestNs + 100 * ms);
+            if (!clock.held()) guestNs = span.endNs;
+            clock.run(span, period, nextCallback);
+            nextCallback += periodNs;
+        }
+        fakeNow += ms;
+        out->work();
+    }
+    const auto s = log.copy();
+    assert(resumeNs && s.size() == 2 + 32);
+    // The note, all notes off at the hold, then the second note after the resume, in a period published since.
+    assert(s[33].b == (Bytes{0x90, 0x3e, 0x40}) && s[33].at >= resumeNs && s[33].hostNs >= resumeNs + periodNs);
+}
+
+// The audio callback's side and the engine's thread at once, on the steady clock, for TSan: the seqlock's end and
+// read.
+void referenceThreads() {
+    Log log;
+    GuestAudioClock clock;
+    {
+        ZodiacMidiOut out(std::make_unique<FakePort>(log, ZodiacMidiOut::steadyNs));
+        out.setReference(&clock);
+        out.start();
+        for (uint32_t i = 0; i < 20; ++i) out.offer(message(20 * ms + i * 5 * ms, 0x90, uint8_t(60 + i), 0x40));
+        std::atomic<bool> done{false};
+        std::thread audio([&] {
+            constexpr size_t period = 256;
+            uint64_t guestNs = 0;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+                AudioQueueSpan span;
+                span.known = true;
+                span.frames = period;
+                span.startNs = guestNs;
+                span.endNs = guestNs += GuestAudioClock::framesNs(period);
+                clock.noteNewest(guestNs + 100 * ms);
+                clock.run(span, period, GuestAudioClock::steadyNs());
+                std::this_thread::sleep_for(std::chrono::microseconds(GuestAudioClock::framesNs(period) / 1000));
+            }
+        });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (log.copy().size() < 20 && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        done = true;
+        audio.join();
+        out.stop();
+        const auto s = log.copy();
+        assert(s.size() >= 20);
+        for (uint32_t i = 0; i < 20; ++i) assert(s[i].b == (Bytes{0x90, uint8_t(60 + i), 0x40}));
+        for (size_t i = 1; i < 20; ++i) assert(s[i].hostNs >= s[i - 1].hostNs);
+    }
+}
+
+// Audio off: the callback stops and the reference goes (setReference(nullptr)); the music carries on by the
+// host clock from the guest time it reached, and goes back to the reference when audio is on again.
+void audioOff() {
+    Log log;
+    fakeNow = 10000 * ms;
+    GuestAudioClock clock;
+    auto out = make(log);
+    out->setReference(&clock);
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, nextCallback = fakeNow.load();
+    for (const uint64_t t : {100 * ms, 300 * ms, 500 * ms}) out->offer(message(t, 0x90, uint8_t(t / ms / 10), 0x40));
+    bool on = true;
+    while (fakeNow.load() < 11000 * ms) {
+        if (on && guestNs >= 200 * ms) {
+            on = false;
+            out->setReference(nullptr);
+        }
+        if (on && fakeNow.load() >= nextCallback) {
+            AudioQueueSpan span;
+            span.known = true;
+            span.frames = period;
+            span.startNs = guestNs;
+            span.endNs = guestNs += periodNs;
+            clock.noteNewest(guestNs + 100 * ms);
+            clock.run(span, period, nextCallback);
+            nextCallback += periodNs;
+        }
+        fakeNow += ms;
+        out->work();
+    }
+    const auto s = log.copy();
+    assert(s.size() == 3);
+    assert(s[2].hostNs - s[1].hostNs > 198 * ms && s[2].hostNs - s[1].hostNs < 202 * ms);
+    assert(s[1].hostNs - s[0].hostNs > 190 * ms && s[1].hostNs - s[0].hostNs < 215 * ms);
+    assert(onTime(s, 0, ms + periodNs));
+}
+
+// A queue clear (no marks: spans not known) after a hold: the next guest audio, 1 s ahead, is a jump, not eased
+// to as the resume would have been.
+void clearAfterHold() {
+    GuestAudioClock clock;
+    constexpr size_t period = 512;
+    const uint64_t periodNs = GuestAudioClock::framesNs(period);
+    uint64_t guestNs = 0, hostNs = 10000 * ms;
+    const auto full = [&](uint64_t startNs) {
+        AudioQueueSpan span;
+        span.known = true;
+        span.frames = period;
+        span.startNs = startNs;
+        span.endNs = startNs + periodNs;
+        clock.run(span, period, hostNs += periodNs);
+    };
+    for (int i = 0; i < 20; ++i, guestNs += periodNs) full(guestNs);
+    clock.hold(true);
+    full(guestNs);
+    clock.hold(false);
+    clock.run(AudioQueueSpan{}, period, hostNs += periodNs);
+    full(guestNs + 1000 * ms);
+    GuestAudioClock::Reference r;
+    const bool read = clock.read(r);
+    assert(read && r.jumps == 1 && !r.back && r.jumpNs == guestNs + 1000 * ms);
+    (void)read;
 }
 
 // Port names without the numbers that change with plug order.
@@ -383,11 +627,17 @@ int main() {
     lateEvent();
     delayed();
     driftDelayed();
+    guestPaced();
+    stampsInOrder();
+    resumed();
+    referenceThreads();
+    audioOff();
+    clearAfterHold();
     portKeys();
     sleeps();
     threads();
     std::puts("PASS: Zodiac MIDI out (event stream, song times, never early, stop, hold, lookahead, forward jump, late event, delay, "
-              "drift after the delay, port names, "
+              "drift after the delay, guest audio clock, stamps in order, resume, clock threads, audio off, a clear after a hold, port names, "
               "sleeping thread, hooks and engine thread, notes off at the end)");
     return 0;
 }
