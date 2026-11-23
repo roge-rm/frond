@@ -39,6 +39,10 @@ namespace {
     // B14, the charger input: the DAL's dock status (ROM 20089990) reads it low as external power and
     // charging. zodiacMachineOptions starts it low; ApplyBattery sets it high off the charger.
     constexpr uint32_t chargerPinB = 0x00004000;
+    // A14, charge done: the DAL (200888d8) reads it high as done, so on the charger the LED driver (20097854) shows
+    // green alone, and low as still charging, green and red. zodiacMachineOptions starts it low; ApplyBattery sets it
+    // high only on the charger at 100%, and low off the charger, where the LED driver doesn't read it.
+    constexpr uint32_t chargeDonePinA = 0x00004000;
     // B16, headphone detect: the DAL (20097d40) reads it high as headphones in, writes YMF768 reg 25 = 0 and
     // turns D27 low and D26 to the headphone bass setting; low (Frond's default) is the speaker.
     constexpr uint32_t headphonePinB = 0x00010000;
@@ -694,7 +698,7 @@ bool SocIMX1::SetBattery(const BatteryPower& value) {
 
 // The level as the graphics chip's mode 1 sample the OS gauge reads and the ASP U word the DAL's voltage
 // read takes (zodiac_battery.h); Maximum is the fixed 712 and 0x9b00 every Zodiac state was made with.
-// Charging pulls B14 low.
+// Charging pulls B14 low, and a full battery on the charger sets A14 high.
 bool SocIMX1::ApplyBattery() {
     if (halted) return false;
     if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
@@ -703,6 +707,8 @@ bool SocIMX1::ApplyBattery() {
         std::cerr << "zodiac: the battery gauge input could not be set" << std::endl;
     // The charger and the headphones go in separately, so one refused pin doesn't hold back the other.
     uint32_t values[4]{}, masks[4]{};
+    masks[0] = chargeDonePinA;
+    values[0] = battery.charging && !battery.ChargeInProgress() ? chargeDonePinA : 0;
     masks[1] = chargerPinB;
     values[1] = battery.charging ? 0 : chargerPinB;
     if (!replaceGpioInputs(machine, values, masks)) std::cerr << "zodiac: the charger input could not be set" << std::endl;
