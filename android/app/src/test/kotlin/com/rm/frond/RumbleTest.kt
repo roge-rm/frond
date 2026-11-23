@@ -37,6 +37,21 @@ class RumbleTest {
         assertEquals(null, RumbleChoice.pick(emptyList(), v, null))
     }
 
+    @Test fun repicksWhenItsPadGoesOrAControllerComes() {
+        // The running pad gone: another pad, or the phone with none left (target with none connected).
+        assertTrue(RumbleChoice.repick(true, 4, 4))
+        assertEquals(5, RumbleChoice.pick(listOf(4, 5).filter { it != 4 }, { true }, 4))
+        assertEquals(RumbleTarget.PHONE, t(true, false, false, true))
+        // Another pad gone leaves it where it is.
+        assertFalse(RumbleChoice.repick(true, 4, 5))
+        // On the phone: a controller plugged in takes it.
+        assertTrue(RumbleChoice.repick(true, null, null))
+        assertFalse(RumbleChoice.repick(true, 4, null))
+        // The guest motor off: nothing to move.
+        assertFalse(RumbleChoice.repick(false, null, 4))
+        assertFalse(RumbleChoice.repick(false, null, null))
+    }
+
     @Test fun settingIsOnByDefaultAndSaved() {
         val zodiac = Device.byId(Device.ZODIAC_ID)!!
         assertTrue(MachineSettings.defaults(zodiac).rumble)

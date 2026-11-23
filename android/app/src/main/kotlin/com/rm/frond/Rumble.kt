@@ -25,6 +25,11 @@ object RumbleChoice {
     // The device to vibrate: the last used one if it is connected and vibrates, else the first that does.
     fun pick(connected: List<Int>, vibrates: (Int) -> Boolean, last: Int?): Int? =
         last?.takeIf { it in connected && vibrates(it) } ?: connected.firstOrNull(vibrates)
+
+    // Whether a running motor picks its vibrator again after a device is added (gone null) or removed
+    // (gone): the pad it ran on went away, or it ran on the phone or nowhere and the controllers changed.
+    fun repick(on: Boolean, runningPad: Int?, gone: Int?): Boolean =
+        on && (runningPad == null || runningPad == gone)
 }
 
 // Runs a vibrator while the guest's motor is on. The guest steps any pattern itself, so this only starts
@@ -48,10 +53,15 @@ class Rumble(private val context: Context, private val notification: Boolean = f
             stop()
             return
         }
+        start(null)
+    }
+
+    // Starts the vibrator the motor goes to, leaving out the controller that is going away (gone).
+    private fun start(gone: Int?) {
         if (notification &&
             context.getSystemService(AudioManager::class.java)?.ringerMode == AudioManager.RINGER_MODE_SILENT
         ) return
-        val connected = connectedControllers()
+        val connected = connectedControllers().filter { it != gone }
         val padId = RumbleChoice.pick(connected, { controllerVibrator(it) != null }, controller)
         val pad = padId?.let { controllerVibrator(it) }
         val phone = phoneVibrator()
@@ -90,14 +100,22 @@ class Rumble(private val context: Context, private val notification: Boolean = f
         on = false
     }
 
+    // A controller plugged in: a motor running on the phone moves to it.
+    fun added(device: Int) = repick(device, null)
+
+    // A controller gone: a motor running on it moves to another controller, or the phone with none left.
     fun forget(device: Int) {
         if (controller == device) controller = null
-        // The motor stays on in the guest, but the gone controller's vibrator is cancelled.
-        if (runningPad == device) {
-            running?.cancel()
-            running = null
-            runningPad = null
-        }
+        repick(device, device)
+    }
+
+    private fun repick(device: Int, gone: Int?) {
+        if (!RumbleChoice.repick(on, runningPad, gone)) return
+        if (gone == null && connectedControllers().none { it == device }) return
+        running?.cancel()
+        running = null
+        runningPad = null
+        start(gone)
     }
 
     private fun controllerVibrator(id: Int): Vibrator? {

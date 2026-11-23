@@ -799,6 +799,7 @@ open class FrondActivity : SDLActivity() {
         inputDevices = getSystemService(InputManager::class.java)
         inputListener = object : InputManager.InputDeviceListener {
             override fun onInputDeviceAdded(deviceId: Int) {
+                rumble?.added(deviceId)
                 applyTouchOverlay()
                 updateDanaEnvironment()
             }
