@@ -467,7 +467,7 @@ class FirmwareInputTest : public QObject {
                    c500 = frondFirmware::deviceFromId("ibm-workpad-c500"), iiix = frondFirmware::deviceFromId("palm-iiix");
         for (auto device : {m125, m500, c500}) {
             QVERIFY(device != Device::automatic && frondFirmware::runs68k(device) && frondFirmware::linkedCards(device));
-            QVERIFY(frondFirmware::hasHotSyncButton(device) && !frondFirmware::capabilities(device).usb);
+            QVERIFY(frondFirmware::hasHotSyncButton(device) && frondFirmware::capabilities(device).usb);
         }
         QVERIFY(frondFirmware::linkedCards(frondFirmware::deviceFromId("alphasmart-dana")) && !frondFirmware::linkedCards(iiix));
         rom68k(rom, 0x300000, 5, 0x0040, 0x70616c6d, 0x76737475, 0x2a2, 0x10000000);

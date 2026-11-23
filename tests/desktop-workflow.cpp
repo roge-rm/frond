@@ -1075,8 +1075,8 @@ for line in s.makefile('rb'):
         QVERIFY(headphones->isChecked());
         headphones->click();
         QTRY_VERIFY(frondSessions::readPreferences(managedSession("Tungsten E2"), &added) && !added.headphonesIn);
-        // TX-only network/serial controls stay off; the E2 keyboard and USB are usable.
-        QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
+        // Network is the Palm Wi-Fi Card; the E2 keyboard and USB are usable.
+        QVERIFY(window.findChild<QComboBox*>("networkMode")->isEnabled());
         QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
         window.findChild<QCheckBox*>("keyboardAttached")->click();
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("keyboard-attach"), 5000);
@@ -1234,12 +1234,8 @@ for line in s.makefile('rb'):
         QCOMPARE(window.windowTitle(), QString("Zire 72"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("keyboard-state"), 5000);
         QVERIFY(!read(".commands").contains("serial-state") && !read(".commands").contains("usb-state"));
-        // Network greys out with the shared wording; the Zire has no serial port, so that row is left out.
-        {
-            auto* box = window.findChild<QComboBox*>("networkMode");
-            QVERIFY(!box->isEnabled());
-            QCOMPARE(box->toolTip(), QString("Not available on the Zire 72 yet"));
-        }
+        // Network is the Palm Wi-Fi Card; the Zire has no serial port, so that row is left out.
+        QVERIFY(window.findChild<QComboBox*>("networkMode")->isEnabled());
         QVERIFY(!window.findChild<QComboBox*>("serialMode")->isVisibleTo(&window));
         QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isVisibleTo(&window));
         QVERIFY(!window.findChild<QPushButton*>("hotsync")->isVisibleTo(&window));
@@ -1729,7 +1725,7 @@ for line in s.makefile('rb'):
         QStringList got;
         for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts)) {
             const auto command = line.section('\t', 0, 0);
-            if (command == "save" || command.startsWith("sd-") && command != "sd-state") got << command;
+            if (command == "save" || command.startsWith("sd-") && command != "sd-state" && command != "sd-protection") got << command;
         }
         QStringList expected;
         if (mode == "apply" || mode == "put-in-fail") expected = {"sd-eject", "save", "sd-take-out", "sd-put-in"};
@@ -2441,7 +2437,7 @@ for line in s.makefile('rb'):
             QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
             QStringList got;
             for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts))
-                if (line.startsWith("sd2-") && !line.startsWith("sd2-state")) got << line.section('\t', 0, 0);
+                if (line.startsWith("sd2-") && !line.startsWith("sd2-state") && !line.startsWith("sd2-protection")) got << line.section('\t', 0, 0);
             QCOMPARE(got, QStringList({"sd2-put-in", "sd2-eject", "sd2-reinsert", "sd2-eject", "sd2-take-out"}));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         }
@@ -3310,6 +3306,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-e2'}.get(cmd,b'done')
     if cmd==b'sd-state': message=card
+    if cmd==b'sd-protection': message=b'writable'
     if cmd==b'sd-eject': card=b'ejected'
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
@@ -3345,8 +3342,8 @@ for line in s.makefile('rb'):
         panelHost->open(3);
         QVERIFY(shown("hotsync"));
         QTRY_VERIFY(window.findChild<QPushButton*>("installApp")->isEnabled());
-        // The E2 has no network; its serial port, USB, keyboard and Bluetooth stay.
-        QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
+        // The E2 network is the Palm Wi-Fi Card; its serial port, USB, keyboard and Bluetooth stay.
+        QVERIFY(window.findChild<QComboBox*>("networkMode")->isEnabled());
         QVERIFY(window.findChild<QComboBox*>("serialMode")->isEnabled());
         QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
         // Sound here and in Settings are the same setting.
