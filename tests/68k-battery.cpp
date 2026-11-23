@@ -46,12 +46,12 @@ class Exposed : public Board {
 template <class Board, class Chip>
 static void dcIn(Chip& chip, int port, uint8 bit, const char* what) {
     Exposed<Board, Chip> board(chip);
-    gBattery = BatteryPower{};
+    gBattery = BatteryPower{};  // the default, on the charger
+    check(!(board.Port(port) & bit), what);
+    check(BatteryPower::Parse("max battery", gBattery), "parse");
     check(board.Port(port) & bit, what);
     check(BatteryPower::Parse("max charging", gBattery), "parse");
     check(!(board.Port(port) & bit), what);
-    gBattery = BatteryPower{};
-    check(board.Port(port) & bit, what);
 }
 
 int main() {
@@ -91,6 +91,10 @@ int main() {
         check(bool(iiic.GetPortInputValue('D') & 0x40) != charging, "IIIc PD6 adapter detect");
         check(palmV.DockId() == (charging ? 96 : 0), "Palm V/Vx charger ID");
     }
+    // Full on the charger: external power, and CHARGING# high as the charger has stopped.
+    gBattery = BatteryPower{};
+    check(!(m500.GetPortInputValue('K') & 0x04) && (m500.GetPortInputValue('E') & 0x40), "m500 full on the charger");
+    check(!(m520.GetPortInputValue('K') & 0x04) && (m520.GetPortInputValue('K') & 0x02), "m520 full on the charger");
 
     EmRegsMB86189 mb86189(0x10800000);
     EmRegsSonyDSP dsp(0x11000000);

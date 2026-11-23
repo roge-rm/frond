@@ -56,19 +56,21 @@ class BatteryTest {
         assertFalse(json.has("batteryMode"))
         assertFalse(json.has("batteryLevel"))
         assertFalse(json.has("batteryCharging"))
-        val set = MachineSettings(batteryMode = BatteryMode.LEVEL, batteryLevel = 15, batteryCharging = true)
+        val set = MachineSettings(batteryMode = BatteryMode.LEVEL, batteryLevel = 15, batteryCharging = false)
         val back = MachineSettings.from(set.json())
         assertEquals(BatteryMode.LEVEL, back.batteryMode)
         assertEquals(15, back.batteryLevel)
-        assertTrue(back.batteryCharging)
+        assertFalse(back.batteryCharging)
         assertEquals(BatteryMode.HOST, MachineSettings.from(MachineSettings(batteryMode = BatteryMode.HOST).json()).batteryMode)
     }
 
-    @Test fun oldSettingsAreMaximum() {
+    @Test fun oldSettingsAreMaximumOnTheCharger() {
         val old = MachineSettings.from(JSONObject().put("engine", "fast"))
         assertEquals(BatteryMode.MAX, old.batteryMode)
         assertEquals(100, old.batteryLevel)
-        assertFalse(old.batteryCharging)
+        assertTrue(old.batteryCharging)
+        assertEquals("max charging", BatteryText.spec(old.batteryMode, old.batteryLevel, old.batteryCharging, HostBattery()))
+        assertFalse(MachineSettings.from(JSONObject().put("batteryCharging", false)).batteryCharging)
         assertEquals(100, MachineSettings.from(JSONObject().put("batteryLevel", 900)).batteryLevel)
         assertEquals(BatteryMode.MAX, MachineSettings.from(JSONObject().put("batteryMode", "nonsense")).batteryMode)
     }

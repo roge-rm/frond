@@ -1020,6 +1020,24 @@ class SessionStoreTest : public QObject {
         QVERIFY(readPreferences(path, &loaded));
         QCOMPARE(loaded.musicOutput, QString("fm"));
     }
+    void batteryPreferences() {
+        const auto path = filePath(folder(), "Battery Default");
+        write(path, header(6, "palm-tx"));
+        // New machines and settings saved before the default changed: full on the charger.
+        Preferences prefs;
+        QVERIFY(prefs.batteryMode == "max" && prefs.batteryLevel == 100 && prefs.batteryCharging);
+        write(preferencesPath(path), R"({"version":1,"scale":4,"smooth":false,"audio":true,"fastAudio":false})");
+        QVERIFY(readPreferences(path, &prefs) && prefs.batteryCharging);
+        // A machine set to battery stays on battery.
+        prefs.batteryCharging = false;
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        Preferences loaded;
+        QVERIFY(readPreferences(path, &loaded) && !loaded.batteryCharging);
+        loaded.batteryCharging = true;
+        QVERIFY(writePreferences(path, loaded).isEmpty());
+        QFile file(preferencesPath(path));
+        QVERIFY(file.open(QIODevice::ReadOnly) && !file.readAll().contains("batteryCharging"));
+    }
     void machineControlVisibilityPreferences() {
         const auto one = filePath(folder(), "TG50 One"), two = filePath(folder(), "TG50 Two");
         write(one, header(6, "sony-clie-tg50"));

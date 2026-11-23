@@ -156,9 +156,11 @@ namespace {
 #define hwrDockStatusUsingExternalPower 0x0004  // using some type of external power source
 #define hwrDockStatusCharging 0x0008            // internal power cells are recharging
 
-        // On the charger (the battery setting's Charging switch) or on battery with nothing attached.
+        // On the charger (the battery setting's Charging switch), charging until full, or on battery with nothing
+        // attached.
         PUT_RESULT_VAL(UInt16, gBattery.charging
-                                   ? UInt16(hwrDockStatusUsingExternalPower | hwrDockStatusCharging)
+                                   ? UInt16(hwrDockStatusUsingExternalPower |
+                                            (gBattery.ChargeInProgress() ? hwrDockStatusCharging : 0))
                                    : UInt16(hwrDockStatusUndocked));
 
         return kSkipROM;

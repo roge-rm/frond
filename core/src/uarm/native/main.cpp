@@ -1900,7 +1900,7 @@ int main(int argc, char** argv) {
         .default_value(false).implicit_value(true);
 
     program.add_argument("--battery")
-        .help("the battery: max, level N or host N (0-100), then charging or battery (not charging)")
+        .help("the battery: max, level N or host N (0-100), then charging or battery (not charging); max charging by default")
         .metavar("<\"max|level N|host N [charging|battery]\">")
         .default_value(string("max"))
         .action([](const string& value) {

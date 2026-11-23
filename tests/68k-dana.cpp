@@ -1510,11 +1510,15 @@ int main() {
     St st;
     st.SetByte(0xfffff421,8);st.SetByte(0xfffff431,0);
     auto* defaults=st.GetSPI2Slave();
+    // The fixed counts off the charger (the default charger adds its rise and the supply).
+    const auto chargerSetting=gBattery;
+    assert(BatteryPower::Parse("max battery",gBattery));
     for(auto sample: {std::pair<uint8,uint16>{0xa4,3072},{0xe4,50}}) {
         defaults->DoExchange(7,sample.first);
         uint16 hi=defaults->DoExchange(7,0),lo=defaults->DoExchange(7,0);
         assert(((hi<<8)|lo)==(sample.second<<3));
     }
+    gBattery=chargerSetting;
     assert(st.Byte(0)==0xaa);assert(st.Byte(0)==0);
     // Polling K cannot create a second reset acknowledgement.
     for(int i=0;i<8;i++)st.GetPortInputValue('K');
@@ -1669,7 +1673,7 @@ int main() {
         assert((level*100+19/2)/19>=curve[10]);
         // With no battery data in RAM (no ROM here) channel 2 keeps its fixed count at any setting.
         const auto saved=gBattery;
-        BatteryPower low; assert(BatteryPower::Parse("level 20",low)); gBattery=low;
+        BatteryPower low; assert(BatteryPower::Parse("level 20 battery",low)); gBattery=low;
         assert(st.SetVirtualAnalogueInputs(1000,50,true));
         adc->DoExchange(7,0xa4);
         uint16 hi=adc->DoExchange(7,0),lo=adc->DoExchange(7,0);

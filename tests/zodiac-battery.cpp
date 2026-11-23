@@ -79,6 +79,7 @@ void machine() {
     SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), why);
     assert(soc && soc->BatterySupported());
     assert(soc->Battery() == BatteryPower{} && soc->BatterySample() == zodiacBatteryFullSample);
+    assert(soc->ChargerInputLow());  // the default is on the charger
     assert(soc->BatteryGaugeSample() == zodiacBatteryFullMode1);
     const auto atMaximum = save(*soc);
 
@@ -97,18 +98,19 @@ void machine() {
     assert(soc->BatteryGaugeSample() == zodiacBatteryFullMode1);
 
     // Charging pulls B14 low, through a load and a reset as well. Off the charger it's high.
-    assert(!soc->ChargerInputLow());
+    assert(soc->ChargerInputLow());
+    assert(soc->SetBattery(battery("max battery")) && !soc->ChargerInputLow());
     assert(soc->SetBattery(battery("level 40 charging")) && soc->ChargerInputLow());
     load(*soc, atMaximum);
     assert(soc->ChargerInputLow());
     soc->Reset();
     assert(soc->ChargerInputLow() && soc->BatterySample() == zodiacBatterySample(40));
-    assert(soc->SetBattery(battery("level 40")) && !soc->ChargerInputLow());
+    assert(soc->SetBattery(battery("level 40 battery")) && !soc->ChargerInputLow());
 
     // A state made at another level loads at the setting the machine has.
-    assert(soc->SetBattery(battery("level 5")));
+    assert(soc->SetBattery(battery("level 5 battery")));
     const auto atLevel = save(*soc);
-    assert(soc->SetBattery(battery("max")));
+    assert(soc->SetBattery(battery("max battery")));
     load(*soc, atLevel);
     assert(soc->BatterySample() == zodiacBatteryFullSample && soc->BatteryGaugeSample() == zodiacBatteryFullMode1);
 
@@ -228,7 +230,7 @@ void halted() {
     SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), why);
     assert(soc);
     const auto fresh = save(*soc);
-    assert(soc->SetBattery(battery("level 20")));
+    assert(soc->SetBattery(battery("level 20 battery")));
     const auto stop = [&] {
         soc->Run(1000000, 32000000);
         assert(soc->Halted());

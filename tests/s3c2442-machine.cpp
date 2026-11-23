@@ -838,7 +838,7 @@ int main() {
     // and pulling out.
     {
         BatteryPower start;
-        assert(BatteryPower::Parse("level 30", start));
+        assert(BatteryPower::Parse("level 30 battery", start));
         S3c2442Options options;
         rx1950BatteryPins(start, options);
         auto m = make({loop}, options);
@@ -848,10 +848,10 @@ int main() {
         m->intc.srcpnd = 0;
         struct Case { const char* spec; bool ac, done; bool edge; };
         const Case cases[] = {
-            {"level 30", false, true, false},  {"level 30 charging", true, false, true},
+            {"level 30 battery", false, true, false},  {"level 30 charging", true, false, true},
             {"level 5 charging", true, false, false}, {"max charging", true, true, false},
-            {"level 100 battery", false, true, true},  {"host 0", false, true, false},
-            {"host 70 charging", true, false, true},   {"max", false, true, true},
+            {"level 100 battery", false, true, true},  {"host 0 battery", false, true, false},
+            {"host 70 charging", true, false, true},   {"max battery", false, true, true},
         };
         for (const auto& c : cases) {
             BatteryPower b;
@@ -874,7 +874,7 @@ int main() {
         // plugging in and pulling out, and back to the setting's own state after.
         {
             BatteryPower b;
-            assert(BatteryPower::Parse("level 60", b));
+            assert(BatteryPower::Parse("level 60 battery", b));
             rx1950ApplyBattery(*m, b);
             m->intc.srcpnd = 0;
             uint32_t gpf = 0;
