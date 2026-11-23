@@ -7,16 +7,34 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RumbleTest {
-    @Test fun controllerFirstThenPhone() {
-        assertEquals(RumbleTarget.CONTROLLER, RumbleChoice.target(enabled = true, controllerVibrates = true, phoneVibrates = true))
-        assertEquals(RumbleTarget.CONTROLLER, RumbleChoice.target(enabled = true, controllerVibrates = true, phoneVibrates = false))
-        assertEquals(RumbleTarget.PHONE, RumbleChoice.target(enabled = true, controllerVibrates = false, phoneVibrates = true))
-        assertEquals(RumbleTarget.NONE, RumbleChoice.target(enabled = true, controllerVibrates = false, phoneVibrates = false))
+    private fun t(enabled: Boolean, connected: Boolean, pad: Boolean, phone: Boolean) =
+        RumbleChoice.target(enabled, connected, pad, phone)
+
+    @Test fun controllerConnectedNeverUsesPhone() {
+        assertEquals(RumbleTarget.CONTROLLER, t(true, true, true, true))
+        assertEquals(RumbleTarget.CONTROLLER, t(true, true, true, false))
+        assertEquals(RumbleTarget.NONE, t(true, true, false, true))
+        assertEquals(RumbleTarget.NONE, t(true, true, false, false))
+    }
+
+    @Test fun noControllerUsesPhone() {
+        assertEquals(RumbleTarget.PHONE, t(true, false, false, true))
+        assertEquals(RumbleTarget.NONE, t(true, false, false, false))
     }
 
     @Test fun offGoesNowhere() {
-        assertEquals(RumbleTarget.NONE, RumbleChoice.target(enabled = false, controllerVibrates = true, phoneVibrates = true))
-        assertEquals(RumbleTarget.NONE, RumbleChoice.target(enabled = false, controllerVibrates = false, phoneVibrates = true))
+        assertEquals(RumbleTarget.NONE, t(false, true, true, true))
+        assertEquals(RumbleTarget.NONE, t(false, false, false, true))
+    }
+
+    @Test fun picksLastUsedThenFirstThatVibrates() {
+        val v = { id: Int -> id != 2 }
+        assertEquals(3, RumbleChoice.pick(listOf(1, 2, 3), v, 3))
+        assertEquals(1, RumbleChoice.pick(listOf(1, 2, 3), v, 2))
+        assertEquals(1, RumbleChoice.pick(listOf(1, 2, 3), v, 9))
+        assertEquals(3, RumbleChoice.pick(listOf(2, 3), v, null))
+        assertEquals(null, RumbleChoice.pick(listOf(2), v, 2))
+        assertEquals(null, RumbleChoice.pick(emptyList(), v, null))
     }
 
     @Test fun settingIsOnByDefaultAndSaved() {
