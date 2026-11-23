@@ -93,8 +93,8 @@ class SdlEventHandler {
     void TapStickPress();
     // Sends what the game controller holds now: its keys that changed and the stick.
     void UpdateGamepad();
-    // The device has Palm buttons a controller map can press.
-    bool ControllerKeysListed() const;
+    // Game controllers are opened: the Zodiac, a CLIÉ that takes the game controller, or a map with keys.
+    bool ControllersWanted() const;
 
    private:
     SoC* soc;

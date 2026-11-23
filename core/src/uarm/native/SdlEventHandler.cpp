@@ -274,11 +274,10 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 break;
             }
 
-            // A game controller, for the Zodiac's stick and the controller map. It is opened so SDL reports its
-            // buttons and axes, on every device with buttons a map can press, as the map can change while running.
+            // A game controller, for the Zodiac, the CLIÉ game controller and a controller map with keys. It is
+            // opened so SDL reports its buttons and axes.
             case SDL_CONTROLLERDEVICEADDED:
-                if (inputControls->style == DeviceControlStyle::zodiac || soc->GamepadSupported() || ControllerKeysListed())
-                    SDL_GameControllerOpen(event.cdevice.which);
+                if (ControllersWanted()) SDL_GameControllerOpen(event.cdevice.which);
                 break;
 
             case SDL_CONTROLLERDEVICEREMOVED:
@@ -599,12 +598,16 @@ bool SdlEventHandler::Rumble(bool on, uint64_t nowUsec) {
     return opened;
 }
 
-bool SdlEventHandler::ControllerKeysListed() const {
-    const auto* profile = deviceProfile5(soc->GetDeviceType());
-    return profile && !controllerPalmKeys(*profile).empty();
+bool SdlEventHandler::ControllersWanted() const {
+    return inputControls->style == DeviceControlStyle::zodiac || soc->GamepadSupported() || !controllerMap.keys.empty();
 }
+// A map with keys on a device that had none opens the controllers already connected.
 void SdlEventHandler::SetControllerMap(const ControllerMap& map) {
     controllerMap = map;
+    if (ControllersWanted() && SDL_WasInit(SDL_INIT_GAMECONTROLLER))
+        for (int i = 0; i < SDL_NumJoysticks(); ++i)
+            if (SDL_IsGameController(i) && !SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i)))
+                SDL_GameControllerOpen(i);
     UpdateGamepad();
 }
 // A controller key is held if any controller holds it. The Zodiac's stick is the one moved last, or
