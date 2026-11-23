@@ -345,6 +345,8 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     dev = deviceSetup(deviceType, &sp, rescheduleCb, getEmuTime, kp, vSD, nandContent, nandSize,
                       &bufferNand);
     deviceSetTransportObserver(dev, RefreshTransportPins, this);
+    // The default battery, full on the charger, on the board's pins before the power-on state is taken.
+    deviceSetBattery(dev, battery);
     if (pxaI2sHasCodec(i2s)) scheduler->ScheduleTask(SCHEDULER_TASK_I2S, 20_usec, 1);
 
     nand = sp.nand;

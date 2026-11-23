@@ -449,9 +449,9 @@ void tg50BoardSetAccessoryAux(Tg50Board *board, uint16_t mV) { ad7873setVaux(boa
 // 0xF3 or more). 0 V would be its serial-ID accessory class 0x200.
 void tg50BoardSetConnectorEmpty(Tg50Board *board) { ad7873setVaux(board->touch, 2500); }
 void tg50BoardSetBatteryMilliVolts(Tg50Board *board, uint16_t mV) { ad7873setVbatt(board->touch, mV); }
-void tg50BoardSetCharging(Tg50Board *board, bool charging) {
+void tg50BoardSetCharging(Tg50Board *board, bool externalPower, bool charging) {
     tg50ucGpioSetInState(board->uc, 0, 13, !charging);
-    tg50ucGpioSetInState(board->uc, 0, 14, !charging);
+    tg50ucGpioSetInState(board->uc, 0, 14, !externalPower);
 }
 uint16_t tg50BoardAccessoryAuxCode(Tg50Board *board) { return ad7873getVaux(board->touch); }
 bool tg50BoardUsbCableAttached(Tg50Board *board) {

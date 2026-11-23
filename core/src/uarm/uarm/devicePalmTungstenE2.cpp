@@ -146,7 +146,7 @@ static void deviceApplyBattery(Device *dev) {
     const bool charging = dev->battery.ExternalPower();
     if (dev->tg50) {
         tg50BoardSetBatteryMilliVolts(dev->tg50, uint16_t(mV));
-        tg50BoardSetCharging(dev->tg50, charging);
+        tg50BoardSetCharging(dev->tg50, charging, dev->battery.ChargeInProgress());
         return;
     }
     if (!dev->wm9712L) return;
@@ -334,7 +334,7 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
         pxaGpioSetState(sp->gpio, 15, false); // USB cable absent (VBUS, active high)
         pxaGpioSetState(sp->gpio, 37, true);  // low starts MfgTestExt's serial test loop
         pxaGpioSetState(sp->gpio, 94, false); // 32 MiB RAM
-        pxaGpioSetState(sp->gpio, 99, true);  // no external power; low shows the battery charging
+        pxaGpioSetState(sp->gpio, 99, true);  // low is external power (the charging bolt); deviceApplyBattery sets it
         // GPIO98 high cuts the card's supply (palmz72.h SD_POWER_N). The ROM switches it off
         // between card accesses and starts the card again from CMD0.
         pxaGpioSetNotif(sp->gpio, 98, [](void *context, uint32_t, bool oldState, bool newState) {

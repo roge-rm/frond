@@ -124,7 +124,7 @@ data class MachineSettings(
     // used by Maximum and Set level. Applied live and at every start.
     val batteryMode: BatteryMode = BatteryMode.MAX,
     val batteryLevel: Int = DEFAULT_BATTERY_LEVEL,
-    val batteryCharging: Boolean = false,
+    val batteryCharging: Boolean = true,
     val headphonesIn: Boolean = false,
     // Zodiac: Music output, the SoundFont's copy in the app's files (SoundFonts) and the MIDI device's name. With
     // nothing picked the game's own sound plays. Applied at every start.
@@ -140,7 +140,7 @@ data class MachineSettings(
         // Saved only when not the default.
         if (batteryMode != BatteryMode.MAX) it.put("batteryMode", batteryMode.arg)
         if (batteryLevel != DEFAULT_BATTERY_LEVEL) it.put("batteryLevel", batteryLevel)
-        if (batteryCharging) it.put("batteryCharging", true)
+        if (!batteryCharging) it.put("batteryCharging", false)
         if (headphonesIn) it.put("headphonesIn", true)
         if (musicOutput != MusicOutput.FM) it.put("musicOutput", musicOutput.arg)
         if (soundFont.isNotEmpty()) it.put("soundFont", soundFont)
@@ -248,7 +248,7 @@ data class MachineSettings(
                 gamepad = if (json.has("gamepad")) json.optBoolean("gamepad") else fallback.gamepad,
                 batteryMode = BatteryMode.entries.firstOrNull { it.arg == json.optString("batteryMode") } ?: BatteryMode.MAX,
                 batteryLevel = json.optInt("batteryLevel", DEFAULT_BATTERY_LEVEL).coerceIn(0, 100),
-                batteryCharging = json.optBoolean("batteryCharging", false),
+                batteryCharging = json.optBoolean("batteryCharging", true),
                 headphonesIn = json.optBoolean("headphonesIn", false),
                 musicOutput = MusicOutput.entries.firstOrNull { it.arg == json.optString("musicOutput") } ?: MusicOutput.FM,
                 soundFont = json.optString("soundFont", ""),

@@ -6,16 +6,20 @@
 #include <string>
 
 // The machine's battery as the user sets it: Maximum, a set level, or the host's own battery (the frontend
-// passes the host's level and charging state in). Charging means on external power and charging.
+// passes the host's level and charging state in). charging means on external power (the charger); the default is a
+// full battery on the charger, also for a spec with no charging or battery word. A full battery on the charger has
+// finished charging: ChargeInProgress() is false there, as a real charger stops at full.
 // It's a machine setting: kept by the frontend, never in a session file.
 struct BatteryPower {
     enum class Mode { maximum, level, host };
     Mode mode = Mode::maximum;
     unsigned percent = 100;  // 0-100, ignored at Maximum
-    bool charging = false;
+    bool charging = true;
 
     unsigned Percent() const { return mode == Mode::maximum ? 100 : (percent > 100 ? 100 : percent); }
     bool ExternalPower() const { return charging; }
+    // On the charger and still charging, for boards with a separate charge status pin.
+    bool ChargeInProgress() const { return charging && Percent() < 100; }
 
     bool operator==(const BatteryPower& o) const {
         return mode == o.mode && Percent() == o.Percent() && charging == o.charging;

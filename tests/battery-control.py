@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The battery control command on out/frond-68k (an EZ ROM, palm-iiix) and out/frond (a Zire 72 or T|X smoke
-machine): battery-state answers Maximum and not charging by default (with no-charging where the board can't take it), battery sets each mode live, bad arguments
+machine): battery-state answers Maximum on the charger by default (on battery with no-charging where the board can't take
+the charger), battery sets each mode live, bad arguments
 are refused, --battery sets it at start, and the setting isn't saved with the session.
 
 Private firmware and sessions: --rom, else the generic OS 3.5 EZ ROM in the firmware folder; --arm-session, else
@@ -32,19 +33,22 @@ def state(c, want, command='battery-state', argument=''):
 def check_commands(c, charging=True):
     """charging False: a board whose ROM reads its own dock status from an input Frond doesn't model."""
     tail = '' if charging else ' no-charging'
-    state(c, 'max 100 battery' + tail)
+    default = 'max 100 charging' if charging else 'max 100 battery no-charging'
+    state(c, default)
     if charging:
         state(c, 'level 20 charging', 'battery', 'level 20 charging')
         state(c, 'level 20 charging')
     else:
         c.fails('battery', 'level 20 charging', code='unsupported')
-        state(c, 'max 100 battery' + tail)
-    state(c, 'host 57 battery' + tail, 'battery', 'host 57')
-    state(c, 'level 3 battery' + tail, 'battery', 'level 3')
+        state(c, default)
+    state(c, 'host 57 battery' + tail, 'battery', 'host 57 battery')
+    # No word takes the default charger, or battery where the board can't take it.
+    state(c, ('level 3 charging' if charging else 'level 3 battery' + tail), 'battery', 'level 3')
+    state(c, 'level 3 battery' + tail, 'battery', 'level 3 battery')
     for bad in ('', 'level', 'level 101', 'max 50', 'low', 'level 5 maybe'):
         c.fails('battery', bad, code='argument')
     state(c, 'level 3 battery' + tail)
-    state(c, 'max 100 battery' + tail, 'battery', 'max')
+    state(c, default, 'battery', 'max')
 
 
 def check_68k(core, rom, root):
@@ -78,17 +82,18 @@ def check_arm(core, session, root):
     c = Client(core, [copy, '--battery', 'level 40 charging'], root, 'arm')
     try:
         state(c, 'level 40 charging')
-        state(c, 'max 100 battery', 'battery', 'max')
+        state(c, 'max 100 battery', 'battery', 'max battery')
+        state(c, 'max 100 charging', 'battery', 'max')
         check_commands(c)
         c.ok('battery', 'level 10 charging')
         c.ok('save', saved, code='saved')
     finally:
         c.quit()
-    # The session keeps no battery setting: it loads at Maximum unless told otherwise.
+    # The session keeps no battery setting: it loads at Maximum on the charger unless told otherwise.
     reload = work / 'saved' if (work / 'saved').is_dir() else saved
     c = Client(core, [reload], root, 'arm-reload')
     try:
-        state(c, 'max 100 battery')
+        state(c, 'max 100 charging')
     finally:
         c.quit()
 

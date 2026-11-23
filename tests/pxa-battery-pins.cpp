@@ -26,8 +26,6 @@ BatteryPower battery(const char* spec) {
     return b;
 }
 
-// Off the charger the TX's GPIO90 is low.
-constexpr bool txPowerOffCharger = false;
 
 void headphones(SocPXA& soc, unsigned pin) {
     assert(soc.HeadphonesSupported() && !soc.HeadphonesIn() && !gpio(soc, pin));
@@ -66,11 +64,13 @@ void tx() {
     std::vector<uint8_t> rom(16 * 1024 * 1024);
     std::vector<uint8_t> nand(132 * 1024 * 1024, 0xff);
     SocPXA soc(DeviceType5::deviceTypeTX, 32 * 1024 * 1024, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2);
-    assert(gpio(soc, 90) == txPowerOffCharger && gpio(soc, 13));
+    // The default is on the charger (GPIO90 high) with no USB cable (GPIO13 high).
+    assert(gpio(soc, 90) && gpio(soc, 13));
+    assert(soc.SetBattery(battery("level 50 battery")) && !gpio(soc, 90));
     assert(soc.SetBattery(battery("level 50 charging")) && gpio(soc, 90));
     soc.Reset();
     assert(gpio(soc, 90));
-    assert(soc.SetBattery(battery("level 50")) && gpio(soc, 90) == txPowerOffCharger);
+    assert(soc.SetBattery(battery("level 50 battery")) && !gpio(soc, 90));
     // The USB test cable still drives GPIO13 (low = cable in).
     assert(soc.SetUsbTestCable(false) && gpio(soc, 13));
     assert(soc.SetUsbTestCable(true) && !gpio(soc, 13));
@@ -83,11 +83,12 @@ void e2(DeviceType5 type) {
     std::vector<uint8_t> rom(8 * 1024 * 1024);
     std::vector<uint8_t> nand(33 * 1024 * 1024, 0xff);
     SocPXA soc(type, 32 * 1024 * 1024, rom.data(), rom.size(), nand.data(), nand.size(), -1, 0);
-    assert(!gpio(soc, 9) && gpio(soc, 35));
+    assert(gpio(soc, 9) && gpio(soc, 35));  // the default is on the charger, no USB cable
+    assert(soc.SetBattery(battery("max battery")) && !gpio(soc, 9));
     assert(soc.SetBattery(battery("max charging")) && gpio(soc, 9) && gpio(soc, 35));
     soc.Reset();
     assert(gpio(soc, 9));
-    assert(soc.SetBattery(battery("max")) && !gpio(soc, 9));
+    assert(soc.SetBattery(battery("max battery")) && !gpio(soc, 9));
     headphones(soc, 12);
     card(soc, 51);
 }
@@ -96,11 +97,12 @@ void zire72() {
     std::vector<uint8_t> rom(0xe40000);
     SocPXA soc(deviceTypeZire72, 32u << 20, rom.data(), rom.size(), nullptr, 0, -1, 2);
     assert(soc.HeadphonesSupported() && !soc.HeadphonesIn());
-    assert(gpio(soc, 99));
+    assert(!gpio(soc, 99));  // the default is on the charger
+    assert(soc.SetBattery(battery("level 50 battery")) && gpio(soc, 99));
     assert(soc.SetBattery(battery("level 50 charging")) && !gpio(soc, 99));
     soc.Reset();
     assert(!gpio(soc, 99));
-    assert(soc.SetBattery(battery("level 50")) && gpio(soc, 99));
+    assert(soc.SetBattery(battery("level 50 battery")) && gpio(soc, 99));
     card(soc, 115);
 
     constexpr uint32_t codec = 0x40500200;
@@ -141,11 +143,13 @@ void tg50() {
     assert(!soc.HeadphonesSupported() && !soc.SetHeadphones(true));
     const auto portA = [&] { return read(soc, 0x08000000) & 0xffff; };
     constexpr uint32_t a2 = 1u << 2, a13 = 1u << 13, a14 = 1u << 14;
-    assert((portA() & (a2 | a13 | a14)) == (a13 | a14));
+    // The default, full on the charger: external power (A14 low), charge done (A13 high).
+    assert((portA() & (a2 | a13 | a14)) == a13);
+    assert(soc.SetBattery(battery("level 80 battery")) && (portA() & (a2 | a13 | a14)) == (a13 | a14));
     assert(soc.SetBattery(battery("level 80 charging")) && !(portA() & (a2 | a13 | a14)));
     soc.Reset();
     assert(!(portA() & (a2 | a13 | a14)));
-    assert(soc.SetBattery(battery("level 80")) && (portA() & (a2 | a13 | a14)) == (a13 | a14));
+    assert(soc.SetBattery(battery("level 80 battery")) && (portA() & (a2 | a13 | a14)) == (a13 | a14));
 }
 }  // namespace
 

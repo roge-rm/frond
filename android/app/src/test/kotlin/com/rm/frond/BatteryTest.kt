@@ -19,6 +19,15 @@ class BatteryTest {
         assertEquals("host 42 battery", BatteryText.spec(BatteryMode.HOST, 7, true, host.copy(charging = false)))
     }
 
+    @Test fun hostModeOverridesTheChargerDefault() {
+        val settings = MachineSettings(batteryMode = BatteryMode.HOST)
+        assertTrue(settings.batteryCharging)
+        assertEquals("host 93 battery",
+            BatteryText.spec(settings.batteryMode, settings.batteryLevel, settings.batteryCharging, HostBattery(93, false)))
+        assertEquals("host 93 charging",
+            BatteryText.spec(settings.batteryMode, settings.batteryLevel, false, HostBattery(93, true)))
+    }
+
     @Test fun machineThatCantChargeSaysBattery() {
         assertEquals("max battery", BatteryText.spec(BatteryMode.MAX, 100, true, host, chargingSupported = false))
         assertEquals("level 20 battery", BatteryText.spec(BatteryMode.LEVEL, 20, true, host, chargingSupported = false))
@@ -56,19 +65,21 @@ class BatteryTest {
         assertFalse(json.has("batteryMode"))
         assertFalse(json.has("batteryLevel"))
         assertFalse(json.has("batteryCharging"))
-        val set = MachineSettings(batteryMode = BatteryMode.LEVEL, batteryLevel = 15, batteryCharging = true)
+        val set = MachineSettings(batteryMode = BatteryMode.LEVEL, batteryLevel = 15, batteryCharging = false)
         val back = MachineSettings.from(set.json())
         assertEquals(BatteryMode.LEVEL, back.batteryMode)
         assertEquals(15, back.batteryLevel)
-        assertTrue(back.batteryCharging)
+        assertFalse(back.batteryCharging)
         assertEquals(BatteryMode.HOST, MachineSettings.from(MachineSettings(batteryMode = BatteryMode.HOST).json()).batteryMode)
     }
 
-    @Test fun oldSettingsAreMaximum() {
+    @Test fun oldSettingsAreMaximumOnTheCharger() {
         val old = MachineSettings.from(JSONObject().put("engine", "fast"))
         assertEquals(BatteryMode.MAX, old.batteryMode)
         assertEquals(100, old.batteryLevel)
-        assertFalse(old.batteryCharging)
+        assertTrue(old.batteryCharging)
+        assertEquals("max charging", BatteryText.spec(old.batteryMode, old.batteryLevel, old.batteryCharging, HostBattery()))
+        assertFalse(MachineSettings.from(JSONObject().put("batteryCharging", false)).batteryCharging)
         assertEquals(100, MachineSettings.from(JSONObject().put("batteryLevel", 900)).batteryLevel)
         assertEquals(BatteryMode.MAX, MachineSettings.from(JSONObject().put("batteryMode", "nonsense")).batteryMode)
     }

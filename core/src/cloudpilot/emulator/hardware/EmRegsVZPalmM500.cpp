@@ -152,8 +152,8 @@ uint8 EmRegsVZPalmM500::GetPortInputValue(int port) {
             result |= hwrVZPortKAC_PWR_N;
     }
 
-    // CHARGING# is PE6 on the m500 family and PK1 on the m520.
-    if (!gBattery.charging) {
+    // CHARGING# is PE6 on the m500 family and PK1 on the m520, high off the charger and once full.
+    if (!gBattery.ChargeInProgress()) {
         if (chargeOnPortK && port == 'K') result |= 0x02;
         if (!chargeOnPortK && port == 'E') result |= 0x40;
     }

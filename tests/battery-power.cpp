@@ -50,13 +50,17 @@ static uint16_t readVbat() {
 
 int main() {
     BatteryPower b;
-    check(b.mode == BatteryPower::Mode::maximum && b.Percent() == 100 && !b.charging, "default is Maximum, not charging");
-    check(b.Describe() == "max 100 battery", "default reply");
+    check(b.mode == BatteryPower::Mode::maximum && b.Percent() == 100 && b.charging && b.ExternalPower() &&
+              !b.ChargeInProgress(),
+          "default is Maximum on the charger, charge done");
+    check(b.Describe() == "max 100 charging", "default reply");
+    check(BatteryPower::Parse("max", b) && b == BatteryPower{}, "no word is the default, on the charger");
     check(BatteryPower::Parse("level 20 charging", b) && b.mode == BatteryPower::Mode::level && b.Percent() == 20 &&
-              b.charging && b.ExternalPower(),
+              b.charging && b.ExternalPower() && b.ChargeInProgress(),
           "level and charging");
     check(b.Describe() == "level 20 charging", "level reply");
-    check(BatteryPower::Parse("host 57", b) && b.mode == BatteryPower::Mode::host && b.Percent() == 57 && !b.charging,
+    check(BatteryPower::Parse("host 57 battery", b) && b.mode == BatteryPower::Mode::host && b.Percent() == 57 &&
+              !b.charging && !b.ChargeInProgress(),
           "host level");
     check(BatteryPower::Parse("max charging", b) && b.Percent() == 100 && b.charging, "max charging");
     const BatteryPower kept = b;

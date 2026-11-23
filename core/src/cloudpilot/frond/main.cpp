@@ -231,7 +231,7 @@ void usage() {
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
             "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
-            "                 [--battery \"max|level N|host N [charging|battery]\"]\n"
+            "                 [--battery \"max|level N|host N [charging|battery]\"] (default max charging)\n"
             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
             "The desktop's ARM-only options are taken and ignored."
          << endl;
@@ -1013,10 +1013,8 @@ class Runner {
           lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
               profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
-        if (gBattery.charging && !BatteryChargingSupported()) {
-            cerr << "this device's charging can't be set yet, it stays on battery" << endl;
-            gBattery.charging = false;
-        }
+        // The default is on the charger, and the frontends always pass it; a device that can't show it stays on battery.
+        if (gBattery.charging && !BatteryChargingSupported()) gBattery.charging = false;
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
         SetSpeed(options.speed);
@@ -2940,7 +2938,11 @@ class Runner {
         if (!BatterySupported()) return error = "This device's battery can't be set yet.", false;
         BatteryPower parsed;
         if (!BatteryPower::Parse(spec, parsed)) return error = "Use max, level N or host N (0-100), then charging or battery.", false;
-        if (parsed.charging && !BatteryChargingSupported()) return error = "This device's charging can't be set yet.", false;
+        if (parsed.charging && !BatteryChargingSupported()) {
+            // With no charging or battery word the spec takes the default charger, which falls back to battery here.
+            if (spec.find("charging") != string::npos) return error = "This device's charging can't be set yet.", false;
+            parsed.charging = false;
+        }
         gBattery = parsed;
         return true;
     }
