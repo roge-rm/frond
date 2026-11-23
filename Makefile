@@ -246,6 +246,13 @@ test-sync-engine: $(COMMON_LIB)
 		-o $(OBJ_ROOT)/test-sync-engine
 	timeout 120 $(OBJ_ROOT)/test-sync-engine $(OBJ_ROOT)/sync-engine-scratch
 
+.PHONY: test-sync-files
+test: test-sync-files
+test-sync-files: $(COMMON_LIB)
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common/sync tests/sync-files.cpp $(COMMON_LIB) -lpthread \
+		-o $(OBJ_ROOT)/test-sync-files
+	umask 077 && dir=$$(mktemp -d) && trap 'rmdir "$$dir"' EXIT && $(OBJ_ROOT)/test-sync-files "$$dir"
+
 .PHONY: test-sync-pim
 test: test-sync-pim
 test-sync-pim: $(COMMON_LIB)

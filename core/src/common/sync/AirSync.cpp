@@ -1098,7 +1098,7 @@ void ApplyBody(const WbxmlNode& data, PimRecord& record, const SupportedFields& 
                                       Number(size->text, -1) != int(BodyCharacters(body->text))));
     const auto* rtf = data.Find(tags.page, tags.rtf);
     ValidatePayload(rtf, maxRtf, true);
-    const bool richOnly = !body && !size && !truncated && rtf && !rtf->text.empty();
+    const bool richOnly = !body && !incomplete && rtf && !rtf->text.empty();
     // WM5 sends a rich contact note without Body or Picture and omits Supported.
     const bool legacyRichEdit = replace && record.kind == PimKind::contacts && !supported && richOnly;
     const bool repeatedRichEdit = richOnly && rtf->text == Field(record, "airsyncRtf");
@@ -1180,15 +1180,36 @@ WbxmlNode ItemData(const PimRecord& r, const Zone& zone, bool wire = true, size_
     return data;
 }
 
-void ApplyItem(const WbxmlNode& data, PimRecord& r, const Zone& zone, bool replace = false,
-               const SupportedFields& supported = {}) {
+void ApplyItemFields(const WbxmlNode& data, PimRecord& r, const Zone& zone, const SupportedFields& supported) {
     switch (r.kind) {
         case PimKind::contacts: ApplyContact(data, r, zone, supported); break;
         case PimKind::calendar: ApplyCalendar(data, r, zone, supported); break;
         case PimKind::tasks: ApplyTask(data, r, zone, supported); break;
         default: throw std::runtime_error("Unsupported AirSync item");
     }
-    ApplyBody(data, r, supported, replace);
+}
+
+void ApplyItem(const WbxmlNode& data, PimRecord& r, const Zone& zone, bool replace = false) {
+    ApplyItemFields(data, r, zone, {});
+    ApplyBody(data, r, {}, replace);
+}
+
+void ApplyChange(const WbxmlNode& data, PimRecord& record, const Zone& zone, const SupportedFields& supported) {
+    const auto tags = LegacyBody(record.kind);
+    const bool contact = record.kind == PimKind::contacts;
+    const auto* rich = data.Find(tags.page, tags.rtf);
+    const auto* picture = contact ? data.Find(tags.page, ct::Picture) : nullptr;
+    // A legacy attachment-only Change can omit Supported and the rest of the item.
+    const bool attachmentOnly = !supported && (rich || picture) &&
+        std::all_of(data.children.begin(), data.children.end(), [&](const WbxmlNode& node) {
+            return node.page == tags.page &&
+                   (node.tag == tags.body || (tags.size && node.tag == tags.size) ||
+                    node.tag == tags.truncated || node.tag == tags.rtf || (contact && node.tag == ct::Picture));
+        });
+    if (!attachmentOnly) ApplyItemFields(data, record, zone, supported);
+    // A picture edit may carry contact details and still omit both forms of the note.
+    const bool pictureEditWithoutNote = !supported && picture && !rich && !data.Find(tags.page, tags.body);
+    ApplyBody(data, record, supported, !attachmentOnly && !pictureEditWithoutNote);
 }
 
 size_t BodyLimit(const WbxmlNode& request) {
@@ -1577,7 +1598,7 @@ class CollectionSync {
         RecoverPhones(*local, link->second);
         PimRecord applied = *local;
         try {
-            ApplyItem(*data, applied, Learn(*data), true, supported);
+            ApplyChange(*data, applied, Learn(*data), supported);
         } catch (const std::exception&) {
             return Reply(replies, as::Change, {}, serverId, "6");
         }

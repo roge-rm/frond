@@ -20,6 +20,7 @@
 #include <QSet>
 #include <QScopeGuard>
 #include <QVBoxLayout>
+#include <QXmlStreamReader>
 #include <QtEndian>
 
 #ifdef Q_OS_UNIX
@@ -251,7 +252,6 @@ struct ExtractionAttempt {
         process.start(program, args);
         process.closeWriteChannel();
         bool exceeded = false;
-        // Let the native helper finish. QProcess only owns its immediate process.
         do {
             if (process.state() == QProcess::Starting) process.waitForStarted(50);
             else if (output) process.waitForReadyRead(50);
@@ -260,6 +260,13 @@ struct ExtractionAttempt {
                 const auto chunk = process.readAllStandardOutput();
                 if (chunk.size() > limit - output->size()) exceeded = true;
                 if (!exceeded && !stopped()) *output += chunk;
+            }
+            if (stopped() || exceeded) {
+                if (process.state() != QProcess::NotRunning) {
+                    process.kill();
+                    process.waitForFinished(1000);
+                }
+                return false;
             }
         } while (process.state() != QProcess::NotRunning);
         return !stopped() && !exceeded && process.error() != QProcess::FailedToStart &&
@@ -399,41 +406,155 @@ bool unpackInstallShield(const ExtractionAttempt& attempt, const QString& progra
 }
 #endif
 
-bool unpackWith7z(const ExtractionAttempt& attempt, const QString& installer, const QString& syncRoot, std::vector<frondSync::InstallerFile>& files) {
-    const QString program = QStandardPaths::findExecutable("7z");
-    if (program.isEmpty()) return false;
-    std::vector<ArchiveMember> members;
-    if (!archiveMembers(attempt, program, installer, members)) return false;
-    qint64 total = 0;
-    if (!collectDirect(attempt, program, installer, members, files, total)) return false;
-#ifdef Q_OS_UNIX
-    const QString unshield = QStandardPaths::findExecutable("unshield");
-    if (unshield.isEmpty()) return !files.empty();
-    if (!unpackInstallShield(attempt, program, installer, members, unshield, syncRoot, files, total)) return false;
+struct MsiTables {
+    QMap<QString, QString> names;
+    QSet<QString> embeddedCabinets;
+};
 
-    if (QFileInfo(installer).suffix().compare("zip", Qt::CaseInsensitive) == 0) {
-        constexpr int maxNested = 4;
-        qint64 nestedTotal = 0;
-        int nestedCount = 0;
-        for (const auto& member : members) {
-            if (attempt.stopped()) return false;
-            if (QFileInfo(member.leaf).suffix().compare("exe", Qt::CaseInsensitive) != 0) continue;
-            if (nestedCount == maxNested || member.size > maxTotalSize - nestedTotal) break;
-            ++nestedCount;
-            nestedTotal += member.size;
-            QTemporaryDir nested(QDir(syncRoot).filePath("unpack-installer-XXXXXX"));
-            if (!nested.isValid()) break;
-            const auto inner = nested.filePath("installer.exe");
-            std::vector<ArchiveMember> innerMembers;
-            if (!writeMember(attempt, program, installer, member, inner) || !archiveMembers(attempt, program, inner, innerMembers)) continue;
-            if (!collectDirect(attempt, program, inner, innerMembers, files, total) ||
-                !unpackInstallShield(attempt, program, inner, innerMembers, unshield, syncRoot, files, total)) return false;
+MsiTables msiTables(const ExtractionAttempt& attempt, const QString& program, const QString& installer) {
+    MsiTables tables;
+    if (program.isEmpty()) return tables;
+    QByteArray files;
+    if (attempt.command(program, {"export", installer, "File"}, 1024 * 1024, &files)) {
+        for (const auto& row : QString::fromUtf8(files).split('\n').mid(3)) {
+            const auto columns = row.split('\t');
+            if (columns.size() < 3) continue;
+            const auto name = columns[2].section('|', -1);
+            if (!name.contains('/') && !name.contains('\\') && !name.contains(QChar::Null))
+                tables.names.insert(columns[0], name);
         }
     }
-#else
-    Q_UNUSED(syncRoot);
+    QByteArray media;
+    if (attempt.command(program, {"export", installer, "Media"}, 1024 * 1024, &media)) {
+        for (const auto& row : QString::fromUtf8(media).split('\n').mid(3)) {
+            const auto columns = row.split('\t');
+            if (columns.size() > 3 && columns[3].startsWith('#')) tables.embeddedCabinets.insert(columns[3].mid(1));
+        }
+    }
+    return tables;
+}
+
+bool mobileCabinet(const ExtractionAttempt& attempt, const QString& program, const QString& archive,
+                   const std::vector<ArchiveMember>& members) {
+    constexpr qint64 maxMetadata = 1024 * 1024;
+    const auto setup = std::find_if(members.begin(), members.end(), [](const ArchiveMember& member) {
+        return member.path == member.leaf && member.leaf.compare("_setup.xml", Qt::CaseInsensitive) == 0;
+    });
+    QByteArray data;
+    if (setup != members.end() && setup->size <= maxMetadata && readMember(attempt, program, archive, *setup, data)) {
+        QXmlStreamReader xml(data);
+        if (xml.readNextStartElement() && xml.name() == QLatin1String("wap-provisioningdoc")) return true;
+    }
+
+    // The first member of a CAB Wizard package is the .000 installation header.
+    if (members.empty() || members.front().size < 100 || members.front().size > maxMetadata ||
+        !members.front().leaf.endsWith(".000", Qt::CaseInsensitive)) return false;
+    data.clear();
+    return readMember(attempt, program, archive, members.front(), data) && data.startsWith(QByteArray("MSCE\0\0\0\0", 8));
+}
+
+struct ArchiveScan {
+    const ExtractionAttempt& attempt;
+    const QString program;
+    const QString syncRoot;
+    const QString msiInfo;
+    const QString unshield;
+    std::vector<frondSync::InstallerFile>& files;
+    qint64 total = 0;
+    qint64 nestedBytes = 0;
+    size_t nestedCount = 0;
+
+    bool unpack(const QString& installer, unsigned depth, bool& inspectedMsiMedia) {
+        std::vector<ArchiveMember> members;
+        if (archiveMembers(attempt, program, installer, members)) {
+            const bool msi = QFileInfo(installer).suffix().compare("msi", Qt::CaseInsensitive) == 0;
+            const auto tables = msi ? msiTables(attempt, msiInfo, installer) : MsiTables{};
+            const auto isCabinet = [&](const ArchiveMember& member) {
+                return msi && (tables.embeddedCabinets.contains(member.path) || member.leaf.endsWith(".cab", Qt::CaseInsensitive));
+            };
+            std::vector<ArchiveMember> direct;
+            for (const auto& member : members) {
+                if (isCabinet(member)) inspectedMsiMedia = true;
+                else direct.push_back(member);
+            }
+
+            if (!collectDirect(attempt, program, installer, direct, files, total)) return false;
+#ifdef Q_OS_UNIX
+            if (!unshield.isEmpty() && !unpackInstallShield(attempt, program, installer, members, unshield, syncRoot, files, total))
+                return false;
 #endif
-    return !files.empty();
+            for (const auto& member : members) {
+                if (attempt.stopped()) return false;
+                const bool cabinet = isCabinet(member);
+                if (!cabinet && (depth >= 2 || !frondSync::IsInstallerFileName(member.leaf.toStdString()))) continue;
+                if (nestedCount >= 8 || member.size > maxTotalSize - nestedBytes) break;
+                ++nestedCount;
+                nestedBytes += member.size;
+                QTemporaryDir stage(QDir(syncRoot).filePath("unpack-installer-XXXXXX"));
+                if (!stage.isValid()) break;
+                const auto inner = stage.filePath("archive." + (cabinet ? QStringLiteral("cab") : QFileInfo(member.leaf).suffix().toLower()));
+                if (!writeMember(attempt, program, installer, member, inner)) continue;
+                if (cabinet) {
+                    if (!unpackMsiCabinet(inner, member.leaf, tables)) return false;
+                    continue;
+                }
+                const auto before = files.size();
+                bool innerMsiMedia = false;
+                const bool opened = unpack(inner, depth + 1, innerMsiMedia);
+                inspectedMsiMedia |= innerMsiMedia;
+                if (!opened) return false;
+                if (files.size() == before && !innerMsiMedia && !unpackEmbedded(inner, member.leaf)) return false;
+            }
+        }
+        return !attempt.stopped();
+    }
+
+    bool unpackMsiCabinet(const QString& path, QString name, const MsiTables& tables) {
+        std::vector<ArchiveMember> members;
+        if (!archiveMembers(attempt, program, path, members)) return !attempt.stopped();
+        if (mobileCabinet(attempt, program, path, members)) {
+            if (!name.endsWith(".cab", Qt::CaseInsensitive)) name += ".cab";
+            frondSync::InstallerFile file{name.toStdString(), {}};
+            QString error;
+            if (file.name.size() > 255 || !frondSyncFiles::readDatabase(path, file.bytes, error) ||
+                !frondSync::IsInstallPayload(file)) return true;
+            if (files.size() >= maxFiles || qint64(file.bytes.size()) > maxTotalSize - total) return false;
+            total += file.bytes.size();
+            files.push_back(std::move(file));
+            return true;
+        }
+        if (attempt.stopped()) return false;
+        for (auto& member : members)
+            member.leaf = tables.names.value(member.path, member.leaf);
+        return collectDirect(attempt, program, path, members, files, total);
+    }
+
+    bool unpackEmbedded(const QString& path, const QString& name) {
+        frondSync::Bytes bytes;
+        QString readError;
+        if (!frondSyncFiles::readDatabase(path, bytes, readError)) return true;
+        std::vector<frondSync::InstallerFile> embedded;
+        std::string error;
+        if (!frondSync::UnpackInstaller(name.toStdString(), bytes, embedded, error, false,
+                                       [&] { return attempt.stopped(); })) return !attempt.stopped();
+        for (auto& payload : embedded) {
+            if (files.size() >= maxFiles || qint64(payload.bytes.size()) > maxTotalSize - total) return false;
+            total += payload.bytes.size();
+            files.push_back(std::move(payload));
+        }
+        return true;
+    }
+};
+
+QString sevenZip() {
+    const auto program = QStandardPaths::findExecutable("7z");
+    return program.isEmpty() ? QStandardPaths::findExecutable("7zz") : program;
+}
+
+bool unpackWith7z(const ExtractionAttempt& attempt, const QString& program, const QString& installer, const QString& syncRoot,
+                 std::vector<frondSync::InstallerFile>& files, bool& inspectedMsiMedia) {
+    ArchiveScan scan{attempt, program, syncRoot, QStandardPaths::findExecutable("msiinfo"), QStandardPaths::findExecutable("unshield"), files};
+    return scan.unpack(installer, 0, inspectedMsiMedia) && !files.empty();
 }
 
 }  // namespace
@@ -619,17 +740,23 @@ static bool unpackFiles(const ExtractionAttempt& attempt, const QString& install
     frondSync::Bytes bytes;
     if (!frondSyncFiles::readDatabase(installer, bytes, error)) return false;
     const QFileInfo info(installer);
-    const bool zip = info.suffix().compare("zip", Qt::CaseInsensitive) == 0;
-    const auto name = info.fileName().toStdString();
-    std::string problem;
-    if (zip && frondSync::UnpackInstaller(name, bytes, files, problem)) return true;
+    const auto suffix = info.suffix().toLower();
+    const auto program = sevenZip();
+    if (program.isEmpty() && (suffix == "7z" || suffix == "rar")) {
+        error = QObject::tr("Install 7-Zip to open this archive.");
+        return false;
+    }
     std::vector<frondSync::InstallerFile> unpacked;
-    if (unpackWith7z(attempt, installer, syncRoot, unpacked)) {
+    bool inspectedMsiMedia = false;
+    if (!program.isEmpty() && unpackWith7z(attempt, program, installer, syncRoot, unpacked, inspectedMsiMedia)) {
         files = std::move(unpacked);
         return true;
     }
     if (attempt.stopped()) return false;
-    if (!zip && frondSync::UnpackInstaller(name, bytes, files, problem)) return true;
+    // A normal MSI media cabinet is itself MSCF, which the raw fallback cannot distinguish.
+    std::string problem = "No Palm or Windows Mobile install files were found.";
+    if (!inspectedMsiMedia && frondSync::UnpackInstaller(info.fileName().toStdString(), bytes, files, problem, true,
+                                    [&] { return attempt.stopped(); })) return true;
     error = QString::fromStdString(problem);
     return false;
 }
@@ -648,11 +775,7 @@ bool unpack(QWidget* parent, const QString& installer, const QString& syncRoot,
     QObject::connect(buttons, &QDialogButtonBox::rejected, &progress, [&] {
         attempt.cancelled = true;
         buttons->setEnabled(false);
-#ifdef Q_OS_UNIX
         label->setText(QObject::tr("Stopping extraction…"));
-#else
-        label->setText(QObject::tr("Waiting for the extraction helper to exit…"));
-#endif
     });
     std::vector<frondSync::InstallerFile> extracted;
     bool ok = false;

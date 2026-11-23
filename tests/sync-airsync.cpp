@@ -1030,6 +1030,81 @@ void TestWm5ContactNote(SyncLibrary& library) {
     CHECK(!saved.fields.count("note") && !saved.fields.count("airsyncRtf") && !saved.fields.count("airsyncPicture"));
 }
 
+void TestWm5AttachmentOnlyChanges(SyncLibrary& library) {
+    SyncProfile profile;
+    OpenProfile(library, "WM5 attachment edits", profile);
+    std::string error;
+    const auto rich = UncompressedRtf(R"({\rtf1\ansi Updated\par note})");
+    struct Sample {
+        PimKind kind;
+        const char* folder;
+        const char* initial;
+        const char* change;
+        uint8_t page, attachment, truncated;
+        std::map<std::string, std::string> fields;
+    };
+    const Sample samples[] = {
+        {PimKind::calendar, "2:", calendarStart, calendarChanges, 4, 0x10, 0x0c,
+         {{"summary", "Meeting"}, {"date", "2026-11-25"}, {"startTime", "10:00"}, {"endTime", "11:00"},
+          {"location", "Library"}}},
+        {PimKind::tasks, "3:", tasksStart, tasksChanges, 9, 0x21, 0x07,
+         {{"summary", "Book the room"}, {"complete", "1"}, {"dueDate", "2026-11-25"}}},
+        {PimKind::contacts, "1:", contactsStart, contactsChanges, 1, 0x3c, 0,
+         {{"firstName", "Ada"}, {"lastName", "Lovelace"}, {"company", "Engines"}, {"airsyncPicture", "AQID"}}},
+    };
+    for (const auto& sample : samples) {
+        const bool contact = sample.kind == PimKind::contacts;
+        auto fields = sample.fields;
+        fields["note"] = "Original note";
+        const auto id = Save(profile, sample.kind, fields).id;
+        const auto serverId = sample.folder + std::to_string(id);
+        AirSyncServer server(profile, "machine:wm5-attachments", {sample.kind});
+        Client client{server};
+        auto key = NextKey(client.Post("Sync", Hex(sample.initial)));
+        key = NextKey(client.Sync(sample.change, key));
+        const auto upload = [&](WbxmlNode data, bool valid = true) {
+            const auto request = SyncWith(sample.change, key, {Command(Change, serverId, std::move(data))});
+            const auto response = client.Post("Sync", request);
+            if (valid) CHECK(!Find(response, 0, Status, 1));
+            else CHECK(TextOf(response, 0, Status, 1) == "6");
+            key = NextKey(response);
+        };
+        auto item = Node(sample.page, {{sample.attachment, contact ? "BAUG" : rich}});
+        if (!contact) item.Add(sample.page, sample.truncated, "0");
+        upload(item);
+        fields[contact ? "airsyncPicture" : "note"] = contact ? "BAUG" : "Updated\nnote";
+        if (!contact) {
+            const auto saved = *profile.FindPimRecord(id);
+            CHECK(saved.fields.at("airsyncRtf") == rich);
+            CHECK(!saved.fields.at("airsyncRtfBodyHash").empty());
+            fields["airsyncRtf"] = rich;
+            fields["airsyncRtfBodyHash"] = saved.fields.at("airsyncRtfBodyHash");
+        }
+        CHECK(profile.FindPimRecord(id)->fields == fields);
+
+        if (contact) {
+            auto detailsAndPicture = Node(sample.page, {{0x1f, "Ada"}, {0x29, "Lovelace"}, {0x19, "Engines"},
+                                                        {sample.attachment, "BwgJ"}});
+            upload(detailsAndPicture);
+            fields["airsyncPicture"] = "BwgJ";
+            CHECK(profile.FindPimRecord(id)->fields == fields);
+        }
+
+        const auto before = *profile.FindPimRecord(id);
+        upload(Node(sample.page, {{sample.attachment, "bad base64"}}), false);
+        CHECK(profile.FindPimRecord(id)->fields == fields);
+        CHECK(profile.FindPimRecord(id)->revision == before.revision);
+
+        upload(Node(sample.page, {{sample.attachment, ""}}));
+        if (contact) fields.erase("airsyncPicture");
+        else {
+            fields.erase("airsyncRtf");
+            fields.erase("airsyncRtfBodyHash");
+        }
+        CHECK(profile.FindPimRecord(id)->fields == fields);
+    }
+}
+
 void TestDeleteRetry(SyncLibrary& library) {
     SyncProfile profile;
     std::string error;
@@ -1439,6 +1514,7 @@ int main(int argc, char** argv) {
     TestLegacyPhoneClear(library);
     TestLegacyBodies(library);
     TestWm5ContactNote(library);
+    TestWm5AttachmentOnlyChanges(library);
     TestDeleteRetry(library);
     TestLargeDeleteRetry(library);
     TestNotesUnavailable(library);

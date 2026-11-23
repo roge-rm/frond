@@ -9,6 +9,12 @@
 
 namespace frondSync {
 
+struct PimRecord;
+
+inline constexpr char noteFileField[] = "wm5-note-file";
+inline constexpr char noteTextField[] = "wm5-note-text";
+void DetachPwiMemo(PimRecord& memo);
+
 // Reads the observed WM5 Notes default-font single-line ASCII format.
 std::optional<std::string> ReadPwiNote(const Bytes& data);
 

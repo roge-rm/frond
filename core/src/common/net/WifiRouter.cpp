@@ -1,7 +1,5 @@
 #include "WifiRouter.h"
 #include <arpa/inet.h>
-#include <libslirp.h>
-#include <poll.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -13,6 +11,7 @@
 #include "ActiveSyncForward.h"
 #include "NetSyncForward.h"
 #include "NetSyncWakeup.h"
+#include "SlirpPoll.h"
 
 namespace frondNet {
 
@@ -89,11 +88,9 @@ struct WifiRouter::Impl {
         callbacks.timer_mod = [](void* timer, int64_t time, void*) {
             static_cast<Timer*>(timer)->deadline = time;
         };
-        callbacks.register_poll_fd = [](int, void*) {};
-        callbacks.unregister_poll_fd = [](int, void*) {};
         callbacks.notify = [](void*) {};
         SlirpConfig config{};
-        config.version = 4;
+        ConfigureSlirpPoll(config, callbacks);
         config.in_enabled = true;
         config.vhostname = "frond";
         config.vnetwork.s_addr = htonl(layout.network);
@@ -112,26 +109,13 @@ struct WifiRouter::Impl {
         if (slirp) slirp_cleanup(slirp);
         for (auto* timer : timers) delete timer;
     }
-    static int Add(int fd, int events, void* context) {
+    static int Add(SlirpPollSocket fd, int events, void* context) {
         auto& self = *static_cast<Impl*>(context);
-        short flags = 0;
-        if (events & SLIRP_POLL_IN) flags |= POLLIN;
-        if (events & SLIRP_POLL_OUT) flags |= POLLOUT;
-        if (events & SLIRP_POLL_PRI) flags |= POLLPRI;
-        self.descriptors.push_back({fd, flags, 0});
-        return self.descriptors.size() - 1;
+        return AddSlirpPollSocket(self.descriptors, fd, events);
     }
     static int Events(int index, void* context) {
         auto& self = *static_cast<Impl*>(context);
-        if (index < 0 || size_t(index) >= self.descriptors.size()) return SLIRP_POLL_ERR;
-        const auto flags = self.descriptors[index].revents;
-        int events = 0;
-        if (flags & POLLIN) events |= SLIRP_POLL_IN;
-        if (flags & POLLOUT) events |= SLIRP_POLL_OUT;
-        if (flags & POLLPRI) events |= SLIRP_POLL_PRI;
-        if (flags & (POLLERR | POLLNVAL)) events |= SLIRP_POLL_ERR;
-        if (flags & POLLHUP) events |= SLIRP_POLL_HUP;
-        return events;
+        return SlirpPollEvents(self.descriptors, index);
     }
 };
 WifiRouter::WifiRouter() : impl(std::make_unique<Impl>(RouterLayout{})) {}
@@ -168,11 +152,7 @@ void WifiRouter::Poll(uint64_t now) {
             timer->deadline = -1;
             timer->callback(timer->context);
         }
-    impl->descriptors.clear();
-    uint32_t timeout = 0;
-    slirp_pollfds_fill(impl->slirp, &timeout, Impl::Add, impl.get());
-    const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
-    slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
+    PollSlirp(impl->slirp, impl->descriptors, Impl::Add, Impl::Events, impl.get());
     impl->netSync.Poll();
     impl->activeSync.Poll();
 }

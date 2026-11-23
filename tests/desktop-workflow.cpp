@@ -3820,6 +3820,10 @@ for line in s.makefile('rb'):
     }
     // The Machine menu and the bar: each row sends its command to the core.
     void activeSyncProfileSettings() {
+        const auto deviceType = frondFirmware::deviceFromId("hp-ipaq-rx1950");
+        const auto protocol = frondDesktopSync::protocol(deviceType);
+        QVERIFY(protocol == frondDesktopSync::Protocol::activeSync);
+        QVERIFY(frondDesktopSync::available(protocol));
         frondSync::SyncLibrary library;
         frondSync::ProfileInfo profile;
         std::string problem;
@@ -8070,10 +8074,17 @@ int main(int argc, char** argv) {
     // Isolate both settings and automatic session files from the real user's desktop.
     QDir().mkpath("build");
     QTemporaryDir directory(QDir::currentPath() + "/build/gui-workflow-XXXXXX");
-    QDir().mkpath(directory.path() + "/data-real");
-    if (!QFile::link(directory.path() + "/data-real", directory.path() + "/data")) return 1;
+    const auto data = directory.path() + "/data";
+#ifdef Q_OS_WIN
+    if (!QDir().mkpath(data)) return 1;
+    qputenv("APPDATA", QDir::toNativeSeparators(data).toUtf8());
+#else
+    const auto realData = directory.path() + "/data-real";
+    QDir().mkpath(realData);
+    if (!QFile::link(realData, data)) return 1;
+#endif
     qputenv("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
-    qputenv("XDG_DATA_HOME", (directory.path() + "/data").toUtf8());
+    qputenv("XDG_DATA_HOME", data.toUtf8());
     // The link hub a window starts runs here too, on its own ports.
     // A unix socket path is limited to 107 characters, so the runtime folder is a short one under
     // the system temp folder.

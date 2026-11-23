@@ -3,10 +3,9 @@
 #include "ActiveSyncForward.h"
 #include "NetSyncForward.h"
 #include "NetSyncWakeup.h"
+#include "SlirpPoll.h"
 
 #include <arpa/inet.h>
-#include <libslirp.h>
-#include <poll.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -108,11 +107,9 @@ struct SlirpIp::Impl {
         callbacks.timer_mod = [](void* timer, int64_t time, void*) {
             static_cast<Timer*>(timer)->deadline = time;
         };
-        callbacks.register_poll_fd = [](int, void*) {};
-        callbacks.unregister_poll_fd = [](int, void*) {};
         callbacks.notify = [](void*) {};
         SlirpConfig config{};
-        config.version = 4;
+        ConfigureSlirpPoll(config, callbacks);
         config.in_enabled = true;
         config.in6_enabled = false;
         config.vhostname = "frond";
@@ -150,26 +147,13 @@ struct SlirpIp::Impl {
 
     void Feed(const std::vector<uint8_t>& frame) { slirp_input(slirp, frame.data(), int(frame.size())); }
 
-    static int Add(int fd, int events, void* context) {
+    static int Add(SlirpPollSocket fd, int events, void* context) {
         auto& self = *static_cast<Impl*>(context);
-        short flags = 0;
-        if (events & SLIRP_POLL_IN) flags |= POLLIN;
-        if (events & SLIRP_POLL_OUT) flags |= POLLOUT;
-        if (events & SLIRP_POLL_PRI) flags |= POLLPRI;
-        self.descriptors.push_back({fd, flags, 0});
-        return int(self.descriptors.size() - 1);
+        return AddSlirpPollSocket(self.descriptors, fd, events);
     }
     static int Events(int index, void* context) {
         auto& self = *static_cast<Impl*>(context);
-        if (index < 0 || size_t(index) >= self.descriptors.size()) return SLIRP_POLL_ERR;
-        const auto flags = self.descriptors[size_t(index)].revents;
-        int events = 0;
-        if (flags & POLLIN) events |= SLIRP_POLL_IN;
-        if (flags & POLLOUT) events |= SLIRP_POLL_OUT;
-        if (flags & POLLPRI) events |= SLIRP_POLL_PRI;
-        if (flags & (POLLERR | POLLNVAL)) events |= SLIRP_POLL_ERR;
-        if (flags & POLLHUP) events |= SLIRP_POLL_HUP;
-        return events;
+        return SlirpPollEvents(self.descriptors, index);
     }
 };
 
@@ -218,11 +202,7 @@ void SlirpIp::Poll(uint64_t now) {
             timer->deadline = -1;
             timer->callback(timer->context);
         }
-    impl->descriptors.clear();
-    uint32_t timeout = 0;
-    slirp_pollfds_fill(impl->slirp, &timeout, Impl::Add, impl.get());
-    const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
-    slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
+    PollSlirp(impl->slirp, impl->descriptors, Impl::Add, Impl::Events, impl.get());
     impl->netSync.Poll();
     impl->activeSync.Poll();
 }

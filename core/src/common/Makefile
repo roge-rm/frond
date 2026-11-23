@@ -50,6 +50,7 @@ SOURCE_CXX = 						\
 	sync/Link.cpp				\
 	sync/SyncManager.cpp \
 	sync/ActiveSync.cpp \
+	sync/PwiNote.cpp \
 	sync/ActiveSyncFiles.cpp \
 	sync/ActiveSyncPartnership.cpp \
 	sync/AirSync.cpp \

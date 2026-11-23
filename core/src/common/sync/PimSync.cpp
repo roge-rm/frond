@@ -1,5 +1,7 @@
 #include "PimSync.h"
 
+#include "PwiNote.h"
+
 #include <algorithm>
 #include <array>
 #include <set>
@@ -316,6 +318,7 @@ class Conduit {
                 action == PimAction::synchronize) {
                 PimRecord archived = local;
                 archived.id = 0;
+                DetachPwiMemo(archived);
                 SaveIncoming(guest, std::move(archived));
             } else SaveIncoming(guest, local);
             return;
@@ -356,6 +359,7 @@ class Conduit {
         }
         PimRecord duplicate = local;
         duplicate.id = 0;
+        DetachPwiMemo(duplicate);
         // Adopt the changed Palm record as a new desktop record. The previous desktop record
         // remains available to upload after the import pass.
         SaveIncoming(guest, std::move(duplicate));
