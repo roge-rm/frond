@@ -87,6 +87,8 @@ class RunningBarState {
     var dialog by mutableStateOf<RunningMenu.Id?>(null)
     // The sheet open over the Palm, if any.
     var sheet by mutableStateOf<RunningSheets.Sheet?>(null)
+    // The controls editor behind the Controls sheet.
+    var controls by mutableStateOf<ControlsEditor?>(null)
     internal var syncProtocol by mutableStateOf<SyncProtocol?>(null)
     internal var syncMachine by mutableStateOf<String?>(null)
     internal var syncStatus by mutableStateOf<String?>(null)

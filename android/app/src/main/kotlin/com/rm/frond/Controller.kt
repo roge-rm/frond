@@ -115,7 +115,10 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
     fun encode(): String = keys.entries.sortedBy { it.key }.joinToString(",") { "${it.key}:${it.value.id}" }
 
     companion object {
-        private const val FILE = "settings"
+        // Maps live in their own file, read again on every call, because Home and the session are separate
+        // processes. Maps saved in "settings" before that are read until a map is saved here.
+        private const val FILE = "controllers"
+        private const val LEGACY_FILE = "settings"
         private fun prefKey(device: Device) = "controller.${device.id}"
 
         // Suits a standard gamepad and handhelds like the Retroid Pocket: d-pad and A for the 5-way,
@@ -193,15 +196,22 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             return ControllerMap(keys)
         }
 
-        fun load(context: Context, device: Device): ControllerMap =
-            decode(context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getString(prefKey(device), null), device)
+        @Suppress("DEPRECATION")
+        private fun prefs(context: Context, file: String) = context.getSharedPreferences(file, Context.MODE_MULTI_PROCESS)
+
+        fun load(context: Context, device: Device): ControllerMap {
+            val text = prefs(context, FILE).getString(prefKey(device), null)
+                ?: prefs(context, LEGACY_FILE).getString(prefKey(device), null)
+            return decode(text, device)
+        }
 
         fun save(context: Context, device: Device, map: ControllerMap) {
-            context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString(prefKey(device), map.encode()).apply()
+            prefs(context, FILE).edit().putString(prefKey(device), map.encode()).commit()
         }
 
         fun reset(context: Context, device: Device) {
-            context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().remove(prefKey(device)).apply()
+            // Saved as the defaults so an older map in "settings" doesn't come back.
+            prefs(context, FILE).edit().putString(prefKey(device), defaults(device).encode()).commit()
         }
 
         // A stick pushed past half travel counts as a key per direction. These numbers are past Android's

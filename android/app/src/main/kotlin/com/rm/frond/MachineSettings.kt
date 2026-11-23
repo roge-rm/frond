@@ -56,7 +56,7 @@ enum class CpuSpeed(val label: String, val arg: String) {
 // Zodiac: where the games' music goes; arg is the saved name. The game's own FM sound, a SoundFont the core plays in
 // the app, or a MIDI device through MidiManager.
 enum class MusicOutput(val label: String, val arg: String) {
-    FM("Game's own sound", "fm"),
+    FM("Built-in FM Synth", "fm"),
     SOUNDFONT("SoundFont", "soundfont"),
     MIDI("MIDI device", "midi"),
 }

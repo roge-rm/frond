@@ -190,6 +190,41 @@ class CardChoicesTest {
         }
     }
 
+    // Unlinking from the running machine keeps every other machine's link and the card it holds.
+    @Test fun unlinkingOneSlotKeepsTheOthers() {
+        val games = card("Games")
+        val a = machine("A TX", tx, Cards.Slot(true, link = games.id))
+        val b = machine("B TX", tx, Cards.Slot(true, link = games.id))
+        val running = machine("C TX", tx, Cards.Slot(true, link = games.id))
+        Cards.tryRunLock(running)!!.use {
+            val keep = CardChoices.linksWithout(sessions, games.id, Cards.SlotRef(a))
+            assertEquals(listOf(b, running).map { it.canonicalFile }, keep.map { it.dir.canonicalFile })
+            assertNull(Cards.setLinks(sessions, games.id, keep, a))
+        }
+        assertNull(Cards.readSlot(a).link)
+        assertEquals(games.id, Cards.readSlot(b).link)
+        assertEquals(games.id, Cards.readSlot(running).link)
+        assertTrue(File(Cards.entryDir(library, games.id), Cards.fileOfKind("sd")).isFile)
+    }
+
+    @Test fun unlinkingAnInsertedCardLeavesItInTheSlot() {
+        val games = card("Games")
+        val holder = machine("A TX", tx)
+        val inserted = card("Held", holder = holder)
+        val other = machine("B TX", tx, Cards.Slot(true, link = inserted.id))
+        assertTrue(Cards.writeSlot(holder, Cards.readSlot(holder).copy(link = inserted.id)))
+        val keep = CardChoices.linksWithout(sessions, inserted.id, Cards.SlotRef(holder))
+        assertEquals(listOf(other.canonicalFile), keep.map { it.dir.canonicalFile })
+        assertNull(Cards.setLinks(sessions, inserted.id, keep, holder))
+        val slot = Cards.readSlot(holder)
+        assertNull(slot.link)
+        assertEquals(inserted.id, slot.card)
+        assertTrue(File(holder, Cards.fileOfKind("sd")).isFile)
+        assertEquals(inserted.id, Cards.readSlot(other).link)
+        assertEquals(null, Cards.readSlot(other).card)
+        assertTrue(File(Cards.entryDir(library, games.id), Cards.fileOfKind("sd")).isFile)
+    }
+
     // ---- Machine dialogs ----
 
     @Test fun duplicateChoicesPutLinkFirst() {

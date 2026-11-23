@@ -284,7 +284,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     musicOutputLabel = new QLabel(tr("Music output"), sound);
     musicOutput = new QComboBox(sound);
     musicOutput->setObjectName("musicOutput");
-    musicOutput->addItem(tr("Game's own sound"), "fm");
+    musicOutput->addItem(tr("Built-in FM Synth"), "fm");
     musicOutput->addItem(tr("SoundFont"), "soundfont");
     musicOutput->addItem(tr("MIDI device"), "midi");
     musicOutput->setCurrentIndex(std::max(0, musicOutput->findData(prefs.musicOutput)));

@@ -23,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.rm.frond.ui.AboutScreen
 import com.rm.frond.ui.CardsScreen
+import com.rm.frond.ui.ControlsEditor
 import com.rm.frond.ui.ConnectionsScreen
 import com.rm.frond.ui.FirmwareScreen
 import com.rm.frond.ui.FrondTheme
@@ -88,43 +89,24 @@ class HomeModel(private val activity: HomeActivity) {
     var settings by mutableStateOf(Settings())
         private set
 
-    // Controller mapping per device, and the Palm button waiting for a controller key, if any.
-    var controllers by mutableStateOf(emptyMap<Device, ControllerMap>())
-        private set
+    // The device each shown device's controller map is for, once its firmware is resolved.
     var controllerDevices by mutableStateOf(emptyMap<Device, Device>())
         private set
-    var capturing by mutableStateOf<Pair<Device, PalmButton>?>(null)
-    // The device whose controls Settings is showing, if any.
-    var controlsFor by mutableStateOf<Device?>(null)
+    // The editor for the device whose controls Settings is showing, if any.
+    var controls by mutableStateOf<ControlsEditor?>(null)
+        private set
+
+    fun openControls(device: Device) {
+        controls = ControlsEditor(activity, device, controllerDevices[device] ?: device)
+    }
+
+    fun closeControls() {
+        controls?.capturing = null
+        controls = null
+    }
 
     // Devices with at least one session, in Device.shown order.
     val added get() = Device.shown.filter { d -> sessions.any { it.device == d } }
-
-    fun assign(key: Int) {
-        val (device, button) = capturing ?: return
-        capturing = null
-        setController(device, controllers.getValue(device).assign(button, key))
-    }
-
-    fun removeKey(device: Device, key: Int) {
-        setController(device, controllers.getValue(device).remove(key))
-    }
-
-    fun clearButton(device: Device, button: PalmButton) {
-        capturing = null
-        setController(device, controllers.getValue(device).clear(button))
-    }
-
-    fun resetController(device: Device) {
-        capturing = null
-        ControllerMap.reset(activity, device)
-        controllers = controllers + (device to ControllerMap.defaults(controllerDevices[device] ?: device))
-    }
-
-    private fun setController(device: Device, map: ControllerMap) {
-        ControllerMap.save(activity, device, map)
-        controllers = controllers + (device to map)
-    }
 
     fun update(changed: Settings) {
         settings = changed
@@ -191,8 +173,8 @@ class HomeModel(private val activity: HomeActivity) {
         sessions = Sessions.list(activity)
         firmwareReady = Device.shown.associateWith { Firmware.ready(activity, it) }
         settings = Settings.load(activity)
+        controls?.reload()
         controllerDevices = Device.shown.associateWith { Firmware.runningDevice(it, null, Firmware.nor(activity, it)) }
-        controllers = controllerDevices.mapValues { (_, device) -> ControllerMap.load(activity, device) }
         cards?.reload()
     }
 
@@ -480,8 +462,8 @@ class HomeActivity : ComponentActivity() {
                     BackHandler(enabled = model.machineDraft != null && !model.firmwareOpen) { model.cancelMachine() }
                     BackHandler(enabled = model.settingsOpen) {
                         when {
-                            model.capturing != null -> model.capturing = null
-                            model.controlsFor != null -> model.controlsFor = null
+                            model.controls?.capturing != null -> model.controls?.capturing = null
+                            model.controls != null -> model.closeControls()
                             else -> model.settingsOpen = false
                         }
                     }
@@ -517,9 +499,9 @@ class HomeActivity : ComponentActivity() {
             assignedKey = 0
             return true
         }
-        if (model.capturing != null && model.settingsOpen && ControllerMap.fromController(event)) {
+        if (model.controls?.capturing != null && model.settingsOpen && ControllerMap.fromController(event)) {
             if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                model.assign(event.keyCode)
+                model.controls?.assign(event.keyCode)
                 assignedKey = event.keyCode
             }
             return true
@@ -533,8 +515,8 @@ class HomeActivity : ComponentActivity() {
     private val captureRight = RightStickAxes()
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
-            val capture = model.capturing != null && model.settingsOpen
-            val assign = { key: Int, down: Boolean -> if (down && capture) model.assign(key) }
+            val capture = model.controls?.capturing != null && model.settingsOpen
+            val assign = { key: Int, down: Boolean -> if (down && capture) model.controls?.assign(key) }
             captureSticks.update(event.deviceId, ControllerMap.STICK_LEFT,
                 event.getAxisValue(android.view.MotionEvent.AXIS_X), event.getAxisValue(android.view.MotionEvent.AXIS_Y), assign)
             captureSticks.update(event.deviceId, ControllerMap.STICK_RIGHT,
