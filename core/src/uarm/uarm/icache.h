@@ -27,6 +27,10 @@ void icacheArm920SetFcsePid(struct icache* ic, const uint32_t* pid);
 void icacheArm920SetLeanWord(struct icache* ic, bool (*word)(void*, uint32_t, unsigned, bool, uint32_t*), void* ctx);
 // Drops every line of the decode cache.
 void icacheArm920DropDecoded(struct icache* ic);
+// icacheArm920Fetch, kept for the next fetch of the same VA, size and mode to answer at once. Only for a caller
+// that runs that fetch next (runStep); icacheArm920DropPrefetch forgets it.
+bool icacheArm920Prefetch(struct icache*, uint32_t va, unsigned size, bool privileged, uint_fast8_t* fsr, uint32_t* word);
+void icacheArm920DropPrefetch(struct icache*);
 bool icacheArm920Fetch(struct icache*, uint32_t va, unsigned size, bool privileged,
                        uint_fast8_t* fsr, uint32_t* instruction);
 bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,

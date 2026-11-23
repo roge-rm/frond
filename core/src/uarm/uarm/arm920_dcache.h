@@ -19,9 +19,10 @@ struct Arm920DataCache {
     } lines[8][64];
     uint8_t victim[8];
     uint32_t random;
-    // The line each segment's last access hit, looked at first. A segment never holds two valid lines
-    // with one address, as a line is only filled after a search found none. Not saved.
-    uint8_t recent[8];
+    // The lines each segment's last accesses hit, newest first, looked at before the whole segment. A segment
+    // never holds two valid lines with one address, as a line is only filled after a search found none, so the
+    // order lines are looked at in doesn't change what is found. Not saved.
+    uint8_t recent[8][4];
     ArmMem* mem;
     Arm920MemoryCheck check;
     void* context;
