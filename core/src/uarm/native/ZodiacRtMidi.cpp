@@ -9,10 +9,18 @@
 #define __MACOSX_CORE__
 #elif defined(_WIN32)
 #define __WINDOWS_MM__
+// winshim/windows.h takes far and near away, and mmsystem.h still uses them.
+#include <windows.h>
+#define far
+#define near
 #elif defined(__linux__) && !defined(__ANDROID__)
 #define __LINUX_ALSA__
 #endif
 #include "../../../../vendor/rtmidi/RtMidi.cpp"
+#if defined(_WIN32)
+#undef far
+#undef near
+#endif
 
 namespace {
 const char* const virtualName = "Frond Zodiac music";
