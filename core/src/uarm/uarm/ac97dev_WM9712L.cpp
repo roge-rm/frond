@@ -890,6 +890,10 @@ void wm9712LsetAuxVoltage(struct WM9712L *wm, enum WM9712LauxPin which, uint32_t
     wm->vAux[which] = mV;
 }
 
+void wm9712LsetAuxCount(struct WM9712L *wm, enum WM9712LauxPin which, uint16_t count) {
+    wm->vAux[which] = count > 0xfff ? 0xfff : count;
+}
+
 void wm9712LsetPen(struct WM9712L *wm, int16_t x, int16_t y,
                    int16_t press)  // raw ADC values, negative for pen up
 {

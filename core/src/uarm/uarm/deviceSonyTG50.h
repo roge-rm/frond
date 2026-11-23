@@ -37,8 +37,8 @@ void tg50BoardSetUsbCable(Tg50Board *, bool connected);
 void tg50BoardSetAccessoryAux(Tg50Board *, uint16_t mV);
 // Nothing on the connector: AUX at full scale.
 void tg50BoardSetConnectorEmpty(Tg50Board *);
-// The AD7873 battery input, 4200 mV when full.
-void tg50BoardSetBatteryMilliVolts(Tg50Board *, uint16_t mV);
+// The AD7873 VBAT count (pxa_battery.h), 1720 (4200 mV) when full.
+void tg50BoardSetBatteryCount(Tg50Board *, uint16_t count);
 // The charger: uc A13 low is charging, A14 low with A2 low external power (DAL 0x24f88 and 0x22abc). A2 always
 // reads low here, so external power pulls A14 low and a charge in progress A13; a full battery on the charger
 // leaves A13 high (charge done).

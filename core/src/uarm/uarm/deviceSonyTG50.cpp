@@ -448,7 +448,7 @@ void tg50BoardSetAccessoryAux(Tg50Board *board, uint16_t mV) { ad7873setVaux(boa
 // Nothing plugged in: AUX reads full scale, which SonySys takes as no accessory (code >> 4 at
 // 0xF3 or more). 0 V would be its serial-ID accessory class 0x200.
 void tg50BoardSetConnectorEmpty(Tg50Board *board) { ad7873setVaux(board->touch, 2500); }
-void tg50BoardSetBatteryMilliVolts(Tg50Board *board, uint16_t mV) { ad7873setVbatt(board->touch, mV); }
+void tg50BoardSetBatteryCount(Tg50Board *board, uint16_t count) { ad7873setVbattCount(board->touch, count); }
 void tg50BoardSetCharging(Tg50Board *board, bool externalPower, bool charging) {
     tg50ucGpioSetInState(board->uc, 0, 13, !charging);
     tg50ucGpioSetInState(board->uc, 0, 14, !externalPower);

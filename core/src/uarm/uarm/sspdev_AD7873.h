@@ -21,6 +21,8 @@ void ad7873Periodic(struct Ad7873 *ad);
 void ad7873PenInput(struct Ad7873 *ad, int16_t x, int16_t y);	//negative for pen up
 
 void ad7873setVbatt(struct Ad7873 *ad, uint16_t mV);
+// The raw 12-bit VBAT conversion result.
+void ad7873setVbattCount(struct Ad7873 *ad, uint16_t count);
 void ad7873setVaux(struct Ad7873 *ad, uint16_t mV);
 uint16_t ad7873getVaux(const Ad7873 *ad);
 

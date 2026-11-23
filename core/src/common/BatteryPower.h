@@ -59,13 +59,6 @@ struct BatteryPower {
         return std::string(name) + " " + std::to_string(Percent()) + (charging ? " charging" : " battery");
     }
 
-    // A lithium-ion cell: 4200 mV full, 3700 nearly empty (5%), 3600 where the Palm shuts down (0%).
-    static uint32_t LiIonMilliVolts(unsigned percent) {
-        if (percent >= 100) return 4200;
-        if (percent <= 5) return 3600 + percent * 20;
-        return 3700 + (percent - 5) * 500 / 95;
-    }
-
     // Palm OS sysBattVoltageCurve: 11 voltages in hundredths of a volt for 0%, 10%, ... 100%.
     // The voltage between two entries for percent, so 100% gives entry 10 exactly.
     static uint32_t CurveCentivolts(const uint16_t (&curve)[11], unsigned percent) {

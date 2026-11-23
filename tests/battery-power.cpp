@@ -1,11 +1,13 @@
-// The battery setting: parsing and the replies, the level-to-voltage curves, and what the ARM boards' battery
-// inputs read back through their real ADC models (WM9712L BMON on the E2, TX and Zire 72, AD7873 VBAT on the TG50).
+// The battery setting: parsing and the replies, the level-to-voltage curves, each PXA DAL's percent as modelled in
+// pxa_battery.h, and what the ARM boards' battery inputs read back through their real ADC models (WM9712L BMON on
+// the E2, TX and Zire 72, AD7873 VBAT on the TG50).
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 #include "BatteryPower.h"
 #include "ac97dev_WM9712L.h"
+#include "pxa_battery.h"
 #include "sspdev_AD7873.h"
 
 static void check(bool success, const char* what) {
@@ -68,12 +70,6 @@ int main() {
                             "level 5 charging extra"})
         check(!BatteryPower::Parse(bad, b) && b == kept, bad);
 
-    check(BatteryPower::LiIonMilliVolts(100) == 4200 && BatteryPower::LiIonMilliVolts(5) == 3700 &&
-              BatteryPower::LiIonMilliVolts(0) == 3600,
-          "lithium-ion curve end points");
-    for (unsigned p = 1; p <= 100; ++p)
-        check(BatteryPower::LiIonMilliVolts(p) > BatteryPower::LiIonMilliVolts(p - 1), "lithium-ion curve rises");
-
     // A Palm OS sysBattVoltageCurve (hundredths of a volt at 0%, 10% ... 100%).
     const uint16_t curve[11] = {180, 200, 210, 220, 230, 240, 250, 260, 270, 280, 300};
     check(BatteryPower::CurveCentivolts(curve, 100) == 300, "100% is entry 10");
@@ -82,23 +78,58 @@ int main() {
     check(BatteryPower::CurveCentivolts(curve, 95) == 290 && BatteryPower::CurveCentivolts(curve, 5) == 190,
           "between entries");
 
-    // WM9712L BMON is behind a divide by three, 3.3 V full scale: 4200 mV reads 1737, today's full value.
+    // Each DAL's table at its own points, from the live tables in a TX and a Zire 72 session's RAM.
+    const unsigned txTable[11] = {1491, 1515, 1533, 1546, 1554, 1563, 1580, 1597, 1622, 1651, 1682};
+    const unsigned zire72Table[11] = {1509, 1525, 1538, 1549, 1562, 1574, 1596, 1616, 1641, 1667, 1695};
+    for (unsigned i = 0; i < 11; ++i) {
+        check(pxaBatteryGuestPercent(PxaBatteryBoard::tx, txTable[i], false) == 10 * i, "TX table");
+        check(pxaBatteryGuestPercent(PxaBatteryBoard::zire72, zire72Table[i], false) == 10 * i, "Zire 72 table");
+    }
+    // The tester's TX at 25%: the old lithium-ion guess (3805 mV, BMON 1574) read 56%.
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::tx, 1574, true) == 56, "old TX 25% read 56%");
+    // E2 at the ends of its calibration, and its charger correction.
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::e2, 1400, false) == 0, "E2 empty");
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::e2, 1641, true) == 100, "E2 full on the charger");
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::e2, 1522, true) < pxaBatteryGuestPercent(PxaBatteryBoard::e2, 1522, false),
+          "E2 reads lower on the charger");
+    // TG50: level = VBAT >> 3, 51 steps per volt, so level 182 is 3.57 V.
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::tg50, 1455, false) == 0, "TG50 0%");
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::tg50, 202 << 3, false) == 100, "TG50 3.96 V is 100%");
+
+    // Set percents read back as the same percent through each DAL's curve, on and off the charger. The TG50 has
+    // about one count per 2% near the middle of its curve, so it gets the nearest percent it can show.
+    for (auto board : {PxaBatteryBoard::tx, PxaBatteryBoard::e2, PxaBatteryBoard::zire72, PxaBatteryBoard::tg50})
+        for (bool charger : {false, true})
+            for (unsigned percent : {0u, 5u, 25u, 50u, 75u, 100u}) {
+                const unsigned shown = pxaBatteryGuestPercent(board, pxaBatteryCount(board, percent, charger), charger);
+                const unsigned off = shown > percent ? shown - percent : percent - shown;
+                check(board == PxaBatteryBoard::tg50 ? off <= 3 : off == 0, "set percent reads back");
+            }
+    for (unsigned percent = 0; percent <= 100; ++percent)
+        for (bool charger : {false, true})
+            for (auto board : {PxaBatteryBoard::tx, PxaBatteryBoard::zire72}) {
+                const unsigned shown = pxaBatteryGuestPercent(board, pxaBatteryCount(board, percent, charger), charger);
+                check((shown > percent ? shown - percent : percent - shown) <= 1, "every percent within 1");
+            }
+    check(pxaBatteryCount(PxaBatteryBoard::tx, 100, true) == pxaBatteryFullBmon &&
+              pxaBatteryCount(PxaBatteryBoard::tg50, 100, false) == pxaBatteryFullVbat,
+          "Maximum keeps the old full counts");
+
+    // WM9712L BMON is behind a divide by three, 3.3 V full scale: 4200 mV reads 1737, the full count.
     auto* wm = wm9712LInit(nullptr, nullptr, -1, 27);
     check(wm != nullptr, "codec");
-    wm9712LsetAuxVoltage(wm, WM9712LauxPinBmon, BatteryPower::LiIonMilliVolts(100) / 3);
-    check(readBmon(wm) == 1737, "BMON full");
-    wm9712LsetAuxVoltage(wm, WM9712LauxPinBmon, BatteryPower::LiIonMilliVolts(5) / 3);
-    check(readBmon(wm) == (3700 / 3 * 4095 + 1650) / 3300, "BMON nearly empty");
-    wm9712LsetAuxVoltage(wm, WM9712LauxPinBmon, BatteryPower::LiIonMilliVolts(0) / 3);
-    check(readBmon(wm) == (1200 * 4095 + 1650) / 3300, "BMON empty");
+    wm9712LsetAuxVoltage(wm, WM9712LauxPinBmon, 4200 / 3);
+    check(readBmon(wm) == pxaBatteryFullBmon, "BMON full");
+    wm9712LsetAuxCount(wm, WM9712LauxPinBmon, pxaBatteryCount(PxaBatteryBoard::tx, 25, false));
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::tx, readBmon(wm), false) == 25, "BMON count reads back");
 
     // AD7873 VBAT has a divide by four into a 2.5 V reference.
     auto* ad = ad7873Init(nullptr, nullptr, -1);
     check(ad != nullptr && sspProc, "AD7873");
-    ad7873setVbatt(ad, uint16_t(BatteryPower::LiIonMilliVolts(100)));
-    check(readVbat() == 1050 * 4096 / 2500, "VBAT full");
-    ad7873setVbatt(ad, uint16_t(BatteryPower::LiIonMilliVolts(0)));
-    check(readVbat() == 900 * 4096 / 2500, "VBAT empty");
+    ad7873setVbatt(ad, 4200);
+    check(readVbat() == pxaBatteryFullVbat, "VBAT full");
+    ad7873setVbattCount(ad, pxaBatteryCount(PxaBatteryBoard::tg50, 25, false));
+    check(pxaBatteryGuestPercent(PxaBatteryBoard::tg50, readVbat(), false) == 25, "VBAT count reads back");
 
     std::puts("battery power: ok");
     return 0;
