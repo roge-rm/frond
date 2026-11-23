@@ -78,17 +78,18 @@ int main() {
     assert(audioQueueAccounting(queue).committed==offCommitted);
     m.soc.SetPcmOutputEnabled(true); m.run(); assert(audioQueuePendingSamples(queue)>0);
 
-    // At 10 cycles/s one cycle is 100 ms of guest time; injected runs account for it without
-    // dividing by zero, and the 4410 frames it mixes overrun a 2-frame queue.
+    // At 10 cycles/s one cycle is 100 ms of guest time. A 1-cycle run still runs the loop's one B,
+    // which the PXA25x cost table charges 4 cycles (400 ms); injected runs account for it without
+    // dividing by zero, and the 17640 frames it mixes overrun a 2-frame queue.
     AudioMachine low; low.configure(); auto* lowQueue=audioQueueCreate(2);
     low.soc.SetAudioQueue(lowQueue); low.soc.SetPcmOutputEnabled(true);
-    assert(low.soc.Run(1,10)==1);
+    assert(low.soc.Run(1,10)==4);
     low.soc.SetPcmOutputEnabled(false);
     low.soc.ResetInjectedTimeNsec(); assert(!low.soc.ExecuteInjected(1,10));
-    assert(low.soc.GetInjectedTimeNsec()==100000000);
+    assert(low.soc.GetInjectedTimeNsec()==400000000);
     low.soc.ResetInjectedTimeNsec(); assert(!low.soc.RunToPaceSyscall(0xa000,1,10));
-    assert(low.soc.GetInjectedTimeNsec()==100000000);
-    low.soc.SetPcmOutputEnabled(true);assert(low.soc.Run(1,10)==1);
+    assert(low.soc.GetInjectedTimeNsec()==400000000);
+    low.soc.SetPcmOutputEnabled(true);assert(low.soc.Run(1,10)==4);
     assert(audioQueuePendingSamples(lowQueue)==2 && audioQueueAccounting(lowQueue).discarded>4000);
     assert(!low.soc.Run(1,0));
     // Late rollback and destruction must not dereference a destroyed SoC.
