@@ -2393,6 +2393,19 @@ void jitLong() {
 #define ZODIAC_FAST_LEAN_MAIN main
 #endif
 int ZODIAC_FAST_LEAN_MAIN() {
+    if (std::getenv("ZODIAC_FAST_LEAN_RING")) {
+        // The ring tests alone, for running again with span options off (FROND_ZODIAC_CROSS_END=0 and the like):
+        // Fast still ends with Exact's results.
+        imx1SetFastBlocksDefault(true);
+        cpuSetJitSync(true);
+        setenv("FROND_JIT_HOT", "1", 1);
+        jitRingPolls();
+        jitRingSubmits();
+        jitQueuedRingSubmits();
+        delayLoop(true);
+        std::puts("PASS: Fast blocks match Exact in the ring polls, ring submits and stores before a delay skip");
+        return 0;
+    }
     uint32_t stopPc = 0, savePc = 0;
     // Lean-only Fast first, which gives Exact's times as well.
     imx1SetFastBlocksDefault(false);

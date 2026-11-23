@@ -27,6 +27,24 @@ inline uint64_t imx1StepsUntil(uint64_t phase, uint64_t den, uint64_t n, uint64_
             return steps ? steps : 1;
         }
     }
+    // Where d divides den (k = den / d), each step adds N = n * k units of 1/den: with target * d = A * n + B,
+    // target * den = A * N + B * k, so the count is A, one more when B * k passes the phase, and fewer by
+    // (phase - B * k) / N whole steps when it doesn't. The same count without a 128-bit divide.
+    if (den % d == 0) {
+        const uint64_t k = den / d;
+        uint64_t scaled, step, part;
+        if (!__builtin_mul_overflow(target, d, &scaled) && !__builtin_mul_overflow(n, k, &step) &&
+            !__builtin_mul_overflow(scaled % n, k, &part)) {
+            const uint64_t whole = scaled / n;
+            uint64_t steps;
+            if (part > phase) steps = whole + 1;
+            else {
+                const uint64_t back = (phase - part) / step;
+                steps = back < whole ? whole - back : 0;
+            }
+            return steps ? steps : 1;
+        }
+    }
     const __uint128_t max = ~__uint128_t(0);
     const __uint128_t whole = __uint128_t(target) * den;
     if (whole <= phase) return 1;
@@ -69,7 +87,21 @@ struct Imx1ReferenceTime {
         return valid() && d && d / imx1Gcd(d, denominator) <= UINT64_MAX / denominator;
     }
     bool add(uint64_t n, uint64_t d) {
-        if (!valid() || !supports(d)) return false;
+        if (!valid()) return false;
+        if (d && denominator % d == 0) {
+            // The common denominator stays: numerator < denominator and (n % d) * (denominator / d) < denominator,
+            // so the sum carries at most one whole tick (past 2^64 too, which the unsigned wrap undoes).
+            uint64_t fraction;
+            const bool wrapped = __builtin_add_overflow(numerator, (n % d) * (denominator / d), &fraction);
+            const bool carry = wrapped || fraction >= denominator;
+            uint64_t whole;
+            if (__builtin_add_overflow(ticks, n / d, &whole) || __builtin_add_overflow(whole, uint64_t(carry), &whole))
+                return false;
+            ticks = whole;
+            numerator = carry ? fraction - denominator : fraction;
+            return true;
+        }
+        if (!supports(d)) return false;
         const auto common = denominator * (d / imx1Gcd(d, denominator));
         const __uint128_t fraction = __uint128_t(numerator) * (common / denominator) +
                                      __uint128_t(n % d) * (common / d);

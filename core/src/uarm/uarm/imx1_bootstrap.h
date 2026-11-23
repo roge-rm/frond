@@ -23,7 +23,7 @@
 #include "imx1_rtc.h"
 #include "imx1_reference_time.h"
 
-enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence, resetRequest, possibleWatchdogTimeout, busTimeout };
+enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence, resetRequest, possibleWatchdogTimeout, busTimeout, argument };
 
 struct Imx1PcmState {
     uint32_t remaining = 0, source = 0, pendingSource = 0, fifoWords = 0, status = 0;
@@ -100,7 +100,14 @@ class Imx1Bootstrap {
     // HCLK order, so Exact and Fast give the same words. An underrun's repeated word counts too. Not saved.
     void setPcmOutput(void (*hook)(void*, uint16_t, unsigned), void* context) { pcmHook = hook; pcmContext = context; }
     // Moves the PCM output to another board, as a state load replaces this one.
-    void takePcmOutput(const Imx1Bootstrap& old) { pcmHook = old.pcmHook; pcmContext = old.pcmContext; }
+    void takePcmOutput(const Imx1Bootstrap& old) {
+        pcmHook = old.pcmHook;
+        pcmContext = old.pcmContext;
+        fmOutputMuted = old.fmOutputMuted;
+    }
+    // Leaves the YMF768's FM out of the PCM output's words, for music played on the host instead. The chip still
+    // mixes each word, so its state and everything the guest sees stay the same. Not saved.
+    void setFmOutputMuted(bool muted) { fmOutputMuted = muted; }
     // The Zodiac's YMF768 on CS4, off unless enableYmf768 is called. Its FM output is added to SSI1's words on
     // their way to the PCM output, and its interrupt drives GPIO B15 (low while asserted). Saved in its own
     // section (stateYmf768), so a state saved before it existed loads with the chip reset.
@@ -676,6 +683,8 @@ class Imx1Bootstrap {
     // when B15 can't follow the chip's line; clockStatus then stops the run, so it isn't saved either.
     Imx1Ymf768 ymf;
     bool ymfEnabled = false, ymfLineRefused = false;
+    // setFmOutputMuted, with the PCM output. Not saved.
+    bool fmOutputMuted = false;
     // GPIO B15 follows the chip's interrupt line, low while asserted. The board options fix port B before the
     // run, so a change is a transition; a board without fixed port B inputs gets B15 fixed here before its
     // first access. Anything else (an interrupt on a port B output, say) refuses the change.

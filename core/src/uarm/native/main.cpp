@@ -38,6 +38,15 @@
 #include "RenderThread.h"
 #include "Rotation.h"
 #include "ZodiacSpeed.h"
+#define TSF_IMPLEMENTATION
+#include "ZodiacMusicSynth.h"
+#include "ZodiacMidiOut.h"
+#ifndef __ANDROID__
+#include "ZodiacRtMidi.h"
+#else
+// In the app (ZodiacMidiJni.cpp): the MIDI output the app's MidiManager side sends from.
+std::unique_ptr<ZodiacMidiOut::Port> zodiacAndroidMidiPort();
+#endif
 
 #ifdef __ANDROID__
 // In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
@@ -122,6 +131,9 @@ struct Options {
     bool syncNetwork{false};
     optional<string> syncFolder, syncProfile, syncMachine, syncUser;  // --sync-*
     optional<string> bluetooth;
+    bool musicHooks{false};  // --music-hooks
+    std::optional<std::string> musicSoundFont;  // --music-soundfont
+    std::optional<std::string> musicMidiOut;    // --music-midi-out
     bool cardSwap;                  // the frontend changed the card files while the machine was off
     optional<string> cardIdentity;  // the card put in: 64 hex digits
     bool cardProtected;
@@ -768,6 +780,9 @@ bool gFastEngineMissing = false;
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
+            // With a SoundFont or a MIDI out taking the events, the hooks don't print them.
+            if (options.musicHooks || options.musicSoundFont || options.musicMidiOut)
+                static_cast<SocIMX1*>(soc)->SetMusicHooks(true, !options.musicSoundFont && !options.musicMidiOut);
         } else if (board == DeviceBoard5::s3c2442Rx1950) {
             // Low-latency audio is --low-latency-queue only: the --fast-audio preview is for Palm OS firmware.
             if (options.gdbPort || options.experimentalFastAudio) {
@@ -794,6 +809,9 @@ bool gFastEngineMissing = false;
                                                reinterpret_cast<uint8_t*>(nand.data), nand.size,
                                                gdbPort, pxa270 ? 2 : deviceGetSocRev()));
         }
+
+        if (board != DeviceBoard5::imx1Zodiac && (options.musicHooks || options.musicSoundFont || options.musicMidiOut))
+            cerr << "--music-hooks, --music-soundfont and --music-midi-out are for the Tapwave Zodiac only; ignored" << endl;
 
         // Before the load, which applies it again over the session's saved inputs.
         if (soc->BatterySupported()) soc->SetBattery(options.battery);
@@ -1035,8 +1053,72 @@ bool gFastEngineMissing = false;
         const uint32_t audioPeriod = options.audioPeriod;
         if (lowLatencyQueue) audioQueueEnsureCapacity(audioQueue, size_t(audioPeriod) * 12 + 1024);
         if (options.experimentalFastAudio) static_cast<SocPXA*>(soc)->SetFastAudioPeriod(audioPeriod);
+        // The Zodiac's MIDI music through a SoundFont, mixed on the audio callback's thread, and to a MIDI output
+        // on its own thread. Declared before the driver, and the mixer cleared at the end of the scope, so the
+        // callback never runs into a freed synth; the MIDI out before the synth, whose helper may feed it.
+        auto* const zodiacMusic = dynamic_cast<SocIMX1*>(soc);
+        std::unique_ptr<ZodiacMidiOut> midiOut;
+        if (zodiacMusic && zodiacMusic->MusicHooksOn() && options.musicMidiOut) {
+            std::string opened = "the app's MIDI output", error;
+#ifndef __ANDROID__
+            auto port = zodiacOpenMidiPort(*options.musicMidiOut, opened, error);
+            constexpr uint64_t lookaheadNs = 0;
+#else
+            // MidiInputPort.send schedules by timestamp, so messages go a little ahead.
+            auto port = zodiacAndroidMidiPort();
+            constexpr uint64_t lookaheadNs = 20000000;
+#endif
+            if (port) {
+                midiOut = std::make_unique<ZodiacMidiOut>(std::move(port), lookaheadNs);
+                cerr << "--music-midi-out: music to " << opened << endl;
+            } else {
+                cerr << "--music-midi-out: " << error << endl;
+            }
+        }
+        std::unique_ptr<ZodiacMusicSynth> musicSynth;
         SdlAudioDriver audioDriver(soc, audioQueue, lowLatencyQueue, audioPeriod);
+        struct ClearMixerAtEnd {
+            SdlAudioDriver& driver;
+            ~ClearMixerAtEnd() { driver.ClearMixer(); }
+        } clearMixerAtEnd{audioDriver};
+        const auto noSynth = [](const std::string& why) { cerr << "--music-soundfont: " << why << endl; };
+        if (zodiacMusic && options.musicSoundFont && zodiacMusic->MusicHooksOn()) {
+            if (options.disableAudio) {
+                noSynth("no audio");
+            } else if (musicSynth = std::make_unique<ZodiacMusicSynth>(); !musicSynth->loadFile(*options.musicSoundFont)) {
+                musicSynth.reset();
+                noSynth("can't read " + *options.musicSoundFont + " as a SoundFont");
+            } else {
+                musicSynth->attach(&zodiacMusic->MusicHooks());
+                if (midiOut) musicSynth->tap([out = midiOut.get()](const zodiac_music::Event& e) { out->offer(e); });
+                musicSynth->start();
+                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count) { synth->mix(frames, count); });
+            }
+        }
         if (!options.disableAudio) audioDriver.Start();
+        if (musicSynth && !audioDriver.Running()) {
+            audioDriver.ClearMixer();
+            musicSynth.reset();
+            noSynth("no audio device");
+        }
+        const bool synthTakes = musicSynth != nullptr;
+        if (midiOut) {
+            // Straight from the hooks when no synth's helper hands it the events.
+            if (!synthTakes) midiOut->attach(&zodiacMusic->MusicHooks());
+            midiOut->start();
+        }
+        // Nobody takes the music events: print them with --music-hooks, else the hooks go off.
+        if (zodiacMusic && zodiacMusic->MusicHooksOn() && !synthTakes && !midiOut &&
+            (options.musicSoundFont || options.musicMidiOut)) {
+            zodiacMusic->SetMusicHooks(options.musicHooks, true);
+            cerr << "Zodiac music: " << (options.musicHooks ? "printing the music calls" : "music hooks off") << endl;
+        }
+        // The SoundFont or the MIDI output plays the music, so the guest's FM is left out of the sound.
+        if (zodiacMusic && (synthTakes || midiOut)) zodiacMusic->SetFmMuted(true);
+        // Only the MIDI output plays the music: when its port fails, the FM comes back.
+        bool fmBackOnPortFail = zodiacMusic && midiOut && !synthTakes;
+        // MIDI out waits for the audio queue: the frames queued and the one period the device is playing, smoothed.
+        double midiDelayFrames = 0;
 
         commands::Register();
         if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
@@ -1365,6 +1447,24 @@ bool gFastEngineMissing = false;
                 const bool headless = sdlEventHandler.InBackground() &&
                                       ((capabilities.backgroundPanel && desktop && desktop->PanelVisible()) || printing);
                 audioDriver.SetHeadless((capabilities.backgroundPanel || printing) && sdlEventHandler.InBackground());
+                // The music's clock stands with the guest's.
+                {
+                    const bool musicHeld = (sdlEventHandler.InBackground() && !headless) || replay.Paused();
+                    if (musicSynth) musicSynth->hold(musicHeld);
+                    if (midiOut) {
+                        midiOut->hold(musicHeld);
+                        if (audioDriver.Running()) {
+                            const double queued = double(audioQueueGetState(audioQueue).pendingSamples) + audioPeriod;
+                            midiDelayFrames += (queued - midiDelayFrames) / 32;
+                            midiOut->setDelay(uint64_t(midiDelayFrames * 1e9 / 44100));
+                        }
+                        midiOut->poke();
+                        if (fmBackOnPortFail && midiOut->portFailed()) {
+                            zodiacMusic->SetFmMuted(false);
+                            fmBackOnPortFail = false;
+                        }
+                    }
+                }
                 if (sdlEventHandler.InBackground() && !headless) {
                     wasHeadless = false;
                     mainLoop.PauseAt(now);
@@ -1997,6 +2097,25 @@ int main(int argc, char** argv) {
         .help("connect the virtual Bluetooth radio to a local H4 controller Unix socket; default off")
         .metavar("<off|/controller/socket>");
 
+    program.add_argument("--music-hooks")
+        .help("Zodiac: catch the games' MIDI music calls and print them on stderr; default off")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("--music-soundfont")
+        .help("Zodiac: play the games' MIDI music through this SoundFont 2 file (turns the music hooks on)")
+        .metavar("<file.sf2>");
+
+    program.add_argument("--music-midi-out")
+        .help("Zodiac: send the games' MIDI music to this MIDI output port: its number or part of its name from "
+              "--music-midi-ports, or virtual for a port of Frond's own (turns the music hooks on)")
+        .metavar("<port|virtual>");
+
+    program.add_argument("--music-midi-ports")
+        .help("list the MIDI output ports and exit")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--irda")
         .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, phone for the core's mobile phone or printer for its IrDA printer; exclusive with keyboard; default off")
         .metavar("<off|pty|tcp:PORT|unix:PATH|phone|printer>");
@@ -2016,6 +2135,22 @@ int main(int argc, char** argv) {
     program.add_argument("--sync-user").help("the user name a new handheld gets on its first HotSync").metavar("<name>");
 
     program.add_argument("--script").help("execute script on startup").metavar("<script file>");
+
+#ifndef __ANDROID__
+    // Before parsing, which wants a session.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) != "--music-midi-ports") continue;
+        std::vector<std::string> ports;
+        std::string error;
+        if (!zodiacMidiPorts(ports, error)) {
+            cerr << "no MIDI: " << error << endl;
+            return 1;
+        }
+        if (ports.empty()) cout << "no MIDI output ports" << endl;
+        for (size_t p = 0; p < ports.size(); ++p) cout << p << ": " << ports[p] << endl;
+        return 0;
+    }
+#endif
 
     try {
         program.parse_args(argc, argv);
@@ -2073,6 +2208,9 @@ int main(int argc, char** argv) {
                        .syncMachine = program.present("--sync-machine"),
                        .syncUser = program.present("--sync-user"),
                        .bluetooth = program.present("--bluetooth"),
+                       .musicHooks = program.get<bool>("--music-hooks"),
+                       .musicSoundFont = program.present("--music-soundfont"),
+                       .musicMidiOut = program.present("--music-midi-out"),
                        .cardSwap = program.get<bool>("--card-swap"),
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),

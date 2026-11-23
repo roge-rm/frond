@@ -16,7 +16,7 @@ inline bool imx1GraphicsMode2RouteValid(Imx1GraphicsMode2Route route) {
 class Imx1GraphicsAcquisition {
    public:
     static constexpr uint32_t conversionTicks = 20000; // 100 us at the virtual 200 MHz reference.
-    static bool owns(uint32_t a) { return a >= 0x16010d08 && a <= 0x16010d1c; }
+    static constexpr bool owns(uint32_t a) { return a >= 0x16010d08 && a <= 0x16010d1c; }
     bool setInput(uint32_t first, uint32_t second) {
         if (first > 1023 || second > 1023) return false;
         input = {first, second}; inputKnown = true; return true;
@@ -30,6 +30,7 @@ class Imx1GraphicsAcquisition {
         auxInput = sample; auxInputKnown = true; return true;
     }
     uint32_t auxSample() const { return auxInput; }
+    uint32_t mode1Sample() const { return mode1Input; }
     bool setMode2Route(Imx1GraphicsMode2Route route) {
         if (!imx1GraphicsMode2RouteValid(route)) return false;
         mode2Route = route; return true;

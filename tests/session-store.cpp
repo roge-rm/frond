@@ -994,6 +994,32 @@ class SessionStoreTest : public QObject {
         QVERIFY(input.seek(0));
         QCOMPARE(QCryptographicHash::hash(input.readAll(), QCryptographicHash::Md5).toHex(), QByteArray("c2d90f775b1737de5bcd11634bf51d7d"));
     }
+    void musicOutputPreferences() {
+        const auto path = filePath(folder(), "Zodiac Music");
+        write(path, header(6, "tapwave-zodiac-2"));
+        Preferences prefs;
+        QVERIFY(!readPreferences(path, &prefs));
+        QCOMPARE(prefs.musicOutput, QString("fm"));
+        QVERIFY(musicArguments(prefs).isEmpty());
+        prefs.musicOutput = "soundfont";
+        // Nothing picked: the game's own sound.
+        QVERIFY(musicArguments(prefs).isEmpty());
+        prefs.soundFont = "/music/GM.sf2";
+        prefs.midiOutPort = "virtual";
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        Preferences loaded;
+        QVERIFY(readPreferences(path, &loaded));
+        QCOMPARE(loaded.musicOutput, QString("soundfont"));
+        QCOMPARE(loaded.soundFont, QString("/music/GM.sf2"));
+        QCOMPARE(loaded.midiOutPort, QString("virtual"));
+        QCOMPARE(musicArguments(loaded), (QStringList{"--music-soundfont", "/music/GM.sf2"}));
+        loaded.musicOutput = "midi";
+        QCOMPARE(musicArguments(loaded), (QStringList{"--music-midi-out", "virtual"}));
+        // An unknown choice reads as the game's own sound.
+        write(preferencesPath(path), R"({"version":1,"scale":4,"smooth":false,"audio":true,"fastAudio":false,"musicOutput":"radio"})");
+        QVERIFY(readPreferences(path, &loaded));
+        QCOMPARE(loaded.musicOutput, QString("fm"));
+    }
     void machineControlVisibilityPreferences() {
         const auto one = filePath(folder(), "TG50 One"), two = filePath(folder(), "TG50 Two");
         write(one, header(6, "sony-clie-tg50"));

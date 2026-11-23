@@ -4,6 +4,11 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+
+#include <unistd.h>
 
 #include <mcl/bit_cast.hpp>
 
@@ -19,6 +24,44 @@
 #include "dynarmic/interface/exclusive_monitor.h"
 
 namespace Dynarmic::Backend::Arm64 {
+
+namespace {
+// Frond: with FROND_JIT_PERF_MAP set to a folder, each block's host range and location go to perf-PID.map
+// there (perf's map format) and its code to perf-PID.code (host start and size as u64, then the bytes), for
+// matching profile samples to guest code and instructions. Off otherwise.
+std::mutex perf_map_mutex;
+std::FILE* perf_map_file = nullptr;
+std::FILE* perf_code_file = nullptr;
+bool perf_map_failed = false;
+
+void PerfMapRegister(IR::LocationDescriptor location, const EmittedBlockInfo& info) {
+    static const char* const dir = std::getenv("FROND_JIT_PERF_MAP");
+    if (!dir || !*dir) return;
+    std::lock_guard lock{perf_map_mutex};
+    if (perf_map_failed) return;
+    if (!perf_map_file) {
+        const std::string base = std::string(dir) + "/perf-" + std::to_string(getpid());
+        perf_map_file = std::fopen((base + ".map").c_str(), "w");
+        perf_code_file = std::fopen((base + ".code").c_str(), "wb");
+        if (!perf_map_file || !perf_code_file) {
+            // Either failed to open: close the other and don't try again.
+            if (perf_map_file) std::fclose(perf_map_file);
+            if (perf_code_file) std::fclose(perf_code_file);
+            perf_map_file = perf_code_file = nullptr;
+            perf_map_failed = true;
+            return;
+        }
+    }
+    const u64 start = mcl::bit_cast<u64>(info.entry_point), size = info.size, value = location.Value();
+    std::fprintf(perf_map_file, "%016llx %llx a32_%08x_%08x\n", (unsigned long long)start, (unsigned long long)size,
+                 u32(value >> 32), u32(value));
+    std::fflush(perf_map_file);
+    std::fwrite(&start, sizeof start, 1, perf_code_file);
+    std::fwrite(&size, sizeof size, 1, perf_code_file);
+    std::fwrite(reinterpret_cast<const void*>(info.entry_point), 1, size, perf_code_file);
+    std::fflush(perf_code_file);
+}
+}  // namespace
 
 AddressSpace::AddressSpace(size_t code_cache_size)
         : code_cache_size(code_cache_size)
@@ -149,6 +192,7 @@ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
     ProtectCodeMemory();
 
     RegisterNewBasicBlock(block, block_info);
+    PerfMapRegister(block.Location(), block_info);
 
     return block_info;
 }
@@ -186,6 +230,7 @@ void AddressSpace::Install(IR::LocationDescriptor location, const EmittedBlockIn
 
     // The rest of the code was written and its cache lines cleaned on the compile thread.
     __asm__ volatile("isb" ::: "memory");
+    PerfMapRegister(location, block_info);
 }
 
 void AddressSpace::Link(EmittedBlockInfo& block_info) {

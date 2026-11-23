@@ -440,7 +440,7 @@ void cpuArm920SetJitAccessPcs(ArmCpu*, const uint32_t* pcs, uint32_t count);
 // every instruction at one of them and its caller can act there first. Setting replaces the ones before and drops
 // translated code when they change. False on another model or for more than ARM920_MAX_CODE_HOOKS. None set
 // runs as before.
-#define ARM920_MAX_CODE_HOOKS 16
+#define ARM920_MAX_CODE_HOOKS 32
 bool cpuArm920SetCodeHooks(ArmCpu*, const uint32_t* pcs, uint32_t count);
 bool cpuArm920CodeHookAt(const ArmCpu*, uint32_t pc);
 // Fast: the physical address of va as a load in the current mode would see it, and with word set the word there

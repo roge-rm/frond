@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <QDialog>
 #include "FirmwareInput.h"
 #include "SessionStore.h"
@@ -18,6 +19,15 @@ int fittingScaleQuarters(frondFirmware::Device device, bool keyboard, frondSessi
 // Fills a speed combo with the choices for the device family (data is the core's name), keeping name selected.
 void fillSpeedBox(QComboBox* box, bool m68k, const QString& name);
 
+// The core that lists the MIDI output ports for the Zodiac's Music output (its --music-midi-ports).
+void setMidiPortsCore(const QString& core);
+// Asks the core for the MIDI output port names in the background; done gets them on context's thread, empty when
+// it has none or can't run (5 s at most). Nothing comes if context goes first.
+void listMidiOutputPorts(QObject* context, std::function<void(const QStringList&)> done);
+// A port's name without the numbers that change with plug order (as the core's zodiacMidiPortKey), in lower case.
+QString midiPortKey(const QString& name);
+
+class QPushButton;
 class MachineSettings : public QWidget {
     Q_OBJECT
  public:
@@ -31,6 +41,11 @@ class MachineSettings : public QWidget {
     QSlider* batteryLevel;
     QCheckBox* batteryCharging;
     QCheckBox *smoothLcd, *showMips, *audio, *fastAudio, *rumble, *showKeyboard;
+    // Zodiac: Music output (the game's own FM, a SoundFont or a MIDI device), the SoundFont file and the port.
+    QComboBox* musicOutput;
+    QLineEdit* soundFont;
+    QPushButton* soundFontChoose;
+    QComboBox* midiPort;
     DanaViewControls* danaView;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
@@ -57,6 +72,10 @@ class MachineSettings : public QWidget {
     void setNewMachine();
  private:
     QLabel *batteryLevelLabel;
+    QLabel* musicOutputLabel;
+    QWidget *soundFontRow, *midiPortRow;
+    bool midiPortsListed{false};
+    void showMusic();
     QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel, *serialLabel, *bluetoothLabel;
     QGroupBox* peripherals;
     bool peripheralsShown{false};

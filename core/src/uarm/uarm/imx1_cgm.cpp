@@ -7,18 +7,11 @@
 
 static Imx1PllRatio pllRatioOf(uint32_t control);
 
-// The last two control words and their ratios, as the MCU and System PLL words are asked for in turn.
-// The ratio depends on the word alone.
-static Imx1PllRatio pllRatio(uint32_t control) {
-    struct Entry { uint32_t control; bool known; Imx1PllRatio ratio; };
-    static thread_local Entry entries[2]{};
-    for (auto& entry : entries)
-        if (entry.known && entry.control == control) return entry.ratio;
-    static thread_local unsigned next = 0;
-    auto& entry = entries[next];
-    next ^= 1;
-    entry = {control, true, pllRatioOf(control)};
-    return entry.ratio;
+// The ratio depends on the control word alone, so each register keeps the last one it gave.
+void Imx1Cgm::RatioMemo::refresh(uint32_t word) const {
+    control = word;
+    ratio = pllRatioOf(word);
+    known = true;
 }
 
 static Imx1PllRatio pllRatioOf(uint32_t control) {
@@ -33,7 +26,6 @@ static Imx1PllRatio pllRatioOf(uint32_t control) {
     return {numerator / common, denominator / common};
 }
 
-Imx1PllRatio Imx1Cgm::mcuPllTargetRatio() const { return pllRatio(mpctl0); }
 Imx1PllRatio Imx1Cgm::writeDelayRatio() const {
     const auto rate = mcuPllTargetRatio();
     // While a System PLL restart is pending the CPU runs at the PLL's own rate (Imx1Bootstrap::cpuMcuRatio).
@@ -42,8 +34,6 @@ Imx1PllRatio Imx1Cgm::writeDelayRatio() const {
     const uint64_t g = imx1Gcd(numerator, denominator);
     return {numerator / g, uint32_t(denominator / g)};
 }
-Imx1PllRatio Imx1Cgm::systemPllTargetRatio() const { return pllRatio(spctl0); }
-Imx1PllRatio Imx1Cgm::systemPllActiveRatio() const { return pllRatio(activeSpctl0); }
 
 bool Imx1Cgm::mcuReferenceSupported(uint64_t denominator) const {
     if (!denominator) return false;
@@ -252,7 +242,7 @@ Imx1CgmAccess Imx1Cgm::access(uint32_t address, uint32_t size, bool write, uint3
             return Imx1CgmAccess::sideEffect;
         if (mcuTimingUnknown) {
             if (!nominalMcuRetune || !mcuOutputQualified) return Imx1CgmAccess::externalInput;
-            const auto old = mcuPllTargetRatio(), next = pllRatio(value);
+            const auto old = mcuPllTargetRatio(), next = pllRatioOf(value);
             if (!mcuRestartComplete || mcuWriteDelay || mcuReferenceRemaining || systemRestartUnits ||
                 old.numerator != next.numerator || old.denominator != next.denominator)
                 return Imx1CgmAccess::sideEffect;

@@ -156,6 +156,7 @@ SOURCE_CXX_NATIVE =						\
 	native/SdlRenderer.cpp				\
 	native/SdlEventHandler.cpp			\
 	native/SdlAudioDriver.cpp			\
+	native/ZodiacRtMidi.cpp				\
 	native/Commands.cpp					\
 	native/InputReplay.cpp				\
 	native/WindowId.cpp				\
@@ -188,6 +189,15 @@ $(BINARY_ZODIAC_DEVELOPER): $(filter-out $(BUILDDIR_NATIVE)/native/main.o,$(OBJE
 zodiac-developer: $(BINARY_ZODIAC_DEVELOPER)
 
 .PHONY: bin clean zodiac-developer
+
+# The Zodiac's MIDI out (native/ZodiacRtMidi.cpp, RtMidi): ALSA on Linux, CoreMIDI on macOS, WinMM on Windows.
+ifeq ($(HOST_OS),macos)
+LDFLAGS_NATIVE_EXTRA += -framework CoreMIDI -framework CoreAudio -framework CoreFoundation
+else ifeq ($(HOST_OS),windows)
+LDFLAGS_NATIVE_EXTRA += -lwinmm
+else
+LDFLAGS_NATIVE_EXTRA += $(shell pkg-config --libs alsa)
+endif
 
 # Native virtual wireless router
 CXXFLAGS_NATIVE_EXTRA += $(shell pkg-config --cflags slirp)

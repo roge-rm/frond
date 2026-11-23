@@ -102,6 +102,52 @@ class Imx1Cs5Configuration {
         if (ticks == UINT64_MAX) return UINT64_MAX;
         return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, numerator * 390625, denominator * 64, ticks);
     }
+    // Fast: idleQuietSteps with the engine's bound at the completion of its last queued batch, not its first.
+    // front is idleQuietSteps; the two differ only when batches complete before the bound. Only with the clocks
+    // programmed and no SD or acquisition work due, as graphicsCommitted runs card work before completions.
+    // pastLast: the bound goes on past the last completion, where the engine going idle changes nothing but the
+    // busy level, to the automatic clock switch that schedules (if any), the clocks and the display. The probe
+    // takes the completions and the busy level at the last one's time in its charge (cpuStepsThroughLast).
+    uint64_t idleQuietStepsThrough(uint64_t numerator, uint64_t denominator, uint64_t& front,
+                                   bool pastLast = false) const {
+        // idleQuietSteps's sources, each looked at once for both bounds.
+        if (!clocks.programmed()) return front = UINT64_MAX;
+        if (!timeFraction.supports(denominator * 64) || clocks.gpuBusyValue() != !engine.emptyRing()) return front = 1;
+        const uint64_t event = clocks.nextEvent() ? clocks.nextEvent() : UINT64_MAX;
+        const uint64_t first = engine.idleQuietTicks(), deadline = acquisition.deadlineRemaining();
+        const uint64_t card = sd.idleQuietTicks(), scan = display.idleQuietTicks();
+        uint64_t ticks = std::min({event, first, card, scan});
+        if (deadline) ticks = std::min(ticks, deadline);
+        const uint64_t n = numerator * 390625, d = denominator * 64;
+        front = ticks == UINT64_MAX ? UINT64_MAX : imx1StepsUntil(timeFraction.phase, timeFraction.denominator, n, d, ticks);
+        if (front == UINT64_MAX || front <= 1 || first == UINT64_MAX || deadline || card != UINT64_MAX) return front;
+        ticks = event;
+        const uint64_t last = engine.idleQuietTicksThrough();
+        if (!pastLast) ticks = std::min(ticks, last);
+        else if (const uint64_t idle = clocks.idleAutomaticTicks(); idle != UINT64_MAX)
+            ticks = std::min(ticks, idle < UINT64_MAX - last ? last + idle : UINT64_MAX - 1);
+        ticks = std::min(ticks, scan);
+        if (ticks <= first) return front;
+        if (ticks == UINT64_MAX) return UINT64_MAX;
+        return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, n, d, ticks);
+    }
+    // CPU cycles of this period after which the last queued batch has finished; 0 with none queued or where the
+    // count can't be worked out.
+    uint64_t cpuStepsThroughLast(Imx1PllRatio period) const {
+        if (!clocks.programmed() || controller.delayRunning() || engine.idleQuietTicks() == UINT64_MAX ||
+            !timeFraction.supports(uint64_t(period.denominator) * 64))
+            return 0;
+        return imx1StepsUntil(timeFraction.phase, timeFraction.denominator, uint64_t(period.numerator) * 390625,
+                              uint64_t(period.denominator) * 64, engine.idleQuietTicksThrough());
+    }
+    // quietCpuCycles with idleQuietStepsThrough; front is quietCpuCycles.
+    uint64_t quietCpuCyclesThrough(Imx1PllRatio period, uint64_t& front, bool pastLast = false) const {
+        if (controller.delayRunning() || !clocks.programmed()) return front = quietCpuCycles(period);
+        uint64_t frontSteps;
+        const uint64_t steps = idleQuietStepsThrough(period.numerator, period.denominator, frontSteps, pastLast);
+        front = frontSteps == UINT64_MAX ? UINT64_MAX : frontSteps - 1;
+        return steps == UINT64_MAX ? UINT64_MAX : steps - 1;
+    }
     // CPU cycles of this period that advanceCpuCycles can take in one call or in any split with the same
     // result, as no graphics model changes state within them. 0 when a change is due or can't be worked out.
     uint64_t quietCpuCycles(Imx1PllRatio period) const {
@@ -291,6 +337,25 @@ class Imx1Cs5Configuration {
     // The OS maps SDRAM at 40000000-473fffff for applications and their data. The ROM runs at 20000000 and the
     // exception vectors at 0, so only code in that RAM drives the chip as a player.
     static bool playerPc(uint32_t pc) { return pc >= 0x40000000 && pc < 0x47400000; }
+    // Whether access takes this write to the engine alone: the ring submit word (220) outside the USB driver, the
+    // board set-up code and player code. With the acquisition source the probe sets first, the engine is then all
+    // a refused write has to put back (engineUndo).
+    bool engineSubmitWrite(uint32_t pc, uint32_t address) const {
+        static_assert(Imx1GraphicsEngine::owns(0x16010220) && !Imx1GraphicsDisplay::owns(0x16010220) &&
+                      !Imx1GraphicsSd::owns(0x16010220) && !Imx1GraphicsAcquisition::owns(0x16010220) &&
+                      !Imx1GraphicsInterrupts::owns(0x16010220) && !Imx1GraphicsClocks::owns(0x16010220));
+        return address == 0x16010220 && virtualProfile() && !Imx1GraphicsUsb::driverPc(pc) &&
+               !(pc >= 0x20086952 && pc <= 0x20086a60) && !playerPc(pc);
+    }
+    struct EngineUndo {
+        Imx1GraphicsEngine engine;
+        Imx1GraphicsAcquisition acquisition;
+    };
+    EngineUndo engineUndo() const { return {engine, acquisition}; }
+    void undoEngine(const EngineUndo& undo) {
+        engine = undo.engine;
+        acquisition = undo.acquisition;
+    }
     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;

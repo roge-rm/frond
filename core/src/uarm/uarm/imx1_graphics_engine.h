@@ -9,7 +9,7 @@
 // Virtual cold state has no work, a disabled ring and no configured clip bounds.
 class Imx1GraphicsEngine {
    public:
-    static bool owns(uint32_t address) {
+    static constexpr bool owns(uint32_t address) {
         return address == 0x160113e8 || address == 0x16010144 || address == 0x160110a8 ||
                address == 0x160104dc || address == 0x16010214 || address == 0x16010220 || address == 0x1601021c ||
                address == 0x16010008 || address == 0x16010230 || address == 0x16010210 || address == 0x16011280 || address == 0x16010140;
@@ -55,6 +55,9 @@ class Imx1GraphicsEngine {
     void advance(uint64_t ticks) { pending.advance(ticks); }
     // Ticks until the first queued batch finishes. 0 when one waits to be completed.
     uint64_t idleQuietTicks() const { return pending.empty() ? UINT64_MAX : pending.frontRemaining(); }
+    // Ticks until the last queued batch finishes, with the ones before it completing on the way. Fast's spans can run
+    // to it where nothing reads what the earlier completions change (the probe's spanCrosses).
+    uint64_t idleQuietTicksThrough() const { return pending.empty() ? UINT64_MAX : pending.lastRemaining(); }
     bool completed() const { return ringEnabled && !pending.empty() && !pending.frontRemaining(); }
     void complete(uint32_t option) {
         readPointer = pending.frontEnd();
@@ -295,6 +298,10 @@ class Imx1GraphicsEngine {
         uint32_t size() const { return tail - head; }
         uint32_t frontEnd() const { return buffer->batches[head].end; }
         uint64_t frontRemaining() const { return remaining(0); }
+        uint64_t lastRemaining() const {
+            const uint64_t total = buffer->batches[tail - 1].total;
+            return total - std::min(done, total);
+        }
         uint32_t end(uint32_t i) const { return buffer->batches[head + i].end; }
         uint64_t remaining(uint32_t i) const {
             const uint64_t total = buffer->batches[head + i].total;

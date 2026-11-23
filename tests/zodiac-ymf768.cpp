@@ -710,6 +710,36 @@ static void machine() {
     assert(streams[0] == streams[1] && resumed[0] == resumed[1]);
 }
 
+// The FM left out of the PCM output: the words are the guest's own (all zeros here), and the saved state is the
+// same as a machine playing the FM; a state load keeps it muted.
+static void fmMuted() {
+    const Program guest = noteGuest(true);
+    for (unsigned fast = 0; fast < 2; ++fast) {
+        // One machine at a time.
+        Capture plain, muted;
+        std::vector<uint8_t> sa, sb;
+        auto* a = create(guest, fast, true);
+        imx1MachineSetPcmOutput(a, Capture::hook, &plain);
+        run(a, 600000, fast ? 7919 : 5000);
+        assert(imx1MachineSaveState(a, sa) == Imx1StateStatus::ok);
+        imx1MachineStop(a);
+        auto* b = create(guest, fast, true);
+        imx1MachineSetPcmOutput(b, Capture::hook, &muted);
+        imx1MachineSetFmOutputMuted(b, true);
+        run(b, 600000, fast ? 7919 : 5000);
+        assert(plain.nonzero() > 100 && muted.nonzero() == 0 && plain.bytes.size() == muted.bytes.size());
+        assert(imx1MachineSaveState(b, sb) == Imx1StateStatus::ok && sa == sb);
+        assert(imx1MachineLoadState(b, sa.data(), sa.size()).status == Imx1StateStatus::ok);
+        const size_t before = muted.bytes.size();
+        run(b, 300000, 5000);
+        assert(muted.bytes.size() > before && muted.nonzero() == 0);
+        imx1MachineSetFmOutputMuted(b, false);
+        run(b, 300000, 5000);
+        assert(muted.nonzero() > 100);
+        imx1MachineStop(b);
+    }
+}
+
 // The ROM's way of running the chip, from the reset vector: FIFO primed with six records and 10 ms ticks,
 // GPIO B15 a low level interrupt through AITC source 12, the note keyed, then wait for interrupt. Each
 // interrupt adds a record, clears B15's status and counts in r6. After quietTicks interrupts the PCM starts;
@@ -898,11 +928,12 @@ int main() {
     quietIdle();
     badState();
     machine();
+    fmMuted();
     guestInterrupts();
     lineRefused();
     olderState();
     readyStepsDroppedOnLoad();
     std::puts("PASS: YMF768 registers, FIFO and interrupt, power steps, A4 pitch, MA-2 operator fields, four operators, the stored note sequence, FM on "
-              "guest time, saves change nothing, quiet idling matches a full run, bad states refused, Exact == Fast on CS4 with a save mid-note, the "
+              "guest time, saves change nothing, quiet idling matches a full run, bad states refused, Exact == Fast on CS4 with a save mid-note, FM left out of the sound with the same state, the "
               "B15 interrupt guest Exact == Fast == stepped idle, a refused B15 stops, older states, ready steps dropped by a state without them");
 }

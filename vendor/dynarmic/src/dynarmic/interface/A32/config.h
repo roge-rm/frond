@@ -234,6 +234,13 @@ struct UserConfig {
     /// Needs enable_cycle_counting. x64 and arm64.
     const std::uint32_t* frond_cost_hint = nullptr;
     const bool* frond_cost_hint_on = nullptr;
+
+    /// Frond, arm64 only: page tables for loads and for stores, each entry the host page's
+    /// address less the guest page's (page_table[addr >> 12] + addr), null where the access
+    /// goes to the callbacks. With both set, arm64 reads these instead of page_table (whose
+    /// write protect bit and pointer mask then don't apply there); x64 still reads page_table.
+    std::array<std::uint8_t*, NUM_PAGE_TABLE_ENTRIES>* frond_read_page_table = nullptr;
+    std::array<std::uint8_t*, NUM_PAGE_TABLE_ENTRIES>* frond_write_page_table = nullptr;
     /// Masks out the first N bits in host pointers from the page table.
     /// The intention behind this is to allow users of Dynarmic to pack attributes in the
     /// same integer and update the pointer attribute pair atomically.

@@ -3,8 +3,10 @@
 #include "xscale_cost.h"
 
 #include <algorithm>
+#include <exception>
 #include <cassert>
 #include <cstring>
+#include <optional>
 #include <memory>
 #include <string>
 #include "twglue_log.h"
@@ -32,6 +34,10 @@ namespace {
 // Only one machine exists at a time. These stay out of Probe, whose size is part of the state layout.
 uint64_t deferredCycles = 0, quietCycles = 0;
 uint32_t quietMode = 0;
+// Fast: how many CPU cycles past the end of quietCycles the board and the bounds stay quiet, where the span ends on a
+// graphics change (a lagged ring submit can run on to the new batch's). Set with each new span, 0 where unknown;
+// the span's use takes from both alike.
+uint64_t boardSlack = 0;
 // Fast only: CS5 wait clocks (HCLK) of graphics memory writes the lean path took inside the quiet span, charged
 // after deferredCycles. The span covers both, so the order of the two charges changes nothing.
 uint64_t deferredHclk = 0;
@@ -90,16 +96,9 @@ uint64_t jitChargedWrites = 0;  // for tests
 // Fast blocks: set by jitChargedWrite around its access when the write's wait clocks pass with no change. access then
 // commits the write at once, with no preview and no cs5Wait, and jitChargedWrite defers the clocks (deferredHclk).
 bool leanSubmit = false;
-// A graphics-only stretch of a JIT run can leave the board behind the chip until the next board access.
+// A graphics-only stretch of a JIT run (lagged ring submits, submitLag) can leave the board behind the chip until
+// the next board access. 0 between slices.
 uint32_t pendingBoardCycles = 0, pendingBoardHclk = 0;
-bool batchSubmitBoard = [] {
-    const char* value = std::getenv("FROND_ZODIAC_SUBMIT_BOARD");
-    return value && !std::strcmp(value, "1");
-}();
-bool keepSubmitSpan = [] {
-    const char* value = std::getenv("FROND_ZODIAC_SUBMIT_SPAN");
-    return value && !std::strcmp(value, "1");
-}();
 bool scanPollSkip = true, fifoWaitSkip = true, uartPollSkip = true;
 // Fast blocks: the pen routine's ASP FIFO wait (skipAspPoll). FROND_ASP_POLL_SKIP=0 turns it off, for measuring. A
 // FIFO_PTR read by the loop's load that sees the loop go on ends the JIT run, so the next run starts on the load
@@ -109,6 +108,42 @@ bool aspPollSkip = [] {
     return !(v && *v && !std::strcmp(v, "0"));
 }();
 bool aspHalted = false, aspHaltOff = false;
+// Fast blocks: a quiet span can run past queued graphics batches' completions to the last one's (spanCrosses), where
+// the run reads nothing those completions change: the ring and status registers, graphics memory and the option word.
+// The fills, the read pointer and the option word are then applied at the span's charge, in order, and the batches'
+// timing is the same (the engine works through its ticks whether or not a completion has been taken). An access that
+// could see them (leanGraphicsRead, leanRegisterRead but the scan status, a graphics memory write outside the ring
+// view, the FIFO wait skip) is refused, which ends the run for the step to take after a charge, and stops crossing
+// (crossBlocked) until the next ring submit. FROND_ZODIAC_CROSS=0 turns it off, for measuring.
+bool crossCompletions = [] {
+    const char* v = std::getenv("FROND_ZODIAC_CROSS");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+// A crossing span also runs past the last queued batch's completion where the engine going idle changes no rate
+// (Imx1Cs5Configuration::idleQuietStepsThrough's pastLast), to the next board, clock or display event or submit.
+// FROND_ZODIAC_CROSS_END=0 turns that part off, for measuring.
+bool crossEnd = [] {
+    const char* v = std::getenv("FROND_ZODIAC_CROSS_END");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+bool spanCrosses = false, crossBlocked = false;
+// Fast blocks: a lagged ring submit keeps the run's lean CS5 checks (jitChargedWrite). FROND_ZODIAC_KEEP_CHECKS=0
+// turns that off, for measuring.
+bool keepLeanChecks = [] {
+    const char* v = std::getenv("FROND_ZODIAC_KEEP_CHECKS");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+// Fast blocks: a ring submit inside the quiet span leaves the board behind the chip (pendingBoardCycles) and works out
+// only the graphics side of the new span, capped at the rest of the old one and its boardSlack, the board's quiet time
+// and the bounds (submitSpan). A span boundary on a graphics change does the same (spanBoundary). The board catches up
+// at the next access, lean read, full charge, poll or delay skip, lean run or the JIT loop's end. A submit or boundary
+// that changes the chip's interrupt output takes the full path. FROND_ZODIAC_SUBMIT_LAG=0 turns both off.
+bool submitLag = [] {
+    const char* v = std::getenv("FROND_ZODIAC_SUBMIT_LAG");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+uint64_t lagSubmits = 0, lagBoundaries = 0, crossEnds = 0;  // for tests and traces
+uint64_t crossSpans = 0, crossRefusals = 0;  // for tests and traces
 uint64_t aspPollSkips = 0, aspPollRounds = 0, aspPollCycles = 0;  // for tests and traces
 // The loop at 20096d92 (Thumb): ldr r3, [r0, #52] (FIFO_PTR); lsls r3, #28; lsrs r3, #28; cmp r3, #3; bcc back.
 // It waits for the write pointer to reach 3, the calibration round's three samples. Its load is a marked access pc.
@@ -204,6 +239,15 @@ struct Probe {
             return false;
         }
     } codeHooks;
+    // quietWriteClocks' last count, with what it depends on. Host side, not saved.
+    struct QuietWriteMemo {
+        Imx1Cs5Mode mode;
+        Imx1PllRatio bus;
+        uint64_t numerator, denominator;
+        uint32_t clocks;
+        bool ok, known;
+    };
+    mutable QuietWriteMemo quietWriteMemo{};
     // Passes through the wait loop. A host count for tests, the skip makes fewer of them than idle periods.
     uint64_t idleAdvances = 0;
     bool boundReached() {
@@ -262,6 +306,9 @@ struct Probe {
     Imx1Cs4Capture cs4Capture;
     Imx1Cs5Reset cs5Reset;
     Imx1Cs5Configuration cs5Configuration;
+    // The fill worker thread (Fast only, FROND_ZODIAC_GFX_THREAD). Declared before graphicsMemory, which lets go of
+    // it when it goes. Not saved.
+    std::unique_ptr<Imx1GraphicsWorker> graphicsWorker;
     std::unique_ptr<Imx1GraphicsMemory> graphicsMemory;
     Imx1GraphicsFrame graphicsFrame;
     Imx1GraphicsCommands graphicsCommands;
@@ -294,10 +341,13 @@ struct Probe {
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
     // graphicsGpu, graphicsDma, graphicsUndo and the lean read rates, left out of the saved layout's size, and
-    // mmcsdCardId, saved in a section of its own, slot 2's card part, saved in its SD2 section, and the pc stop.
+    // mmcsdCardId, saved in a section of its own, slot 2's card part, saved in its SD2 section, the pc stop, the code
+    // hooks and the quietWriteClocks memo.
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
                                            sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
-                                           Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks);
+                                           Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks) +
+                                           sizeof(QuietWriteMemo) + Imx1GraphicsCommands::unsavedBytes +
+                                           sizeof(std::unique_ptr<Imx1GraphicsWorker>);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -323,7 +373,28 @@ struct Probe {
         }
         // Already attached to this memory: nothing to bring back or upload.
         if (graphicsGpu.gpu->attachedMemory() == graphicsMemory.get()) return;
+        // The GPU's residency and the fill worker don't go together.
+        graphicsWorker.reset();
         graphicsGpu.gpu->attach(graphicsMemory.get());
+    }
+    // Attaches the fill worker to graphics memory in Fast without a host GPU, or stops it. Its destructor drains
+    // first, so leaving Fast or switching it off leaves every fill done and no thread behind.
+    void attachGraphicsWorker() {
+        const bool on = fastEngine && graphicsMemory && !graphicsMemory->gpuResidency() &&
+                        Imx1GraphicsCommands::directFills && Imx1GraphicsWorker::enabledByEnvironment();
+        if (!on) {
+            graphicsWorker.reset();
+            return;
+        }
+        if (!graphicsWorker) {
+            // A host that can't start the thread keeps the fills here.
+            try {
+                graphicsWorker = std::make_unique<Imx1GraphicsWorker>();
+            } catch (const std::exception&) {
+                return;
+            }
+        }
+        graphicsWorker->attach(graphicsMemory.get());
     }
     // What the command decoder said about the batch it last refused. For the stop text, not saved.
     Imx1GraphicsCommands::Refusal graphicsRefusal;
@@ -347,6 +418,10 @@ struct Probe {
         // The explicit virtual pull-up resolves a released INTb to high.
         const uint32_t value = line == Imx1GpioLine::clear ? 0x2000 : 0;
         const uint32_t known = line == Imx1GpioLine::unknown ? 0 : 0x2000;
+        // A board left behind by a lean submit catches up first, so the pin changes at the board's own time.
+        if (commit && (pendingBoardCycles || pendingBoardHclk) &&
+            (!known || !peripherals.gpioDriveSettled(0, value, known)))
+            flushSubmitBoard();
         return peripherals.driveGpioInput(0, value, known, commit);
     }
     // What follows a committed graphics state.
@@ -404,11 +479,30 @@ struct Probe {
     // CPU cycles from now that can be charged later in one piece. Worked out only after the interrupt
     // lines and the clock boundary have been looked at in the state it starts from.
     // withGraphics false leaves the graphics models out, for spanBoundary.
-    uint64_t quietCpuCycles(uint32_t mode, bool withGraphics = true) const {
+    // cross: Fast's span may run past queued batches' completions (crossCompletions); sets spanCrosses for the result.
+    // boardSide, where given, gets the cycles the board and the bounds alone stay quiet for (at least the result).
+    uint64_t quietCpuCycles(uint32_t mode, bool withGraphics = true, bool cross = false,
+                            uint64_t* boardSide = nullptr) const {
+        if (cross) spanCrosses = false;
+        if (boardSide) *boardSide = 0;
         if (options.idleStepped) return 0;
         const auto cpuPeriod = peripherals.cpuReferencePeriod(mode);
-        uint64_t cycles = withGraphics ? cs5Configuration.quietCpuCycles(cpuPeriod) : UINT64_MAX;
+        uint64_t front = UINT64_MAX;
+        cross = cross && withGraphics && crossAllowed();
+        uint64_t cycles = !withGraphics ? UINT64_MAX : cross ? cs5Configuration.quietCpuCyclesThrough(cpuPeriod, front, crossEnd) :
+                                                                cs5Configuration.quietCpuCycles(cpuPeriod);
         if (!cycles) return 0;
+        if (cross && cycles > front) {
+            const uint64_t through = quietCpuCycles(mode, false);
+            const uint64_t bounded = std::min(cycles, through);
+            if (boardSide) *boardSide = through;
+            if (bounded > front) {
+                spanCrosses = true;
+                ++crossSpans;
+                return bounded;
+            }
+            return std::min(front, through);
+        }
         // The board counts its quiet time in HCLK periods, the last of which is the one with the change.
         // One more is left out for the part of a System PLL clock an asynchronous charge can carry over.
         const uint64_t hclk = std::min<uint64_t>(peripherals.idleQuietHclk(), uint64_t(1) << 30);
@@ -429,6 +523,7 @@ struct Probe {
         }
         // One charge takes 32 bits of cycles.
         cycles = std::min<uint64_t>(cycles, uint64_t(1) << 24);
+        uint64_t side = std::min<uint64_t>(uint64_t(1) << 24, board < UINT64_MAX ? uint64_t(board) : UINT64_MAX);
         if (board < cycles) cycles = uint64_t(board);
         if (bounds && cycles) {
             const auto& now = peripherals.referenceTime();
@@ -449,9 +544,45 @@ struct Probe {
             }
             if (!steps) return 0;
             if (steps - 1 < cycles) cycles = uint64_t(steps - 1);
+            if (steps - 1 < side) side = uint64_t(steps - 1);
         }
         if (cycles && !peripherals.referenceChargeSupported(cycles * cpuPeriod.numerator, cpuPeriod.denominator)) return 0;
+        if (boardSide) {
+            if (side > cycles && !peripherals.referenceChargeSupported(side * cpuPeriod.numerator, cpuPeriod.denominator))
+                side = cycles;
+            *boardSide = cycles ? side : 0;
+        }
         return cycles;
+    }
+    // The span after a lagged submit: the graphics side only, at most cap, the rest of the span the submit was in.
+    uint64_t submitSpan(uint64_t cap) const {
+        spanCrosses = false;
+        const auto period = peripherals.cpuReferencePeriod(quietMode);
+        uint64_t front = UINT64_MAX;
+        const bool cross = crossAllowed();
+        const uint64_t cycles = cross ? cs5Configuration.quietCpuCyclesThrough(period, front, crossEnd) :
+                                        cs5Configuration.quietCpuCycles(period);
+        if (cross && cycles > front && std::min(cycles, cap) > front) {
+            spanCrosses = true;
+            ++crossSpans;
+            return std::min(cycles, cap);
+        }
+        return std::min({cycles, front, cap});
+    }
+    bool crossAllowed() const {
+        if (!crossCompletions || crossBlocked || !fastEngine || !fastJit || !graphicsMemory ||
+            graphicsMemory->gpuResidency() || options.cs5ConfigurationObserver || options.busObserver ||
+            !cs5Configuration.virtualProfile())
+            return false;
+        // A player's batches carry overlay words for the display; those complete one at a time.
+        return cs5Configuration.engineState().otherSubmission() != Imx1GraphicsEngine::player;
+    }
+    // Refuses a lean access while the span runs past completions, and stops crossing until the next submit.
+    bool crossRefused() const {
+        if (!spanCrosses) return false;
+        crossBlocked = true;
+        ++crossRefusals;
+        return true;
     }
     // Charges the waiting cycles. Anything that reads or changes the board, the graphics chip or the
     // time calls this first. A refusal is kept in graphicsWireStatus for the next clock boundary.
@@ -476,13 +607,35 @@ struct Probe {
             flushSubmitBoard();
             if (graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
         }
-        quietCycles = 0;
+        quietCycles = boardSlack = 0;
+        const bool crossed = std::exchange(spanCrosses, false);
         linesPending = false;
         if (!deferredCycles && !deferredHclk) return true;
-        const uint32_t cycles = uint32_t(deferredCycles);
+        uint32_t cycles = uint32_t(deferredCycles);
         const uint32_t hclk = uint32_t(deferredHclk);
         deferredCycles = deferredHclk = 0;
         const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
+        Imx1BootstrapAccess status = Imx1BootstrapAccess::ok;
+        if (crossed && crossEnd) {
+            // A span past the last queued batch's completion (crossEnd): the cycles up to it go first, with the
+            // completions, and the busy level is taken at its time, as a span boundary there would.
+            const uint64_t last = cs5Configuration.cpuStepsThroughLast(cpuPeriod);
+            if (last && last < cycles) {
+                status = chargeCycles(uint32_t(last), 0, keepBoard, cpuPeriod);
+                if (status == Imx1BootstrapAccess::ok) {
+                    cs5Configuration.takeBusyLevel();
+                    cycles -= uint32_t(last);
+                    ++crossEnds;
+                }
+            }
+        }
+        if (status == Imx1BootstrapAccess::ok) status = chargeCycles(cycles, hclk, keepBoard, cpuPeriod);
+        if (status == Imx1BootstrapAccess::ok) return true;
+        if (graphicsWireStatus == Imx1BootstrapAccess::ok) graphicsWireStatus = status;
+        return false;
+    }
+    // chargeDeferred's charge of cycles and then hclk wait clocks: the chip, then the board (kept back with keepBoard).
+    Imx1BootstrapAccess chargeCycles(uint32_t cycles, uint32_t hclk, bool keepBoard, Imx1PllRatio cpuPeriod) {
         Imx1BootstrapAccess status;
         if (!hclk) {
             status = advanceGraphicsCpu(cycles, cpuPeriod);
@@ -515,9 +668,7 @@ struct Probe {
                 if (!keepBoard) status = peripherals.clockStatus();
             }
         }
-        if (status == Imx1BootstrapAccess::ok) return true;
-        if (graphicsWireStatus == Imx1BootstrapAccess::ok) graphicsWireStatus = status;
-        return false;
+        return status;
     }
     // Fast: the end of a quiet span in the JIT loop, taken without a step. The step there would charge the span, look
     // at the clock boundary and the interrupt lines and start a new span, which this does without an instruction.
@@ -533,24 +684,60 @@ struct Probe {
             (codeHooks.count && codeHooks.at(cpuGetRegisters(cpu)[15] & ~1u)))
             return 0;
         if (linesPending) {
+            flushSubmitBoard();
             if (clockBoundary()) return -1;
             updateInterrupts();
             linesPending = false;
             if (quietCycles >= leanMinimumSpan) return 1;
         }
-        // The span ran out just before a graphics change, with no wait clocks to charge after the cycles: the stall
-        // cycle goes in the same charge, as nothing else changes in it.
         const auto period = peripherals.cpuReferencePeriod(mode);
-        if (!quietCycles && !deferredHclk && cs5Configuration.quietCpuCycles(period) == deferredCycles &&
-            (deferredCycles || cs5Configuration.changeDue(period)) && quietCpuCycles(mode, false) > deferredCycles)
-            ++deferredCycles;
-        if (!chargeDeferred()) { clockBoundary(); return -1; }
-        // A batch the charge completed leaves its busy level for the next advance, which takes it first: it is taken
-        // now, as jitChargedWrite takes a new batch's, so the span can run on.
-        cs5Configuration.takeBusyLevel();
+        // The board stays quiet for quietCycles + boardSlack more cycles: within them a span that ends on a graphics
+        // change charges only the chip, leaves the board behind (pendingBoardCycles) and works out the graphics side
+        // of the next span, as a lagged submit does. Anything the board sees catches it up first (flushSubmitBoard).
+        // A change of the chip's interrupt output and a short span take the full path.
+        // The deferred cycles were taken off quietCycles as the runs added them, so only the stall cycle is new.
+        const uint64_t boardLeft = quietCycles + boardSlack;
+        if (submitLag && boardLeft > leanMinimumSpan &&
+            uint64_t(pendingBoardCycles) + deferredCycles < UINT32_MAX &&
+            uint64_t(pendingBoardHclk) + deferredHclk <= UINT32_MAX) {
+            // The stall cycle as below; the board is quiet past it.
+            uint64_t stall = 0;
+            if (!quietCycles && !deferredHclk && cs5Configuration.quietCpuCycles(period) == deferredCycles &&
+                (deferredCycles || cs5Configuration.changeDue(period))) {
+                ++deferredCycles;
+                stall = 1;
+            }
+            const auto lineBefore = cs5Configuration.interruptState().interruptOutput();
+            if (!chargeDeferred(true)) { flushSubmitBoard(); clockBoundary(); return -1; }
+            cs5Configuration.takeBusyLevel();
+            if (graphicsWireStatus == Imx1BootstrapAccess::ok &&
+                cs5Configuration.interruptState().interruptOutput() == lineBefore) {
+                const uint64_t cap = boardLeft - stall;
+                const uint64_t span = submitSpan(cap);
+                if (span >= leanMinimumSpan) {
+                    quietCycles = span;
+                    boardSlack = cap - span;
+                    ++lagBoundaries;
+                    return 1;
+                }
+            }
+            flushSubmitBoard();
+        } else {
+            flushSubmitBoard();
+            // The span ran out just before a graphics change, with no wait clocks to charge after the cycles: the
+            // stall cycle goes in the same charge, as nothing else changes in it.
+            if (!quietCycles && !deferredHclk && cs5Configuration.quietCpuCycles(period) == deferredCycles &&
+                (deferredCycles || cs5Configuration.changeDue(period)) && quietCpuCycles(mode, false) > deferredCycles)
+                ++deferredCycles;
+            if (!chargeDeferred()) { clockBoundary(); return -1; }
+            // A batch the charge completed leaves its busy level for the next advance, which takes it first: it is
+            // taken now, as jitChargedWrite takes a new batch's, so the span can run on.
+            cs5Configuration.takeBusyLevel();
+        }
         if (clockBoundary()) return -1;
         updateInterrupts();
-        uint64_t span = quietCpuCycles(mode);
+        uint64_t side = 0;
+        uint64_t span = quietCpuCycles(mode, true, true, &side);
         if (span < leanMinimumSpan && !cs5Configuration.quietCpuCycles(period) && cs5Configuration.changeDue(period) &&
             quietCpuCycles(mode, false)) {
             // The graphics change is due in the next cycle and nothing else is: it passes as the step would charge it.
@@ -564,9 +751,10 @@ struct Probe {
             peripherals.advanceCpuCycles(1, mode, options.assumeMpllSettled);
             if (clockBoundary()) return -1;
             updateInterrupts();
-            span = quietCpuCycles(mode);
+            span = quietCpuCycles(mode, true, true, &side);
         }
         quietCycles = span;
+        boardSlack = side > span ? side - span : 0;
         return span >= leanMinimumSpan ? 1 : 0;
     }
     bool idleWakePossible() const {
@@ -809,7 +997,7 @@ struct Probe {
             return false;
         const auto rate = cs5Configuration.clockState().systemRate();
         // The count below depends only on the mode, the bus period and the system rate; the last one is kept.
-        static thread_local struct { Imx1Cs5Mode mode; Imx1PllRatio bus; uint64_t numerator, denominator; uint32_t clocks; bool ok, known; } last{};
+        auto& last = quietWriteMemo;
         if (last.known && last.mode == mode && last.bus.numerator == busPeriod.numerator &&
             last.bus.denominator == busPeriod.denominator && last.numerator == rate.numerator &&
             last.denominator == rate.denominator) {
@@ -910,6 +1098,8 @@ struct Probe {
             Imx1GraphicsMemory::owns(pa) || options.cs5ConfigurationObserver || failed || quietCycles <= ran ||
             cs5Configuration.engineState().completed())
             return false;
+        // The scan status follows the display's timing alone, which a completion doesn't change.
+        if (pa != 0x1601054c && crossRefused()) return false;
         if (!leanCs5Ready() || left < leanCs5.cost) return false;
         const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
         if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok || !leanRegisterReady())
@@ -966,6 +1156,14 @@ struct Probe {
             p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)
             return false;
         if (!p.leanCs5Ready() || left < leanCs5.cost) return false;
+        // Past a completion only ring words: the batches were decoded at their submits, and the producer writes only
+        // words a read pointer read before showed free, which stay free.
+        if (spanCrosses) {
+            if (!leanCs5.ringChecked && size == 4 && pa >= 0x16080000 && pa < 0x160c0000) p.leanRingCheck();
+            if (!(leanCs5.ringUsable && pa - leanCs5.ringLow < leanCs5.ringSpan && size == 4 && !(pa & 3)) &&
+                p.crossRefused())
+                return false;
+        }
         const bool user = (cpuGetRegExternal(p.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
         uint32_t datum = value;
         if (p.peripherals.eimState().cs5Transfer(pa, size, true, user) != Imx1EimAccess::ok || !p.leanMemoryReady() ||
@@ -1023,20 +1221,22 @@ struct Probe {
     // span is worked out again, and the run stops at its next block if the span now ends before its budget.
     __attribute__((noinline)) bool jitChargedWrite(uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t pc) {
         if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver) return false;
-        // The existing span already excludes charges from earlier runs. A write inside it can keep the
-        // board behind the chip, and can keep the span if it only adds to an active queue.
+        // A write inside the span can leave the board behind the chip (submitLag): the board stays quiet for the rest
+        // of the span and its slack.
         const uint64_t used = uint64_t(ran) + leanCs5.waitCost;
         const uint64_t remaining = quietCycles > used ? quietCycles - used : 0;
-        const bool queued = cs5Configuration.engineState().idleQuietTicks() != UINT64_MAX;
-        const bool keepBoard = batchSubmitBoard && remaining >= leanMinimumSpan &&
+        const uint64_t slackBefore = boardSlack;
+        const bool keepBoard = submitLag && !options.idleStepped && remaining >= leanMinimumSpan &&
             uint64_t(pendingBoardCycles) + deferredCycles + ran <= UINT32_MAX &&
             uint64_t(pendingBoardHclk) + deferredHclk + leanCs5.waitClocks <= UINT32_MAX;
         deferredHclk += leanCs5.waitClocks;
         result.cs5WaitClocks += leanCs5.waitClocks;
         work += leanCs5.waitClocks;
+        const LeanCs5 checks = leanCs5;
         leanCs5 = {};
         deferredCycles += ran;
         cpuArm920JitCharge(cpu, ran, 0);
+        const auto lineBefore = cs5Configuration.interruptState().interruptOutput();
         if (!chargeDeferred(keepBoard)) return false;
         auto& t = result.trace;
         const auto saved = t;
@@ -1049,9 +1249,16 @@ struct Probe {
         // at once and its clocks are charged after it, as the lean path does for ring words: the batch starts that
         // many clocks earlier. The span after it has to hold their cost.
         uint32_t clocks = 0;
-        leanSubmit = !peripherals.systemPllBusStallPending() && quietWriteClocks(clocks) &&
-                     !graphicsFrame.scanDue(cs5Configuration, peripherals.eimState()) &&
-                     acceptGraphics(cs5Configuration, false) == Imx1BootstrapAccess::ok;
+        // The run's lean checks, where they passed, cover these: since them only the chip has moved, within the
+        // span, and with the board kept back the board hasn't.
+        if (keepLeanChecks && keepBoard && checks.checked && checks.usable) {
+            clocks = checks.clocks;
+            leanSubmit = true;
+        } else {
+            leanSubmit = !peripherals.systemPllBusStallPending() && quietWriteClocks(clocks) &&
+                         !graphicsFrame.scanDue(cs5Configuration, peripherals.eimState()) &&
+                         acceptGraphics(cs5Configuration, false) == Imx1BootstrapAccess::ok;
+        }
         const bool lean = leanSubmit;
         if (!lean && keepBoard) flushSubmitBoard();
         const bool ok = access(this, pa, uint_fast8_t(size), true, &datum);
@@ -1059,6 +1266,7 @@ struct Probe {
         t = saved;
         if (!ok) return false;
         ++jitChargedWrites;
+        crossBlocked = false;
         // A batch start leaves its busy level for the next advance, which would end the quiet span at once; it
         // takes it now, so the run goes on to the batch's completion.
         cs5Configuration.takeBusyLevel();
@@ -1069,19 +1277,31 @@ struct Probe {
             work += clocks;
             cost = leanClockCost(clocks);
         }
-        // A queued write cannot change the front batch's deadline, and scan and board deadlines
-        // still hold within the original span. A new batch needs its own graphics bound.
-        const bool reuseSpan = keepSubmitSpan && lean && queued && remaining > cost &&
-            cs5Configuration.engineState().idleQuietTicks() != UINT64_MAX;
-        if (reuseSpan) {
-            quietCycles = remaining;
-        } else if (keepBoard && lean && remaining > cost) {
-            quietCycles = std::min(remaining, cs5Configuration.quietCpuCycles(peripherals.cpuReferencePeriod(quietMode)));
+        uint64_t side = 0;
+        if (keepBoard && lean && remaining > cost &&
+            cs5Configuration.interruptState().interruptOutput() == lineBefore &&
+            graphicsWireStatus == Imx1BootstrapAccess::ok) {
+            // The board hasn't moved since the span's start, so the rest of boundaryStatus is its clock status as
+            // checked then; the chip's period support is checked again at its next charge.
+            // The board still lags. chargeDeferred cleared boardSlack; the board's quiet cycles from here are the rest
+            // of the span and the slack it had.
+            side = remaining + slackBefore;
+            quietCycles = submitSpan(side);
+            ++lagSubmits;
+            // The run's lean checks still hold: the board hasn't moved, the line and the write clocks are the same,
+            // and a submit changes only the engine's queue, which none of them read. The ring view, memoryReady and
+            // the register checks read the ring and window registers, the EIM and the GPIO, which it doesn't write.
+            // Here the write took its clocks from these checks.
+            if (keepLeanChecks && checks.checked && checks.usable && !graphicsMemory->gpuResidency()) {
+                leanCs5 = checks;
+                leanCs5.waitClocks = leanCs5.waitCost = 0;
+            }
         } else {
             flushSubmitBoard();
             updateInterrupts();
-            quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+            quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, true, &side) : 0;
         }
+        boardSlack = side > quietCycles ? side - quietCycles : 0;
         if (cost) {
             if (quietCycles > cost) quietCycles -= cost;
             else {
@@ -1090,7 +1310,8 @@ struct Probe {
                 if (chargeDeferred()) {
                     cs5Configuration.takeBusyLevel();
                     updateInterrupts();
-                    quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+                    quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, true, &side) : 0;
+                    boardSlack = side > quietCycles ? side - quietCycles : 0;
                 }
             }
         }
@@ -1126,7 +1347,10 @@ struct Probe {
         if (!ok) return false;
         if (!write) value = datum;
         updateInterrupts();
-        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        uint64_t side = 0;
+        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, false, &side) : 0;
+        boardSlack = side > quietCycles ? side - quietCycles : 0;
+        spanCrosses = false;
         cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
         if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
             jitHalt = true;
@@ -1151,7 +1375,10 @@ struct Probe {
         ++result.busAccesses;
         ++jitBoardWrites;
         updateInterrupts();
-        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        uint64_t side = 0;
+        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, false, &side) : 0;
+        boardSlack = side > quietCycles ? side - quietCycles : 0;
+        spanCrosses = false;
         if (quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
             jitHalt = true;
             cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
@@ -1216,6 +1443,7 @@ struct Probe {
         unsigned b = 0, sreg = 0;
         uint32_t wait = 0;
         if (!(cpuIsThumb(cpu) ? thumbDelayLoop(r, b, sreg, wait) : armDelayLoop(r, b, sreg, wait))) return 0;
+        flushSubmitBoard();
         uint32_t timer;
         if (!cpuArm920PeekWord(cpu, r[b] + 16, nullptr, &timer) || !Imx1Bootstrap::timerCountAddress(timer) ||
             failed || graphicsWireStatus != Imx1BootstrapAccess::ok) return 0;
@@ -1289,6 +1517,7 @@ struct Probe {
             w != 0xe3110e40u || !cpuArm920PeekWord(cpu, pc + 8, &w, &pa) || w != (rows ? 0x0afffffcu : 0x1afffffcu) ||
             ((r[0] + 0x54c) & 3) || !cpuArm920PeekWord(cpu, r[0] + 0x54c, nullptr, &pa) || pa != 0x1601054c)
             return 0;
+        flushSubmitBoard();
         // What leanRegisterRead needs, none of which changes inside the span.
         if (!graphicsMemory || !cs5Configuration.virtualProfile() || options.cs5ConfigurationObserver || failed ||
             cs5Configuration.engineState().completed() || !leanCs5Ready())
@@ -1367,6 +1596,7 @@ struct Probe {
         if ((va & 3) || (cpsr & 31) == ARM_SR_MODE_USR || !cpuArm920PeekWord(cpu, va, nullptr, &pa)) return 0;
         const uint32_t unit = pa & ~0xfffu, offset = pa & 0xfffu;
         if ((unit != 0x00206000 && unit != 0x00207000) || (offset != 0x94 && offset != 0x98 && offset != 0xb4)) return 0;
+        flushSubmitBoard();
         uint32_t value;
         if (peripherals.access(pa, 4, false, value, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok) return 0;
         const unsigned rotate = 2 * ((w[1] >> 8) & 15);
@@ -1512,7 +1742,7 @@ struct Probe {
     // Returns whether rounds passed.
     bool skipFifoWait() {
         const uint32_t* r = cpuGetRegisters(cpu);
-        if (!fifoWaitSkip || r[15] != 0x2008492c || r[14] != 0x200b9018 || r[0] != 1 || r[6] != 1 || r[5] > r[11] ||
+        if (spanCrosses || !fifoWaitSkip || r[15] != 0x2008492c || r[14] != 0x200b9018 || r[0] != 1 || r[6] != 1 || r[5] > r[11] ||
             !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu))
             return false;
         static constexpr uint32_t caller[] = {0xe1a00006u, 0xeb000e28u, 0xe594101cu, 0xe5940014u, 0xe0010198u,
@@ -1612,6 +1842,7 @@ struct Probe {
                                                     uint32_t& value, uint32_t& cost) {
         if (!cs5Configuration.virtualProfile() || options.cs5ConfigurationObserver || failed || quietCycles <= ran)
             return false;
+        if (crossRefused()) return false;
         if (!leanCs5Ready() || left < leanCs5.cost) return false;
         const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
         if (peripherals.eimState().cs5Transfer(pa, size, false, user) != Imx1EimAccess::ok || !leanMemoryReady() ||
@@ -1706,14 +1937,25 @@ struct Probe {
                 return status;
             }
             // A preview works on a copy. A commit works on the chip in place and puts the copy back unless
-            // the result is taken (accept), as it would have dropped a refused candidate.
-            Imx1Cs5Configuration saved = p.cs5Configuration;
-            auto& candidate = preview ? saved : p.cs5Configuration;
-            bool kept = preview;
+            // the result is taken (accept), as it would have dropped a refused candidate. A write that only reaches
+            // the engine (a ring submit) works on the chip in place in both, keeping just the engine and the
+            // acquisition source, which a preview always puts back.
+            const bool engineOnly = write && p.cs5Configuration.engineSubmitWrite(p.result.trace.pc, address);
+            std::optional<Imx1Cs5Configuration> saved;
+            Imx1Cs5Configuration::EngineUndo engineSaved{};
+            if (engineOnly) engineSaved = p.cs5Configuration.engineUndo();
+            else saved.emplace(p.cs5Configuration);
+            auto& candidate = preview && !engineOnly ? *saved : p.cs5Configuration;
+            bool kept = preview && !engineOnly;
             struct Restore {
-                bool& kept; Imx1Cs5Configuration& chip; const Imx1Cs5Configuration& saved;
-                ~Restore() { if (!kept) chip = saved; }
-            } restore{kept, p.cs5Configuration, saved};
+                bool& kept; Imx1Cs5Configuration& chip; const std::optional<Imx1Cs5Configuration>& saved;
+                const Imx1Cs5Configuration::EngineUndo& engineSaved;
+                ~Restore() {
+                    if (kept) return;
+                    if (saved) chip = *saved;
+                    else chip.undoEngine(engineSaved);
+                }
+            } restore{kept, p.cs5Configuration, saved, engineSaved};
             // acceptGraphics(candidate, !preview), with the commit already in place.
             auto accept = [&] {
                 if (preview) return p.acceptGraphics(candidate, false);
@@ -1896,6 +2138,11 @@ bool bootstrapInstructionChecked(uint32_t i, const uint32_t* registers, uint32_t
         const bool load = i & 0x00100000;
         if (i & 0x00400000) {
             const unsigned mode = cpsr & 31;
+            // An APCS-26 return (ldmdb fp, {..., pc}^) in User or System mode, which has no SPSR, loads as a plain
+            // LDM, as the shared interpreter runs it (ASSUMPTION "ARM920T LDM^ with PC in User and System mode":
+            // the ARM ARM calls it unpredictable; Big Money's ARMlets end with it and ran on OS 5 Palms).
+            if ((mode == 0x10 || mode == 0x1f) && load && (i & 0x8000))
+                return base != 15 && (!(i & 0x00200000) || !(i & (1u << base)));
             if (!armMode(mode) || mode == 0x10 || mode == 0x1f || base == 15) return false;
             if (load && (i & 0x8000)) {
                 // LDM exception return uses current registers, then restores CPSR.
@@ -2318,7 +2565,10 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
             p->updateInterrupts();
             if (!deferredCycles && !deferredHclk) {
                 quietMode = cpuArm920ClockMode(p->cpu);
-                quietCycles = p->quietCpuCycles(quietMode);
+                uint64_t side = 0;
+                quietCycles = p->quietCpuCycles(quietMode, true, false, &side);
+                boardSlack = side > quietCycles ? side - quietCycles : 0;
+                spanCrosses = false;
             }
         }
         const auto pc = cpuGetRegisters(p->cpu)[15];
@@ -2484,10 +2734,13 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         // With a clock boundary pending they are charged below first, so the stop comes with them charged.
         if (cpuArm920ClockMode(p->cpu) == quietMode && p->graphicsWireStatus == Imx1BootstrapAccess::ok &&
             !p->peripherals.systemPllBusStallPending()) {
-            const uint64_t span = p->quietCpuCycles(quietMode);
+            uint64_t side = 0;
+            const uint64_t span = p->quietCpuCycles(quietMode, true, false, &side);
             if (span > cycles && p->boundaryStatus() == Imx1BootstrapAccess::ok) {
                 deferredCycles = cycles;
                 quietCycles = span - cycles;
+                boardSlack = side > span ? side - span : 0;
+                spanCrosses = false;
                 linesPending = true;
                 return true;
             }
@@ -2517,6 +2770,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
     p->result.stop = Imx1ProbeStop::budget;
     // A round seen in an earlier slice may be from before a state load.
     for (auto& e : stepped) e.step = UINT64_MAX;
+    // Crossing starts afresh each slice, so a state load runs as the slice after a save would.
+    spanCrosses = crossBlocked = false;
     if (!p->fastEngine || !p->options.bootstrapPeripherals || p->observer || p->options.diagnosticSnapshot ||
         p->options.busObserver) {
         // Exact: UART status polls pass at once (skipUartPollStepped). Not with an observer, which sees every step.
@@ -2575,6 +2830,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 if (p->fastJit && jitSlack && hard >= jitSlack && !p->interruptedPrefixCount) {
                     if (delayHalted) {
                         delayHalted = false;
+                        p->flushSubmitBoard();
                         const bool rounds = p->skipFifoWait();
                         const int skipped = p->skipDelay();
                         delayHaltOff = skipped == 1;
@@ -2595,6 +2851,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     }
                     scanHaltOff |= halted;
                     if (std::exchange(aspHalted, false)) {
+                        p->flushSubmitBoard();
                         if (const uint64_t passed = p->skipAspPoll(hard - jitSlack)) {
                             slice += uint32_t(passed);
                             continue;
@@ -2613,7 +2870,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                                                          uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)),
                                                          &instructions);
                     inJit = false;
-                    p->flushSubmitBoard();
+                    // The board may stay behind into the next span (spanBoundary); everything else catches it up.
                     delayPassed = false;
                     if (jitHalt) {
                         jitHalt = false;
@@ -2623,14 +2880,22 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     deferredHclk += leanCs5.waitClocks;
                     p->result.cs5WaitClocks += leanCs5.waitClocks;
                     p->work += leanCs5.waitClocks;
-                    quietCycles = leanCs5.waitCost < quietCycles ? quietCycles - leanCs5.waitCost : 0;
+                    // A run past the span's end uses the board's slack after it.
+                    const auto useSpan = [](uint64_t used) {
+                        if (used > quietCycles) {
+                            const uint64_t over = used - quietCycles;
+                            boardSlack = over < boardSlack ? boardSlack - over : 0;
+                        }
+                        quietCycles = used < quietCycles ? quietCycles - used : 0;
+                    };
+                    useSpan(leanCs5.waitCost);
                     leanCs5 = {};
                     ++jitRuns;
                     if (ran) {
                         // Cycles a charged write took already (jitChargedWrite) aren't deferred again.
                         const uint32_t left = ran - std::min(ran, cpuArm920JitCharged(p->cpu));
                         deferredCycles += left;
-                        quietCycles = left < quietCycles ? quietCycles - left : 0;
+                        useSpan(left);
                         p->retired += instructions;
                         jitRetired += instructions;
                         p->work += instructions;
@@ -2658,6 +2923,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
                     leanCount = stop == arm920JitCold || instructions < 4 ? 32 : 1;
                 }
+                p->flushSubmitBoard();
                 if (quietCycles < leanMinimumSpan || slice + 1 >= retiredBudget) break;
                 uint64_t budget = std::min<uint64_t>(quietCycles, retiredBudget - slice - 1);
                 if (p->bounds) {
@@ -2694,6 +2960,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 if (p->blPrefix) p->blNextPc = blNext;
                 if (!p->fastJit) break;
             }
+            p->flushSubmitBoard();
             if (ended) break;
         }
     }
@@ -2729,6 +2996,7 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     // Fast keeps no cache contents: dirty data goes to memory first.
     if (fast) cpuArm920LeanReset(p->cpu);
     p->attachGraphicsGpu();
+    p->attachGraphicsWorker();
     return true;
 }
 
@@ -2766,6 +3034,13 @@ uint64_t imx1MachineAspPollSkips(const Imx1Machine*) { return aspPollSkips; }
 uint64_t imx1MachineAspPollRounds(const Imx1Machine*) { return aspPollRounds; }
 uint64_t imx1MachineAspPollCycles(const Imx1Machine*) { return aspPollCycles; }
 void imx1SetAspPollSkip(bool skip) { aspPollSkip = skip; }
+uint64_t imx1MachineCrossSpans(const Imx1Machine*) { return crossSpans; }
+uint64_t imx1MachineCrossRefusals(const Imx1Machine*) { return crossRefusals; }
+void imx1SetCrossCompletions(bool on) { crossCompletions = on; crossBlocked = spanCrosses = false; }
+uint64_t imx1MachineLagSubmits(const Imx1Machine*) { return lagSubmits; }
+uint64_t imx1MachineLagBoundaries(const Imx1Machine*) { return lagBoundaries; }
+uint64_t imx1MachineCrossEnds(const Imx1Machine*) { return crossEnds; }
+void imx1SetSubmitLag(bool on) { submitLag = on; }
 bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on) {
     auto* p = machine->probe;
     if (p->bounds || p->stopped) return false;
@@ -2848,6 +3123,7 @@ void imx1MachineEnableYmf768(Imx1Machine* machine) { machine->probe->peripherals
 void imx1MachineSetPcmOutput(Imx1Machine* machine, void (*hook)(void*, uint16_t, unsigned), void* context) {
     machine->probe->peripherals.setPcmOutput(hook, context);
 }
+void imx1MachineSetFmOutputMuted(Imx1Machine* machine, bool muted) { machine->probe->peripherals.setFmOutputMuted(muted); }
 
 extern uint64_t imx1PcmUnderrunWords;
 uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*) { return imx1PcmUnderrunWords; }
@@ -3160,12 +3436,25 @@ Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine* machine, uint32_t sam
     auto* p = machine->probe;
     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.graphicsRawAuxKnown)
         return Imx1BootstrapAccess::sequence;
-    if (sample > 1023) return Imx1BootstrapAccess::sideEffect;
+    if (sample > 1023) return Imx1BootstrapAccess::argument;
     if (commit) p->cs5Configuration.setAcquisitionAuxInput(sample);
     return Imx1BootstrapAccess::ok;
 }
 uint32_t imx1MachineGraphicsAux(const Imx1Machine* machine) {
     return machine ? machine->probe->cs5Configuration.acquisitionState().auxSample() : 0;
+}
+
+Imx1BootstrapAccess imx1MachineSetGraphicsMode1(Imx1Machine* machine, uint32_t sample) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.graphicsRawMode1Known)
+        return Imx1BootstrapAccess::sequence;
+    if (sample > 1023) return Imx1BootstrapAccess::argument;
+    p->cs5Configuration.setAcquisitionMode1Input(sample);
+    return Imx1BootstrapAccess::ok;
+}
+uint32_t imx1MachineGraphicsMode1(const Imx1Machine* machine) {
+    return machine ? machine->probe->cs5Configuration.acquisitionState().mode1Sample() : 0;
 }
 
 Imx1UsbFunctionState imx1MachineUsbState(const Imx1Machine* machine) {
@@ -3463,7 +3752,7 @@ static_assert(sizeof(Imx1GraphicsInterrupts) == 12, "update its stateVersion and
 static_assert(sizeof(Imx1GraphicsAcquisition) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsSd) - Imx1GraphicsSd::unsavedBytes == 80, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsClocks) == 104, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1GraphicsCommands) == 10352, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1GraphicsCommands) - Imx1GraphicsCommands::unsavedBytes == 10352, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsMemory) - Imx1GraphicsMemory::unsavedBytes == 248, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsFrame) == 136, "update its stateVersion and the size in stateLayoutFingerprint");
 #endif
@@ -4069,8 +4358,10 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     info.graphicsSdResumed = p->cs5Configuration.reattachSdCard(
         graphicsSdCard, info.graphicsSdSection ? &staged.graphicsSdCard : nullptr);
     p->graphicsCommands = std::move(*staged.commands);
+    if (p->graphicsWorker) p->graphicsWorker->attach(nullptr);
     if (p->graphicsMemory) p->graphicsMemory.swap(staged.graphicsMemory);
     if (p->graphicsGpu.gpu) p->graphicsGpu.gpu->attach(p->graphicsMemory.get());
+    p->attachGraphicsWorker();
     p->graphicsFrame.replace(*staged.frame);
     if (p->options.i2cBus) {
         // Checked in decodeState, so this takes it.

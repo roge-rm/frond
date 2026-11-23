@@ -97,7 +97,7 @@ class Imx1GraphicsClocks {
     struct Rate { uint64_t numerator = 0, denominator = 1; };
     static constexpr uint64_t timeHz = 200000000, referenceHz = 16000000;
     static constexpr uint32_t testPrescaler = 4;
-    static bool owns(uint32_t address) { return address >= 0x16010080 && address <= 0x160100b0 && !(address & 3); }
+    static constexpr bool owns(uint32_t address) { return address >= 0x16010080 && address <= 0x160100b0 && !(address & 3); }
     void reset() { *this = {}; }
     static constexpr uint32_t stateVersion = 1;
     template <class A> void state(A& a) {
@@ -116,6 +116,13 @@ class Imx1GraphicsClocks {
         return next;
     }
     bool automaticNormal() const { return automaticRouted() && normal; }
+    // Ticks from the busy level going low to the automatic clock switch it schedules (scheduleAutomatic); UINT64_MAX
+    // where it schedules none.
+    uint64_t idleAutomaticTicks() const {
+        if (!automaticRouted() || normal || !(word(0x98) & 0x40)) return UINT64_MAX;
+        const auto timer = (word(0x98) >> 16) & 255;
+        return ((uint64_t(timer) + 1) * 16 * timeHz + referenceHz - 1) / referenceHz;
+    }
     bool gpuBusyValue() const { return gpuBusy; }
     void setGpuBusy(bool value) {
         if (gpuBusy==value) return;

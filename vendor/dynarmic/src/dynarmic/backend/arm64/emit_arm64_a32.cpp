@@ -27,6 +27,27 @@ oaknut::Label EmitA32Cond(oaknut::CodeGenerator& code, EmitContext&, IR::Cond co
     oaknut::Label pass;
     // TODO: Flags in host flags
     code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
+    // Frond: a condition on one flag (or on N == V) tests the saved bits (N 31, Z 30, C 29, V 28) without moving
+    // them to the host flags. Only the branch reads them here.
+    switch (cond) {
+    case IR::Cond::EQ: code.TBNZ(Wscratch0, 30, pass); return pass;
+    case IR::Cond::NE: code.TBZ(Wscratch0, 30, pass); return pass;
+    case IR::Cond::CS: code.TBNZ(Wscratch0, 29, pass); return pass;
+    case IR::Cond::CC: code.TBZ(Wscratch0, 29, pass); return pass;
+    case IR::Cond::MI: code.TBNZ(Wscratch0, 31, pass); return pass;
+    case IR::Cond::PL: code.TBZ(Wscratch0, 31, pass); return pass;
+    case IR::Cond::VS: code.TBNZ(Wscratch0, 28, pass); return pass;
+    case IR::Cond::VC: code.TBZ(Wscratch0, 28, pass); return pass;
+    case IR::Cond::GE:
+    case IR::Cond::LT:
+        // Bit 31 of nzcv ^ (nzcv << 3) is N ^ V.
+        code.EOR(Wscratch0, Wscratch0, Wscratch0, oaknut::LogShift::LSL, 3);
+        if (cond == IR::Cond::GE) code.TBZ(Wscratch0, 31, pass);
+        else code.TBNZ(Wscratch0, 31, pass);
+        return pass;
+    default:
+        break;
+    }
     code.MSR(oaknut::SystemReg::NZCV, Xscratch0);
     code.B(static_cast<oaknut::Cond>(cond), pass);
     return pass;

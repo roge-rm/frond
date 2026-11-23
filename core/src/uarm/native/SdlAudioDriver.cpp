@@ -1,6 +1,7 @@
 #include "SdlAudioDriver.h"
 
 #include <iostream>
+#include <thread>
 
 #include "SDL_audio.h"
 #include "SoC.h"
@@ -18,6 +19,7 @@ SdlAudioDriver::SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatency
       periodFrames(periodFrames) {}
 
 SdlAudioDriver::~SdlAudioDriver() {
+    if (!initialized) ClearMixer();
     if (initialized) {
         SDL_CloseAudioDevice(audioDevice);
     }
@@ -116,19 +118,37 @@ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
                                           samplesRemaining, queueGeneration);
     }
 
-    if (muted.load(std::memory_order_relaxed)) memset(stream, 0, len);
-    else if (samplesRemaining > 0) {
-        memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
+    // The mixer gets the whole period, guest audio or silence, and runs muted and headless too, so its clock keeps
+    // to the device's.
+    if (samplesRemaining > 0) memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
+    inMixer.store(true);
+    if (mixerOn.load()) mixer(reinterpret_cast<int16_t*>(stream), size_t(len) / 4);
+    inMixer.store(false);
+    if (muted.load(std::memory_order_relaxed) || headlessOut.load(std::memory_order_relaxed)) {
+        memset(stream, 0, len);
+        return;
     }
 }
 
+void SdlAudioDriver::ClearMixer() {
+    if (!mixer) return;
+    mixerOn.store(false);
+    while (inMixer.load()) std::this_thread::yield();
+    mixer = nullptr;
+}
+
 void SdlAudioDriver::SetMuted(bool value) { muted.store(value, std::memory_order_relaxed); }
-void SdlAudioDriver::Abandon() { initialized = false; }
+void SdlAudioDriver::Abandon() {
+    // The device stays open, so nothing it calls may outlive this.
+    ClearMixer();
+    initialized = false;
+}
 
 void SdlAudioDriver::SetHeadless(bool value) {
     if (headless == value) return;
     headless = value;
     soc->SetAudioOutputFenced(value);
+    headlessOut.store(value, std::memory_order_relaxed);
     // Frames from before the panel shouldn't play on return.
     if (value) audioQueueClear(audioQueue);
 }

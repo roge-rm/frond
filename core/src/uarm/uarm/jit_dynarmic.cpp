@@ -387,11 +387,26 @@ struct Env final : public A32::UserCallbacks {
 
     static uint8_t *ReadOnly(uint8_t *host) { return (uint8_t *)(uintptr_t(host) | 1); }
 
+#ifdef __aarch64__
+    // arm64 generated code reads these instead (the fork's frond_read_page_table and frond_write_page_table):
+    // the host page less the guest page for loads, and for stores where the entry is writable, null otherwise.
+    PageTable *readPages = nullptr, *writePages = nullptr;
+#endif
+    // Every page table entry is set here, which keeps the arm64 tables in step.
+    void SetPage(uint32_t page, uint8_t *entry) {
+        (*pages)[page] = entry;
+#ifdef __aarch64__
+        const uintptr_t host = uintptr_t(entry) & ~uintptr_t(1), offset = uintptr_t(page) << 12;
+        (*readPages)[page] = entry ? (uint8_t *)(host - offset) : nullptr;
+        (*writePages)[page] = entry && !(uintptr_t(entry) & 1) ? (uint8_t *)(host - offset) : nullptr;
+#endif
+    }
+
     void ProtectHost(uint8_t *host) {
         const auto it = writable.find(host);
         if (it == writable.end()) return;
         for (uint32_t page : it->second)
-            if ((*pages)[page] == host) (*pages)[page] = ReadOnly(host);
+            if ((*pages)[page] == host) SetPage(page, ReadOnly(host));
         stats.writeProtects++;
         writable.erase(it);
     }
@@ -400,7 +415,7 @@ struct Env final : public A32::UserCallbacks {
         for (auto it = writable.begin(); it != writable.end();) {
             if (it->first + 0x1000 > host && it->first < host + size) {
                 for (uint32_t page : it->second)
-                    if ((*pages)[page] == it->first) (*pages)[page] = ReadOnly(it->first);
+                    if ((*pages)[page] == it->first) SetPage(page, ReadOnly(it->first));
                 stats.writeProtects++;
                 it = writable.erase(it);
             } else {
@@ -652,7 +667,7 @@ struct Env final : public A32::UserCallbacks {
         // entry was noted, so it goes with the mappings.
         cpuCostHintClear(cpu);
         for (auto &list : filled) {
-            for (const Filled &f : list) (*pages)[f.page] = nullptr;
+            for (const Filled &f : list) SetPage(f.page, nullptr);
             list.clear();
         }
         writable.clear();
@@ -696,10 +711,10 @@ struct Env final : public A32::UserCallbacks {
                     }
                 }
                 if (access & 1) {
-                    (*pages)[f.page] = ReadOnly(entry);
+                    SetPage(f.page, ReadOnly(entry));
                     stats.pageReadOnly++;
                 } else {
-                    (*pages)[f.page] = nullptr;
+                    SetPage(f.page, nullptr);
                     stats.pageDrops++;
                     continue;
                 }
@@ -825,7 +840,7 @@ struct Env final : public A32::UserCallbacks {
             uint8_t *host = cpuJitReadPage(cpu, va);
             if (host && !(uintptr_t(host) & 1)) {
                 stats.pageFills++;
-                (*pages)[page] = ReadOnly(host);
+                SetPage(page, ReadOnly(host));
                 NoteFilled(page);
             } else if (!memoryCost) {
                 AfterIo();
@@ -840,6 +855,10 @@ struct Env final : public A32::UserCallbacks {
         stats.NoteCallback(va, true);
         if constexpr (sizeof(T) <= 4) {
             if (arm920) {
+                if (!memoryCost && cpuJitCodePageWrite(cpu, va, sizeof(T), uint32_t(v))) {
+                    AfterIo();
+                    return;
+                }
                 if (const int device = cpuJitLeanDeviceWrite(cpu, va, sizeof(T), uint32_t(v), RanNow())) {
                     if (device < 0) {
                         AccessFailed(va, sizeof(T), true, 0);
@@ -885,7 +904,7 @@ struct Env final : public A32::UserCallbacks {
             if (host && !(uintptr_t(host) & 1)) {
                 stats.writeMaps++;
                 if (!entry) NoteFilled(page);
-                (*pages)[page] = host;
+                SetPage(page, host);
                 writable[host].push_back(page);
             }
         }
@@ -1438,11 +1457,18 @@ struct WmmxCoprocessor final : public A32::Coprocessor {
 struct Level {
     Env env;
     PageTable *pages = nullptr;
+#ifdef __aarch64__
+    PageTable *readPages = nullptr, *writePages = nullptr;
+#endif
     std::unique_ptr<A32::Jit> jit;
     std::shared_ptr<WmmxCoprocessor> wmmx[2];
     ~Level() {
         jit.reset();
         free(pages);
+#ifdef __aarch64__
+        free(readPages);
+        free(writePages);
+#endif
     }
 };
 
@@ -1554,9 +1580,18 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     auto l = std::make_unique<Level>();
     l->pages = static_cast<PageTable *>(calloc(1, sizeof(PageTable)));
     if (!l->pages) abort();
+#ifdef __aarch64__
+    l->readPages = static_cast<PageTable *>(calloc(1, sizeof(PageTable)));
+    l->writePages = static_cast<PageTable *>(calloc(1, sizeof(PageTable)));
+    if (!l->readPages || !l->writePages) abort();
+#endif
     Env &e = l->env;
     e.cpu = j->cpu;
     e.pages = l->pages;
+#ifdef __aarch64__
+    e.readPages = l->readPages;
+    e.writePages = l->writePages;
+#endif
     e.pidTags = j->pidTags;
     e.privileged = privileged;
     e.hot = j->hot;
@@ -1569,6 +1604,10 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
         conf.optimizations &= ~(OptimizationFlag::BlockLinking | OptimizationFlag::ReturnStackBuffer |
                                 OptimizationFlag::FastDispatch);
     conf.page_table = l->pages;
+#ifdef __aarch64__
+    conf.frond_read_page_table = l->readPages;
+    conf.frond_write_page_table = l->writePages;
+#endif
     conf.page_table_writes_via_callbacks = false;
     conf.page_table_write_protect_bit = true;
     e.hinted = jitPrvCostHint;

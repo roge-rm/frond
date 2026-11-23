@@ -106,6 +106,7 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Show keyboard, Jog controls, Jog in landscape | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard; with the game controller in, Left of keyboard puts them left of the controller. Jog in landscape is where they go once the game controller's grips are either side of the screen: Hidden, Left of controller, Under screen or Over screen. Under and over turn them on their side, with jog up on the left. |
 | Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
+| Music output | Zodiac only. Where the games' music goes. See [Music output](#music-output). |
 | Contrast | The grey 68k Palms and Dana only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
 | Battery | Maximum (the default, with Charging off), Set level (a 0 to 100 slider) or Host battery, which follows this computer's level and charging, read about once a minute (a computer with no battery reads 100% on external power). Charging says whether the device sits on its charger, for Maximum and Set level. Low levels bring up the device's own warnings and auto-off. It applies at once, is in the Display panel too, and is saved with the machine, not the session. Greyed in the Display panel on devices that don't have it yet, and Charging is greyed there where the charger isn't modelled (the saved choice is kept). |
 | Speed | Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k Palms stop at 4×); the multiples run that many times faster than Original. On the 68k Palms and Dana, Original runs at the real clock (16.58 MHz on the IIIx, IIIe, IIIxe, V, m100 and m105, 20.25 MHz on the Vx and IIIc, 33.16 MHz on the m125, m130, m500, c500, m505, m515 and m520) and Uncapped lets the host run it as fast as it can (timers stay real time); it's in the Display panel or sheet too and applies at once. On the other devices Original follows the clock the Palm OS sets (312 MHz turbo on the T|X and Zire 72, about 199 MHz on the E2, E3 and TG50, lower when the OS slows the chip down) and Uncapped passes `--mips 3000`; both apply at the next start. |
@@ -114,6 +115,18 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 Android also has Settings in the home menu: Orientation (follow the phone, portrait or landscape), the gdb server and its port, and the controller keys.
 
 The button bars and silkscreens are drawn at the chosen size. The E3 uses the E2 button bar, with its input area drawn by Palm OS.
+
+### Music output
+
+Zodiac only. Zodiac games play their music as MIDI, which the Zodiac's own FM chip plays. Music output picks what plays it instead:
+
+- **Game's own sound**: the FM chip, as on a real Zodiac. This is the default.
+- **SoundFont**: a SoundFont (`.sf2`) file you pick plays the music. Frond doesn't come with one, so use any General MIDI SoundFont you have. On Linux, click **Choose…** and pick the file; Frond reads it from where it is. On Android, tap the SoundFont row and pick the file; Frond copies it into the app, so you can delete the original.
+- **MIDI device**: the music goes to a MIDI device, like a hardware synthesizer or a synth app. On Linux, pick a port from the list, which shows what ALSA has, or Frond's own port, which other programs can connect to. On Android, pick a USB MIDI device or a Bluetooth MIDI device that's already paired; plug it in before opening Edit settings so it's in the list.
+
+With SoundFont or MIDI device, the FM chip is left out of the sound, and sound effects still play as before. The MIDI is held back by the same delay as the sound, so the music lines up with the effects. If the SoundFont can't be read or the MIDI device isn't there when the machine starts, the game's own sound plays. Music output applies at the next start and is saved with the machine.
+
+Anything else the FM chip plays outside the games' MIDI music isn't heard with SoundFont or MIDI device.
 
 ### Low-latency audio
 

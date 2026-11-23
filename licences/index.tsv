@@ -24,3 +24,5 @@ ecliptic-LICENSE	Ecliptic (TwGlue slot names)	MIT	da
 sqlite-PUBLIC-DOMAIN	SQLite (sync manager profiles)	Public domain	da
 arduinojson-LICENSE	ArduinoJson	MIT	a
 synce-LICENSE	SynCE (ActiveSync RAPI)	MIT	da
+rtmidi-LICENSE	RtMidi (Zodiac music to MIDI devices)	MIT	d
+tinysoundfont-LICENSE	TinySoundFont (Zodiac music through a SoundFont)	MIT	da

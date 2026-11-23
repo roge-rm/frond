@@ -134,7 +134,17 @@ struct Preferences {
     bool headphonesIn{false};
     // Speed multiplier of Original (1.5x, 2x, 3x, 4x, 8x) when uncapped is false; empty is Original.
     QString multiplier;
+    // Zodiac: the games' music as the guest's own FM ("fm"), through the SoundFont file soundFont ("soundfont"), or
+    // to the MIDI output port midiOutPort ("midi", a port name or "virtual"). Applied at start.
+    QString musicOutput{"fm"};
+    QString soundFont, midiOutPort;
 };
+// The core's arguments for the Music output setting: none for FM, or for a choice with nothing picked.
+inline QStringList musicArguments(const Preferences& prefs) {
+    if (prefs.musicOutput == QLatin1String("soundfont") && !prefs.soundFont.isEmpty()) return {"--music-soundfont", prefs.soundFont};
+    if (prefs.musicOutput == QLatin1String("midi") && !prefs.midiOutPort.isEmpty()) return {"--music-midi-out", prefs.midiOutPort};
+    return {};
+}
 // The speed setting as the core names it: original, 1.5x..8x or uncapped.
 inline QString speedName(const Preferences& prefs) {
     return prefs.uncapped ? QStringLiteral("uncapped") : prefs.multiplier.isEmpty() ? QStringLiteral("original") : prefs.multiplier;
@@ -188,6 +198,9 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     result->batteryCharging = object.value("batteryCharging").toBool(false);
     result->headphonesIn = object.value("headphonesIn").toBool(false);
     result->rumble = object.value("rumble").toBool(true);
+    if (const auto music = object.value("musicOutput").toString(); music == "soundfont" || music == "midi") result->musicOutput = music;
+    result->soundFont = object.value("soundFont").toString();
+    result->midiOutPort = object.value("midiOutPort").toString();
     result->gamepadSet = object.value("gamepad").isBool();
     result->gamepad = object.value("gamepad").toBool(false);
     result->jogLandscape = readJogLandscape(object);
@@ -222,6 +235,9 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     if (prefs.batteryCharging) object.insert("batteryCharging", true);
     if (prefs.headphonesIn) object.insert("headphonesIn", true);
     if (!prefs.rumble) object.insert("rumble", false);
+    if (prefs.musicOutput != "fm") object.insert("musicOutput", prefs.musicOutput);
+    if (!prefs.soundFont.isEmpty()) object.insert("soundFont", prefs.soundFont);
+    if (!prefs.midiOutPort.isEmpty()) object.insert("midiOutPort", prefs.midiOutPort);
     if (prefs.gamepadSet) object.insert("gamepad", prefs.gamepad);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
     if (prefs.usbPort == "printer") object.insert("usbPrinter", true);

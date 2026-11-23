@@ -2284,6 +2284,51 @@ test-zodiac-dma-channel: $(OBJ_ROOT)/zodiac-boot-probe
 		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-dma-channel
 	$(OBJ_ROOT)/test-zodiac-dma-channel
 
+# The Zodiac music hooks' SoundFont synth (TinySoundFont), with ASan and UBSan, then with TSan for its threads.
+.PHONY: test-zodiac-music-synth
+test: test-zodiac-music-synth
+ZODIAC_MUSIC_SYNTH_FLAGS = -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+	-Wno-missing-field-initializers -Wno-sign-compare -Wno-implicit-fallthrough \
+	-Icore/src/uarm/native -Icore/src/uarm/uarm tests/zodiac-music-synth.cpp -pthread
+test-zodiac-music-synth:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) $(ZODIAC_MUSIC_SYNTH_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-o $(OBJ_ROOT)/test-zodiac-music-synth
+	$(OBJ_ROOT)/test-zodiac-music-synth
+	$(CXX) $(ZODIAC_MUSIC_SYNTH_FLAGS) -fsanitize=thread -o $(OBJ_ROOT)/test-zodiac-music-synth-tsan
+	TSAN_OPTIONS=halt_on_error=1 setarch -R $(OBJ_ROOT)/test-zodiac-music-synth-tsan
+
+# The Zodiac music's MIDI out engine against a fake port, with ASan and UBSan, then with TSan for its thread.
+.PHONY: test-zodiac-midi-out
+test: test-zodiac-midi-out
+ZODIAC_MIDI_OUT_FLAGS = -std=c++17 -O1 -g -Wall -Wextra -Werror \
+	-Icore/src/uarm/native -Icore/src/uarm/uarm tests/zodiac-midi-out.cpp -pthread
+test-zodiac-midi-out:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) $(ZODIAC_MIDI_OUT_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-o $(OBJ_ROOT)/test-zodiac-midi-out
+	$(OBJ_ROOT)/test-zodiac-midi-out
+	$(CXX) $(ZODIAC_MIDI_OUT_FLAGS) -fsanitize=thread -o $(OBJ_ROOT)/test-zodiac-midi-out-tsan
+	TSAN_OPTIONS=halt_on_error=1 setarch -R $(OBJ_ROOT)/test-zodiac-midi-out-tsan
+
+# The Zodiac music hooks' host sequencer, with ASan and UBSan.
+.PHONY: test-zodiac-music-player
+test: test-zodiac-music-player
+test-zodiac-music-player:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-Icore/src/uarm/uarm tests/zodiac-music-player.cpp -o $(OBJ_ROOT)/test-zodiac-music-player
+	$(OBJ_ROOT)/test-zodiac-music-player
+
+# Host-side SMF reader for the Zodiac music hooks, with ASan and UBSan.
+.PHONY: test-zodiac-smf
+test: test-zodiac-smf
+test-zodiac-smf:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
+		-Icore/src/uarm/uarm tests/zodiac-smf.cpp -o $(OBJ_ROOT)/test-zodiac-smf
+	$(OBJ_ROOT)/test-zodiac-smf
+
 # ARM software exception entry, return and FIQ mask preservation.
 .PHONY: test-zodiac-exception
 test-zodiac-exception: $(OBJ_ROOT)/zodiac-boot-probe
@@ -2352,7 +2397,7 @@ test-zodiac-dcache: $(OBJ_ROOT)/test-zodiac-dcache
 
 # Every i.MX1 test target.
 .PHONY: test-imx1
-test-imx1: test-imx1-aitc test-imx1-clocks-gpio test-imx1-live-clocks test-imx1-gpio-idle test-imx1-gpio-pad test-imx1-gpio-active test-imx1-mpll test-imx1-spll test-imx1-eim test-imx1-timer test-imx1-uart test-imx1-timer2 test-imx1-sysctrl test-imx1-mmcsd test-imx1-mmcsd-card test-imx1-memory-dma test-imx1-i2c-read-window test-imx1-i2c test-imx1-asp test-imx1-pwm test-imx1-rtc test-imx1-watchdog test-imx1-mpll-retune test-imx1-rtc-live-writes test-imx1-run-cache
+test-imx1: test-imx1-aitc test-imx1-clocks-gpio test-imx1-live-clocks test-imx1-gpio-idle test-imx1-gpio-pad test-imx1-gpio-active test-imx1-mpll test-imx1-spll test-imx1-eim test-imx1-timer test-imx1-uart test-imx1-timer2 test-imx1-sysctrl test-imx1-mmcsd test-imx1-mmcsd-card test-imx1-memory-dma test-imx1-i2c-read-window test-imx1-i2c test-imx1-asp test-imx1-pwm test-imx1-rtc test-imx1-watchdog test-imx1-mpll-retune test-imx1-rtc-live-writes test-imx1-run-cache test-imx1-steps-until
 test: test-imx1
 
 # The UART cache flag survives board assignment.
@@ -2378,6 +2423,13 @@ test-imx1-clocks-gpio: prepare
 		core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp \
 		core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp -o $(OBJ_ROOT)/test-imx1-clocks-gpio
 	$(OBJ_ROOT)/test-imx1-clocks-gpio
+
+.PHONY: test-imx1-steps-until
+# imx1StepsUntil's 64-bit and divided-denominator branches against its 128-bit count.
+test-imx1-steps-until: prepare
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm \
+		tests/imx1-steps-until.cpp -o $(OBJ_ROOT)/test-imx1-steps-until
+	$(OBJ_ROOT)/test-imx1-steps-until
 
 .PHONY: test-imx1-live-clocks
 test-imx1-live-clocks: prepare
@@ -2633,6 +2685,18 @@ test-zodiac-graphics-commands: $(OBJ_ROOT)/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_eim.cpp -o $(OBJ_ROOT)/test-zodiac-graphics-commands
 	$(OBJ_ROOT)/test-zodiac-graphics-commands
 
+.PHONY: test-zodiac-graphics-worker
+# The Fast fill worker thread against fills on the calling thread, and the same with ThreadSanitizer.
+test-zodiac-graphics-worker: $(OBJ_ROOT)/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-worker.cpp \
+		core/src/uarm/uarm/imx1_eim.cpp -pthread -o $(OBJ_ROOT)/test-zodiac-graphics-worker
+	$(OBJ_ROOT)/test-zodiac-graphics-worker
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=thread \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-graphics-worker.cpp \
+		core/src/uarm/uarm/imx1_eim.cpp -pthread -o $(OBJ_ROOT)/test-zodiac-graphics-worker-tsan
+	TSAN_OPTIONS=halt_on_error=1 setarch -R $(OBJ_ROOT)/test-zodiac-graphics-worker-tsan
+
 .PHONY: test-zodiac-graphics-gpu
 # The host GPU path against the CPU model; skipped (77) on a host with no usable GPU.
 test-zodiac-graphics-gpu: $(OBJ_ROOT)/zodiac-boot-probe
@@ -2822,12 +2886,13 @@ test-zodiac-ymf-ready: benchmark-replay
 
 .PHONY: test-zodiac-fast-lean
 # The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access.
-test-zodiac-fast-lean: $(OBJ_ROOT)/zodiac-boot-probe
+test-zodiac-fast-lean: $(OBJ_ROOT)/zodiac-boot-probe test-imx1-steps-until
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-fast-lean.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-fast-lean
 	$(OBJ_ROOT)/test-zodiac-fast-lean
+	ZODIAC_FAST_LEAN_RING=1 FROND_ZODIAC_CROSS_END=0 FROND_ZODIAC_KEEP_CHECKS=0 $(OBJ_ROOT)/test-zodiac-fast-lean
 
 .PHONY: test-zodiac-code-hooks
 # Code hooks on their own: set on cached ARM and Thumb code, every pass stopped, cleared code runs lean and compiled.
@@ -2837,6 +2902,16 @@ test-zodiac-code-hooks: $(OBJ_ROOT)/zodiac-boot-probe
 		tests/zodiac-code-hooks.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-code-hooks
 	$(OBJ_ROOT)/test-zodiac-code-hooks
+
+.PHONY: test-zodiac-music-hook
+# Music hooks: the Tapwave Midi Library found (and on ZODIAC_ROM, the 1.1 ROM's), a guest's calls caught with their
+# arguments in Exact and both Fast paths, the guest's run unchanged.
+test-zodiac-music-hook: $(OBJ_ROOT)/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Itests \
+		tests/zodiac-music-hook.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@$(OBJ_ROOT)/zodiac-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zodiac-music-hook
+	ZODIAC_ROM="$(ZODIAC_ROM)" $(OBJ_ROOT)/test-zodiac-music-hook
 
 .PHONY: test-zodiac-guest-exceptions
 test-zodiac-guest-exceptions: $(OBJ_ROOT)/zodiac-boot-probe
@@ -2892,7 +2967,7 @@ test-zodiac-faster: $(OBJ_ROOT)/zodiac-boot-probe
 # The Zodiac checks not listed elsewhere in the suite. Left out for time: arm-add-pc, ldm-return and fast-lean;
 # cs4-capture is a diagnostic kept outside make test.
 .PHONY: test-zodiac
-test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
+test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-worker test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-music-hook test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
 test: test-zodiac
 
 # The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,

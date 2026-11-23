@@ -317,7 +317,9 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun cancelMachine() {
+        val picked = machineDraft?.settings?.soundFont
         machineDraft = null
+        if (!picked.isNullOrEmpty()) pruneSoundFonts()
     }
 
     fun chooseMachine(device: Device) {
@@ -328,6 +330,31 @@ class HomeModel(private val activity: HomeActivity) {
 
     fun changeMachineSettings(settings: MachineSettings) {
         machineDraft = machineDraft?.copy(settings = settings)
+    }
+
+    // Copies a picked SoundFont into the app's files and puts it in the machine being edited.
+    fun importSoundFont(uri: android.net.Uri) {
+        val app = activity.applicationContext
+        runJob("Copying", "Couldn't use the SoundFont", null, cancellable = true, reload = false) { cancelled, progress ->
+            val path = SoundFonts.import(app, uri, cancelled, progress)
+            HomeWork.scope.launch {
+                val m = HomeWork.model
+                // A copy that finished after the copy or the draft was cancelled goes, unless a machine uses it.
+                if (m == null || m.machineDraft == null || cancelled()) {
+                    val keep = Sessions.list(app).map { it.settings.soundFont }.filter { it.isNotEmpty() }.toSet()
+                    if (path !in keep && m?.machineDraft?.settings?.soundFont != path) File(path).delete()
+                } else {
+                    m.machineDraft = m.machineDraft?.let { d -> d.copy(settings = d.settings.copy(soundFont = path)) }
+                }
+            }
+            null
+        }
+    }
+
+    // Removes the SoundFont copies no machine uses any more.
+    private fun pruneSoundFonts() {
+        val keep = Sessions.list(activity).map { it.settings.soundFont }.filter { it.isNotEmpty() }.toSet()
+        try { SoundFonts.prune(activity, keep) } catch (e: Exception) { }
     }
 
     // Add device's card for slot `n` ("" for none).
@@ -360,6 +387,7 @@ class HomeModel(private val activity: HomeActivity) {
                 Sessions.updateSettings(activity, id) { draft.settings }
                 machineDraft = null
                 reload()
+                pruneSoundFonts()
             } else if (firmwareReady[draft.device] != true) {
                 openFirmware(draft.device)
             } else {
@@ -372,6 +400,7 @@ class HomeModel(private val activity: HomeActivity) {
                 if (cards.any { it.isNotEmpty() }) HomeWork.startCards[session.id] = cards
                 machineDraft = null
                 reload()
+                pruneSoundFonts()
                 start(session)
             }
         } catch (e: Exception) {

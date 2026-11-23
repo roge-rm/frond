@@ -307,6 +307,14 @@ std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::Cod
         }
     }
 
+    if (ctx.conf.frond_split_page_tables) {
+        // Frond: the load or store table's entry is the host page less the guest page, null for the callbacks.
+        code.UBFX(Xscratch0, Xaddr, page_bits, valid_page_index_bits);
+        code.LDR(Xscratch0, write ? Xfastmem : Xpagetable, Xscratch0, LSL, 3);
+        code.CBZ(Xscratch0, *fallback);
+        return std::make_pair(Xscratch0, Xaddr);
+    }
+
     if (ctx.conf.silently_mirror_page_table || unused_top_bits == 0) {
         code.UBFX(Xscratch0, Xaddr, page_bits, valid_page_index_bits);
     } else {

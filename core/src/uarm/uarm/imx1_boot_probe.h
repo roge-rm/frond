@@ -253,6 +253,17 @@ uint64_t imx1MachineAspPollSkips(const Imx1Machine*);
 uint64_t imx1MachineAspPollRounds(const Imx1Machine*);
 uint64_t imx1MachineAspPollCycles(const Imx1Machine*);
 void imx1SetAspPollSkip(bool skip);
+// Fast spans that ran past queued graphics batches' completions, and the lean accesses that refused for them, since
+// the process started. On unless FROND_ZODIAC_CROSS=0; imx1SetCrossCompletions(false) turns it off, for tests.
+uint64_t imx1MachineCrossSpans(const Imx1Machine*);
+uint64_t imx1MachineCrossRefusals(const Imx1Machine*);
+void imx1SetCrossCompletions(bool on);
+// Ring submits Fast took with the board left behind the chip, since the process started. On unless
+// FROND_ZODIAC_SUBMIT_LAG=0; imx1SetSubmitLag sets it, for tests.
+uint64_t imx1MachineLagSubmits(const Imx1Machine*);
+uint64_t imx1MachineLagBoundaries(const Imx1Machine*);
+uint64_t imx1MachineCrossEnds(const Imx1Machine*);
+void imx1SetSubmitLag(bool on);
 // Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
 // ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
 // Execution thread, between runs; false inside a bounded run or after stop.
@@ -293,6 +304,9 @@ uint16_t imx1MachinePcmLastTransmitted(const Imx1Machine*);
 // Sends each 16-bit word SSI1 finishes and its slot (0 the frame sync slot) to hook, on the thread that runs
 // the machine, in guest time order. Kept through state loads; null stops it.
 void imx1MachineSetPcmOutput(Imx1Machine*, void (*hook)(void*, uint16_t word, unsigned slot), void* context);
+// Leaves the YMF768's FM out of the PCM output's words (the chip still runs and mixes as before, so nothing the
+// guest sees or saves changes). Kept through state loads; off at first.
+void imx1MachineSetFmOutputMuted(Imx1Machine*, bool muted);
 // Puts the Zodiac's YMF768 on CS4 in place of the diagnostic recorder: its registers, its FM output mixed into
 // the PCM output's words and its interrupt on GPIO B15. Call before the first instruction. Saved states carry it
 // in an optional section; a state without one loads with the chip reset.
@@ -332,7 +346,7 @@ void imx1MachineRestorePcStops(Imx1Machine*, const Imx1MachinePcStops&);
 // Imx1MachineYield::codeHook, in Exact and Fast alike; unlike pc stops they leave Fast its lean path and JIT, which
 // stop short of the hooks. Leave lets the next run run the instruction at the hook first. Setting replaces the
 // ones before (none: count 0). Not saved; a load or reset keeps them. None set runs as before.
-inline constexpr unsigned imx1MachineMaximumCodeHooks = 16;
+inline constexpr unsigned imx1MachineMaximumCodeHooks = 32;
 bool imx1MachineSetCodeHooks(Imx1Machine*, const uint32_t* pcs, unsigned count);
 void imx1MachineLeaveCodeHook(Imx1Machine*);
 bool imx1MachineAtCodeHook(const Imx1Machine*);
@@ -419,6 +433,10 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first,
 // On the Zodiac it's the accessory ID line the DAL's 200876b6 reads; the options' graphicsRawAux starts it.
 Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine*, uint32_t sample, bool commit = true);
 uint32_t imx1MachineGraphicsAux(const Imx1Machine*);
+// The graphics chip's mode 1 ADC input, 0-1023, saved with the state. On the Zodiac it's the battery the DAL's
+// 20087382 reads; the options' graphicsRawMode1 starts it.
+Imx1BootstrapAccess imx1MachineSetGraphicsMode1(Imx1Machine*, uint32_t sample);
+uint32_t imx1MachineGraphicsMode1(const Imx1Machine*);
 // The W4200's USB function from the host side (Imx1GraphicsUsb), between runs. Each change also drives the
 // chip's interrupt line. A stopped machine or a refused line change answers Timeout (false for the reset).
 struct Imx1UsbFunctionState { bool listening = false; uint32_t enableCount = 0; uint8_t address = 0; };
@@ -435,7 +453,9 @@ void imx1MachineSetUsbHostPending(Imx1Machine*, bool pending);
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,
 // and in landscape the rotation at 20084d26 turns them one place, so top is D10, right D9, bottom D8, left D14.
-// ASSUMPTION "Zodiac Function and Bluetooth pins": D12 and D13 by elimination, the ROM has no key code for them.
+// The scan reads D12 as key bit 0x8000 and D13 as 0x01000000. D12 is Function: the ROM's stick calibration
+// ("press and hold the function button") goes on only for it. D13 is Bluetooth: a press in the launcher shows
+// "Discoverable for 3 minutes".
 // Not wired: D22 (the cradle's HotSync button, active low, idle high) and B23 (the scan's other stick click input).
 enum class Imx1ZodiacControl {
     home, triggerLeft, triggerRight, power, stickClick, actionRight, actionUp, actionLeft, function, bluetooth,

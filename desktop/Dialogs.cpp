@@ -17,6 +17,9 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QProcess>
+#include <QRegularExpression>
+#include <QTimer>
 #include <QSlider>
 #include <QVBoxLayout>
 #include <QGuiApplication>
@@ -163,6 +166,50 @@ QString FirmwareDialog::importImages() {
     return error;
 }
 
+namespace {
+QString midiCore;
+}
+void setMidiPortsCore(const QString& core) { midiCore = core; }
+void listMidiOutputPorts(QObject* context, std::function<void(const QStringList&)> done) {
+    if (midiCore.isEmpty()) {
+        done({});
+        return;
+    }
+    auto* core = new QProcess(context);
+    auto* timeout = new QTimer(core);
+    timeout->setSingleShot(true);
+    QObject::connect(timeout, &QTimer::timeout, core, [core] { core->kill(); });
+    QObject::connect(core, &QProcess::finished, context, [core, done](int, QProcess::ExitStatus status) {
+        QStringList ports;
+        // "N: name" a line.
+        if (status == QProcess::NormalExit)
+            for (const auto& line : QString::fromUtf8(core->readAllStandardOutput()).split('\n')) {
+                const int colon = line.indexOf(QStringLiteral(": "));
+                bool number = false;
+                if (colon > 0) line.left(colon).toUInt(&number);
+                if (number) ports << line.mid(colon + 2).trimmed();
+            }
+        core->deleteLater();
+        done(ports);
+    });
+    QObject::connect(core, &QProcess::errorOccurred, context, [core, done](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) return;
+        core->deleteLater();
+        done({});
+    });
+    core->start(midiCore, {"--music-midi-ports"});
+    timeout->start(5000);
+}
+
+QString midiPortKey(const QString& name) {
+    static const QRegularExpression clientPort(QStringLiteral("\\s+\\d+:\\d+$"));
+    static const QRegularExpression bracketed(QStringLiteral("\\s*\\(\\d+(:\\d+)?\\)"));
+    QString key = name;
+    key.remove(clientPort);
+    key.remove(bracketed);
+    return key.trimmed().toLower();
+}
+
 MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool automaticScale, QWidget* parent)
     : QWidget(parent), automaticScale(automaticScale), originalPreferences(prefs) {
     auto* layout = new QVBoxLayout(this);
@@ -234,6 +281,45 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     rumble = new QCheckBox(tr("Rumble"), sound);
     rumble->setObjectName("rumble");
     soundLayout->addWidget(rumble);
+    musicOutputLabel = new QLabel(tr("Music output"), sound);
+    musicOutput = new QComboBox(sound);
+    musicOutput->setObjectName("musicOutput");
+    musicOutput->addItem(tr("Game's own sound"), "fm");
+    musicOutput->addItem(tr("SoundFont"), "soundfont");
+    musicOutput->addItem(tr("MIDI device"), "midi");
+    musicOutput->setCurrentIndex(std::max(0, musicOutput->findData(prefs.musicOutput)));
+    musicOutputLabel->setBuddy(musicOutput);
+    auto* musicRow = new QHBoxLayout;
+    musicRow->addWidget(musicOutputLabel);
+    musicRow->addWidget(musicOutput, 1);
+    soundLayout->addLayout(musicRow);
+    soundFontRow = new QWidget(sound);
+    auto* soundFontLayout = new QHBoxLayout(soundFontRow);
+    soundFontLayout->setContentsMargins(0, 0, 0, 0);
+    soundFont = new QLineEdit(prefs.soundFont, soundFontRow);
+    soundFont->setObjectName("soundFont");
+    soundFont->setPlaceholderText(tr("SoundFont file (.sf2)"));
+    soundFontChoose = new QPushButton(tr("Choose…"), soundFontRow);
+    soundFontChoose->setObjectName("soundFontChoose");
+    soundFontLayout->addWidget(soundFont, 1);
+    soundFontLayout->addWidget(soundFontChoose);
+    soundLayout->addWidget(soundFontRow);
+    connect(soundFontChoose, &QPushButton::clicked, this, [this] {
+        const auto file = QFileDialog::getOpenFileName(this, tr("Choose a SoundFont"), QFileInfo(soundFont->text()).absolutePath(),
+                                                       tr("SoundFont (*.sf2);;All files (*)"));
+        if (!file.isEmpty()) soundFont->setText(file);
+    });
+    midiPortRow = new QWidget(sound);
+    auto* midiLayout = new QHBoxLayout(midiPortRow);
+    midiLayout->setContentsMargins(0, 0, 0, 0);
+    midiPort = new QComboBox(midiPortRow);
+    midiPort->setObjectName("midiPort");
+    // Filled from the core when MIDI device is first shown; the saved port stays chosen meanwhile.
+    if (!prefs.midiOutPort.isEmpty()) midiPort->addItem(prefs.midiOutPort == "virtual" ? tr("Frond's own port") : prefs.midiOutPort, prefs.midiOutPort);
+    midiLayout->addWidget(midiPort, 1);
+    soundLayout->addWidget(midiPortRow);
+    connect(musicOutput, &QComboBox::currentIndexChanged, this, [this] { showMusic(); });
+    showMusic();
     layout->addWidget(sound);
     auto* batteryGroup = new QGroupBox(tr("Battery"), this);
     auto* batteryLayout = new QVBoxLayout(batteryGroup);
@@ -366,6 +452,38 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
 }
 
+// Music output and its file or port, on the Zodiac only. The ports are listed the first time MIDI device shows.
+void MachineSettings::showMusic() {
+    const bool zodiac = device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac;
+    const auto choice = musicOutput->currentData().toString();
+    musicOutputLabel->setVisible(zodiac);
+    musicOutput->setVisible(zodiac);
+    soundFontRow->setVisible(zodiac && choice == "soundfont");
+    midiPortRow->setVisible(zodiac && choice == "midi");
+    if (!zodiac || choice != "midi" || midiPortsListed) return;
+    midiPortsListed = true;
+    listMidiOutputPorts(this, [this](const QStringList& ports) {
+        const auto keep = midiPort->currentData().toString();
+        const QSignalBlocker blocked(midiPort);
+        midiPort->clear();
+#ifndef Q_OS_WIN
+        midiPort->addItem(tr("Frond's own port"), "virtual");
+#endif
+        for (const auto& port : ports) midiPort->addItem(port, port);
+        int index = keep.isEmpty() ? 0 : midiPort->findData(keep);
+        // The same port under new client numbers.
+        if (index < 0)
+            for (int i = 0; i < midiPort->count() && index < 0; ++i)
+                if (midiPortKey(midiPort->itemData(i).toString()) == midiPortKey(keep)) index = i;
+        // A saved port that isn't there now stays, so the choice isn't lost while the device is unplugged.
+        if (index < 0) {
+            midiPort->addItem(tr("%1 (not found)").arg(keep), keep);
+            index = midiPort->count() - 1;
+        }
+        midiPort->setCurrentIndex(index);
+    });
+}
+
 void fillSpeedBox(QComboBox* box, bool m68k, const QString& name) {
     const QSignalBlocker blocked(box);
     box->clear();
@@ -411,6 +529,11 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.audio = audio->isChecked();
     prefs.fastAudio = fastAudio->isChecked();
     prefs.rumble = rumble->isChecked();
+    if (device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac) {
+        prefs.musicOutput = musicOutput->currentData().toString();
+        prefs.soundFont = soundFont->text().trimmed();
+        prefs.midiOutPort = midiPort->currentData().toString();
+    }
     prefs.showKeyboard = showKeyboard->isChecked();
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     prefs.jogLandscape = frondSessions::JogLandscape(jogLandscape->currentData().toInt());
@@ -489,6 +612,7 @@ void MachineSettings::setDevice(Device device) {
     fastAudio->setVisible(!m68k);
     rumble->setText(frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac ? tr("Rumble") : tr("Vibrate"));
     rumble->setVisible(known && frondFirmware::capabilities(device).vibrate);
+    showMusic();
     showMips->setVisible(!m68k);
     contrastLabel->setVisible(frondFirmware::lcdContrast(device));
     contrast->setVisible(frondFirmware::lcdContrast(device));

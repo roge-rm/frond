@@ -316,6 +316,49 @@ void probeGuards() {
                     assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe1b0f00e);
                     assert(r.registers[15] == 32 && !r.busAccesses);
                 }
+        // LDM^ with PC in User or System mode (an APCS-26 return, Big Money's ARMlets) loads as a plain LDM.
+        for (uint32_t mode : {0xdfu, 0xd0u}) for (bool taken : {true, false}) {
+            std::vector<uint32_t> p(0x40 / 4, 0xe7f000f0);
+            p[0] = 0xe3a00020;  // mov r0, #0x20
+            p[1] = 0xe321f000 | mode;  // msr cpsr_c, #mode (System or User)
+            p[2] = 0xe3b06000;  // movs r6, #0 (Z set, so the NE form doesn't run)
+            p[3] = taken ? 0xe8d08010u : 0x18d08010u;  // ldmia r0, {r4, pc}^ or ldmiane
+            p[4] = 0xe3a05003;  // mov r5, #3
+            p[0x20 / 4] = 7; p[0x24 / 4] = 0x30;
+            p[0x30 / 4] = 0xe3a05009;  // mov r5, #9
+            const auto r = probe(p, fast);
+            assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe7f000f0);
+            assert((r.cpsr & 0xff) == mode && !r.busAccesses);
+            if (taken) assert(r.registers[4] == 7 && r.registers[5] == 9);
+            else assert(r.registers[4] == 0 && r.registers[5] == 3);
+        }
+        // Writeback with the base outside the list is a plain LDM too: r0 moves past the two words.
+        for (uint32_t mode : {0xdfu, 0xd0u}) {
+            std::vector<uint32_t> p(0x40 / 4, 0xe7f000f0);
+            p[0] = 0xe3a00020; p[1] = 0xe321f000 | mode;
+            p[2] = 0xe8f08010;  // ldmia r0!, {r4, pc}^
+            p[0x20 / 4] = 7; p[0x24 / 4] = 0x30;
+            p[0x30 / 4] = 0xe3a05009;
+            const auto r = probe(p, fast);
+            assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe7f000f0);
+            assert((r.cpsr & 0xff) == mode && r.registers[0] == 0x28 && r.registers[4] == 7 && r.registers[5] == 9);
+        }
+        // Still refused in User and System mode: writeback with the base in the list, base r15, and LDM^ without
+        // pc (a user-bank load, which has no meaning there). Each stops at the LDM with nothing loaded.
+        for (uint32_t mode : {0xdfu, 0xd0u})
+            for (uint32_t instruction : {0xe8f08011u,    // ldmia r0!, {r0, r4, pc}^
+                                         0xe8df8010u,    // ldmia pc, {r4, pc}^
+                                         0xe8d00030u,    // ldmia r0, {r4, r5}^
+                                         0xe8f00030u}) { // ldmia r0!, {r4, r5}^
+                std::vector<uint32_t> p(0x40 / 4, 0xe7f000f0);
+                p[0] = 0xe3a00020; p[1] = 0xe321f000 | mode;
+                p[2] = instruction;
+                p[0x20 / 4] = 7; p[0x24 / 4] = 0x30;
+                const auto r = probe(p, fast);
+                assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == instruction);
+                assert(r.registers[15] == 8 && (r.cpsr & 0xff) == mode && !r.busAccesses);
+                assert(r.registers[0] == 0x20 && r.registers[4] == 0 && r.registers[5] == 0);
+            }
         for (uint32_t instruction : {0xe1b0f00du, 0xe1b0f00fu, 0xe25ef004u, 0xe8fd8000u}) {
             const auto r = probe({instruction}, fast);
             assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 0 && !r.busAccesses);
