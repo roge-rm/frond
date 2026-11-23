@@ -120,7 +120,7 @@ The button bars and silkscreens are drawn at the chosen size. The E3 uses the E2
 
 Zodiac only. Zodiac games play their music as MIDI, which the Zodiac's own FM chip plays. Music output picks what plays it instead:
 
-- **Game's own sound**: the FM chip, as on a real Zodiac. This is the default.
+- **Built-in FM Synth**: the FM chip, as on a real Zodiac. This is the default.
 - **SoundFont**: a SoundFont (`.sf2`) file you pick plays the music. Frond doesn't come with one, so use any General MIDI SoundFont you have. On Linux, click **Choose…** and pick the file; Frond reads it from where it is. On Android, tap the SoundFont row and pick the file; Frond copies it into the app, so you can delete the original.
 - **MIDI device**: the music goes to a MIDI device, like a hardware synthesizer or a synth app. On Linux, pick a port from the list, which shows what ALSA has, or Frond's own port, which other programs can connect to. On Android, pick a USB MIDI device or a Bluetooth MIDI device that's already paired; plug it in before opening Edit settings so it's in the list.
 
