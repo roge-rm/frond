@@ -96,6 +96,7 @@
 #include "Sound.h"
 #include "RawFingers.h"
 #include "Touch.h"
+#include "Controllers68k.h"
 #include "device_profile5.h"
 #include "speed_setting5.h"
 #include "session/session_file5.h"
@@ -190,6 +191,7 @@ struct Options {
     float windowScale{2};
     bool sound{true};
     bool disableRumble{false};
+    optional<string> controllerMap;  // --controller-map, as ControllerMap.h encodes it
     optional<string> audioOutput;
     bool toneLog{false};
     optional<string> pa1TracePath;
@@ -224,6 +226,7 @@ void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--hide-buttons] [--no-sound] [--no-rumble] [--audio-output WAV]\n"
+            "                 [--controller-map KEY:BUTTON,...|none]\n"
             "                 [--pa1-trace NEW_CSV (T415 development)]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
@@ -1116,6 +1119,7 @@ class Runner {
         if (!OpenWav() || !OpenLinks()) return 1;
         if (options.gdbPort) StartGdb(options.gdbPort);
         OpenWindow();
+        if (options.controllerMap) SetControllerMap(*options.controllerMap);
         if (soundOn) OpenAudio();
         if (options.desktopSocket) {
             desktop = make_unique<DesktopChannel>(*options.desktopSocket);
@@ -2560,6 +2564,12 @@ class Runner {
             const auto result=DanaInputCommand(command,argument);
             return {result=="accepted",result,"Dana input: "+result};
         }
+        if (command == "controller-map") {
+            // KEY:BUTTON,... or none; entries the device can't use are dropped.
+            if (!window || !controllers.Listed()) return {false, "unsupported", "This device takes no game controller."};
+            SetControllerMap(argument);
+            return {true, "controller-map", controllers.Map().encode()};
+        }
         bool fileCommand = false, takesArgument = card;
         for (const char* name : fileCommands) fileCommand = fileCommand || command == name;
         for (const char* name : argumentCommands) takesArgument = takesArgument || command == name;
@@ -3570,9 +3580,24 @@ class Runner {
         mouseKey = keyInvalid;
         touch.ReleaseAll();
         keyHolds.Clear();
+        controllers.Forget();
         for (KeyId key : {keyIdHard1, keyIdHard2, keyIdHard3, keyIdHard4, keyIdUp, keyIdDown, keyIdPower,
                           keyIdJogUp, keyIdJogDown, keyIdJogPress, keyIdBack})
             if (pressed & deviceKeyBit(key)) SetKey(key, false);
+    }
+
+    // Game controllers press keys through the map like the other sources, counted with their holds.
+    void ApplyControllers() { controllers.Update([this](KeyId key, bool down) { Key(key, down); }); }
+    void SetControllerMap(const string& text) {
+        controllers.SetMap(text, [this](KeyId key, bool down) { Key(key, down); });
+        OpenControllers();
+    }
+    // Opens the controllers already connected once the map has keys; SDL then reports their events.
+    void OpenControllers() {
+        if (!controllers.Wanted() || !SDL_WasInit(SDL_INIT_GAMECONTROLLER)) return;
+        for (int i = 0; i < SDL_NumJoysticks(); ++i)
+            if (SDL_IsGameController(i) && !SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i)))
+                SDL_GameControllerOpen(i);
     }
 
     void PollWindow() {
@@ -3594,6 +3619,12 @@ class Runner {
                     // and a replay from --input-replay.
                     if(deviceTypeIsDana5(profile->deviceType) && (event.window.event==SDL_WINDOWEVENT_HIDDEN||
                         event.window.event==SDL_WINDOWEVENT_MINIMIZED))ReleaseInput(windowPolled,!windowPolled);
+                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST || event.window.event == SDL_WINDOWEVENT_HIDDEN ||
+                        event.window.event == SDL_WINDOWEVENT_MINIMIZED)
+                        controllers.SetFocused(false, [this](KeyId key, bool down) { Key(key, down); });
+                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED || event.window.event == SDL_WINDOWEVENT_SHOWN ||
+                        event.window.event == SDL_WINDOWEVENT_RESTORED)
+                        controllers.SetFocused(true, [this](KeyId key, bool down) { Key(key, down); });
                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {windowFocused=true;ApplyKeyboardGrab();}
                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                         // Initial focus events must keep balanced input from the loaded session and the replay.
@@ -3605,6 +3636,42 @@ class Runner {
                 case SDL_RENDER_TARGETS_RESET:
                     controlsDirty = true;
                     break;
+                case SDL_CONTROLLERDEVICEADDED:
+                    if (controllers.Wanted() &&
+                        !SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(event.cdevice.which)))
+                        SDL_GameControllerOpen(event.cdevice.which);
+                    break;
+                case SDL_CONTROLLERDEVICEREMOVED:
+                    if (auto* controller = SDL_GameControllerFromInstanceID(event.cdevice.which))
+                        SDL_GameControllerClose(controller);
+                    controllers.Remove(event.cdevice.which, [this](KeyId key, bool down) { Key(key, down); });
+                    break;
+                case SDL_CONTROLLERAXISMOTION: {
+                    PadReading& pad = controllers.Pad(event.caxis.which);
+                    const int16_t value = event.caxis.value;
+                    switch (event.caxis.axis) {
+                        case SDL_CONTROLLER_AXIS_LEFTX: pad.leftX = value; break;
+                        case SDL_CONTROLLER_AXIS_LEFTY: pad.leftY = value; break;
+                        case SDL_CONTROLLER_AXIS_RIGHTX: pad.rightX = value; break;
+                        case SDL_CONTROLLER_AXIS_RIGHTY: pad.rightY = value; break;
+                        case SDL_CONTROLLER_AXIS_TRIGGERLEFT: pad.leftTrigger = value; break;
+                        case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: pad.rightTrigger = value; break;
+                        default: break;
+                    }
+                    ApplyControllers();
+                    break;
+                }
+                case SDL_CONTROLLERBUTTONDOWN:
+                case SDL_CONTROLLERBUTTONUP: {
+                    // PadKey numbers the buttons as SDL does (checked in the ARM core's SdlEventHandler).
+                    const int button = event.cbutton.button;
+                    if (button < 0 || button >= padButtonCount) break;
+                    PadReading& pad = controllers.Pad(event.cbutton.which);
+                    if (event.type == SDL_CONTROLLERBUTTONDOWN) pad.buttons |= uint32_t(1) << button;
+                    else pad.buttons &= ~(uint32_t(1) << button);
+                    ApplyControllers();
+                    break;
+                }
                 case SDL_RENDER_DEVICE_RESET:
                     ResetRenderer();
                     break;
@@ -3774,6 +3841,7 @@ class Runner {
     bool penDown{false};
     KeyId mouseKey{keyInvalid};
     KeyHolds68k keyHolds;
+    Controllers68k controllers{*profile};
     DanaInput5 danaInput;
     DanaViewState danaView;
     DanaViewLayout danaLayout;
@@ -3888,6 +3956,10 @@ bool parseOptions(int argc, char** argv, Options& options) {
             options.sound = false;
         } else if (arg == "--no-rumble") {
             options.disableRumble = true;
+        } else if (arg == "--controller-map") {
+            const char* v = value();
+            if (!v) return false;
+            options.controllerMap = v;
         } else if (arg == "--audio-output") {
             const char* v = value();
             if (!v) return false;
@@ -4100,6 +4172,13 @@ int main(int argc, char** argv) {
         cerr << "SDL failed to start: " << SDL_GetError() << endl;
         return 1;
     }
+    // Game controllers are for the desktop, which runs without them if SDL can't start them; on
+    // Android the app maps them to keys itself.
+#ifndef __ANDROID__
+    if (options.runFor <= 0 && !options.checkOnly && !controllerPalmKeys(*profile).empty() &&
+        SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0)
+        cerr << "no game controllers: " << SDL_GetError() << endl;
+#endif
     IgnoreGoneXWindows();
     // Before any window exists, so nothing queued is flushed; it sees window points either way.
     RawFingers::Install();

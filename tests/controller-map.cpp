@@ -7,6 +7,7 @@
 #include <tuple>
 
 #include "Gamepad.h"
+#include "Controllers68k.h"
 
 static const DeviceProfile5& named(const char* name) {
     const auto* profile = deviceProfileNamed5(name);
@@ -68,8 +69,6 @@ static void lists() {
     assert(controllerPalmKeys(zodiac).size() == 13 && listed(zodiac, PalmKey::stickPress) && !listed(zodiac, PalmKey::power));
     assert(palmKeyLabel(PalmKey::app1, tx) == "Home" && palmKeyLabel(PalmKey::app4, e2) == "Note Pad");
     assert(palmKeyLabel(PalmKey::app2, zodiac) == "Action 2 (right)" && palmKeyLabel(PalmKey::up, zodiac) == "Stick up");
-    // frond-68k reads no game controller, so a 68k device lists nothing.
-    assert(controllerPalmKeys(named("palm-m515")).empty() && controllerPalmKeys(named("sony-clie-t415")).empty());
     // Every listed button is a key on the device's own strip (Power and Voice can sit off it, on the side),
     // and the defaults only use listed buttons.
     for (const auto& profile : deviceProfiles5) {
@@ -188,12 +187,93 @@ static void triggers() {
     assert(apply(map, pad, false).keys == 0);
 }
 
+// The 68k devices list their own buttons as Android does, with Android's defaults.
+static void devices68k() {
+    using K = PalmKey;
+    const auto& iiix = named("palm-iiix");
+    const auto& m515 = named("palm-m515");
+    const auto& t415 = named("sony-clie-t415");
+    auto keys = [](const DeviceProfile5& profile) {
+        std::string text;
+        for (auto key : controllerPalmKeys(profile)) text += std::string(text.empty() ? "" : "|") + palmKeyId(key);
+        return text;
+    };
+    assert(keys(iiix) == "up|down|app1|app2|app3|app4|power");
+    assert(keys(m515) == "up|down|app1|app2|app3|app4");
+    assert(keys(t415) == "up|down|app1|app2|app3|app4|jog-up|jog-down|jog-press|back");
+    assert(controllerPalmKeys(named("alphasmart-dana")).empty() && controllerDefaults(named("alphasmart-dana")).keys.empty());
+    assert(palmKeyLabel(K::app1, iiix) == "Date Book" && palmKeyLabel(K::app4, m515) == "Note Pad");
+    assert(palmKeyLabel(K::jogPress, t415) == "Jog press");
+    // No Home key, so Start is the first app button; Power has no default.
+    assert(controllerDefaults(iiix).encode() ==
+           "x:app2,y:app3,start:app1,leftshoulder:app1,rightshoulder:app4,dpup:up,dpdown:down");
+    assert(controllerDefaults(m515) == controllerDefaults(iiix));
+    assert(controllerDefaults(t415).encode() ==
+           "x:app2,y:app3,start:app1,leftstick:back,rightstick:jog-press,leftshoulder:app1,rightshoulder:app4,"
+           "dpup:up,dpdown:down,lefttrigger:jog-up,righttrigger:jog-down");
+    // Buttons the device doesn't have are dropped from a saved map.
+    assert(decodeControllerMap("a:centre,b:power,x:jog-up", iiix).encode() == "b:power");
+}
+
+// The 68k runner's controllers: presses and releases through the map, counted per key across controllers.
+static void runner68k() {
+    Controllers68k pads(named("sony-clie-t415"));
+    std::string log;
+    auto apply = [&](KeyId key, bool down) { log += std::to_string(int(key)) + (down ? "+" : "-"); };
+    auto said = [&](const std::string& want) { const bool same = log == want; log.clear(); return same; };
+    auto press = [&](int pad, PadKey key, bool down) {
+        auto& reading = pads.Pad(pad);
+        if (down) reading.buttons |= uint32_t(1) << int(key);
+        else reading.buttons &= ~(uint32_t(1) << int(key));
+        pads.Update(apply);
+    };
+    const std::string hard1 = std::to_string(int(keyIdHard1)), jogUp = std::to_string(int(keyIdJogUp));
+    press(0, PadKey::leftShoulder, true);
+    assert(said(hard1 + "+"));
+    // Start is the first app button too, and a second controller holding it changes nothing.
+    press(0, PadKey::start, true);
+    press(1, PadKey::leftShoulder, true);
+    assert(said(""));
+    press(0, PadKey::leftShoulder, false);
+    press(0, PadKey::start, false);
+    assert(said(""));
+    pads.Remove(1, apply);
+    assert(said(hard1 + "-"));
+    // L2 past half travel turns the Jog Dial up.
+    pads.Pad(0).leftTrigger = 30000;
+    pads.Update(apply);
+    assert(said(jogUp + "+"));
+    pads.SetFocused(false, apply);
+    assert(said(jogUp + "-"));
+    pads.SetFocused(true, apply);
+    assert(said(jogUp + "+"));
+    // A new map lets go of what it no longer holds.
+    pads.SetMap("none", apply);
+    assert(said(jogUp + "-") && !pads.Wanted());
+    pads.SetMap("lefttrigger:back", apply);
+    assert(said(std::to_string(int(keyIdBack)) + "+"));
+    // After the runner lets go of everything itself, a held button presses again only once pressed again.
+    pads.Pad(0).leftTrigger = 0;
+    pads.Update(apply);
+    log.clear();
+    press(0, PadKey::a, true);
+    pads.SetMap("a:app2", apply);
+    assert(said(std::to_string(int(keyIdHard2)) + "+"));
+    pads.Forget();
+    pads.Update(apply);
+    assert(said(""));
+    press(0, PadKey::a, true);
+    assert(said(std::to_string(int(keyIdHard2)) + "+"));
+}
+
 int main() {
     text();
     lists();
     zodiacDefaults();
     clieDefaults();
     triggers();
+    devices68k();
+    runner68k();
     std::puts("controller-map: ok");
     return 0;
 }
