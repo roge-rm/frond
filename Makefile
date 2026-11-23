@@ -982,14 +982,14 @@ test-frond-68k-auto-off: out/frond-68k
 
 # Console database commands while a guest app is busy for 45 s on the private IIIx 3.1 ROM: they
 # wait for its event loop or fail with an error, and the core runs on. Skips without the ROM, or
-# m68k-palmos-gcc and the 3.5 SDK in ../palm-os-sdk.
+# m68k-palmos-gcc and the 3.5 SDK in ~/Projects/palm/palm-os-sdk.
 .PHONY: test-frond-68k-busy
 test-frond-68k-busy: out/frond-68k
 	python3 tests/frond-68k-busy.py
 
 # Installs at the launcher and with other apps in front on the private IIIx 3.1 ROM: the launcher
 # lists a new app at once, other apps stay in front, and sync notifies go to the creator app unless
-# it's in front. Skips without the ROM, or m68k-palmos-gcc and the 3.5 SDK in ../palm-os-sdk.
+# it's in front. Skips without the ROM, or m68k-palmos-gcc and the 3.5 SDK in ~/Projects/palm/palm-os-sdk.
 .PHONY: test-frond-68k-install
 test-frond-68k-install: out/frond-68k
 	python3 tests/frond-68k-install.py

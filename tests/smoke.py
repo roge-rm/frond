@@ -37,7 +37,7 @@ CORE = Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond').absolute()
 OUT = ROOT / 'build/smoke'
 # FROND_DEVICE_IMAGES points at another copy of the firmware folder (deviceimages/palm).
 PALM = palm_boot.palm_images() / 'Palm'
-SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
+SDK = Path.home() / 'Projects/palm/palm-os-sdk/sdk-5r3'
 
 # nor, nand: read-only firmware under PALM. setup: function in tools/palm_boot.py that takes a cold boot to
 # the launcher. app: database name launched from the launcher, taps: pen taps inside it, area: the part of

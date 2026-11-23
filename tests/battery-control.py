@@ -96,7 +96,7 @@ def check_arm(core, session, root):
 def arm_session(given):
     if given:
         return given
-    for base in (ROOT, Path.home() / 'Projects/palm/frond'):
+    for base in (ROOT, Path.home() / 'Projects/apps/frond'):
         for name in ('palm-zire-72', 'palm-tx'):
             if (base / 'build/smoke/machines' / name).is_dir():
                 return base / 'build/smoke/machines' / name

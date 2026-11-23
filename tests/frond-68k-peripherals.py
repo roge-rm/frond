@@ -921,7 +921,7 @@ def main():
                                                  'palm-m505', 'palm-m515', 'ibm-workpad-c500', 'palm-m130', 'palm-m520'],
                         help='device for the supplied ROM; default palm-iiix or sony-clie-t415 for a T400 ROM')
     parser.add_argument('--only', action='append', choices=CHECKS)
-    parser.add_argument('--sdk', type=Path, default=ROOT.parent / 'palm-os-sdk/sdk-3.5')
+    parser.add_argument('--sdk', type=Path, default=Path.home() / 'Projects/palm/palm-os-sdk/sdk-3.5')
     parser.add_argument('--evidence', type=Path, help='keep logs and frames here')
     args = parser.parse_args()
     global DEVICE

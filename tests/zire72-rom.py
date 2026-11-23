@@ -404,7 +404,7 @@ class HardResetPromptTest(unittest.TestCase):
         self.assertFalse(self.run_reset('e2-soft', [E2], False, soft_after=1), 'the hold outlived a soft reset')
 
 
-SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
+SDK = Path.home() / 'Projects/palm/palm-os-sdk/sdk-5r3'
 PROBE_READY = (SDK / 'include/PalmOS.h').is_file() and all(shutil.which(t) for t in ('m68k-palmos-gcc', 'pilrc'))
 MTOOLS = all(shutil.which(t) for t in ('mformat', 'mcopy', 'mtype', 'mdir'))
 

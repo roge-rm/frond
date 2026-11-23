@@ -284,7 +284,7 @@ PEN_PROBE = ROOT / 'build/pen68k-probe/FrondPen68k.prc'
 
 def pen_probe():
     """The pen probe, built when prc-tools and the Palm OS 5 SDK beside the tree are here, else None."""
-    sdk = ROOT.parent / 'palm-os-sdk/sdk-5r3'
+    sdk = Path.home() / 'Projects/palm/palm-os-sdk/sdk-5r3'
     if not PEN_PROBE.is_file() and shutil.which('m68k-palmos-gcc') and (sdk / 'include/PalmOS.h').is_file():
         subprocess.run([sys.executable, 'tools/build-palm-probe.py', '--probe', 'pen68k', '--sdk', str(sdk)],
                        cwd=ROOT, check=True, capture_output=True)

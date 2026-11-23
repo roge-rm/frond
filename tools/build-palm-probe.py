@@ -6,7 +6,7 @@ import shutil
 import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
-p.add_argument('--sdk', type=Path, default=Path('../palm-os-sdk/sdk-5r3'))
+p.add_argument('--sdk', type=Path, default=Path.home() / 'Projects/palm/palm-os-sdk/sdk-5r3')
 p.add_argument('--probe', choices=['sd', 'ms', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth', 'timing68k', 'tone68k', 'alarm68k', 'ppp68k', 'busy68k', 'sync68k', 'pen68k', 'dana-sound', 'dana-irda-fifo', 'dana-card'], default='sd')
 p.add_argument('--output', type=Path)
 a = p.parse_args()

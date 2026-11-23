@@ -1206,8 +1206,8 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-peripherals` | IIIx ROM. Piezo, backlight, sleep, serial HotSync (pilot-link) and databases. |
 | `test-frond-68k-gdb` | IIIx ROM, `build/hello-debug`, `m68k-palmos-gdb` and gdb-multiarch. |
 | `test-frond-68k-boot-save` | IIIx ROM. A session saved over the GDB stub mid-boot after a soft reset keeps its databases on reload. |
-| `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Database commands while an app is busy for 45 s. |
-| `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front, and install and export while hidden. |
+| `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `~/Projects/palm/palm-os-sdk`. Database commands while an app is busy for 45 s. |
+| `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `~/Projects/palm/palm-os-sdk`. Installs at the launcher and with another app in front, and install and export while hidden. |
 | `test-68k-ms` | Memory Stick controller (MB86189) on the 68k core, and runtime card changes for it. |
 | `test-68k-ez-uart-spi` | EZ and VZ UART receive with the receiver off, and the SPIM interrupt following its control bits. |
 | `test-68k-host-transport` | `frond-68k` host link pacing: bytes reach the guest at the line's rate after an idle spell, a drain and refill, and an IrDA frame gap. |

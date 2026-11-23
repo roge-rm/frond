@@ -99,7 +99,7 @@ def check(rom, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rom', type=Path)
-    parser.add_argument('--sdk', type=Path, default=ROOT.parent / 'palm-os-sdk/sdk-3.5')
+    parser.add_argument('--sdk', type=Path, default=Path.home() / 'Projects/palm/palm-os-sdk/sdk-3.5')
     parser.add_argument('--evidence', type=Path, help='keep logs and frames here')
     args = parser.parse_args()
     rom = args.rom or palm_boot.palm_images() / 'Palm/IIIx/Palm-IIIx-3.1-en.rom'

@@ -389,7 +389,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--session', action='append', default=[], metavar='DEVICE=PATH')
     parser.add_argument('--device', action='append', choices=DEVICES)
-    parser.add_argument('--sdk', type=Path, default=ROOT.parent / 'palm-os-sdk/sdk-3.5')
+    parser.add_argument('--sdk', type=Path, default=Path.home() / 'Projects/palm/palm-os-sdk/sdk-3.5')
     parser.add_argument('--evidence', type=Path, help='keep logs and frames here')
     args = parser.parse_args()
     found = sessions(args)
