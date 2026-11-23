@@ -1,9 +1,9 @@
 // The Zodiac music synth (native/ZodiacMusicSynth.h) with a SoundFont made here (one looped square wave): silence
 // until the guest's note on, sound once it's due, nothing changed in frames before it, quiet again after the note
 // off and its release, a late event moving the clock, a song from the guest's memory played through and its Held
-// freed, hold, a backlog bigger than the rings with its Stop kept, refusing a file that isn't a SoundFont, and the
-// three threads (hooks, helper, audio) at once, which the
-// TSan build checks. Built with ASan and UBSan, and with TSan.
+// freed, hold, a backlog bigger than the rings with its Stop kept, refusing a file that isn't a SoundFont, the clock
+// on the guest audio through an audio queue's marks (queue depth, an underrun, no guest audio), and the three
+// threads (hooks, helper, audio) at once, which the TSan build checks. Built with ASan and UBSan, and with TSan.
 #define TSF_IMPLEMENTATION
 #include "ZodiacMusicSynth.h"
 
@@ -90,7 +90,9 @@ zodiac_music::Library library() {
 }
 
 // A guest's memory, from 0: an SMF at smfAt, its handle word at handleAt, a sysex at sysExAt, a 10 s song at longAt.
-constexpr uint32_t smfAt = 0x2000, handleAt = 0x3000, sysExAt = 0x3100, handle = 0x4444, longAt = 0x2100;
+// Two 100 ms notes 1 s apart at twoAt.
+constexpr uint32_t smfAt = 0x2000, handleAt = 0x3000, sysExAt = 0x3100, handle = 0x4444, longAt = 0x2100,
+                   twoAt = 0x2200;
 struct Guest {
     Bytes mem = Bytes(0x4000, 0);
     Guest() {
@@ -102,6 +104,11 @@ struct Guest {
         const Bytes long10 = {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 96, 'M', 'T', 'r', 'k', 0, 0, 0, 13,
                               0x00, 0x90, 0x3c, 0x64, 0x8f, 0x00, 0x80, 0x3c, 0x00, 0x00, 0xff, 0x2f, 0x00};
         std::copy(long10.begin(), long10.end(), mem.begin() + longAt);
+        // Note on 60 at 0, off at 19 ticks, on again at 192 (1 s), off at 211, end there.
+        const Bytes two = {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 96, 'M', 'T', 'r', 'k', 0, 0, 0, 21,
+                           0x00, 0x90, 0x3c, 0x64, 0x13, 0x80, 0x3c, 0x00, 0x81, 0x2d, 0x90, 0x3c, 0x64, 0x13, 0x80,
+                           0x3c, 0x00, 0x00, 0xff, 0x2f, 0x00};
+        std::copy(two.begin(), two.end(), mem.begin() + twoAt);
         const Bytes sysEx = {0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7};
         std::copy(sysEx.begin(), sysEx.end(), mem.begin() + sysExAt);
     }
@@ -223,6 +230,94 @@ void heldAndBacklog(const Bytes& font) {
     synth.pump();
     assert(synth.playing() == 0 && !synth.outstanding());
 }
+
+// The clock on the guest audio, through an AudioQueue as the app has it: the guest runs 150 ms ahead of the device
+// and marks the queue every 16 ms, the device pops 512-frame periods and passes the span. A song played at guest
+// 1 s sounds where the guest audio of 1 s plays, not 150 ms early; after a 116 ms underrun its second note still
+// lines up with the guest audio of 2 s; with no guest audio at all (SSI off) a later song still plays, by the marks.
+void guestClock(const Bytes& font) {
+    ZodiacMusicSynth synth;
+    const bool loaded = synth.load(font.data(), int(font.size()));
+    assert(loaded);
+    (void)loaded;
+    zodiac_music::Hooks hooks;
+    hooks.enable();
+    synth.attach(&hooks);
+    Guest guest;
+    // Kept for the run (the queue has no destroy).
+    static AudioQueue* const queue = audioQueueCreate(1 << 16);
+    constexpr size_t period = 512;
+    uint64_t guestNs = 0, pushed = 0;
+    bool played = false, playedAgain = false, ssiOn = true;
+    // The guest's frame index each device frame played, or -1 for silence; the music on its own.
+    std::vector<int64_t> played_;
+    std::vector<int16_t> music;
+    const auto runGuest = [&](uint64_t untilNs) {
+        while (guestNs < untilNs) {
+            const uint64_t to = std::min(untilNs, guestNs - guestNs % (16 * ms) + 16 * ms);
+            if (!played && to > 1000 * ms) {
+                call(hooks, guest, openPc, 1000 * ms, handleAt, twoAt, 0, 0);
+                std::memcpy(guest.mem.data() + handleAt, &handle, 4);
+                call(hooks, guest, playPc, 1000 * ms, handle, 0, 0, 0);
+                played = true;
+            }
+            if (!playedAgain && to > 5000 * ms) {
+                call(hooks, guest, playPc, 5000 * ms, handle, 0, 0, 0);
+                playedAgain = true;
+            }
+            if (ssiOn)
+                for (const uint64_t want = to * 441 / 10000000; pushed < want; ++pushed) audioQueuePush(queue, uint32_t(pushed));
+            guestNs = to;
+            audioQueueMark(queue, guestNs);
+        }
+    };
+    const auto device = [&](bool underrun) {
+        std::vector<uint32_t> pcm(period);
+        AudioQueueSpan span;
+        const size_t got = audioQueuePopChunkIfGeneration(queue, pcm.data(), underrun ? 0 : period,
+                                                          audioQueueGetState(queue).generation, &span);
+        assert(span.known && span.frames == got);
+        for (size_t i = 0; i < period; ++i) played_.push_back(i < got ? int64_t(pcm[i]) : -1);
+        std::vector<int16_t> out(period * 2, 0);
+        synth.mix(out.data(), period, span);
+        music.insert(music.end(), out.begin(), out.end());
+    };
+    runGuest(150 * ms);
+    uint64_t lostNs = 0;
+    for (int p = 0; p < 690; ++p) {  // about 8 s of device frames
+        synth.pump();
+        const uint64_t deviceNs = uint64_t(played_.size()) * 1000000000ull / 44100;
+        // An underrun at 1.5 s: the guest stalls for 10 periods and that time is lost.
+        const bool underrun = p >= 130 && p < 140;
+        if (underrun) lostNs += period * 1000000000ull / 44100;
+        else runGuest(deviceNs + 150 * ms - lostNs);
+        if (deviceNs > 4000 * ms) ssiOn = false;
+        device(underrun);
+    }
+    // Onsets: sound after 300 ms of quiet.
+    std::vector<size_t> onsets;
+    size_t quiet = 1 << 30;
+    for (size_t f = 0; f < music.size() / 2; ++f) {
+        if (music[2 * f] || music[2 * f + 1]) {
+            if (quiet > 13230) onsets.push_back(f);
+            quiet = 0;
+        } else {
+            ++quiet;
+        }
+    }
+    assert(onsets.size() == 4);
+    // Where the guest audio of guest 1 s and 2 s plays: the music is there within one 64-frame step.
+    for (int i = 0; i < 2; ++i) {
+        const int64_t frame = int64_t(1000 * (i + 1)) * 441 / 10;
+        size_t at = 0;
+        while (at < played_.size() && played_[at] < frame) ++at;
+        assert(onsets[i] >= at && onsets[i] < at + ZodiacMusicSynth::step + 1);
+    }
+    // With no guest audio from 4 s on, the clock follows the marks, the guest's time now: the second Play at guest
+    // 5 s sounds when the guest gets there, 34 ms before the device's 5 s (150 ms ahead less the 116 ms lost).
+    const double again = double(onsets[2]) / 44100;
+    assert(again > 4.96 && again < 4.99);
+}
 }  // namespace
 
 int main() {
@@ -289,8 +384,10 @@ int main() {
     assert(same(flat, 0, 64, 7));
 
     heldAndBacklog(font);
+    guestClock(font);
     threads(font);
     std::printf("PASS: Zodiac music synth (SoundFont load and refusal, nothing before the first note, note on and off "
-                "on time, release, late events, a guest song through the helper, Helds freed, hold, backlog, three threads)\n");
+                "on time, release, late events, a guest song through the helper, Helds freed, hold, backlog, clock on the guest "
+                "audio, three threads)\n");
     return 0;
 }

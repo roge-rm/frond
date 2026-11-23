@@ -1092,7 +1092,9 @@ bool gFastEngineMissing = false;
                 musicSynth->attach(&zodiacMusic->MusicHooks());
                 if (midiOut) musicSynth->tap([out = midiOut.get()](const zodiac_music::Event& e) { out->offer(e); });
                 musicSynth->start();
-                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count) { synth->mix(frames, count); });
+                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                    synth->mix(frames, count, span);
+                });
             }
         }
         if (!options.disableAudio) audioDriver.Start();
@@ -1515,6 +1517,9 @@ bool gFastEngineMissing = false;
                 } else {
                     mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
                 }
+                // The SoundFont's clock follows the guest audio playing: the queue notes the guest time its frames
+                // reached.
+                if (musicSynth) audioQueueMark(audioQueue, soc->GetTime());
                 inputTrace::note("cycle", true, "end");
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.
                 if (sdInsertPending || msInsertPending) {

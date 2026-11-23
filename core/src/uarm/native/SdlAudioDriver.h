@@ -6,6 +6,8 @@
 #include <atomic>
 #include <functional>
 
+#include "audio_queue.h"
+
 class SoC;
 struct AudioQueue;
 
@@ -34,9 +36,11 @@ class SdlAudioDriver {
     void AudioCallback(uint8_t* stream, int len);
 
     // Mixes more sound into each period on the callback thread, after the guest's: (stereo frames, interleaved;
-    // the period's frame count). It runs every period, with guest audio or silence, muted and headless too (its
-    // sound is dropped then). Set it before Start; ClearMixer takes it out while the device runs.
-    void SetMixer(std::function<void(int16_t*, size_t)> mix) {
+    // the period's frame count; the guest times of the guest audio at its start, from the queue's marks). It runs
+    // every period, with guest audio or silence, muted and headless too (its sound is dropped then). Set it before
+    // Start; ClearMixer takes it out while the device runs.
+    using Mixer = std::function<void(int16_t*, size_t, const AudioQueueSpan&)>;
+    void SetMixer(Mixer mix) {
         mixer = std::move(mix);
         mixerOn.store(bool(mixer));
     }
@@ -53,7 +57,7 @@ class SdlAudioDriver {
 
     SoC* soc;
     std::function<void(const std::function<void()>&)> deviceThread;
-    std::function<void(int16_t*, size_t)> mixer;
+    Mixer mixer;
     AudioQueue* audioQueue;
     SDL_AudioDeviceID audioDevice{0};
 

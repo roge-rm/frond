@@ -2303,7 +2303,7 @@ test-zodiac-dma-channel: $(OBJ_ROOT)/zodiac-boot-probe
 test: test-zodiac-music-synth
 ZODIAC_MUSIC_SYNTH_FLAGS = -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 	-Wno-missing-field-initializers -Wno-sign-compare -Wno-implicit-fallthrough \
-	-Icore/src/uarm/native -Icore/src/uarm/uarm tests/zodiac-music-synth.cpp -pthread
+	-Icore/src/uarm/native -Icore/src/uarm/uarm tests/zodiac-music-synth.cpp core/src/uarm/uarm/audio_queue.cpp -pthread
 test-zodiac-music-synth:
 	@mkdir -p $(OBJ_ROOT)
 	$(CXX) $(ZODIAC_MUSIC_SYNTH_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all \
