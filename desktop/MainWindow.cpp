@@ -1335,8 +1335,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (secondStartPending && !stopping && (command == "sd2-state" || command == cardCommand("put-in", 1))) {
             secondStartPending = false;
-            protection2StartPending = zodiac && card2Present;
-            send(protection2StartPending ? "sd2-protection" : "network-state");
+            protection2StartPending = zodiac && card2Present && send("sd2-protection");
+            if (!protection2StartPending) send("network-state");
             return;
         }
         if (!stopping && sdWriteProtection && cardPresent &&
