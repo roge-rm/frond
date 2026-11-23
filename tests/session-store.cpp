@@ -1020,6 +1020,27 @@ class SessionStoreTest : public QObject {
         QVERIFY(readPreferences(path, &loaded));
         QCOMPARE(loaded.musicOutput, QString("fm"));
     }
+    void controllerMapPreferences() {
+        const auto path = filePath(folder(), "Controller Map");
+        write(path, header(6, "palm-tx"));
+        Preferences prefs;
+        QVERIFY(!prefs.controllerMapSet);
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        Preferences loaded;
+        QVERIFY(readPreferences(path, &loaded));
+        QVERIFY(!loaded.controllerMapSet && loaded.controllerMap.isEmpty());
+        prefs.controllerMapSet = true;
+        prefs.controllerMap = "a:centre,dpup:up";
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        QVERIFY(readPreferences(path, &loaded));
+        QVERIFY(loaded.controllerMapSet);
+        QCOMPARE(loaded.controllerMap, QString("a:centre,dpup:up"));
+        prefs.controllerMap = "none";
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        QVERIFY(readPreferences(path, &loaded));
+        QVERIFY(loaded.controllerMapSet);
+        QCOMPARE(loaded.controllerMap, QString("none"));
+    }
     void batteryPreferences() {
         const auto path = filePath(folder(), "Battery Default");
         write(path, header(6, "palm-tx"));

@@ -87,14 +87,14 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     machineMenu->setObjectName("machineMenu");
     static const std::pair<Id, const char*> names[] = {
         {Id::Hold, "machineHold"}, {Id::Keyboard, "machineKeyboard"}, {Id::Gamepad, "machineGamepad"}, {Id::Microphone, "machineMicrophone"},
-        {Id::Network, "machineNetwork"}, {Id::SyncManager, "machineSyncManager"}, {Id::Display, "machineDisplay"}, {Id::Connections, "machineConnections"},
+        {Id::Network, "machineNetwork"}, {Id::SyncManager, "machineSyncManager"}, {Id::Display, "machineDisplay"}, {Id::Connections, "machineConnections"}, {Id::Controls, "machineControls"},
         {Id::Screenshot, "machineScreenshot"}, {Id::HideBar, "machineHideBar"}, {Id::FullScreen, "machineFullScreen"},
         {Id::Save, "machineSave"}, {Id::SaveCopy, "machineSaveCopy"}, {Id::Log, "machineLog"},
         {Id::Reset, "machineReset"}, {Id::HardReset, "machineHardReset"}, {Id::SaveStop, "machineSaveStop"}};
     int group = 0;
     // Every row is made here; apply() shows the ones a device has.
     runningRules::Traits all;
-    all.holdPresent = all.holdSupported = all.keyboard = all.microphone = all.network = all.gamepad = all.syncManager = true;
+    all.holdPresent = all.holdSupported = all.keyboard = all.microphone = all.network = all.gamepad = all.syncManager = all.controls = true;
     for (const auto& row : runningRules::rows(all, {})) {
         if (row.group != group) { machineMenu->addSeparator(); group = row.group; }
         QAction* action;

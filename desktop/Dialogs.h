@@ -84,6 +84,9 @@ class MachineSettings : public QWidget {
     bool automaticScale;
     bool automaticEngine{false};
     frondSessions::Preferences originalPreferences;
+    // The controller map being edited (controllerMapSet and controllerMap only).
+    frondSessions::Preferences controllerPrefs;
+    QGroupBox* controllerGroup;
 };
 
 class MachineSettingsDialog : public QDialog {

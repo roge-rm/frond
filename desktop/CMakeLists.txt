@@ -52,7 +52,7 @@ target_include_directories(frond-host-battery PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 if(APPLE)
   target_link_libraries(frond-host-battery PUBLIC "-framework IOKit" "-framework CoreFoundation")
 endif()
-add_library(frond-dialogs STATIC Dialogs.cpp DanaViewControls.cpp)
+add_library(frond-dialogs STATIC Dialogs.cpp DanaViewControls.cpp ControlsEditor.cpp)
 target_link_libraries(frond-dialogs PUBLIC Qt6::Widgets Qt6::Network ZLIB::ZLIB frond-zodiac-rom)
 target_include_directories(frond-dialogs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # The USB printer row and drawing a received job on a printer or PDF.

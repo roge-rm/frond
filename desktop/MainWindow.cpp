@@ -24,6 +24,7 @@
 #include <QMenu>
 #include <QPainter>
 #include <QAction>
+#include "ControlsEditor.h"
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -99,6 +100,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     : core(core), core68k(core68k.isEmpty() ? siblingCore68k(core) : core68k) {
     frondCards::defaultCore() = core;
     setMidiPortsCore(core);
+    setControllerCore(core);
     setWindowTitle(tr("Frond"));
     resize(620, 650);
     restoreGeometry(settings.value("windowGeometry").toByteArray());
@@ -940,6 +942,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] {
         applyBluetoothLink();
         if (irdaQueued && client.running() && !stopping && client.available()) { irdaQueued = false; send("irda-mode", irdaArgument()); }
+        if (!controllerMapUnsent.isEmpty() && client.running() && !stopping && client.available() &&
+            send("controller-map", controllerMapUnsent)) controllerMapUnsent.clear();
     }); });
     connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
         const auto type = m.value("type").toString();
@@ -972,6 +976,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (internalListWanted) listInternal();
             if (appsStale) listApps();
         });
+        // The answer is the map the core now uses, already saved; nothing to show.
+        if (command == "controller-map") {
+            if (!ok) log->appendPlainText(command + ": " + message);
+            if (stopping) save();
+            return;
+        }
         if (command == "sync-start" || command == "activesync-start") {
             if (stopping) { save(); return; }
             if (ok) { if (!syncRunning) notify(message, 0); }
@@ -2159,6 +2169,7 @@ void MainWindow::barChosen(runningRules::Id id) {
         case Id::Microphone: microphoneToggle->click(); break;
         case Id::Display: panels->open(2); break;
         case Id::Connections: panels->open(3); break;
+        case Id::Controls: showControls(); break;
         case Id::Screenshot: screenshot(); break;
         case Id::HideBar: setBarShown(!runningBar->barShown()); break;
         case Id::Save: saveButton->click(); break;
@@ -2778,6 +2789,9 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     if (!runningPreferences.rumble) arguments << "--no-rumble";
+    controllerMapUnsent.clear();
+    if (!m68k && runningPreferences.controllerMapSet && !runningPreferences.controllerMap.isEmpty())
+        arguments << "--controller-map" << runningPreferences.controllerMap;
     if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac) arguments << frondSessions::musicArguments(runningPreferences);
     // Nothing is known about this machine yet; the core's answer to battery-state sets it right.
     batteryKnown = batterySupported = false;
@@ -3043,6 +3057,22 @@ void MainWindow::showConnections() {
     connectionsWindow->activateWindow();
 }
 
+void MainWindow::showControls() {
+    if (!client.running()) return;
+    const auto& profile = frondFirmware::profile(runningDevice);
+    if (!controlsShown(profile)) return;
+    ControlsDialog dialog(profile, controllerMapFor(runningPreferences, profile), this);
+    connect(&dialog, &ControlsDialog::changed, this, [this](const ControllerMap& map, bool defaults) {
+        auto prefs = runningPreferences;
+        prefs.controllerMapSet = !defaults;
+        prefs.controllerMap = defaults ? QString() : QString::fromStdString(map.encode());
+        if (const auto error = frondSessions::writePreferences(sessionPath, prefs); !error.isEmpty()) return failure(error);
+        runningPreferences = prefs;
+        controllerMapUnsent = QString::fromStdString(map.encode());
+        if (!stopping && client.available() && send("controller-map", controllerMapUnsent)) controllerMapUnsent.clear();
+    });
+    dialog.exec();
+}
 void MainWindow::showSyncManager() {
     if (!syncWindow) syncWindow = new SyncWindow(this);
     syncWindow->machineNames.clear();
