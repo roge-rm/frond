@@ -348,7 +348,7 @@ class MainWindow : public QMainWindow {
     QCheckBox* cradleToggle;
     QString cradleSetting;
     bool cradleStartupPending{false};
-    bool protectionKnown{false}, protection2Known{false}, protectionStartPending{false};
+    bool protectionKnown{false}, protection2Known{false}, protectionStartPending{false}, protection2StartPending{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
     // The CLIÉ game controller as the core last said: empty unknown, attached, detached or busy.

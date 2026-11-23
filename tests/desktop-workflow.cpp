@@ -2411,6 +2411,13 @@ for line in s.makefile('rb'):
             QVERIFY(QFileInfo(a + "/sd2.frondsd").isFile() && !QFileInfo(a + "/sd.frondsd").exists());
             QCOMPARE(frondCards::readSlot(a, 1).card, games);
             QVERIFY(frondCards::readSlot(a).card.isEmpty());
+            // A card put in while running asks its protection and nothing more: the start chain doesn't run again.
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("sd2Eject")->isEnabled(), 10000);
+            {
+                QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+                const auto commands = trace.readAll();
+                QVERIFY(commands.contains("sd2-put-in\t") && commands.count("network-state\t") == 1);
+            }
             // Eject and Insert on the row.
             answerYes();
             window.findChild<QPushButton*>("sd2Eject")->click();
@@ -2455,8 +2462,13 @@ for line in s.makefile('rb'):
             window.openSession(a + "/Zodiac.frond", true);
             auto* pick = window.findChild<QPushButton*>("card2Pick");
             QTRY_COMPARE_WITH_TIMEOUT(pick->text(), QString("Games"), 10000);
-            QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
-            const auto commands = trace.readAll();
+            // The start chain goes on to the network after the card's protection query.
+            QByteArray commands;
+            QTRY_VERIFY_WITH_TIMEOUT(([&] {
+                QFile trace(files.filePath("commands"));
+                commands = trace.open(QIODevice::ReadOnly) ? trace.readAll() : QByteArray();
+                return commands.contains("network-state\t");
+            }()), 10000);
             QVERIFY(commands.indexOf("sd2-state\t") >= 0 && commands.indexOf("sd2-state\t") < commands.indexOf("sd2-put-in\t"));
             QVERIFY(commands.indexOf("sd2-put-in\t") < commands.indexOf("network-state\t"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);

@@ -916,7 +916,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
     linked2Watcher.reset(); linked2WatcherId.clear(); cardSlot = 0; secondStartPending = false;
         palmWifiInserted = false;
-        sdKnown = protectionKnown = protection2Known = protectionStartPending = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
+        sdKnown = protectionKnown = protection2Known = protectionStartPending = protection2StartPending = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         refresh();
         // The machine's card is free for Files and the rest once its lock is gone.
         if (cardsWindow) cardsWindow->refresh();
@@ -1131,7 +1131,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 return;
             }
             if (command == "headphones") refresh();
-            if (!stopping && command == "sd2-protection") { send("network-state"); return; }
+            if (command == "sd2-protection" && protection2StartPending) {
+                protection2StartPending = false;
+                if (!stopping) { send("network-state"); return; }
+            }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
             if (command == "camera-mode") { showCamera(message.startsWith("pattern") ? message : "pattern " + message); refresh(); }
             // A failed switch leaves the core off (serial, infrared) or as it was (Bluetooth); the
@@ -1332,7 +1335,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (secondStartPending && !stopping && (command == "sd2-state" || command == cardCommand("put-in", 1))) {
             secondStartPending = false;
-            send(zodiac && card2Present ? "sd2-protection" : "network-state");
+            protection2StartPending = zodiac && card2Present;
+            send(protection2StartPending ? "sd2-protection" : "network-state");
             return;
         }
         if (!stopping && sdWriteProtection && cardPresent &&
@@ -1344,7 +1348,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (card2Present && (command == "sd2-create" || command == "sd2-insert" || command == "sd2-put-in" ||
                                  command == "sd2-state"))
                 { send("sd2-protection"); return; }
-            if (command == "sd2-protection") { send("network-state"); return; }
+            // Only the start chain goes on to the network; a query after a card change ends there.
+            if (command == "sd2-protection" && protection2StartPending) {
+                protection2StartPending = false;
+                send("network-state");
+                return;
+            }
         }
         if ((command == "sd-state" || command == "ms-state" || protectedStart || firstDone) && !stopping) {
             send(command == "ms-state" && cardPresent && !m68k ? "ms-protection" : "network-state"); return;
