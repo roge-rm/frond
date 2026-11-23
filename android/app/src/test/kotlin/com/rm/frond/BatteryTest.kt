@@ -19,6 +19,15 @@ class BatteryTest {
         assertEquals("host 42 battery", BatteryText.spec(BatteryMode.HOST, 7, true, host.copy(charging = false)))
     }
 
+    @Test fun hostModeOverridesTheChargerDefault() {
+        val settings = MachineSettings(batteryMode = BatteryMode.HOST)
+        assertTrue(settings.batteryCharging)
+        assertEquals("host 93 battery",
+            BatteryText.spec(settings.batteryMode, settings.batteryLevel, settings.batteryCharging, HostBattery(93, false)))
+        assertEquals("host 93 charging",
+            BatteryText.spec(settings.batteryMode, settings.batteryLevel, false, HostBattery(93, true)))
+    }
+
     @Test fun machineThatCantChargeSaysBattery() {
         assertEquals("max battery", BatteryText.spec(BatteryMode.MAX, 100, true, host, chargingSupported = false))
         assertEquals("level 20 battery", BatteryText.spec(BatteryMode.LEVEL, 20, true, host, chargingSupported = false))
