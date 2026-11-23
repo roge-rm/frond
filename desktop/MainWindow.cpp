@@ -2790,7 +2790,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     if (!runningPreferences.rumble) arguments << "--no-rumble";
     controllerMapUnsent.clear();
-    if (!m68k && runningPreferences.controllerMapSet && !runningPreferences.controllerMap.isEmpty())
+    if (runningPreferences.controllerMapSet && !runningPreferences.controllerMap.isEmpty())
         arguments << "--controller-map" << runningPreferences.controllerMap;
     if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac) arguments << frondSessions::musicArguments(runningPreferences);
     // Nothing is known about this machine yet; the core's answer to battery-state sets it right.

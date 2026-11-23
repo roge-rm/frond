@@ -8,7 +8,8 @@ class QLabel;
 class QProcess;
 class QPushButton;
 
-// The ARM core, which listens for a controller button for press-to-assign (its --controller-listen).
+// The ARM core, which listens for a controller button for press-to-assign (its --controller-listen),
+// for the 68k devices too.
 void setControllerCore(const QString& core);
 
 // The map a machine's settings give: the saved one, or the device's defaults.

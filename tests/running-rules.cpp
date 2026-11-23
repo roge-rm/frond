@@ -61,14 +61,14 @@ class RunningRulesTest : public QObject {
         QCOMPARE(has(list, Id::Network), t.network);
     }
     void controlsShowWhereAControllerCanPressButtons() {
-        for (auto* id : {"palm-tx", "palm-e2", "sony-clie-tg50", "tapwave-zodiac-2"}) {
+        for (auto* id : {"palm-tx", "palm-e2", "sony-clie-tg50", "tapwave-zodiac-2", "palm-iiix", "sony-clie-t415"}) {
             const auto list = ids(traitsFor(named(id)));
             QVERIFY2(has(list, Id::Controls), id);
             // Right after Connections.
             QVERIFY2(std::find(list.begin(), list.end(), Id::Controls) - std::find(list.begin(), list.end(), Id::Connections) == 1, id);
         }
-        // frond-68k reads no game controller.
-        QVERIFY(!has(ids(traitsFor(named("palm-iiix"))), Id::Controls));
+        // The Dana lists no buttons, as on Android.
+        QVERIFY(!has(ids(traitsFor(named("alphasmart-dana"))), Id::Controls));
     }
     void otherDevicesGreyOutWhatIsMissing() {
         for (auto* id : {"palm-tx", "palm-e2"}) {
