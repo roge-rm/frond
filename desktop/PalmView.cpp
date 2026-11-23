@@ -106,6 +106,15 @@ bool PalmHolder::embed(quint64 id) {
     }
 #endif
     wanted = child->size();
+#ifdef FROND_XCB
+    // Qt before 6.7 doesn't read a foreign window's size, so ask X. X sizes are device pixels.
+    if (wanted.isEmpty())
+        if (auto* connection = xcbConnection()) {
+            XcbReply<xcb_get_geometry_reply_t> geometry(xcb_get_geometry_reply(connection, xcb_get_geometry(connection, xcb_window_t(id)), nullptr), &free);
+            if (geometry && geometry->width > 1 && geometry->height > 1)
+                wanted = (QSizeF(geometry->width, geometry->height) / devicePixelRatioF()).toSize();
+        }
+#endif
     keySink->setGeometry(0, 0, 1, 1);
     keySink->show();
     container = QWidget::createWindowContainer(child, this);
