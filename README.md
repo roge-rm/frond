@@ -59,9 +59,9 @@ Dan
 |---|---|---|---|---|---|---|---|---|
 | **Palm OS 5, ARM** | | | | | | | | |
 | Palm T\|X | 5.4 | 320×480 colour | SD | yes | yes | yes | virtual Wi-Fi | USB, serial |
-| Tungsten E2 | 5.4 | 320×320 colour | SD | yes | yes | yes | | USB, serial |
+| Tungsten E2 | 5.4 | 320×320 colour | SD | yes | yes | yes | Wi-Fi card | USB, serial |
 | Tungsten E3 | 5.4 | 320×480 colour | SD | yes | yes | | | USB, serial |
-| Zire 72 | 5.2 | 320×320 colour | SD | yes | yes | yes | | USB |
+| Zire 72 | 5.2 | 320×320 colour | SD | yes | yes | yes | Wi-Fi card | USB |
 | Sony CLIÉ TG50 | 5.0 | 320×320 colour | Memory Stick | yes | yes | yes | | USB, serial |
 | Tapwave Zodiac | 5.2 | 480×320 colour | two SD | yes | yes | yes | | USB, serial |
 | **Palm OS 3 and 4, 68k** | | | | | | | | |
@@ -78,7 +78,7 @@ Dan
 | IBM WorkPad c500 | 4.0 | 160×160 grey | SD or MMC | piezo | yes | | PPP | serial |
 | Palm m505, m515 | 4.1 | 160×160 colour | SD or MMC | piezo | yes | | PPP | serial |
 | Palm m520 | 4.1 | 320×320 colour | SD or MMC | piezo | yes | | PPP | serial |
-| Sony CLIÉ T415 | 4.1 | 320×320 grey | Memory Stick | yes | yes | | PPP | USB |
+| Sony CLIÉ T415 | 4.1 | 320×320 grey | Memory Stick | yes | yes | | PPP | USB, serial |
 | **Other** | | | | | | | | |
 | AlphaSmart Dana | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | USB Wi-Fi adapter | |
 | AlphaSmart Dana Wireless | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | built in | |
@@ -153,6 +153,7 @@ On Linux use File → Firmware… or Add device, on Android import the firmware 
 - Connections: infrared, Bluetooth and serial link machines on one computer or on paired Fronds on your network. On Linux serial and USB also go to a PTY or TCP port. See [Connections](doc/using-frond.md#connections).
 - Modem and phones: the 68k Palms have a snap-on modem, and most ARM Palm OS devices dial through a mobile phone over infrared or Bluetooth, onto the internet. See [Dial-up modem](doc/using-frond.md#dial-up-modem).
 - Printing: every device with infrared prints to "Frond Printer", and the Danas to a USB printer, as a PDF or a raw file. See [Printing over infrared](doc/using-frond.md#printing-over-infrared).
+- Zodiac music: Zodiac games can play their music through a SoundFont you have or a MIDI device, like a synth, instead of the FM chip. See [Music output](doc/using-frond.md#music-output).
 - Low-latency audio: less delay between a tap and the sound, for music apps like SunVox. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
 - HotSync and ActiveSync: [Sync Manager](doc/using-frond.md#sync-manager) syncs contacts, calendar, tasks and memos on supported Palm OS devices. [External HotSync](doc/using-frond.md#usb-hotsync) and [ActiveSync](doc/using-frond.md#activesync) can use pilot-link and SynCE.
 
