@@ -3,6 +3,8 @@
 #include "PosixCompat.h"
 #include "gdbstub.h"
 
+#include <cstdio>
+
 #ifdef GDB_STUB_ENABLED
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -558,5 +560,9 @@ stub* gdbStubInit(ArmCpu* cpu, int port) {
 #else
 struct stub {};
 void gdbStubSetSoc(stub*,SoC*) {}
-stub* gdbStubInit(ArmCpu*, int) { static stub disabled; return &disabled; }
+// No stub: the CPU's debugStub stays null, which keeps the plain step loop, the JIT and Fast's spans on.
+stub* gdbStubInit(ArmCpu*, int port) {
+    if (port != -1) fprintf(stderr, "GDB stub not available on this host; --gdb ignored\n");
+    return nullptr;
+}
 #endif
