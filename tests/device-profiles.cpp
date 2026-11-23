@@ -234,7 +234,8 @@ int main() {
         for (const auto& other : deviceProfiles5)
             assert(deviceProfileHasHotSyncButton5(other.deviceType) ==
                    (other.deviceType == deviceTypeTX || other.deviceType == deviceTypeE2 ||
-                    other.deviceType == deviceTypeFrankenE2 || other.board == DeviceBoard5::ez328 || vzPalm(other)));
+                    other.deviceType == deviceTypeFrankenE2 || other.board == DeviceBoard5::imx1Zodiac ||
+                    other.board == DeviceBoard5::ez328 || vzPalm(other)));
         for (int unknown : {-1, 99}) {
             assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown));
         }
