@@ -211,6 +211,8 @@ class SocIMX1 : public SoC {
     uint64_t LagSubmits() const { return imx1MachineLagSubmits(machine); }
     // Span boundaries taken with the board behind the chip (imx1MachineLagBoundaries).
     uint64_t LagBoundaries() const { return imx1MachineLagBoundaries(machine); }
+    // Ring submits that left the chip behind too (imx1MachineDeferredSubmits).
+    uint64_t DeferredSubmits() const { return imx1MachineDeferredSubmits(machine); }
     // Charges of crossing spans that ran past the last queued batch's completion (imx1MachineCrossEnds).
     uint64_t CrossEnds() const { return imx1MachineCrossEnds(machine); }
     // The guest time of the last of them in ns, on GetTime's clock, for tests.
