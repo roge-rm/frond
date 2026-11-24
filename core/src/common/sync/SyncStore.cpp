@@ -590,6 +590,7 @@ int SyncProfile::QueueRestore(const std::string& fromDevice, const std::string& 
     if (!Exec(db, "BEGIN IMMEDIATE", error)) return -1;
     int count = 0;
     for (const auto& entry : Backups(fromDevice)) {
+        if (entry.name == "Unsaved Preferences") continue;  // backed up, never restored, as Palm Desktop does
         // Copy-protected databases go back only to the device they came from.
         if ((entry.attributes & dbCopyPrevention) && fromDevice != toDevice &&
             fromDevice != toDevice + " / recovery " + entry.sha256) continue;

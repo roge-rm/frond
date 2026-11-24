@@ -1035,6 +1035,15 @@ void TestStore(const std::string& root) {
     CHECK(profile.QueueRestore("machine:a", "machine:b", error) == 1);
     CHECK(profile.PendingInstalls("machine:b").size() == 1);
     CHECK(profile.QueueInstall("machine:b", "Kept.pdb", file, item, error));
+    // Unsaved Preferences is backed up but never restored.
+    auto unsaved = db;
+    unsaved.name = "Unsaved Preferences";
+    Bytes unsavedFile;
+    unsaved.Write(unsavedFile);
+    CHECK(profile.StoreBackup("machine:a", unsaved, unsavedFile, error));
+    CHECK(profile.LoadBackup("machine:a", "Unsaved Preferences", back));
+    CHECK(profile.QueueRestore("machine:a", "machine:c", error) == 1);
+    for (const auto& i : profile.PendingInstalls("machine:c")) CHECK(i.dbName != "Unsaved Preferences");
     auto corrupt = db;
     corrupt.name = "Z-Corrupt";
     CHECK(profile.StoreBackup("machine:a", corrupt, Bytes(10, 0), error));
