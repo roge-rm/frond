@@ -89,4 +89,11 @@ clean:
 
 .SUFFIXES:
 
+# The dependency files name objects by absolute path, so once the checkout moves they match nothing
+# and header changes stop rebuilding the objects that use them. Start the objects afresh then.
+SOURCE_DIR_STAMP := $(BUILDDIR_NATIVE)/.source-dir
+ifneq ($(shell cat '$(SOURCE_DIR_STAMP)' 2>/dev/null),$(CURDIR))
+$(shell rm -rf '$(BUILDDIR_NATIVE)' '$(DEPDIR_NATIVE)'; mkdir -p '$(dir $(SOURCE_DIR_STAMP))' && echo '$(CURDIR)' > '$(SOURCE_DIR_STAMP)')
+endif
+
 include $(shell test -e $(DEPDIR_NATIVE) && find $(DEPDIR_NATIVE) -type f)
