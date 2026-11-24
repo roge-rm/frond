@@ -19,7 +19,6 @@ constexpr uint8_t latin1Escape = 0xc1;
 constexpr uint8_t euroFirst = 0xac;
 constexpr uint8_t euroSecond = 0x82;
 constexpr uint8_t palmEuro = 0x80;
-constexpr uint16_t lineHeight = 0x030d;
 constexpr uint16_t firstParagraphId = 0x23;
 constexpr std::array<uint8_t, 18> footer{0x82, 0, 9, 0, 3, 0, 0x82, 0};
 
@@ -27,19 +26,40 @@ uint16_t Word(const Bytes& data, size_t offset) {
     return data[offset] | (uint16_t(data[offset + 1]) << 8);
 }
 
+// Words that follow the typing zoom (Notes' Zoom menu outside Draw mode), from notes the rx1950
+// saved at each zoom: the zoom in percent, layout words at 0x9a, 0xfc, 0x104, 0x108, 0x114 and 0x118,
+// and each line's height.
+struct TypingZoom {
+    uint16_t zoom, w9a, wfc, w104, w108, w114, w118, lineHeight;
+};
+constexpr TypingZoom typingZooms[] = {
+    {100, 0xf0, 0x12, 0x3e4, 0x353, 0x402, 0x353, 0x030d},
+    {75, 198, 22, 1226, 1047, 1263, 1047, 0x020a},
+    {150, 396, 11, 613, 523, 631, 523, 0x0415},
+    {200, 550, 8, 443, 378, 456, 378, 0x061d},
+    {300, 793, 5, 307, 262, 316, 262, 0x092a},
+};
+const TypingZoom* FindTypingZoom(uint16_t zoom) {
+    for (const auto& z : typingZooms)
+        if (z.zoom == zoom) return &z;
+    return nullptr;
+}
+
+// The drawing zoom, kept as it is.
+bool DrawZoom(uint16_t zoom) { return zoom == 75 || zoom == 100 || zoom == 150 || zoom == 200 || zoom == 300; }
+
 // Fixed words in the observed default-font Notes header.
 constexpr std::pair<size_t, uint16_t> fixedWords[] = {
     {0x000, 0x5c7b}, {0x002, 0x7770}, {0x004, 0x1569}, {0x008, 0x0101}, {0x00a, 6},
-    {0x010, 2}, {0x012, 0x18}, {0x014, 1}, {0x016, 0x0a}, {0x018, 1}, {0x01c, 0x64},
+    {0x010, 2}, {0x012, 0x18}, {0x014, 1}, {0x016, 0x0a}, {0x018, 1},
     {0x024, 1}, {0x026, 1},
     {0x034, 'T'}, {0x036, 'a'}, {0x038, 'h'}, {0x03a, 'o'}, {0x03c, 'm'}, {0x03e, 'a'},
     {0x074, 0x14}, {0x076, 4}, {0x078, 1}, {0x07e, 0x15}, {0x080, 5}, {0x082, 1},
     {0x088, 7}, {0x08a, 6}, {0x08c, 0x15}, {0x08e, 0x50}, {0x090, 1},
-    {0x092, 0x2fd0}, {0x096, 0x3de0}, {0x09a, 0xf0},
+    {0x092, 0x2fd0}, {0x096, 0x3de0},
     {0x09e, 0x5a0}, {0x0a2, 0x5a0}, {0x0a6, 0x5a0}, {0x0aa, 0x5a0},
     {0x0bc, 0x0a}, {0x0c2, 4}, {0x0cc, 0x0a}, {0x0d2, 4},
     {0x0e2, 8}, {0x0e4, 7}, {0x0e6, 0x10}, {0x0e8, 1}, {0x0ec, 2},
-    {0x0fc, 0x12}, {0x104, 0x3e4}, {0x108, 0x353}, {0x114, 0x402}, {0x118, 0x353},
     {0x128, 0x40}, {0x12a, 8},
 };
 
@@ -51,10 +71,18 @@ void SetWord(Buffer& buffer, size_t offset, uint16_t value) {
     buffer[offset + 1] = value >> 8;
 }
 
-std::array<uint8_t, indexStart> Header(uint16_t paragraphs, uint16_t chars, uint16_t lines, uint16_t setting) {
+std::array<uint8_t, indexStart> Header(uint16_t paragraphs, uint16_t chars, uint16_t lines, uint16_t drawZoom,
+                                       const TypingZoom& typing) {
     std::array<uint8_t, indexStart> header{};
     for (const auto& [offset, value] : fixedWords) SetWord(header, offset, value);
-    SetWord(header, 0x01a, setting);
+    SetWord(header, 0x01a, drawZoom);
+    SetWord(header, 0x01c, typing.zoom);
+    SetWord(header, 0x09a, typing.w9a);
+    SetWord(header, 0x0fc, typing.wfc);
+    SetWord(header, 0x104, typing.w104);
+    SetWord(header, 0x108, typing.w108);
+    SetWord(header, 0x114, typing.w114);
+    SetWord(header, 0x118, typing.w118);
     SetWord(header, 0x12c, 6 + 2 * paragraphs);
     SetWord(header, 0x12e, paragraphs);
     SetWord(header, 0x132, paragraphs);
@@ -86,7 +114,7 @@ bool Zeroes(Bytes::const_iterator first, Bytes::const_iterator last) {
     return std::all_of(first, last, [](uint8_t byte) { return byte == 0; });
 }
 
-bool ReadParagraph(const Bytes& data, size_t index, size_t& position, std::string& text) {
+bool ReadParagraph(const Bytes& data, size_t index, size_t& position, uint16_t lineHeight, std::string& text) {
     const auto lines = Word(data, index);
     const auto count = Word(data, index + 2);
     const auto id = Word(data, index + 4);
@@ -199,7 +227,7 @@ bool WriteParagraph(Bytes& data, size_t index, std::string_view text, uint16_t i
     for (size_t i = 0; i < lines.size(); ++i, position += lineSize) {
         SetWord(data, position, lines[i]);
         SetWord(data, position + 6, uint16_t(26 * (lines[i] - (i + 1 == lines.size()))));
-        SetWord(data, position + 8, lineHeight);
+        SetWord(data, position + 8, typingZooms[0].lineHeight);
     }
     return true;
 }
@@ -208,21 +236,22 @@ bool WriteParagraph(Bytes& data, size_t index, std::string_view text, uint16_t i
 
 std::optional<std::string> ReadPwiNote(const Bytes& data) {
     if (data.size() < indexStart) return std::nullopt;
-    const auto setting = Word(data, 0x01a);
-    if (setting != 100 && setting != 200) return std::nullopt;
+    const auto drawZoom = Word(data, 0x01a);
+    const auto* typing = FindTypingZoom(Word(data, 0x01c));
+    if (!DrawZoom(drawZoom) || !typing) return std::nullopt;
     const auto paragraphs = Word(data, 0x12e);
     if (paragraphs == 0 || 6 + 2 * paragraphs > UINT16_MAX) return std::nullopt;
     const size_t indexEnd = indexStart + paragraphs * indexEntrySize;
     if (indexEnd > data.size()) return std::nullopt;
     size_t position = indexEnd;
 
-    const auto header = Header(paragraphs, Word(data, 0x136), Word(data, 0x13a), setting);
+    const auto header = Header(paragraphs, Word(data, 0x136), Word(data, 0x13a), drawZoom, *typing);
     if (!std::equal(header.begin(), header.end(), data.begin())) return std::nullopt;
     std::string text;
     size_t chars = 0, lines = 0;
     for (size_t index = indexStart; index < indexEnd; index += indexEntrySize) {
         if (index != indexStart) text += '\n';
-        if (!ReadParagraph(data, index, position, text)) return std::nullopt;
+        if (!ReadParagraph(data, index, position, typing->lineHeight, text)) return std::nullopt;
         lines += Word(data, index);
         chars += Word(data, index + 2);
     }
@@ -259,13 +288,15 @@ std::optional<Bytes> WritePwiNote(std::string_view utf8) {
         if (end != std::string_view::npos) begin = end + 1;
     }
 
-    const auto header = Header(uint16_t(paragraphs), uint16_t(text.size() + 1), uint16_t(lines), 200);
+    const auto header = Header(uint16_t(paragraphs), uint16_t(text.size() + 1), uint16_t(lines), 200, typingZooms[0]);
     std::copy(header.begin(), header.end(), data.begin());
     data.insert(data.end(), footer.begin(), footer.end());
     data.resize(RoundToWord(data.size()));
     return data;
 }
 
+// The replacement keeps the drawing zoom and is laid out at 100% typing zoom, as its line
+// breaks are worked out for 100%.
 bool ReplacePwiNoteText(Bytes& data, std::string_view text) {
     if (!ReadPwiNote(data)) return false;
     auto replacement = WritePwiNote(text);

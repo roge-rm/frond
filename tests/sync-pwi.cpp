@@ -67,6 +67,31 @@ void CheckWriter() {
     assert(ReadPwiNote(data) == "First line\n\nThird");
     assert(data[0x1a] == 100);
 
+    // Notes' Zoom menu: 75, 100, 150, 200 and 300 percent, kept on replace. Others are unknown layouts.
+    for (const uint16_t zoom : {75, 150, 200, 300}) {
+        auto zoomed = data;
+        zoomed[0x1a] = uint8_t(zoom & 0xff);
+        zoomed[0x1b] = uint8_t(zoom >> 8);
+        assert(ReadPwiNote(zoomed) == "First line\n\nThird");
+        assert(ReplacePwiNoteText(zoomed, "Zoomed"));
+        assert((zoomed[0x1a] | zoomed[0x1b] << 8) == zoom && ReadPwiNote(zoomed) == "Zoomed");
+    }
+    malformed = data;
+    malformed[0x1a] = 125;
+    assert(!ReadPwiNote(malformed));
+
+    // Typing zoom at 0x1c moves layout words and the line height together, as the rx1950 saves them.
+    auto typed = *WritePwiNote("Mid");
+    auto put = [&](size_t offset, uint16_t value) { typed[offset] = uint8_t(value), typed[offset + 1] = uint8_t(value >> 8); };
+    put(0x1c, 150);
+    assert(!ReadPwiNote(typed));
+    put(0x9a, 396), put(0xfc, 11), put(0x104, 613), put(0x108, 523), put(0x114, 631), put(0x118, 523);
+    assert(!ReadPwiNote(typed));
+    put(0x18a, 0x0415);  // the only line's height
+    assert(ReadPwiNote(typed) == "Mid");
+    assert(ReplacePwiNoteText(typed, "Mid two"));
+    assert(typed[0x1c] == 100 && ReadPwiNote(typed) == "Mid two");
+
     // Each paragraph's line count must agree with the index and document totals.
     malformed = data;
     malformed[0x146] ^= 1;
