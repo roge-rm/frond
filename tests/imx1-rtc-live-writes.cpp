@@ -44,7 +44,7 @@ void liveWritesAndDeadline() {
     write(a, rtc + 16, 0xe0);
     for (uint32_t control : {0x80u, 0xa0u, 0u, 0xe1u})
         write(a, rtc + 16, control, A::sideEffect);
-    for (unsigned offset : {0u, 4u, 32u}) write(a, rtc + offset, read(a, rtc + offset), A::sideEffect);
+    for (unsigned offset : {0u, 4u, 32u}) write(a, rtc + offset, read(a, rtc + offset));
     write(a, rtc + 24, 0x88, A::sideEffect); assert(read(a, rtc + 24) == 8);
     write(a, rtc + 24, 0x48, A::reservedBits); assert(read(a, rtc + 24) == 8);
     const uint32_t remaining = (126 * 16384 - 32768) * 250;
@@ -64,6 +64,28 @@ void liveWritesAndDeadline() {
     write(unknown, wdog, 0x7f02); write(unknown, wdog, 0x7f03);
     write(unknown, rtc + 24, 8, A::externalInput); assert(read(unknown, rtc + 24) == 0);
     std::puts("PASS: live RTC masks/status/alarm preserve RTC phase, future watchdog deadline and service sequence");
+}
+// Palm OS sets the date and time (Prefs > Date & Time) by writing DAYR, HOURMIN and SECONDS with the
+// watchdog running and the day interrupt on. The new time counts on from the old second phase and the
+// watchdog bound doesn't move.
+void counterWritesKeepWatchdog() {
+    Imx1Bootstrap a; start(a);
+    write(a, rtc + 24, 8);
+    a.advanceFastBusCycles(124);
+    auto b = a;
+    write(a, rtc + 32, 100); write(a, rtc, 0x0e18); write(a, rtc + 4, 16);
+    assert(read(a, rtc + 32) == 100 && read(a, rtc) == 0x0e18 && read(a, rtc + 4) == 16);
+    a.advanceFastBusCycles(32768 * 250 - 125); b.advanceFastBusCycles(32768 * 250 - 125);
+    assert(read(a, rtc + 4) == 16 && read(b, rtc + 4) == 59);
+    a.advanceFastBusCycles(1); b.advanceFastBusCycles(1);
+    assert(read(a, rtc + 4) == 17 && read(a, rtc) == 0x0e18 && read(b, rtc + 4) == 0);
+    assert(read(a, rtc + 20) == 0 && read(b, rtc + 20) == 8);
+    const uint32_t remaining = (126 * 16384 - 32768) * 250;
+    a.advanceFastBusCycles(remaining - 1); b.advanceFastBusCycles(remaining - 1);
+    assert(a.clockStatus() == A::ok && b.clockStatus() == A::ok);
+    a.advanceFastBusCycles(1); b.advanceFastBusCycles(1);
+    assert(a.clockStatus() == A::possibleWatchdogTimeout && b.clockStatus() == A::possibleWatchdogTimeout);
+    std::puts("PASS: live RTC counter writes keep the RTC phase and the watchdog deadline");
 }
 void pendingAndAtomicity() {
     for (bool fiq : {false, true}) {
@@ -167,4 +189,4 @@ void cpuDelivery() {
     std::puts("PASS: active-watchdog RTC sampling IRQ/FIQ, ARM/Thumb return and W1C in Exact/Fast");
 }
 }
-int main() { liveWritesAndDeadline(); pendingAndAtomicity(); cpuDelivery(); }
+int main() { liveWritesAndDeadline(); counterWritesKeepWatchdog(); pendingAndAtomicity(); cpuDelivery(); }

@@ -194,7 +194,7 @@ void activeBootstrap() {
     write(soc, 0x00204010, 0xa0, B::sideEffect); assert(read(soc, 0x00204010) == 0x80);
     write(soc, 0x00204010, 0xe0, B::sideEffect); assert(read(soc, 0x00204010) == 0x80);
     write(soc, 0x00204018, 0);
-    write(soc, 0x00204004, 1, B::sideEffect); assert(read(soc, 0x00204004) == 56);
+    write(soc, 0x00204004, 1); assert(read(soc, 0x00204004) == 1);
     for (unsigned i = 0; i < 100; ++i) assert(read(soc, base + 8) == 0);
     soc.advanceFastBusCycles(16384 * 250 - 1);
     assert(soc.clockStatus() == B::ok && read(soc, base + 8) == 0);

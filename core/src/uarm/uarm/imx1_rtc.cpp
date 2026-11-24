@@ -96,10 +96,11 @@ uint64_t Imx1Rtc::assertedInterrupts() const {
            ((status & enable & 0xff00) ? uint64_t(1) << 18 : 0);
 }
 bool Imx1Rtc::preservesWatchdogClock(const Imx1Rtc& next, uint32_t address) const {
-    // Alarm, status and interrupt masks are separate from the prescaler (figure 23-1).
-    // Counter writes, changed control and the exceptional 2HZ gate retain their guards.
-    if (address != base + 8 && address != base + 12 && address != base + 16 && address != base + 20 &&
-        address != base + 24 && address != base + 36) return false;
+    // Alarm, status, interrupt masks and the HOURMIN, SECONDS and DAYR counters are separate from the
+    // prescaler (figure 23-1). Palm OS writes the counters to set the time with the watchdog running.
+    // ASSUMPTION "RTC counter writes keep the prescaler": the manual doesn't say a counter write resets it.
+    // Changed control and the exceptional 2HZ gate keep their guards.
+    if (address < base || address > base + 36 || address == base + 28) return false;
     return next.watchdogClockBoundSupported() && control == next.control &&
         ((enable ^ next.enable) & 0x80) == 0 && prescaler == next.prescaler &&
         samplingPhase == next.samplingPhase && referencePhase == next.referencePhase &&
