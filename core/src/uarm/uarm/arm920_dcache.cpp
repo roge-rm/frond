@@ -45,9 +45,16 @@ void Arm920DataCache::invalidate() {
 bool Arm920DataCache::maintain(uint32_t operand, bool index, bool cleaning, bool invalidating) {
     if (guard.active) return false;
     auto& segment = lines[(operand >> 5) & 7];
+    // An index op names one line, bits 31:26.
+    if (index) {
+        auto& line = segment[operand >> 26];
+        if (cleaning && !clean(line)) return false;
+        if (invalidating) line.valid = false;
+        return true;
+    }
     for (unsigned i = 0; i < 64; ++i) {
         auto& line = segment[i];
-        if (index ? i != (operand >> 26) : !line.valid || line.va != (operand & ~31u)) continue;
+        if (!line.valid || line.va != (operand & ~31u)) continue;
         if (cleaning && !clean(line)) return false;
         if (invalidating) line.valid = false;
     }
