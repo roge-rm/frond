@@ -225,8 +225,14 @@ void machine() {
         assert(usb.Start(soc, {HostSerial::Kind::pty, 0, {}}, error));
         run(usb);
         assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+        // The bus is unplugged out of the cradle: no reset, no packets, nothing listening. In the cradle the
+        // packets reach the W4200.
+        const uint8_t setup[8]{0x80, 6, 0, 1, 0, 0, 18, 0};
+        const auto port = soc->GetUsbPort();
+        assert(!port.Reset() && !port.Listening() && !port.Enabled() && port.Setup(setup) == UsbPacketResult::Disabled);
         // Putting the Zodiac in the cradle brings the cable's bus with it; taking it out drops both.
         assert(soc->SetCradle(true) && cradleIn());
+        assert(port.Setup(setup) != UsbPacketResult::Disabled);
         assert(soc->SetCradle(false) && !soc->CradleAttached() && !soc->AccessoryPinsHigh());
         usb.Stop();
         assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);

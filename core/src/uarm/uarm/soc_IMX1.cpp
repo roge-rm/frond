@@ -495,37 +495,43 @@ std::function<void()> SocIMX1::CapturePeripheralInput() {
 
 UsbDevicePort SocIMX1::GetUsbPort() {
     using R = UsbPacketResult;
+    // The bus comes through the cradle: with it out the W4200 sees no host and the host sees no device.
     static const UsbDevicePort::Operations ops{
-        [](void* p) { return imx1MachineUsbBusReset(static_cast<SocIMX1*>(p)->machine); },
+        [](void* p) { return static_cast<SocIMX1*>(p)->cradle && imx1MachineUsbBusReset(static_cast<SocIMX1*>(p)->machine); },
         [](void*) { return false; },  // no start-of-frame model
-        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
-        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
+        [](void* p) { return static_cast<SocIMX1*>(p)->cradle && imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
+        [](void* p) { return static_cast<SocIMX1*>(p)->cradle && imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
         [](void*) { return false; },
-        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).enableCount; },
-        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).address; },
+        [](void* p) { return static_cast<SocIMX1*>(p)->cradle ? imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).enableCount : 0u; },
+        [](void* p) -> uint8_t { return static_cast<SocIMX1*>(p)->cradle ? imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).address : 0; },
         [](void*, void (*)(void*), void*) {},
-        [](void* p, const uint8_t* data) { return imx1MachineUsbSetup(static_cast<SocIMX1*>(p)->machine, data); },
+        [](void* p, const uint8_t* data) { return !static_cast<SocIMX1*>(p)->cradle ? R::Disabled : imx1MachineUsbSetup(static_cast<SocIMX1*>(p)->machine, data); },
         [](void* p, const uint8_t* data, unsigned size) {
+            if (!static_cast<SocIMX1*>(p)->cradle) return R::Disabled;
             return imx1MachineUsbOut(static_cast<SocIMX1*>(p)->machine, 0, data, size);
         },
         [](void* p, uint8_t* data, unsigned* size) {
+            if (!static_cast<SocIMX1*>(p)->cradle) return R::Disabled;
             return imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, 0, data, size, true);
         },
         [](void* p, uint8_t ep, const uint8_t* data, unsigned size) {
             ep &= 0x7f;
+            if (!static_cast<SocIMX1*>(p)->cradle) return R::Disabled;
             return ep ? imx1MachineUsbOut(static_cast<SocIMX1*>(p)->machine, ep, data, size) : R::Unsupported;
         },
         [](void* p, uint8_t ep, uint8_t* data, unsigned* size) {
             ep &= 0x7f;
+            if (!static_cast<SocIMX1*>(p)->cradle) return R::Disabled;
             return ep ? imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, ep, data, size, true) : R::Unsupported;
         },
         [](void* p, uint8_t ep, unsigned* size) {
             ep &= 0x7f;
+            if (!static_cast<SocIMX1*>(p)->cradle) return R::Disabled;
             return ep ? imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, ep, nullptr, size, false) : R::Unsupported;
         },
         [](void* p, uint8_t ep, unsigned) {
             ep &= 0x7f;
-            return !ep || imx1MachineUsbOutReady(static_cast<SocIMX1*>(p)->machine, ep);
+            return !static_cast<SocIMX1*>(p)->cradle || !ep || imx1MachineUsbOutReady(static_cast<SocIMX1*>(p)->machine, ep);
         }};
     return {this, ops};
 }
@@ -757,7 +763,13 @@ bool SocIMX1::ApplyCradle() {
     return ok;
 }
 
-bool SocIMX1::SetCradle(bool attached) { return SetCradleInputs(cradle, attached); }
+// The USB bus goes with the cradle: a cable in the cradle replugs, so the host enumerates again once it's back.
+bool SocIMX1::SetCradle(bool attached) {
+    const bool before = cradle;
+    if (!SetCradleInputs(cradle, attached)) return false;
+    if (cradle != before && usbCable && usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
+    return true;
+}
 bool SocIMX1::SetUsbCable(bool attached) { return SetCradleInputs(usbCable, attached); }
 
 bool SocIMX1::SetCradleInputs(bool& setting, bool attached) {

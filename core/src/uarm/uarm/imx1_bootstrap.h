@@ -259,7 +259,7 @@ class Imx1Bootstrap {
     // so the CPU and every module on HCLK or a PERCLK stand still. The System PLL goes on until the
     // CLK32 edges of SD_CNT have passed, 16 HCLK at least (table 12-5), and an interrupt before that
     // keeps it on. An asserted IRQ or FIQ turns both PLLs on again (table 12-3), locked 300 us at most
-    // later (12.4.2), taken as the nine CLK32 periods the MCU PLL wake already uses.
+    // later (12.4.2), taken as the nine CLK32 periods the stop mode wake uses (the idle wake of the MCU PLL is one).
     bool systemStopArmed() const { return systemStop == stopArmed; }
     bool systemStopped() const { return systemStop >= stopStopped; }
     // Whether the CPU's clock is off: stopped, or on FCLK (clock mode 3) with the MCU PLL off or still

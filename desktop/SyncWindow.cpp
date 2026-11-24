@@ -1,5 +1,6 @@
 #include "SyncWindow.h"
 
+#include <set>
 #include <algorithm>
 #include <array>
 #include <functional>
@@ -674,8 +675,13 @@ void SyncWindow::changeProfile() {
         backupDevice->clear();
         if (profile.IsOpen()) {
             const auto assignments = library.Assignments();
-            for (const auto& key : profile.BackupDevices())
-                backupDevice->addItem(deviceName(machineNames, assignments, key), text(key));
+            // A device that only has recovery copies is listed under its own name, with the copies under it.
+            std::set<std::string> listed;
+            for (const auto& source : profile.BackupDevices(true)) {
+                std::string key = source;
+                IsRecoverySource(source, &key);
+                if (listed.insert(key).second) backupDevice->addItem(deviceName(machineNames, assignments, key), text(key));
+            }
         }
         const int at = backupDevice->findData(previous);
         if (at >= 0) backupDevice->setCurrentIndex(at);
