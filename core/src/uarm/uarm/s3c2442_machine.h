@@ -89,7 +89,7 @@ class S3c2442Machine {
     uint64_t jitRetired() const { return jitRetiredCount; }
     uint64_t leanRetired() const { return leanRetiredCount; }
     uint64_t stepRetired() const { return stepRetiredCount; }
-    // Fast: the WTCNT delay loops passed at once (skipDelay) and the instructions they would have run. delaySkip
+    // Fast: the WTCNT delay loops and ADC waits passed at once (skipDelay) and the instructions they would have run. delaySkip
     // turns it off for measuring (FROND_DELAY_SKIP=0 at create does too).
     uint64_t delaySkips() const { return delaySkipCount; }
     uint64_t delaySkipRetired() const { return delaySkipRetiredCount; }
@@ -162,6 +162,8 @@ class S3c2442Machine {
     void setStylus(bool down, uint16_t x, uint16_t y);
     // The screen as the LCD controller scans it out of SDRAM (S3cLcd::frame).
     bool screen(std::vector<uint32_t>& pixels, unsigned& width, unsigned& height, std::string& why) const;
+    // n bytes of SDRAM at physical address pa, null where they aren't all in SDRAM.
+    const uint8_t* sdramSpan(uint32_t pa, size_t n) const;
 
     // Sound. The IIS runs at the sample rate audioRate() gives (frames a second, numerator / denominator, 0 / 1
     // while it's off), moving its FIFOs through DMA and the UDA1380. Each frame it sends goes to pcmSink after
@@ -305,8 +307,10 @@ class S3c2442Machine {
                           uint32_t* cost);
     static bool leanGuard(uint32_t instruction, const uint32_t* registers, uint32_t cpsr, uint32_t spsr);
     // CPU cycles to the next event; with wakeOnly, only events that can wake an idle CPU: interrupts
-    // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset.
-    uint64_t cyclesToEvent(bool wakeOnly = false) const;
+    // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset. With openTimers, a PWM timer
+    // whose interrupt INTMSK holds back isn't an event (Fast spans): advance() applies its underflows
+    // later just the same, and every guest look at it (SFR access, lean PWM read) settles time first.
+    uint64_t cyclesToEvent(bool wakeOnly = false, bool fast = false) const;
     // Sleep: the sources that wake it, pending now; time asleep, which moves only the RTC.
     uint32_t wakeSources() const;
     void sleepAdvance(uint64_t cpuCycles);
@@ -316,7 +320,7 @@ class S3c2442Machine {
     void audioFrames(uint64_t frames);
     void pumpAudioDma();
     // CPU cycles until a DMA interrupt the IIS's frames bring, UINT64_MAX with none; wakeOnly as cyclesToEvent.
-    uint64_t audioCyclesToEvent(bool wakeOnly) const;
+    uint64_t audioCyclesToEvent(bool wakeOnly, bool frameBoundary = false) const;
     uint64_t iisMasterHz() const;
     bool codecPowered() const;
     // After a GPIO write: the codec's reset pin (GPD0, high resets it).
@@ -369,6 +373,16 @@ class S3c2442Machine {
     uint32_t lastWake = 0;
     uint64_t batchAdvanced = 0;
     uint32_t leanAdvanced = 0;  // of the running lean call, by leanRead
+    // Cycles runFast's translated and lean runs have retired but not yet applied with advance(). With no event
+    // due in the span, applying them in one go gives the same state, so it waits for anything that reads the
+    // blocks' time: the interpreter, a delay skip, a WTCNT read and the end of the span.
+    uint64_t fastOwed = 0;
+    void settleFast() {
+        if (!fastOwed) return;
+        const uint64_t n = fastOwed;
+        fastOwed = 0;
+        advance(n);
+    }
     bool sfrAccessed = false;  // since the Fast span started
     bool fastOn = false;
     uint64_t jitRetiredCount = 0, leanRetiredCount = 0, stepRetiredCount = 0;

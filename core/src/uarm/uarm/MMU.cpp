@@ -26,16 +26,20 @@ void mmuSetPermHook(struct ArmMmu *mmu, void (*hook)(void *), void *ctx) {
     mmu->permChangedCtx = ctx;
 }
 
+// Every entry from an earlier gen is dead. Gen 0 is never current, so a wrap clears them all once.
+static void mmuPrvNextGen(struct ArmMmu *mmu) {
+    if (++mmu->gen == 0) {
+        for (size_t i = 0; i < TLB_SIZE; i++) mmu->tlb[i].gen = 0;
+        mmu->gen = 1;
+    }
+    mmu->genFills = 0;
+}
+
 void mmuTlbFlush(struct ArmMmu *mmu) {
     mmuPrvPermChanged(mmu);
     mmu->flushes++;
-    mmu->revision = (mmu->revision + 1) & 0x0f;
-
-    if (mmu->revision == 0) {
-        mmu->revision = 1;
-
-        for (size_t i = 0; i < TLB_SIZE; i++) mmu->tlb[i].revision = 0;
-    }
+    mmu->revision = mmu->revision % 15 + 1;
+    mmuPrvNextGen(mmu);
 }
 
 void mmuReset(struct ArmMmu *mmu) {
@@ -66,7 +70,9 @@ bool mmuIsOn(struct ArmMmu *mmu) { return mmu->transTablPA != MMU_DISABLED_TTP; 
 static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uint32_t adr,
                                                          bool priviledged, bool write, bool inspect = false,
                                                          bool checkRead = true, uint8_t *access = nullptr,
-                                                         bool *uniformP = nullptr) {
+                                                         bool *uniformP = nullptr, MmuCodeWalkMemo *memo = nullptr,
+                                                         const uint8_t *(*host)(void *, uint32_t) = nullptr,
+                                                         void *hostCtx = nullptr) {
     bool c = false, b = false, x = false;
     bool section = false, coarse = true, pxa_tex_page = false;
     uint32_t va, paPage = 0, sz, t, pa;
@@ -77,8 +83,21 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
     MMUTranslateResult result;
 
     const auto readTable = [&](uint32_t pa, uint32_t* dest) {
-        return (!inspect || memIsBufferRange(mmu->mem,pa,4,false)) &&
-               memAccess<4,false>(mmu->mem,pa,dest);
+        const bool ok = (!inspect || memIsBufferRange(mmu->mem,pa,4,false)) &&
+                        memAccess<4,false>(mmu->mem,pa,dest);
+        // A word that failed, isn't plain memory or doesn't read the same there can't be checked later.
+        if (memo && memo->n != 0xff) {
+            const uint8_t *h = ok && memo->n < 10 ? host(hostCtx, pa) : nullptr;
+            uint32_t v;
+            if (h && (memcpy(&v, h, 4), v == *dest)) {
+                memo->word[memo->n] = h;
+                memo->pa[memo->n] = pa;
+                memo->value[memo->n++] = v;
+            } else {
+                memo->n = 0xff;
+            }
+        }
+        return ok;
     };
     // read first level table
     if (mmu->transTablPA & 3) return TRANSLATE_RESULT_FAULT(0x01);  // alignment fault
@@ -193,10 +212,18 @@ translated:
     pa = (adr - va) + paPage;
 
     if (!inspect && sz > 1024) {
-        hostTlbFlush(&mmu->mem->hostTlb);
+        // The host TLB holds pages with a live entry, and pages of 1 KB subpages the lean path filled whole
+        // (never in the TLB; Fast keeps those until a TLB flush even if the guest edits their entry). The
+        // walked page's own entry is dead, so a flush is needed only when a live entry (another page of a
+        // 64 KB page or section) changes.
+        bool replaced = false;
         for (uint32_t offset = 0; offset < sz; offset += 4096) {
             struct TlbEntry *tlbEntry = mmu->tlb + ((va + offset) >> 12);
 
+            if (tlbEntry->gen == mmu->gen &&
+                (tlbEntry->ap != ap || tlbEntry->c != c || tlbEntry->b != b || tlbEntry->x != x ||
+                 tlbEntry->domain != dom || tlbEntry->section != section || tlbEntry->pa != (paPage + offset) >> 12))
+                replaced = true;
             tlbEntry->ap = ap;
             tlbEntry->c = c;
             tlbEntry->b = b;
@@ -204,8 +231,11 @@ translated:
             tlbEntry->domain = dom;
             tlbEntry->section = section;
             tlbEntry->pa = (paPage + offset) >> 12;
-            tlbEntry->revision = mmu->revision;
+            tlbEntry->gen = mmu->gen;
         }
+        mmu->fills++;
+        mmu->genFills++;
+        if (replaced) hostTlbFlush(&mmu->mem->hostTlb);
     }
 
     if (access) {
@@ -232,7 +262,7 @@ MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviled
 
     struct TlbEntry *tlbEntry = mmu->tlb + (addr >> 12);
 
-    if (tlbEntry->revision != mmu->revision) {
+    if (tlbEntry->gen != mmu->gen) {
         return translateAndCache(mmu, addr, priviledged, write);
     }
 
@@ -252,7 +282,7 @@ MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviled
 MMUTranslateResult mmuTranslateInspectAccess(ArmMmu* mmu, uint32_t addr, bool privileged, bool write) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
     const auto& entry=mmu->tlb[addr >> 12];
-    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,privileged,write,true);
+    if (entry.gen != mmu->gen) return translateAndCache(mmu,addr,privileged,write,true);
     auto fsr=checkPermissions(mmu,entry.ap,entry.domain,entry.section,privileged,write);
     if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
     return uint64_t((addr & 0xfff) | (entry.pa << 12));
@@ -262,12 +292,35 @@ MMUTranslateResult mmuTranslateInspectAccess(ArmMmu* mmu, uint32_t addr, bool pr
 MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
     const auto& entry=mmu->tlb[addr >> 12];
-    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,true,write,true,false);
+    if (entry.gen != mmu->gen) return translateAndCache(mmu,addr,true,write,true,false);
     if (write) {
         auto fsr=checkPermissions(mmu,entry.ap,entry.domain,entry.section,true,true);
         if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
     }
     return uint64_t((addr & 0xfff) | (entry.pa << 12));
+}
+
+// The walk behind mmuTranslateCodeAccess, its table words recorded in memo when given.
+static MMUTranslateResult codeAccessWalk(ArmMmu* mmu, uint32_t addr, uint32_t* access, MmuCodeWalkMemo* memo,
+                                         const uint8_t* (*host)(void*, uint32_t), void* ctx) {
+    uint8_t a;
+    bool uniform;
+    const MMUTranslateResult r = translateAndCache(mmu,addr,true,false,true,false,&a,&uniform,memo,host,ctx);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return r;
+    uint32_t acc = uint32_t(a >> 2) << 8;
+    if (uniform) {
+        acc |= (a & 3) * 0x55u;
+    } else {
+        for (uint32_t k = 0; k < 4; ++k) {
+            const uint32_t sub = (addr & ~0xfffu) | (k << 10);
+            if (MMU_TRANSLATE_RESULT_OK(translateAndCache(mmu,sub,true,false,true,false,&a,&uniform,memo,host,ctx)))
+                acc |= uint32_t(a & 3) << (2 * k);
+            else
+                acc |= 0x1000u << k;
+        }
+    }
+    *access = acc;
+    return r;
 }
 
 MMUTranslateResult mmuTranslateCodeAccess(ArmMmu* mmu, uint32_t addr, uint32_t* access) {
@@ -278,28 +331,50 @@ MMUTranslateResult mmuTranslateCodeAccess(ArmMmu* mmu, uint32_t addr, uint32_t* 
     *access = 0;
     const auto& entry=mmu->tlb[addr >> 12];
     // TLB entries only hold 4K pages with one AP.
-    if (entry.revision == mmu->revision) {
+    if (entry.gen == mmu->gen) {
         *access = (uint32_t(entry.domain) << 8) | (entry.ap * 0x55u);
         return uint64_t((addr & 0xfff) | (entry.pa << 12));
     }
-    uint8_t a;
-    bool uniform;
-    const MMUTranslateResult r = translateAndCache(mmu,addr,true,false,true,false,&a,&uniform);
-    if (!MMU_TRANSLATE_RESULT_OK(r)) return r;
-    uint32_t acc = uint32_t(a >> 2) << 8;
-    if (uniform) {
-        acc |= (a & 3) * 0x55u;
-    } else {
-        for (uint32_t k = 0; k < 4; ++k) {
-            const uint32_t sub = (addr & ~0xfffu) | (k << 10);
-            if (MMU_TRANSLATE_RESULT_OK(translateAndCache(mmu,sub,true,false,true,false,&a,&uniform)))
-                acc |= uint32_t(a & 3) << (2 * k);
-            else
-                acc |= 0x1000u << k;
+    return codeAccessWalk(mmu, addr, access, nullptr, nullptr, nullptr);
+}
+
+MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu* mmu, uint32_t addr, uint32_t* access, MmuCodeWalkMemo* memo,
+                                              const uint8_t* (*host)(void*, uint32_t), void* ctx) {
+    memo->tlb = mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[addr >> 12].gen == mmu->gen;
+    if (mmu->transTablPA == MMU_DISABLED_TTP || memo->tlb) return mmuTranslateCodeAccess(mmu, addr, access);
+    if (memo->n && memo->n != 0xff && memo->ttb == mmu->transTablPA) {
+        bool same = true;
+        for (uint8_t i = 0; same && i < memo->n; ++i) {
+            uint32_t v;
+            memcpy(&v, memo->word[i], 4);
+            same = v == memo->value[i];
+        }
+        if (same) {
+            *access = memo->access;
+            return memo->result;
         }
     }
-    *access = acc;
+    *access = 0;
+    memo->n = 0;
+    memo->walks++;
+    memo->ttb = mmu->transTablPA;
+    const MMUTranslateResult r = codeAccessWalk(mmu, addr, access, memo, host, ctx);
+    if (memo->n == 0xff) memo->n = 0;
+    memo->result = r;
+    memo->access = *access;
     return r;
+}
+
+bool mmuPageWhollyAllowed(struct ArmMmu *mmu, uint32_t va, bool privileged, bool write) {
+    if (mmu->transTablPA == MMU_DISABLED_TTP) return true;
+    const uint32_t page = va & ~0xfffu;
+    const MMUTranslateResult first = translateAndCache(mmu, page, privileged, write, true);
+    if (!MMU_TRANSLATE_RESULT_OK(first) || (MMU_TRANSLATE_RESULT_PA(first) & 0xfffu)) return false;
+    for (uint32_t q = 0x400; q < 0x1000; q += 0x400) {
+        const MMUTranslateResult r = translateAndCache(mmu, page + q, privileged, write, true);
+        if (!MMU_TRANSLATE_RESULT_OK(r) || r != first + q) return false;
+    }
+    return true;
 }
 
 bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged) {
@@ -316,6 +391,15 @@ bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged) {
 uint32_t mmuGetTTP(struct ArmMmu *mmu) { return mmu->transTablPA; }
 
 uint32_t mmuFlushCount(const struct ArmMmu *mmu) { return mmu->flushes; }
+
+uint32_t mmuTlbFills(const struct ArmMmu *mmu, uint32_t *sinceFlush) {
+    *sinceFlush = mmu->genFills;
+    return mmu->fills;
+}
+
+bool mmuTlbLive(const struct ArmMmu *mmu, uint32_t va) {
+    return mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[va >> 12].gen == mmu->gen;
+}
 
 void mmuSetTTP(struct ArmMmu *mmu, uint32_t ttp) {
     mmuTlbFlush(mmu);
@@ -414,7 +498,7 @@ void mmuSetDomainCfg(struct ArmMmu *mmu, uint32_t val) {
 int mmuPageClientAccess(struct ArmMmu *mmu, uint32_t va, bool privileged) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) return (MMU_DOMAIN_NONE << 2) | 3;
     const struct TlbEntry &entry = mmu->tlb[va >> 12];
-    if (entry.revision != mmu->revision) return -1;
+    if (entry.gen != mmu->gen) return -1;
     return (entry.domain << 2) | (apAllows(mmu, entry.ap, privileged, false) ? 1 : 0) |
            (apAllows(mmu, entry.ap, privileged, true) ? 2 : 0);
 }
@@ -613,7 +697,7 @@ void mmuArm920Capture(const ArmMmu* mmu, Arm920SavedState& s) {
     s.tlb.clear();
     for (uint32_t i = 0; i < TLB_SIZE; ++i) {
         const auto& e = mmu->tlb[i];
-        if (e.revision != mmu->revision) continue;
+        if (e.gen != mmu->gen) continue;
         s.tlb.push_back(i);
         s.tlb.push_back(uint32_t(e.pa) | uint32_t(e.ap) << 20 | uint32_t(e.domain) << 22 |
                         uint32_t(e.c) << 26 | uint32_t(e.section) << 27 | uint32_t(e.b) << 28);
@@ -625,8 +709,8 @@ void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
     mmu->domainCfg = s.domainCfg;
     mmu->S = s.mmuS;
     mmu->R = s.mmuR;
-    // Revision 0 is never current, so every other entry is dead.
-    memset(mmu->tlb, 0, sizeof(mmu->tlb));
+    // A new gen leaves every other entry dead.
+    mmuPrvNextGen(mmu);
     mmu->revision = s.tlbRevision;
     mmu->flushes = s.tlbFlushes;
     for (size_t n = 0; n + 1 < s.tlb.size(); n += 2) {
@@ -638,8 +722,11 @@ void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
         e.c = (packed >> 26) & 1;
         e.section = (packed >> 27) & 1;
         e.b = (packed >> 28) & 1;
-        e.revision = s.tlbRevision;
+        e.x = 0;
+        e.gen = mmu->gen;
     }
+    mmu->fills++;
+    mmu->genFills++;
     mmuPrvPermChanged(mmu);
 }
 
@@ -648,7 +735,7 @@ void mmuEmitDiagnostic(const ArmMmu* mmu, const ArmDiagnosticSink& sink) {
     sink.emit("mmu",state,6);
     for (uint32_t i=0;i<TLB_SIZE;++i) {
         const auto& e=mmu->tlb[i];
-        if (e.revision != mmu->revision) continue;
+        if (e.gen != mmu->gen) continue;
         const uint32_t row[] = {i << 12,uint32_t(e.pa) << 12,e.ap,e.domain,e.section,e.c,e.b};
         sink.emit("tlb",row,7);
     }

@@ -724,7 +724,7 @@ bool SocS3C2442::SetHeadphones(bool in) {
 void SocS3C2442::StateChanged() {
     const auto stop = machine->stopInfo().stop;
     halted = stop != S3c2442Stop::running && stop != S3c2442Stop::budget;
-    framePending = false;
+    lcdView.pending = false;
     redraw = true;
     jams.clear();
     keys.clear();
@@ -947,32 +947,29 @@ SoC::Attention SocS3C2442::GuestAttention() {
 
 bool SocS3C2442::LcdEnabled() { return !machine->asleep() && machine->lcd.enabled(); }
 
-// The panel as the LCD controller scans it, 0xRRGGBB, to the frontend's ABGR8888. Black with the LCD off.
+// The panel as the LCD controller scans it, to the frontend's ABGR8888 (S3cLcdView). Black with the LCD off.
 uint32_t* SocS3C2442::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) {
-    const unsigned width = displayConfiguration.width, height = displayConfiguration.height;
-    if (view.size() != size_t(width) * height) view.assign(size_t(width) * height, 0xff000000);
-    unsigned w = 0, h = 0;
+    S3cLcd::Layout layout;
     std::string why;
-    bool changed = false;
-    if (LcdEnabled() && machine->screen(scan, w, h, why) && w == width && h == height) {
-        for (size_t i = 0; i < view.size(); ++i) {
-            const uint32_t c = scan[i];
-            const uint32_t px = 0xff000000u | (c & 0xff) << 16 | (c & 0xff00) | ((c >> 16) & 0xff);
-            if (view[i] != px) { view[i] = px; changed = true; }
-        }
-    } else {
-        for (auto& px : view)
-            if (px != 0xff000000u) { px = 0xff000000u; changed = true; }
-    }
-    if (changed || redraw) framePending = true;
+    const bool on = LcdEnabled() && machine->lcd.layout(layout, why);
+    // The panel takes a new frame about 60 times a guest second; scanning SDRAM much more often than that
+    // only repeats the compare, so it's left until 1/120 s of guest time has passed. When guest time
+    // stands still between two calls (paused, audio backpressure) it scans once, so the last writes show.
+    const uint64_t now = machine->nanoseconds();
+    const bool stopped = now == frameCallNs && now != scannedNs;
+    frameCallNs = now;
+    if (!redraw && !stopped && on == scannedOn && now >= scannedNs && now - scannedNs < 1000000000 / 120)
+        return lcdView.take(firstDirtyLine, lastDirtyLine);
+    scannedNs = now;
+    scannedOn = on;
+    lcdView.scan(displayConfiguration.width, displayConfiguration.height, on ? &layout : nullptr,
+                 [&](uint32_t pa, size_t n) { return machine->sdramSpan(pa, n); });
     if (redraw) {
         redraw = false;
         ClearFramebufferDirty();
+        lcdView.all();
     }
-    if (!framePending) return nullptr;
-    firstDirtyLine = 0;
-    lastDirtyLine = height - 1;
-    return view.data();
+    return lcdView.take(firstDirtyLine, lastDirtyLine);
 }
 
 void SocS3C2442::JamKey(enum KeyId key, uint32_t durationMsec) {

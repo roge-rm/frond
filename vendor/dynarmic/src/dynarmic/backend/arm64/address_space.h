@@ -42,6 +42,7 @@ public:
     CodePtr GetOrEmit(IR::LocationDescriptor descriptor);
 
     void InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors);
+    void InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors, CodePtr keep_info);
 
     void ClearCache();
 

@@ -604,6 +604,174 @@ static void usbDeviceTests() {
     assert(usb.address() == 0 && get(usb, 0x140) == 0 && !(get(usb, 0x190) & 1));
 }
 
+// The pixel decode as the manual gives it, word by word, for the line converter to match.
+static uint32_t lcdReference(const uint8_t* line, unsigned x, bool bpp24, bool frm565, bool bpp24bl, bool bswp,
+                             bool hwswp) {
+    if (bpp24) {
+        uint32_t w = line[x * 4] | line[x * 4 + 1] << 8 | line[x * 4 + 2] << 16 | uint32_t(line[x * 4 + 3]) << 24;
+        if (bswp) w = __builtin_bswap32(w);
+        return bpp24bl ? w >> 8 : w & 0xffffff;
+    }
+    const unsigned word = x / 2 * 4;
+    uint32_t w = line[word] | line[word + 1] << 8 | line[word + 2] << 16 | uint32_t(line[word + 3]) << 24;
+    if (bswp) w = __builtin_bswap32(w);
+    const uint32_t p = (x & 1) == (hwswp ? 1u : 0u) ? w >> 16 : w & 0xffff;
+    uint32_t r6, g6, b6;
+    if (frm565) {
+        r6 = ((p >> 11) & 0x1f) << 1 | ((p >> 15) & 1);
+        g6 = (p >> 5) & 0x3f;
+        b6 = (p & 0x1f) << 1 | ((p >> 4) & 1);
+    } else {
+        r6 = ((p >> 11) & 0x1f) << 1 | (p & 1);
+        g6 = ((p >> 6) & 0x1f) << 1 | (p & 1);
+        b6 = ((p >> 1) & 0x1f) << 1 | (p & 1);
+    }
+    return (r6 << 2 | r6 >> 4) << 16 | (g6 << 2 | g6 >> 4) << 8 | (b6 << 2 | b6 >> 4);
+}
+
+// Every pixel format through frame() and convertLine, 0xRRGGBB and ABGR, against the reference.
+static void lcdFormatTests() {
+    S3cIntc intc;
+    intc.reset();
+    uint8_t mem[3 * 64];
+    uint32_t seed = 12345;
+    for (auto& b : mem) b = uint8_t((seed = seed * 1103515245 + 12345) >> 16);
+    auto memory = [&](uint32_t pa, void* out, size_t n) {
+        if (pa < 0x30100000 || pa + n > 0x30100000 + sizeof mem) return false;
+        std::memcpy(out, mem + (pa - 0x30100000), n);
+        return true;
+    };
+    for (unsigned mode = 0; mode < 32; ++mode) {
+        const bool bpp24 = mode & 1, frm565 = mode & 2, bpp24bl = mode & 4, bswp = mode & 8, hwswp = mode & 16;
+        S3cLcd lcd;
+        lcd.reset();
+        lcd.write(0x04, 2u << 14, intc);
+        lcd.write(0x08, 7u << 8, intc);
+        lcd.write(0x10, (frm565 ? 1u << 11 : 0) | (bpp24bl ? 1u << 12 : 0) | (bswp ? 2 : 0) | (hwswp ? 1 : 0), intc);
+        lcd.write(0x14, 0x30100000 >> 1, intc);
+        lcd.write(0x1c, 32, intc);  // 64 bytes a line
+        lcd.write(0x00, (0x3u << 5) | ((bpp24 ? 0xdu : 0xcu) << 1) | 1, intc);
+        std::vector<uint32_t> pixels;
+        unsigned w = 0, h = 0;
+        std::string why;
+        assert(lcd.frame(memory, pixels, w, h, why) && w == 8 && h == 3);
+        S3cLcd::Layout layout;
+        assert(lcd.layout(layout, why) && layout.stride == 64 && layout.lineBytes == (bpp24 ? 32u : 16u));
+        for (unsigned y = 0; y < 3; ++y) {
+            uint32_t abgr[8];
+            S3cLcd::convertLine(layout, mem + y * 64, abgr, true);
+            for (unsigned x = 0; x < 8; ++x) {
+                const uint32_t c = lcdReference(mem + y * 64, x, bpp24, frm565, bpp24bl, bswp, hwswp);
+                assert(pixels[y * 8 + x] == c);
+                assert(abgr[x] == (0xff000000u | (c & 0xff) << 16 | (c & 0xff00) | ((c >> 16) & 0xff)));
+            }
+        }
+    }
+}
+
+// S3cLcdView's dirty rows: a partial change, rows collecting until reset, a layout change, the LCD off.
+static void lcdViewTests() {
+    S3cIntc intc;
+    intc.reset();
+    uint8_t mem[2 * 3 * 64];
+    uint32_t seed = 777;
+    for (auto& b : mem) b = uint8_t((seed = seed * 1103515245 + 12345) >> 16);
+    auto span = [&](uint32_t pa, size_t n) -> const uint8_t* {
+        if (pa < 0x30100000 || pa + n > 0x30100000 + sizeof mem) return nullptr;
+        return mem + (pa - 0x30100000);
+    };
+    S3cLcd lcd;
+    lcd.reset();
+    lcd.write(0x04, 2u << 14, intc);
+    lcd.write(0x08, 7u << 8, intc);
+    lcd.write(0x10, 1u << 11, intc);
+    lcd.write(0x14, 0x30100000 >> 1, intc);
+    lcd.write(0x1c, 32, intc);
+    lcd.write(0x00, (0x3u << 5) | (0xcu << 1) | 1, intc);
+    S3cLcd::Layout layout;
+    std::string why;
+    assert(lcd.layout(layout, why) && layout.width == 8 && layout.height == 3);
+    S3cLcdView view;
+    uint32_t first = 99, last = 99;
+    auto scan = [&](bool on) {
+        assert(lcd.layout(layout, why));
+        view.scan(8, 3, on ? &layout : nullptr, span);
+    };
+    auto matches = [&] {
+        std::vector<uint32_t> pixels;
+        unsigned w, h;
+        auto memory = [&](uint32_t pa, void* out, size_t n) {
+            const uint8_t* p = span(pa, n);
+            if (p) std::memcpy(out, p, n);
+            return p != nullptr;
+        };
+        assert(lcd.frame(memory, pixels, w, h, why));
+        for (size_t i = 0; i < pixels.size(); ++i) {
+            const uint32_t c = pixels[i];
+            assert(view.pixels[i] == (0xff000000u | (c & 0xff) << 16 | (c & 0xff00) | ((c >> 16) & 0xff)));
+        }
+    };
+    // First frame: every row.
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 2);
+    matches();
+    view.reset();
+    scan(true);
+    assert(!view.take(first, last));
+    // One line changed: that row only.
+    mem[64 + 3] ^= 0xff;
+    scan(true);
+    assert(view.take(first, last) && first == 1 && last == 1);
+    matches();
+    // Not reset: the next change adds to the range.
+    mem[2 * 64] ^= 0xff;
+    scan(true);
+    assert(view.take(first, last) && first == 1 && last == 2);
+    scan(true);
+    assert(view.take(first, last) && first == 1 && last == 2);
+    view.reset();
+    assert(!view.take(first, last));
+    // Bytes past the line (lineBytes 16 of a 64-byte stride) aren't scanned.
+    mem[40] ^= 0xff;
+    scan(true);
+    assert(!view.take(first, last));
+    // LCDSADDR moved to a frame with other bytes on every line: every row.
+    lcd.write(0x14, (0x30100000 + 3 * 64) >> 1, intc);
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 2);
+    matches();
+    view.reset();
+    // A changed pixel format with the same bytes converts every line again.
+    lcd.write(0x10, 0, intc);
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 2);
+    matches();
+    view.reset();
+    // Back to the first frame with only line 0 differing: only row 0 is dirty after its own change.
+    std::memcpy(mem + 3 * 64, mem, 3 * 64);
+    mem[3 * 64 + 1] ^= 0x55;
+    scan(true);
+    view.reset();
+    mem[3 * 64 + 1] ^= 0x55;
+    scan(true);
+    assert(view.take(first, last) && first == 0 && last == 0);
+    view.reset();
+    // LCD off: black, and the rows that weren't black are dirty.
+    std::memset(mem + 3 * 64 + 128, 0, 64);
+    scan(true);
+    matches();
+    view.reset();
+    scan(false);
+    assert(view.take(first, last) && first == 0 && last == 1);
+    for (uint32_t p : view.pixels) assert(p == 0xff000000u);
+    view.reset();
+    scan(false);
+    assert(!view.take(first, last));
+    // A size change marks every row pending.
+    view.scan(8, 4, &layout, span);
+    assert(view.take(first, last) && first == 0 && last == 3);
+}
+
 static void lcdTests() {
     S3cIntc intc;
     intc.reset();
@@ -662,6 +830,8 @@ static void lcdTests() {
     // Without HWSWP the first pixel is the high halfword.
     small.write(0x10, 1u << 11, intc);
     assert(small.frame(memory, pixels, w, h, why) && pixels[0] == 0x00ff00 && pixels[1] == 0xff0000);
+    lcdFormatTests();
+    lcdViewTests();
 }
 
 // The host's erase for a hard reset: whole blocks back to 0xff and marked dirty, the blocks either side kept.

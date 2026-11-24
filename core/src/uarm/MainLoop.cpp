@@ -48,7 +48,7 @@ double MainLoop::Cycle(uint64_t now, bool paused) {
     }
 
     const uint64_t lagCatchup = 3 * timesliceUsec / 2;
-    const uint64_t lagSkip = 3 * timesliceUsec;
+    const uint64_t lagSkip = std::max(catchUpUsec, 3 * timesliceUsec);
     // virtualTimeUsec += static_cast<double>(socGetInjectedTimeNsec(soc)) / 1000;
     soc->ResetInjectedTimeNsec();
 
@@ -56,6 +56,7 @@ double MainLoop::Cycle(uint64_t now, bool paused) {
     if (deltaUsec < 0) return 0;
 
     if (deltaUsec > lagSkip) {
+        droppedUsec += deltaUsec - timesliceUsec;
         deltaUsec = timesliceUsec;
         virtualTimeUsec = now - deltaUsec;
         cyclesPerSecondAverage.Reset(1);

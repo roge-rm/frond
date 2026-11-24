@@ -62,8 +62,8 @@ bool IsConditionPassed(TranslatorVisitor& v, IR::Cond cond) {
 
     // non-AL cond
 
-    if (!v.ir.block.empty()) {
-        // We've already emitted instructions. Quit for now, we'll make a new block here later.
+    if (!v.ir.block.empty() && v.ir.current_location != LocationDescriptor{v.ir.block.Location()}) {
+        // Start a new block after earlier guest instructions. Entry instrumentation can precede the first one.
         v.cond_state = ConditionalState::Break;
         v.ir.SetTerm(IR::Term::LinkBlockFast{v.ir.current_location});
         return false;

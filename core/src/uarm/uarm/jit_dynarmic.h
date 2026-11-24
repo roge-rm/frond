@@ -56,6 +56,8 @@ uint32_t jitMaxUnchecked(const FrondJit *jit);
 // Inside jitRun, from a memory read callback: the cycles the run has charged so far, its
 // finished blocks (a block's cycles count at its end).
 uint32_t jitRanNow(const FrondJit *jit);
+// The same in instructions (ARM920T ticks' low half; clocks elsewhere).
+uint32_t jitRanInstructionsNow(const FrondJit *jit);
 // MRC and MCR p15 c3 (domain access control) run in privileged mode from generated code, in
 // every JIT so far (tests).
 uint64_t jitDomainCalls();
@@ -117,6 +119,10 @@ int cpuJitIoWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, bool
 int cpuJitLeanDeviceWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value, uint32_t ranNow);
 bool cpuJitCodePageWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value);
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word);
+// ARM920T Fast blocks: as cpuJitFetch, at an MVA (no FCSE relocation). False on other cores.
+bool cpuJitFetchMva(ArmCpu *cpu, uint32_t mva, uint32_t *word);
+// ARM920T Fast blocks: the word at a physical address in RAM or ROM, whatever maps it.
+bool cpuJitFetchPa(ArmCpu *cpu, uint32_t pa, uint32_t *word);
 // While on, cpuJitFetch reads only RAM and ROM; a fetch from anything else fails and is
 // noted for cpuJitRefused (turning it on clears that). For code compiled ahead, which the
 // guest may never run, so no device sees a read the guest didn't make.
@@ -132,6 +138,15 @@ uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va);
 // Physical address of va by the page tables, without touching the TLBs, and in *access the
 // domain and AP of its page (MMU_ACCESS_*, see mmuTranslateCodeAccess), also on a fault.
 bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access);
+// The same, remembering the page table words the walk read in memo (an MmuCodeWalkMemo) on the ARM920T with
+// Fast blocks, so a walk over unchanged tables is a compare.
+struct MmuCodeWalkMemo;
+bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, MmuCodeWalkMemo *memo);
+// The translation table base the MMU walks now (MMU_DISABLED_TTP with the MMU off).
+uint32_t cpuJitTtb(ArmCpu *cpu);
+// mmuTlbFills and mmuTlbLive of the CPU's MMU.
+uint32_t cpuJitTlbFills(ArmCpu *cpu, uint32_t *sinceFlush);
+bool cpuJitTlbLive(ArmCpu *cpu, uint32_t va);
 // Whether code from a page with that access may be fetched now, in the current mode.
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
 // Domains, S and R: what cpuJitAccessReadable depends on besides the access and the
@@ -174,6 +189,7 @@ uint32_t *cpuJitSpsr(ArmCpu *cpu);
 // ARM920T Fast blocks: where generated code notes an access pc (cpuArm920SetJitAccessPcs), and whether pc is one.
 uint32_t *cpuJitAccessPcSlot(ArmCpu *cpu);
 bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc);
+bool cpuJitAccessPcsStartBlocks(const ArmCpu *cpu);
 uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value);
 // For the fork's in-place MSR CPSR (psr_inline_interrupt_mask): the waiting IRQ and FIQ
 // counts as one word, 0 when none is waiting, and the word whose bytes 2 and 3 are the
@@ -229,10 +245,17 @@ inline bool jitCp15SlotWord(uint32_t w) {
     return false;
 }
 
-// The ARM920T's p15 slot in Fast blocks: jitCp15SlotWord's words, and MCR c7, c5, 0 and c7, c5, 2 (I-cache
-// invalidate, all and by index), which Fast blocks ignore as they watch code by physical page.
+// The ARM920T's p15 slot in Fast blocks: jitCp15SlotWord's words, MRC of c5, c6 and c13 (fault status,
+// fault address, FCSE PID: an abort handler's reads), MCR c7, c14, 1 (clean and invalidate D-cache line,
+// through the handler as c7, c10, 1 is), and MCR c7, c5, 0 and c7, c5, 2 (I-cache invalidate, all and by
+// index), which Fast blocks ignore as they watch code by physical page.
 inline bool jitCp15SlotWord920(uint32_t w) {
     if (jitCp15SlotWord(w)) return true;
+    if ((w & 0x0fff0fff) == 0x0e070f3e) return true;  // MCR p15, 0, Rd, c7, c14, 1
+    if ((w & 0x0ff00fff) == 0x0e100f10) {  // MRC p15, 0, Rd, CRn, c0, 0
+        const uint32_t crn = (w >> 16) & 15;
+        return crn == 5 || crn == 6 || crn == 13;
+    }
     if ((w & 0x0fff0f1f) != 0x0e070f15) return false;
     const uint32_t op2 = (w >> 5) & 7;
     return op2 == 0 || op2 == 2;
