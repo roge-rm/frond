@@ -176,15 +176,15 @@ inline uint32_t& allocate(DataCacheState& s, const CacheGeometry& g, uint32_t va
     unsigned way;
     if (g.sharedVictim) {
         if (roundRobin) {
-            way = s.victim[0] % g.ways;
-            s.victim[0] = uint8_t((way + 1) % g.ways);
+            way = s.victim[0] & (g.ways - 1);
+            s.victim[0] = uint8_t((way + 1) & (g.ways - 1));
         } else {
             s.random = s.random * 1664525u + 1013904223u;
-            way = (s.random >> 24) % g.ways;
+            way = (s.random >> 24) & (g.ways - 1);
         }
     } else {
-        way = s.victim[set] % g.ways;
-        s.victim[set] = uint8_t((way + 1) % g.ways);
+        way = s.victim[set] & (g.ways - 1);
+        s.victim[set] = uint8_t((way + 1) & (g.ways - 1));
     }
     uint32_t& l = s.line[set * g.ways + way];
     if (l & kLineValid) {
@@ -213,7 +213,7 @@ inline void bufferStore(DataCacheState& s, Core core, uint32_t va, uint64_t now,
 // the access, charges so far included, as cacheStall takes it). roundRobin is the ARM920T's RR bit (the
 // XScale is always round-robin).
 inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Policy p, bool store, uint64_t now,
-                                   bool roundRobin = true) {
+                                   bool roundRobin = true, uint8_t* hint = nullptr) {
     CacheEvents e;
     if (!policyCached(p)) {
         if (!store) e.uncachedLoads = 1;
@@ -222,10 +222,14 @@ inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Po
         return e;
     }
     const CacheGeometry& g = cacheGeometry(core);
-    const int way = detail::findWay(s, g, va);
     const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
+    uint32_t* base = s.line + set * g.ways;
+    const unsigned previous = hint ? hint[set] & (g.ways - 1) : 0;
+    const int way = hint && (base[previous] & (kLineValid | kLineAddressMask)) == ((va >> 5) | kLineValid)
+                        ? int(previous) : detail::findWay(s, g, va);
     const uint32_t dirty = (va & 16) ? kLineDirtyHigh : kLineDirtyLow;
     if (way >= 0) {
+        if (hint) hint[set] = uint8_t(way);
         e.hits = 1;
         if (store) {
             if (p == Policy::writeThrough) detail::bufferStore(s, core, va, now, e);
@@ -234,12 +238,14 @@ inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Po
         return e;
     }
     if (!store) {
-        detail::allocate(s, g, va, roundRobin, e);
+        auto& line = detail::allocate(s, g, va, roundRobin, e);
+        if (hint) hint[set] = uint8_t(&line - base);
         e.fills = 1;
         return e;
     }
     if (p == Policy::writeBackAllocate) {
         uint32_t& l = detail::allocate(s, g, va, roundRobin, e);
+        if (hint) hint[set] = uint8_t(&l - base);
         l |= dirty;
         e.fills = 1;
         return e;
@@ -253,26 +259,7 @@ inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Po
 // address, so the hinted way is the one the full search would find.
 inline CacheEvents dataCacheAccessHinted(DataCacheState& s, Core core, uint32_t va, Policy p, bool store,
                                          uint64_t now, uint8_t* hint, bool roundRobin = true) {
-    const CacheGeometry& g = cacheGeometry(core);
-    const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
-    if (policyCached(p)) {
-        uint32_t& l = s.line[set * g.ways + hint[set] % g.ways];
-        if ((l & (kLineValid | kLineAddressMask)) == (((va >> 5) & kLineAddressMask) | kLineValid)) {
-            CacheEvents e;
-            e.hits = 1;
-            if (store) {
-                if (p == Policy::writeThrough) detail::bufferStore(s, core, va, now, e);
-                else l |= (va & 16) ? kLineDirtyHigh : kLineDirtyLow;
-            }
-            return e;
-        }
-    }
-    const CacheEvents e = dataCacheAccess(s, core, va, p, store, now, roundRobin);
-    if (policyCached(p) && (e.hits | e.fills)) {  // a miss that didn't allocate leaves the set as it was
-        const int way = detail::findWay(s, g, va);
-        if (way >= 0) hint[set] = uint8_t(way);
-    }
-    return e;
+    return dataCacheAccess(s, core, va, p, store, now, roundRobin, hint);
 }
 
 // Cache maintenance (CP15 c7). Each returns the dirty halves it wrote back.

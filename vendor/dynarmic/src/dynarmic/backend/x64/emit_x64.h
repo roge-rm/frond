@@ -81,6 +81,8 @@ public:
     explicit EmitX64(BlockOfCode& code);
     virtual ~EmitX64();
 
+    void RetirePatchOrigin(BlockDescriptor block);
+
     /// Looks up an emitted host block in the cache.
     std::optional<BlockDescriptor> GetBasicBlock(IR::LocationDescriptor descriptor) const;
 
@@ -121,6 +123,8 @@ protected:
     virtual void EmitTerminalImpl(IR::Term::CheckBit terminal, IR::LocationDescriptor initial_location, bool is_single_step) = 0;
     virtual void EmitTerminalImpl(IR::Term::CheckHalt terminal, IR::LocationDescriptor initial_location, bool is_single_step) = 0;
 
+    void EnablePatchRetirement();
+
     // Patching
     struct PatchInformation {
         std::vector<CodePtr> jg;
@@ -140,6 +144,10 @@ protected:
     ExceptionHandler exception_handler;
     tsl::robin_map<IR::LocationDescriptor, BlockDescriptor> block_descriptors;
     tsl::robin_map<IR::LocationDescriptor, PatchInformation> patch_information;
+
+private:
+    // One byte per 16-byte code slot. A32 blocks begin at a 16-byte boundary.
+    std::vector<u8> retired_patch_origins;
 };
 
 }  // namespace Dynarmic::Backend::X64

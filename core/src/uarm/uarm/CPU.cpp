@@ -572,7 +572,7 @@ static FORCE_INLINE void cpuPrvHintDrop(struct ArmCpu *cpu, uint32_t line, bool 
 static FORCE_INLINE void cpuPrvHintNote(struct ArmCpu *cpu, cost::Core core, uint32_t va, cost::Policy p) {
     const cost::CacheGeometry &g = cost::cacheGeometry(core);
     const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
-    const uint32_t l = cpu->dcache.line[set * g.ways + cpu->dcacheHint[set] % g.ways];
+    const uint32_t l = cpu->dcache.line[set * g.ways + (cpu->dcacheHint[set] & (g.ways - 1))];
     if ((l & (cost::kLineValid | cost::kLineAddressMask)) != (((va >> 5) & cost::kLineAddressMask) | cost::kLineValid))
         return;
     const uint32_t line = va & ~31u;
@@ -7511,11 +7511,10 @@ void cpuSetVectorAddr(struct ArmCpu *cpu, uint32_t adr) { cpu->vectorBase = adr;
 
 uint16_t cpuGetCPAR(struct ArmCpu *cpu) { return cpu->CPAR; }
 
-// Fast only runs iWMMXt instructions whose coprocessor CPAR allows (cpuJitPlain), so a
-// change to bit 0 or 1 drops the translated code.
+// Fast code is tagged with the iWMMXt permission bits of CPAR.
 void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) {
 #ifdef FROND_DYNARMIC
-    if (cpu->jit) jitCparWritten(cpu->jit, cpu->wmmx && ((cpu->CPAR ^ cpar) & 3));
+    if (cpu->jit) jitCparWritten(cpu->wmmx && ((cpu->CPAR ^ cpar) & 3));
 #endif
     cpu->CPAR = cpar;
 }

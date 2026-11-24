@@ -86,9 +86,8 @@ void jitInvalidate(FrondJit *jit, uint32_t va, uint32_t size);
 void jitGuestInvalidateAll(FrondJit *jit, uint32_t pc);
 // Host side changes (reset, session load, PACE and peephole patching): drops everything.
 void jitClear(FrondJit *jit);
-// A CPAR write; changed: bit 0 or 1 changed on a CPU with iWMMXt, which drops all translated
-// code, since whether the JIT runs iWMMXt instructions depends on those bits.
-void jitCparWritten(FrondJit *jit, bool changed);
+// Count CPAR writes and changes to iWMMXt permissions.
+void jitCparWritten(bool changed);
 // For tests: whether the iWMMXt slot gives a callback for the ARM word (CDP, MCR, MRC, MCRR,
 // MRRC, LDC or STC on coprocessor 0 or 1), as it would when dynarmic compiles it.
 bool jitWmmxCompiles(FrondJit *jit, uint32_t word);

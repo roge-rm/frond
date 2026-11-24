@@ -325,7 +325,8 @@ std::function<bool(IR::LocationDescriptor)> A32AddressSpace::CompiledFn() {
 std::function<std::unique_ptr<A32::CodeSnapshot>(IR::LocationDescriptor)> A32AddressSpace::SnapshotFn() {
     return [this](IR::LocationDescriptor location) {
         const A32::LocationDescriptor a32_location{location};
-        return conf.callbacks->SnapshotCodeAhead(a32_location.PC(), a32_location.TFlag(), compile_thread->Overflowed(location));
+        return conf.callbacks->SnapshotCodeAhead(a32_location.PC(), a32_location.TFlag(),
+                                                   compile_thread->Overflowed(location), a32_location.FPSCR().Value());
     };
 }
 
