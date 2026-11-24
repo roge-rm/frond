@@ -1664,6 +1664,9 @@ bool gFastEngineMissing = false;
                     bool sampled = false;
                     if (zodiac) {
                         const auto status = zodiac->Status();
+                        uint64_t fmSamples = 0, fmSounding = 0;
+                        zodiac->FmSamples(fmSamples, fmSounding);
+                        zodiacSpeed->Fm(fmSamples, fmSounding);
                         sampled = zodiacSpeed->Sample(now, status.retired, status.time.ticks);
                     } else {
                         auto& machine = rx1950Soc->Machine();

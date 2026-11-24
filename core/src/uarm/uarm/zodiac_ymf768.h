@@ -165,6 +165,8 @@ class Imx1Ymf768 {
     unsigned queuedRecords() const { return fifoQueued; }
     uint64_t engineSamples() const { return samples; }
     uint64_t engineQuietSamples() const { return quietSamples; }
+    // Samples with some operator above ymfm's quiet level, for the speed log.
+    uint64_t engineSoundingSamples() const { return soundingSamples; }
     void setQuietSkipping(bool on) { quietSkipping = on; }
     std::vector<uint8_t> engineState() const { std::vector<uint8_t> v; saveEngine(v); return v; }
     static bool engineStateValid(const std::vector<uint8_t>& in);
@@ -258,6 +260,7 @@ class Imx1Ymf768 {
     uint64_t enginePeriod;  // 32768 x the System PLL numerator at the last advance, 0 before the first
     uint64_t samples;     // not saved, for tests
     uint64_t quietSamples;  // not saved, for tests: samples made without the output calls
+    uint64_t soundingSamples = 0;  // not saved: samples that weren't quiet
     // The last sample was quiet and every channel's feedback input is 0 (sample). Not saved: false after a
     // load or copy only costs one full sample.
     bool quietOutput;

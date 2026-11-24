@@ -3666,6 +3666,12 @@ Imx1ReferenceTime imx1MachineYmfLastReadyRead(const Imx1Machine* machine) {
     return machine->probe->peripherals.ymf768().lastReadyRead();
 }
 
+void imx1MachineYmfSamples(const Imx1Machine* machine, uint64_t* samples, uint64_t* sounding) {
+    const auto& ymf = machine->probe->peripherals.ymf768();
+    *samples = ymf.engineSamples();
+    *sounding = ymf.engineSoundingSamples();
+}
+
 void imx1SetFastBlocksDefault(bool blocks) { fastBlocksDefault = blocks; }
 
 bool imx1MachineSetFastBlocks(Imx1Machine* machine, bool blocks) {

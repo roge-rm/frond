@@ -92,6 +92,7 @@ Imx1Ymf768& Imx1Ymf768::operator=(const Imx1Ymf768& other) {
     pendingRight = other.pendingRight;
     quietOutput = false;
     quietSamples = other.quietSamples;
+    soundingSamples = other.soundingSamples;
     quietSkipping = other.quietSkipping;
     std::vector<uint8_t> engine;
     other.saveEngine(engine);
@@ -104,7 +105,7 @@ void Imx1Ymf768::reset() {
     index = 0; bank = 0; fifoQueued = 0; fifoPartial = 0; fifoWait = 0;
     readyPending = 0; std::memset(readyAcc, 0, sizeof(readyAcc)); readyNumerator = 0;
     timerAcc = 0; engineAcc = 0; enginePeriod = 0; samples = 0; pendingRight = 0;
-    quietOutput = false; quietSamples = 0;
+    quietOutput = false; quietSamples = 0; soundingSamples = 0;
     for (auto& v : last) v = 0;
     core->engine.reset();
     engineWrite(0x105, 1);  // OPL3 mode: four operators and the eight waveforms
@@ -220,6 +221,7 @@ void Imx1Ymf768::sample(int32_t& left, int32_t& right) {
     bool quiet = true;
     for (unsigned n = 0; n < Imx1Ymf768Engine::OPERATORS && quiet; ++n)
         quiet = engine.debug_operator(n)->debug_eg_attenuation() > 0x380;
+    if (!quiet) ++soundingSamples;
     if (quiet && quietOutput && quietSkipping) {
         left = right = 0;
         ++quietSamples;

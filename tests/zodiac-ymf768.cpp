@@ -374,6 +374,15 @@ static void quietIdle() {
     fprintf(stderr, "quiet idle: %llu of %llu samples skipped\n", (unsigned long long)quick.engineQuietSamples(),
             (unsigned long long)quick.engineSamples());
     assert(quick.engineQuietSamples() > quick.engineSamples() / 2);
+    // The speed log's sounding count: the same whether quiet samples are skipped or not, none before the first
+    // key on, and every sample is either sounding or quiet.
+    assert(full.engineSoundingSamples() == quick.engineSoundingSamples());
+    assert(quick.engineSoundingSamples() > 0 && quick.engineSoundingSamples() + quick.engineQuietSamples() <= quick.engineSamples());
+    {
+        Imx1Ymf768 opening = quietVoices(true);
+        for (unsigned f = 0; f < 1500; ++f) { int32_t l, r; frame(opening, l, r); }
+        assert(opening.engineSamples() > 0 && opening.engineSoundingSamples() == 0);
+    }
     // Saves in the opening silence and mid-silence after the release, loaded, carry on the same.
     {
         Imx1Ymf768 again = quietVoices(true);

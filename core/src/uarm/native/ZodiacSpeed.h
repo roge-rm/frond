@@ -2,8 +2,8 @@
 
 // Speed figures for the Zodiac and the rx1950, worked out on the guest thread once per window: instructions per
 // second of real time and per second spent emulating, guest time against real time, frames handed
-// to the SDL thread and drawn there, and the CPU time each of the two threads used. The SDL thread
-// only adds to the draw counters.
+// to the SDL thread and drawn there, and the CPU time each of the two threads used, and on the Zodiac the share of
+// FM engine samples that sounded. The SDL thread only adds to the draw counters.
 
 #include <pthread.h>
 #include <time.h>
@@ -37,6 +37,14 @@ public:
     void HandedOver(uint64_t usec) {
         window.handoffUsec += usec;
         ++window.published;
+    }
+
+    // Guest thread, before Sample on the Zodiac: the FM engine's sample counts so far (all, and those that
+    // sounded). The line gives the window's sounding share.
+    void Fm(uint64_t samples, uint64_t sounding) {
+        fmSamples = samples;
+        fmSounding = sounding;
+        fmKnown = true;
     }
 
     // Guest thread: whether Sample is due, the first time or once a window has passed.
@@ -83,6 +91,12 @@ public:
             drawn ? drawTime / 1e3 / drawn : 0.0,
             sdlClockValid ? 100.0 * (sdlCpu - start.sdlCpu) / wall : 0.0);
         line = text;
+        if (fmKnown && start.fmKnown && fmSamples >= start.fmSamples && fmSounding >= start.fmSounding) {
+            const uint64_t made = fmSamples - start.fmSamples, sounded = fmSounding - start.fmSounding;
+            if (made) std::snprintf(text, sizeof text, "; FM sounding %.1f%% of %.1fk samples/s", 100.0 * sounded / made, made / seconds / 1e3);
+            else std::snprintf(text, sizeof text, "; FM off");
+            line += text;
+        }
         Restart(now, retired, guestTicks, guestCpu, sdlCpu);
         return true;
     }
@@ -97,10 +111,15 @@ private:
     struct Window {
         uint64_t wall{0}, retired{0}, guestTicks{0}, guestCpu{0}, sdlCpu{0};
         uint64_t emulationUsec{0}, handoffUsec{0}, published{0};
+        uint64_t fmSamples{0}, fmSounding{0};
+        bool fmKnown{false};
     };
 
     void Restart(uint64_t now, uint64_t retired, uint64_t guestTicks, uint64_t guestCpu, uint64_t sdlCpu) {
         start = Window{now, retired, guestTicks, guestCpu, sdlCpu};
+        start.fmSamples = fmSamples;
+        start.fmSounding = fmSounding;
+        start.fmKnown = fmKnown;
         window = Window{};
     }
 
@@ -120,4 +139,6 @@ private:
     uint64_t ips{0};
     double realTime{0};
     std::atomic<uint64_t> draws{0}, frames{0}, drawUsec{0};
+    uint64_t fmSamples{0}, fmSounding{0};
+    bool fmKnown{false};
 };

@@ -262,6 +262,11 @@ class SocIMX1 : public SoC {
         if (machine) imx1MachineSetFmOutputMuted(machine, muted);
     }
     bool FmMuted() const { return fmMuted; }
+    // The FM engine's samples so far and how many sounded, for the speed log.
+    void FmSamples(uint64_t& samples, uint64_t& sounding) const {
+        samples = sounding = 0;
+        if (machine) imx1MachineYmfSamples(machine, &samples, &sounding);
+    }
     // The events caught, for the player and tests.
     zodiac_music::Hooks& MusicHooks() { return music.hooks; }
     const zodiac_music::Library& MusicLibrary() const { return music.library; }

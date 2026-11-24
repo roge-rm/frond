@@ -308,6 +308,8 @@ void imx1SetFifoWaitSkip(bool skip);
 uint64_t imx1MachineYmfReadyReads(const Imx1Machine*);
 // The board time of the last of those reads, for tests (not saved).
 Imx1ReferenceTime imx1MachineYmfLastReadyRead(const Imx1Machine*);
+// The YMF768's engine samples made so far and how many of them sounded (host only, not saved).
+void imx1MachineYmfSamples(const Imx1Machine*, uint64_t* samples, uint64_t* sounding);
 // SSI1 words sent again from an empty FIFO since the process started (every machine, not saved), for tools.
 uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*);
 // Instructions the Fast engine ran on its lean path since the machine was made.
