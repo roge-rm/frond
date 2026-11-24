@@ -2106,6 +2106,11 @@ bool softwareInterrupt(uint32_t i, bool thumb) {
 bool undefinedInstruction(uint32_t i, bool thumb) {
     return thumb ? (i & 0xff00) == 0xde00 : i >> 28 != 15 && (i & 0x0e000010) == 0x06000010;
 }
+// PLD (ARMv5TE, NV condition) never executes on the ARM920T, as in the CPU model: TCPMP runs it when it plays
+// through its ATI video drivers.
+bool neverExecutedPld(uint32_t i) {
+    return i >> 28 == 15 && (i & 0x0d70f000) == 0x0550f000;
+}
 // An abort or undefined instruction entry as the ARM920T takes it (ARM DDI0100I A2.6): the vector, abort or
 // undefined mode, I set, F kept, ARM state, SPSR the old CPSR, and the link: the next instruction for undefined,
 // the aborted instruction + 4 for a prefetch abort and + 8 for a data abort, in both states.
@@ -2631,7 +2636,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
         (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc,
                                  alignmentFaults) :
-         t.instruction >> 28 == 15 ||
+         (t.instruction >> 28 == 15 && !neverExecutedPld(t.instruction)) ||
          (condition(t.instruction, t.cpsr) &&
           !bootstrapInstructionChecked(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
                                        cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR), alignmentFaults))));

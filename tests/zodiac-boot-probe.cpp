@@ -171,6 +171,12 @@ int main() {
         r = run({instruction});  // CLZ, BLX register/immediate and unqualified byte load to PC.
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.pc == 0x10000000);
     }
+    for (bool fast : {false, true}) {
+        for (uint32_t pld : {0xf5d0f020u, 0xf7d0f002u}) {  // PLD [r0, #32] and PLD [r0, r2] never execute.
+            r = run({0xe3a00007, pld, 0xeafffffe}, 4, fast);
+            assert(r.stop == Imx1ProbeStop::budget && r.trace.step == 3 && r.registers[0] == 7);
+        }
+    }
     r = run({0x016f1f10, 0xeafffffe}, 3);  // Failed condition skips even an unsupported instruction.
     assert(r.stop == Imx1ProbeStop::budget && r.trace.step == 2);
     r = run({0xe3a00000, 0xee080f17, 0xeafffffe}, 3);
