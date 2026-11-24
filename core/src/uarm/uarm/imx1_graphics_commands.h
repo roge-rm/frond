@@ -94,6 +94,11 @@ class Imx1GraphicsCommands {
         else refused = candidate.refused;
         return status;
     }
+    // Whether decode's room checks pass for a batch of left words on a ring of words words, with the queue as it is.
+    // A completion only makes room, so a pass holds after one.
+    bool roomFor(uint32_t words, uint32_t left) const {
+        return words && batches.size() < words - 1 && left <= words - 1 - queuedWords;
+    }
     // prepare for a copy the caller drops on refusal, reading only refusal() from it then: decodes in place, with
     // the same result as prepare where it succeeds.
     Imx1BootstrapAccess prepareCopy(const Imx1Cs5Configuration& configuration,

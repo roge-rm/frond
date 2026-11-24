@@ -240,6 +240,13 @@ bool deferSubmits = [] {
     return !(v && *v && !std::strcmp(v, "0"));
 }();
 uint64_t deferredSubmits = 0;  // for tests and traces
+// The same past queued batches' completions in a crossing span (deferSubmit). FROND_ZODIAC_DEFER_CROSSING=0 turns
+// that part off.
+bool deferCrossing = [] {
+    const char* v = std::getenv("FROND_ZODIAC_DEFER_CROSSING");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+uint64_t deferredCrossings = 0;  // for traces
 uint64_t crossSpans = 0, crossRefusals = 0;  // for tests and traces
 uint64_t aspPollSkips = 0, aspPollRounds = 0, aspPollCycles = 0;  // for tests and traces
 // The loop at 20096d92 (Thumb): ldr r3, [r0, #52] (FIFO_PTR); lsls r3, #28; lsrs r3, #28; cmp r3, #3; bcc back.
@@ -1510,7 +1517,23 @@ struct Probe {
         const uint64_t cost = checks.clocks ? leanClockCost(checks.clocks) : 0;
         if (remaining <= cost + leanMinimumSpan) return 0;
         const uint64_t behind = deferredCycles + (deferredHclk ? leanClockCost(uint32_t(deferredHclk)) : 0);
-        if (cs5Configuration.quietCpuCycles(peripherals.cpuReferencePeriod(quietMode)) <= behind + 1) return 0;
+        const auto period = peripherals.cpuReferencePeriod(quietMode);
+        if (cs5Configuration.quietCpuCycles(period) <= behind + 1) {
+            // Batches complete in between: only in a span that runs past completions, where nothing reads what they
+            // change, the last of them still running, and room for the batch with the read pointer and the queue
+            // as they are before the completions (the room they make only lets more in). Decoding reads no state a
+            // completion changes but the room: a queued brush upload is read from its batch.
+            if (!deferCrossing || !spanCrosses) return 0;
+            const uint64_t last = cs5Configuration.cpuStepsThroughLast(period);
+            if (last <= behind + 1) return 0;
+            const auto& engine = cs5Configuration.engineState();
+            const uint32_t words = engine.ringBytes() / 4, mask = words - 1;
+            if (!words || value > mask) return 0;
+            const uint32_t added = (value - engine.producer()) & mask;
+            const uint32_t occupied = (engine.producer() - engine.consumer()) & mask;
+            if (!added || added > mask - occupied || !graphicsCommands.roomFor(words, added)) return 0;
+            ++deferredCrossings;
+        }
         preCycles = deferredCycles;
         preHclk = deferredHclk;
         auto& t = result.trace;
