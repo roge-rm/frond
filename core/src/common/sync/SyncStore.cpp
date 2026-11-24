@@ -227,10 +227,12 @@ bool SyncLibrary::CreateProfile(const std::string& name, ProfileInfo& out, std::
     if (ec) return error = "Could not make the profile folder: " + ec.message(), false;
     SyncProfile profile;
     if (!profile.Open((fs::path(root) / folder).string(), error)) return false;
+    // One timestamp for the row and the caller, so a check against the row matches.
+    const auto created = NowSeconds();
     Query q(db, "INSERT INTO profile(name,folder,created) VALUES(?,?,?)");
-    q.Bind(1, name).Bind(2, folder).Bind(3, NowSeconds());
+    q.Bind(1, name).Bind(2, folder).Bind(3, created);
     if (!q.Run()) return error = LastError(db), false;
-    out = {sqlite3_last_insert_rowid(db), name, folder, NowSeconds()};
+    out = {sqlite3_last_insert_rowid(db), name, folder, created};
     return true;
 }
 

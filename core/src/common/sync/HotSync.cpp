@@ -319,11 +319,13 @@ struct Session {
                 ++result.backupSkipped;  // the handheld asks for it to be left out
                 continue;
             }
+            // Every database this profile has no copy of is backed up, whatever its backup bit
+            // and dates say: an app installed from a file keeps the file's header, often with no
+            // backup bit and a backup date no older than its modification date.
             const auto stored = profile.FindBackup(result.deviceKey, entry.name);
             const bool changed = !stored || stored->modNumber != entry.modNumber || stored->modified != entry.modified ||
                                  stored->attributes != (entry.attributes & ~dbOpen);
-            const bool wanted = (entry.attributes & dbBackup) || entry.modified > entry.backedUp || stored;
-            if (!wanted || !changed) {
+            if (!changed) {
                 ++result.backupSkipped;
                 continue;
             }

@@ -818,7 +818,7 @@ class InstallHandheld : public PacketLink {
                 data.insert(data.end(), {'A', 0});
                 break;
             case dlpReadDBList:
-                if (args.front().data[3]) {
+                if (args.front().data[3] || !listed) {
                     status = dlpErrNotFound;
                 } else {
                     data = Bytes(48);
@@ -861,6 +861,7 @@ class InstallHandheld : public PacketLink {
 
     bool refuseConduit{false};
     bool refuseRead{true};
+    bool listed{true};
     uint8_t record{1};
     unsigned deletes{0};
 
@@ -907,6 +908,37 @@ void TestInstallRecovery(const std::string& root) {
         CHECK(profile.QueueRestore(*recovery, "machine:other", error) == 0);
         CHECK(profile.QueueRestore(*recovery, MachineDeviceKey(options.machineKey), error) == 1);
     }
+}
+
+// "Test" has no backup bit and its modification date isn't past its backup date, as an app
+// installed from a file can. It's still backed up, and a restore after a hard reset brings it back.
+void TestBackupAndRestoreAfterReset(const std::string& root) {
+    std::string error;
+    SyncLibrary library;
+    CHECK(library.Open(root, error));
+    ProfileInfo info;
+    CHECK(library.CreateProfile("Reset restore", info, error));
+    SyncOptions options;
+    options.machineKey = "reset-test";
+    options.profile = info.name;
+    const auto key = MachineDeviceKey(options.machineKey);
+    InstallHandheld handheld;
+    handheld.refuseRead = false;
+    SyncProfile profile;
+    CHECK(profile.Open(library.ProfilePath(info), error));
+    auto result = RunHotSync(handheld, options, root, Transport::serial, SyncManager::Get());
+    CHECK(result.ok && result.backedUp == 1);
+    CHECK(profile.FindBackup(key, "Test").has_value());
+    // The hard reset: the handheld syncs with the database gone, and the backup stays.
+    handheld.listed = false;
+    handheld.record = 0;
+    result = RunHotSync(handheld, options, root, Transport::serial, SyncManager::Get());
+    CHECK(result.ok && result.backedUp == 0);
+    CHECK(profile.FindBackup(key, "Test").has_value());
+    CHECK(profile.QueueRestore(key, key, error) == 1);
+    result = RunHotSync(handheld, options, root, Transport::serial, SyncManager::Get());
+    CHECK(result.ok && result.installed == 1 && result.installFailed == 0);
+    CHECK(handheld.record == 1);
 }
 
 void TestFailedPalmSyncKeepsUser(const std::string& root) {
@@ -1037,6 +1069,7 @@ int main(int argc, char** argv) {
     TestInstallerFiles();
     TestStore(argv[1]);
     TestInstallRecovery(argv[1]);
+    TestBackupAndRestoreAfterReset(argv[1]);
     TestFailedPalmSyncKeepsUser(argv[1]);
     TestRapiDeadlines();
     TestActiveSync(argv[1]);
