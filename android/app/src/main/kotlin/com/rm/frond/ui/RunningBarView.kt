@@ -184,11 +184,14 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
             }
             state.syncProtocol?.let { protocol ->
                 IconButton(actions.startSync, Modifier.size(button), enabled = !state.syncStarting && !state.syncRunning && state.model?.busy == null) {
-                    Icon(Icons.Filled.Refresh, contentDescription = protocol.label)
+                    Icon(painterResource(if (protocol == SyncProtocol.ACTIVE_SYNC) R.drawable.ic_activesync else R.drawable.ic_hotsync), contentDescription = protocol.label)
                 }
             }
             if (state.soundKey) BarButton(actions.toggleSound, button) {
                 Icon(painterResource(if (state.sound) R.drawable.ic_volume_up else R.drawable.ic_volume_off), contentDescription = if (state.sound) "Mute" else "Unmute")
+            }
+            if (device != null && !device.runs68k) BarButton({ state.model?.rotate() }, button) {
+                Icon(painterResource(R.drawable.ic_rotate_device), contentDescription = "Rotate")
             }
             if (state.powerKey) BarButton(actions.power, button) { Icon(painterResource(R.drawable.ic_power), contentDescription = "Power") }
             Box {
