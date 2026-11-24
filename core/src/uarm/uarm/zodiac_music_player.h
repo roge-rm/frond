@@ -7,7 +7,9 @@
 // drops its message, as the ROM's DAL does (its handlers refuse a note, velocity, program or controller value over
 // 127), except pitch bend, which it masks to 7 bits, a song's note-off velocity and the value of All Sound Off,
 // Reset All Controllers and All Notes Off, which it doesn't read (sent as 0). Stop, Close, a reset or load and a song's end send all notes off (CC 123 and 120) on all
-// 16 channels. Host only, never saved; nothing here touches the machine.
+// 16 channels. A Play with a range starts at its start (what comes before gives its state, and only notes from the
+// last 20 ms before it sound, as in the DAL) and ends at its end; one with a channel plays only that channel's notes.
+// Host only, never saved; nothing here touches the machine.
 // Two stages, neither on the emulation thread:
 // - Preparer, on a helper thread, takes the hooks' events, parses each file at its first Play (keeping the last
 //   few) and turns every event into a Cue, plain data with at most one Held (a parsed song or a sysex's bytes).
@@ -47,6 +49,9 @@ struct Cue {
     uint8_t bytes[3]{};
     uint8_t length = 0;
     Held* held = nullptr;
+    // play: Event's range and channels.
+    uint32_t startMs = 0, endMs = Event::noEnd;
+    uint8_t firstChannel = 0, lastChannel = 15;
 };
 
 using Release = std::function<void(Held*)>;
@@ -62,6 +67,10 @@ class Preparer {
         c.value = e.value;
         for (int i = 0; i < 3; ++i) c.bytes[i] = e.bytes[i];
         c.length = e.length;
+        c.startMs = e.startMs;
+        c.endMs = e.endMs;
+        c.firstChannel = e.firstChannel;
+        c.lastChannel = e.lastChannel;
         switch (e.kind) {
             case Kind::play:
                 if (auto song = parsed(e.smf)) {
@@ -135,12 +144,19 @@ class Player {
                 end(c.handle, c.timeNs, sink, false);
                 if (!c.held) break;
                 if (!c.held->song) { release_(c.held); break; }
+                // The DAL refuses a range that ends past the song (its length in whole ms).
+                if (c.endMs != Event::noEnd && c.endMs > c.held->song->song.lengthUs / 1000) {
+                    release_(c.held);
+                    break;
+                }
                 if (songs_.size() >= maxSongs) {
                     release_(songs_.front().held);
                     songs_.erase(songs_.begin());
                     allNotesOff(c.timeNs, sink);
                 }
-                songs_.push_back({c.handle, c.held, c.held->song.get(), c.timeNs, 0});
+                songs_.push_back({c.handle, c.held, c.held->song.get(), c.timeNs, 0, uint64_t(c.startMs) * 1000,
+                                  c.endMs == Event::noEnd ? UINT64_MAX : uint64_t(c.endMs) * 1000, c.firstChannel,
+                                  c.lastChannel});
                 break;
             case Kind::stop:
             case Kind::close: end(c.handle, c.timeNs, sink, true); break;
@@ -177,8 +193,8 @@ class Player {
             Song* next = nullptr;
             uint64_t at = 0;
             for (auto& s : songs_) {
-                if (s.next >= s.parsed->song.events.size()) continue;
-                const uint64_t t = s.startNs + s.parsed->song.events[s.next].timeUs * 1000;
+                if (done(s)) continue;
+                const uint64_t t = eventNs(s);
                 if (t <= nowNs && (!next || t < at)) next = &s, at = t;
             }
             if (!next) break;
@@ -191,8 +207,8 @@ class Player {
         // Songs played through end by themselves.
         for (size_t i = songs_.size(); i-- > 0;) {
             auto& s = songs_[i];
-            if (s.next < s.parsed->song.events.size()) continue;
-            const uint64_t endNs = s.startNs + s.parsed->song.lengthUs * 1000;
+            if (!done(s)) continue;
+            const uint64_t endNs = endNsOf(s);
             if (endNs > nowNs) continue;
             release_(s.held);
             songs_.erase(songs_.begin() + long(i));
@@ -211,8 +227,7 @@ class Player {
     uint64_t nextNs() const {
         uint64_t at = UINT64_MAX;
         for (const auto& s : songs_) {
-            const auto& events = s.parsed->song.events;
-            const uint64_t t = s.startNs + (s.next < events.size() ? events[s.next].timeUs : s.parsed->song.lengthUs) * 1000;
+            const uint64_t t = done(s) ? endNsOf(s) : eventNs(s);
             if (t < at) at = t;
         }
         return at;
@@ -255,9 +270,28 @@ class Player {
         uint32_t handle;
         Held* held;
         const Parsed* parsed;
-        uint64_t startNs;
+        uint64_t startNs;  // guest time of the Play
         size_t next;
+        uint64_t fromUs, toUs;  // the range played, song time; toUs UINT64_MAX to the end
+        uint8_t firstChannel, lastChannel;
     };
+    // Notes this many ms before a range's start still sound at the Play (the DAL's lateness limit for its songs).
+    static constexpr uint64_t lateMs = 20;
+
+    // Ranges are whole ms, compared as the DAL does: an event in the end's ms still plays.
+    static bool done(const Song& s) {
+        const auto& events = s.parsed->song.events;
+        return s.next >= events.size() || (s.toUs != UINT64_MAX && events[s.next].timeUs / 1000 > s.toUs / 1000);
+    }
+    // Guest time the next event is due: events before the range's start go at the Play.
+    static uint64_t eventNs(const Song& s) {
+        const uint64_t t = s.parsed->song.events[s.next].timeUs;
+        return s.startNs + (t > s.fromUs ? t - s.fromUs : 0) * 1000;
+    }
+    static uint64_t endNsOf(const Song& s) {
+        const uint64_t end = s.toUs != UINT64_MAX ? s.toUs : s.parsed->song.lengthUs;
+        return s.startNs + (end > s.fromUs ? end - s.fromUs : 0) * 1000;
+    }
     const Release release_;
     std::vector<Song> songs_;  // reserved for maxSongs, never grown
     uint64_t skipBeforeNs_ = 0;
@@ -290,6 +324,11 @@ class Player {
             return;
         }
         const uint8_t type = e.status & 0xf0;
+        if (type == 0x80 || type == 0x90) {
+            const uint8_t channel = e.status & 15;
+            if (channel < s.firstChannel || channel > s.lastChannel) return;
+            if (e.timeUs / 1000 + lateMs < s.fromUs / 1000) return;
+        }
         if (type == 0x90 && e.data2 && timeNs < skipBeforeNs_) return;
         uint8_t b[3] = {e.status, e.data1, e.data2};
         const size_t length = type == 0xc0 || type == 0xd0 ? 2 : 3;

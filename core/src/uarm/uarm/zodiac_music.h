@@ -14,7 +14,10 @@
 // 'libr' 'twMD' 'amdc'. Every entry is a B to its function, which the TwGlue stubs reach through the table and
 // TwMidiPlaySmf (entry 80) with bl, so a hook at each function catches both ways in.
 // TwSmfOpen(&handle, smf, outP or 0): on success the handle goes to [r0] (a 24-byte object, magic ff051962 at
-// +8, driver id at +12, playing flag at +13). TwSmfPlay(handle, rangeP or 0, byteP or 0, callbackP or 0).
+// +8, driver id at +12, playing flag at +13); outP gets the song's length in ms. TwSmfPlay(handle, rangeP or 0,
+// channelP or 0, callbackP or 0): rangeP is {start ms, end ms} of the song to play (start under end, end at most
+// the length), channelP one byte, the only channel whose notes play (under 16); the DAL refuses the Play otherwise.
+// Without them the whole song plays on all 16 channels.
 // TwSmfStop(handle), TwSmfClose(handle). TwMidiSetMasterVolume(volume, 0-127). The real-time calls pass r1-r3
 // to the DAL driver unchanged; their order (channel, note or controller, velocity or value) is the Tapwave SDK's,
 // not checked against a game: none of the 58 calls them.
@@ -94,7 +97,7 @@ struct Smf {
 };
 
 enum class Kind : uint8_t {
-    play,          // handle, smf, range, flags, callback (r1-r3 as given)
+    play,          // handle, smf, range, flags, callback (r1-r3 as given), startMs, endMs, channels
     stop,          // handle
     close,         // handle
     message,       // handle (TwMidi's), bytes[0..length)
@@ -109,13 +112,17 @@ struct Event {
     uint32_t handle = 0;
     std::shared_ptr<const Smf> smf;
     uint32_t range = 0, flags = 0, callback = 0, value = 0;
+    // play: what rangeP and channelP held. endMs noEnd plays to the song's end.
+    static constexpr uint32_t noEnd = UINT32_MAX;
+    uint32_t startMs = 0, endMs = noEnd;
+    uint8_t firstChannel = 0, lastChannel = 15;
     uint8_t bytes[3]{};
     uint8_t length = 0;
     std::vector<uint8_t> data;
 };
 
 struct Stats {
-    uint64_t calls = 0, opens = 0, badFiles = 0, unmatchedPlays = 0, dropped = 0;
+    uint64_t calls = 0, opens = 0, badFiles = 0, unmatchedPlays = 0, refusedPlays = 0, dropped = 0;
 };
 
 // Reads size bytes at a guest address; false when any of them can't be read.
@@ -214,6 +221,19 @@ class Hooks {
                 Event e = at(timeNs, Kind::play, r[0]);
                 e.smf = smf;
                 e.range = r[1]; e.flags = r[2]; e.callback = r[3];
+                // What the DAL checks before it plays (its SMF play, 200b3b34 in 1.1); the end against the length
+                // is the player's, which has the song parsed.
+                if (r[1]) {
+                    uint32_t range[2];
+                    if (!read(r[1], range, sizeof range) || range[0] >= range[1]) { ++stats_.refusedPlays; break; }
+                    e.startMs = range[0];
+                    e.endMs = range[1];
+                }
+                if (r[2]) {
+                    uint8_t channel = 0;
+                    if (!read(r[2], &channel, 1) || channel > 15) { ++stats_.refusedPlays; break; }
+                    e.firstChannel = e.lastChannel = channel;
+                }
                 push(std::move(e));
                 break;
             }

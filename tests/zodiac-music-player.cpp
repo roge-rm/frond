@@ -1,11 +1,12 @@
 // The Zodiac music player (zodiac_music_player.h): song messages at their guest times from Play, tempo applied,
-// data bytes over 0x7f taken as the DAL takes them, sysex from the file, Stop and Close with all notes off, a Play of a playing handle starting
+// data bytes over 0x7f taken as the DAL takes them, a Play's range and channel (read by the hooks), sysex from the file, Stop and Close with all notes off, a Play of a playing handle starting
 // over, two songs merged in time order, a song's end, a reset, real-time messages and master volume, an F7 escape
 // sent as raw bytes, the song limit, every Held the preparer made handed back, a jumped clock's skipped note-ons and
 // the event budget. Built with ASan and UBSan.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "zodiac_music_player.h"
@@ -171,6 +172,95 @@ void dataBytes() {
     assert(p.settled());
 }
 
+// TwSmfPlay's rangeP and channelP: the hooks read them from the guest and refuse what the DAL refuses; the player
+// starts at the range's start (state before it, notes from its last 20 ms), ends at its end and plays one
+// channel's notes. Song (120 bpm, 96 ticks a quarter, so a tick is 500/96 ms): note on 60 ch 0 at 0, CC 7 ch 0 at
+// 96 (500 ms), note on 62 ch 1 at 186 (968.75 ms), note on 64 ch 0 at 192 (1 s), note on 65 ch 1 at 384 (2 s),
+// end at 576 (3 s).
+void rangeAndChannel() {
+    const Bytes song = {0x00, 0x90, 0x3c, 0x40,
+                        0x60, 0xb0, 0x07, 0x50,
+                        0x5a, 0x91, 0x3e, 0x40,
+                        0x06, 0x90, 0x40, 0x40,
+                        0x81, 0x40, 0x91, 0x41, 0x40,
+                        0x81, 0x40, 0xff, 0x2f, 0x00};
+    const auto file = smf(song);
+    // A guest: the file at 0x100, the open's handle word at 0x40, rangeP at 0x50, channelP at 0x60.
+    Bytes mem(0x400, 0);
+    std::memcpy(mem.data() + 0x100, file->bytes.data(), file->bytes.size());
+    const uint32_t handle = 0x9000;
+    std::memcpy(mem.data() + 0x40, &handle, 4);
+    const auto put = [&](uint32_t at, uint32_t v) { std::memcpy(mem.data() + at, &v, 4); };
+    const Read read = [&](uint32_t at, void* data, uint32_t n) {
+        if (at > mem.size() || n > mem.size() - at) return false;
+        std::memcpy(data, mem.data() + at, n);
+        return true;
+    };
+    Library lib;
+    for (unsigned i = 0; i < callCount; ++i) lib.pcs[i] = 0x1000 + i * 4;
+    const auto call = [&](Hooks& h, Call c, uint32_t a, uint32_t b, uint32_t c2) {
+        const uint32_t r[16] = {a, b, c2, 0};
+        const bool hit = h.hit(lib, lib.pcs[unsigned(c)], r, 0, read);
+        assert(hit);
+        (void)hit;
+    };
+    // Plays one Play through the hooks and the player; the events it gives up to 5 s.
+    const auto run = [&](uint32_t rangeP, uint32_t channelP) {
+        Hooks h;
+        h.enable();
+        call(h, Call::smfOpen, 0x40, 0x100, 0);
+        call(h, Call::smfPlay, handle, rangeP, channelP);
+        sent.clear();
+        Stages p;
+        Event e;
+        while (h.take(e)) p.feed(std::move(e));
+        p.advance(5000 * ms);
+        assert(p.settled() && !p.playing());
+        return h.stats().refusedPlays;
+    };
+    const auto notes = [] {
+        Bytes n;
+        for (const auto& m : sent)
+            if ((m.b[0] & 0xf0) == 0x90) n.push_back(m.b[1]);
+        return n;
+    };
+    // No range or channel: everything, ending at 3 s.
+    assert(!run(0, 0) && notes() == (Bytes{60, 62, 64, 65}) && allOff(sent.size() - 32, 3000 * ms));
+    // From 1 s to 2.5 s: CC 7 at the Play, 62 (31.25 ms before the start) dropped, 64 at the Play, 65 1 s after, the
+    // end 1.5 s after the Play.
+    put(0x50, 1000);
+    put(0x54, 2500);
+    assert(!run(0x50, 0));
+    assert(sent[0].t == 0 && sent[0].b == (Bytes{0xb0, 0x07, 0x50}) && sent[1].t == 0 && sent[1].b == (Bytes{0x90, 0x40, 0x40}));
+    assert(sent[2].t == 1000 * ms && sent[2].b == (Bytes{0x91, 0x41, 0x40}) && sent.size() == 3 + 32 && allOff(3, 1500 * ms));
+    // From 990 ms: 62 is 21.25 ms before, its ms 968 is 22 before the start: dropped; from 985 (17 ms): kept.
+    put(0x50, 990);
+    assert(!run(0x50, 0) && notes() == (Bytes{64, 65}));
+    put(0x50, 985);
+    assert(!run(0x50, 0) && notes() == (Bytes{62, 64, 65}));
+    // To 2000: the event in the end's ms still plays, and the end is at 2 s.
+    put(0x50, 0);
+    put(0x54, 2000);
+    assert(!run(0x50, 0) && notes() == (Bytes{60, 62, 64, 65}) && allOff(sent.size() - 32, 2000 * ms));
+    put(0x54, 1999);
+    assert(!run(0x50, 0) && notes() == (Bytes{60, 62, 64}) && allOff(sent.size() - 32, 1999 * ms));
+    // Channel 1 only: its notes, and channel 0's CC 7 still.
+    mem[0x60] = 1;
+    assert(!run(0, 0x60) && notes() == (Bytes{62, 65}) && sent[0].b == (Bytes{0xb0, 0x07, 0x50}));
+    // Refused as the DAL refuses: start not under the end, a channel over 15 (the hooks), an end past the song (the
+    // player: nothing plays).
+    put(0x50, 2000);
+    put(0x54, 2000);
+    assert(run(0x50, 0) == 1 && sent.empty());
+    mem[0x60] = 16;
+    assert(run(0, 0x60) == 1 && sent.empty());
+    put(0x50, 0);
+    put(0x54, 3001);
+    assert(!run(0x50, 0) && sent.empty());
+    put(0x54, 3000);
+    assert(!run(0x50, 0) && notes() == (Bytes{60, 62, 64, 65}));
+}
+
 void volumeAndSysEx() {
     sent.clear();
     Stages p;
@@ -292,10 +382,11 @@ int main() {
     stopAndRestart();
     twoSongs();
     dataBytes();
+    rangeAndChannel();
     volumeAndSysEx();
     escapesAndLimits();
     skipAndBudget();
-    std::puts("PASS: Zodiac music player (times, data bytes over 0x7f, sysex, stop, restart, merge, end, reset, volume, escapes, "
+    std::puts("PASS: Zodiac music player (times, data bytes over 0x7f, ranges and channels, sysex, stop, restart, merge, end, reset, volume, escapes, "
               "song limit, Helds returned, skipped note-ons, budget)");
     return 0;
 }
