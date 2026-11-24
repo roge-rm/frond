@@ -126,6 +126,52 @@ bool Imx1Bootstrap::timerCountAfter(uint32_t address, uint32_t size, uint64_t cy
     return true;
 }
 
+bool Imx1Bootstrap::cardRegisterLatch(uint32_t address, uint32_t value, uint64_t cycles, uint32_t mode, uint64_t hclk) {
+    if (!mmcsdLookahead) return false;
+    if (address >= 0x00209080 && address < 0x00209300) {
+        const uint32_t offset = address - 0x00209080, word = (offset & 0x3f) / 4, number = offset / 0x40;
+        static constexpr uint32_t masks[]{0xffffffff,0xffffffff,0xffffff,0,0x1f,0x3f,0xffff};
+        if ((address & 3) || word >= 7 || word == 3 || (value & ~masks[word]) ||
+            ((cardDma.active | memoryDma.active) & (1u << number)))
+            return false;
+        SourceChange change(*this);
+        dmaChannels[number][word] = word < 2 ? value & ~3u : value;
+        return true;
+    }
+    if (address < 0x00214000 || address > 0x00214030 || !mmcsd.statusReadable() || cgm.systemRestartRemaining() ||
+        cycles > UINT32_MAX || hclk > UINT32_MAX || (hclk && systemStopped()))
+        return false;
+    const uint64_t bus = cgm.busDivider();
+    uint64_t systemClocks = cycles * bus;
+    if (mode == 3) {
+        const auto mcu = cpuMcuRatio();
+        const auto system = cgm.systemPllActiveRatio();
+        const uint64_t units = cycles * mcu.denominator * cgm.mcuPrescaler();
+        if (units > (std::numeric_limits<uint64_t>::max() - systemPllPhase) / system.numerator) return false;
+        systemClocks = (units * system.numerator + systemPllPhase) / (mcu.numerator * system.denominator);
+    }
+    systemClocks += hclk * bus;
+    SourceChange change(*this);
+    return mmcsd.latchAfterPerclk2(address, value, (systemClocks + perclk2Phase) / cgm.perclk2Divider());
+}
+
+bool Imx1Bootstrap::mmcsdStatusAfter(uint64_t cycles, uint32_t mode, uint64_t hclk, uint32_t& value) const {
+    if (!mmcsd.statusReadable() || cgm.systemRestartRemaining() || cycles > UINT32_MAX || hclk > UINT32_MAX ||
+        (hclk && systemStopped()))
+        return false;
+    const uint64_t bus = cgm.busDivider();
+    uint64_t systemClocks = cycles * bus;
+    if (mode == 3) {
+        const auto mcu = cpuMcuRatio();
+        const auto system = cgm.systemPllActiveRatio();
+        const uint64_t units = cycles * mcu.denominator * cgm.mcuPrescaler();
+        if (units > (std::numeric_limits<uint64_t>::max() - systemPllPhase) / system.numerator) return false;
+        systemClocks = (units * system.numerator + systemPllPhase) / (mcu.numerator * system.denominator);
+    }
+    systemClocks += hclk * bus;
+    return mmcsd.statusAfterPerclk2((systemClocks + perclk2Phase) / cgm.perclk2Divider(), value);
+}
+
 void Imx1Bootstrap::advanceHclkCycles(uint32_t cycles) {
     SourceChange change(*this);
     assert(!cgm.systemRestartRemaining());
@@ -168,7 +214,7 @@ uint64_t Imx1Bootstrap::idleQuietHclk() const {
         const uint64_t clocks = ymf.clocksUntilChange(pll.numerator, pll.denominator);
         if (clocks != UINT64_MAX) quiet = std::min<uint64_t>(quiet, (clocks + bus - 1) / bus);
     }
-    if (const auto cycles = mmcsd.idleQuietPerclk2())
+    if (const auto cycles = mmcsdLookahead ? mmcsd.hardQuietPerclk2(cardDmaQuietEnd()) : mmcsd.idleQuietPerclk2())
         quiet = std::min(quiet, imx1StepsUntilDivided(cycles, cgm.perclk2Divider(), perclk2Phase, bus));
     for (const auto* timer : {&timer1, &timer2})
         if (const auto cycles = timer->idleQuietCycles())

@@ -95,6 +95,69 @@ class Imx1Mmcsd {
         if (!ticks) return 0;
         return phase < divider ? ticks * divider - phase : 1;
     }
+    // Fast's card lookahead: as idleQuietPerclk2, but past the events that only change STATUS: a clock stop's end
+    // (CLK_RUN clears) and a command end with END_CMD_RES masked. With dataEndSoft (the board's card DMA won't
+    // interrupt) a read's data phase end with DATA_TRAN masked is passed by dataEndMargin too, so the span doesn't
+    // end in a few short steps there; statusAfterPerclk2 refuses reads past it, which charge the span first.
+    // 0 when nothing bounds it.
+    static constexpr uint64_t dataEndMargin = 64;
+    uint64_t hardQuietPerclk2(bool dataEndSoft) const {
+        if (!running || !(control & 4) || stopRemaining || !remaining) return 0;
+        if (resume.pulled == pulledRead || resume.pulled == pulledWrite) return idleQuietPerclk2();
+        const uint64_t divider = clockDivider();
+        const auto at = [&](uint64_t ticks) { return phase < divider ? ticks * divider - phase : 1; };
+        const uint64_t margin = dataEndSoft && !slot.dataWrite && (registers[9] & 1) ? dataEndMargin : 0;
+        if (slot.dataPhase) return at(remaining) + margin;
+        if (!(registers[9] & 4)) return at(remaining);
+        if (!slot.data || responseExpected) return 0;
+        // The command's bits, then the data phase's clocks, as advancePerclk2 carries them over.
+        return at(uint64_t(remaining) + slot.dataClocks) + margin;
+    }
+    // What a STATUS read gives after clocks more PERCLK2 cycles. False from a data phase's end, a pulled card's
+    // time-out or an interrupting command end on, which a read has to see charged.
+    bool statusAfterPerclk2(uint64_t clocks, uint32_t& value) const {
+        uint32_t next = status;
+        bool on = running;
+        if (running && (control & 4)) {
+            const unsigned divider = clockDivider();
+            const uint64_t ticks = clocks / divider + (clocks % divider + phase) / divider;
+            if (stopRemaining) {
+                if (ticks >= stopRemaining) on = false;
+            } else if (remaining && ticks >= remaining) {
+                if (resume.pulled == pulledRead || resume.pulled == pulledWrite || slot.dataPhase ||
+                    !(registers[9] & 4) || (slot.data && !responseExpected && ticks - remaining >= slot.dataClocks))
+                    return false;
+                next = 0x2000 | (responseExpected ? 2 : 0);
+            }
+        }
+        value = next | (on && (control & 4) ? 0x100 : 0);
+        return true;
+    }
+    // Whether a STATUS read would be answered (access gives ok).
+    bool statusReadable() const { return emptySlot && !(psr0 & 0x10) && (psr1 & 0x10); }
+    // Fast's card lookahead: a write of a command register (CMD_DAT_CONT, RES_TO, READ_TO, BLK_LEN, NOB, CMD, ARGH,
+    // ARGL) clocks more PERCLK2 cycles from now, taken as access would take it then. Only where the clock has
+    // stopped by then (a stop that ends in clocks touches neither these registers nor what they bound); false
+    // leaves it to the charged write.
+    bool latchAfterPerclk2(uint32_t address, uint32_t value, uint64_t clocks) {
+        const unsigned index = (address - 0x00214000) / 4;
+        if (address < 0x0021400c || address > 0x00214030 || (address & 3) || index == 8 || index == 9 || !ready ||
+            (psr0 & 0x10) || !(psr1 & 0x10))
+            return false;
+        static constexpr uint32_t masks[]{0,0,0x3f,0x1fff,0xff,0xffff,0x3ff,0xffff,0,0x7f,0x3f,0xffff,0xffff};
+        if (value & ~masks[index]) return false;
+        if (running) {
+            if (!(control & 4) || !stopRemaining) return false;
+            const unsigned divider = clockDivider();
+            if (clocks / divider + (clocks % divider + phase) / divider < stopRemaining) return false;
+        }
+        if (index == 3 && ((value & 0xc00) || (value & 0x300) == 0x100 || (value & 0x300) == 0x300 || (value & 7) == 7))
+            return false;
+        registers[index] = value;
+        if (index == 3) staged |= 8;
+        if (index >= 10) staged |= 1u << (index - 10);
+        return true;
+    }
     void advancePerclk2(uint64_t clocks) {
         if (!running || !(control & 4)) return;
         const unsigned divider = clockDivider();

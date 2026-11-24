@@ -1189,6 +1189,79 @@ void jitCardWrites() {
     assert(writes >= 1000);
 }
 
+// 20 rounds of the ROM card driver's command and clock stop waits on the virtual slot (no card): CMD0 with its end
+// masked, STATUS polled until END_CMD_RES, a clock stop, STATUS polled until CLK_RUN clears. With the card lookahead
+// Fast's spans run past both ends and the polls read STATUS at their own time: the poll counts match Fast's without
+// it exactly. Fast's own timing puts them a little under Exact's (under 0.1%).
+Outcome cardWaits(const std::vector<uint32_t>& words, bool fast) {
+    auto o = graphicsOptions(false);
+    o.ramMiB = 32;
+    o.mmcsdEmptySlot = true;
+    Imx1ProbeResult error{};
+    Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
+                                       Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
+    assert(m);
+    if (fast) assert(imx1MachineSetFastEngine(m, true) && imx1MachineFastEngine(m));
+    return finish(m);
+}
+void jitCardWaits() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00210000, 0xffffc400);                      // AIPI2 PSR0 and PSR1: MMCSD on the 32-bit bus
+    g.store(0x00210004, 0xfffffbff);
+    g.store(0x00214000, 0x08);                            // STR_STP_CLK: reset, then 8 stop writes to get ready
+    g.store(0x00214000, 0x0d);
+    for (unsigned i = 0; i < 8; ++i) g.store(0x00214000, 0x05);
+    g.store(0x00214024, 4);                               // INT_MASK: END_CMD_RES masked
+    std::vector<uint32_t> words;
+    load(words, 0, 0x00214000); load(words, 2, 0x80); load(words, 3, 20); load(words, 4, 0);
+    load(words, 6, 6); load(words, 7, 5); load(words, 8, 0); load(words, 9, 0);
+    const auto branch = [&](uint32_t condition, size_t target) {
+        words.push_back(condition | ((uint32_t(target) - uint32_t(words.size()) - 2) & 0xffffff));
+    };
+    const size_t top = words.size();
+    words.push_back(0xe580200c);                          // loop: str r2, [r0, #0x0c] (CMD_DAT_CONT 0x80)
+    words.push_back(0xe5804028);                          // str r4, [r0, #0x28] (CMD 0)
+    words.push_back(0xe580402c);                          // str r4, [r0, #0x2c] (ARGH)
+    words.push_back(0xe5804030);                          // str r4, [r0, #0x30] (ARGL)
+    words.push_back(0xe5806000);                          // str r6, [r0]: start the command
+    const size_t command = words.size();
+    words.push_back(0xe5905004);                          // ldr r5, [r0, #4] (STATUS)
+    words.push_back(0xe2888001);                          // add r8, r8, #1
+    words.push_back(0xe3150a02);                          // tst r5, #0x2000 (END_CMD_RES)
+    branch(0x0a000000, command);                          // beq
+    words.push_back(0xe5807000);                          // str r7, [r0]: stop the clock
+    const size_t stop = words.size();
+    words.push_back(0xe5905004);                          // ldr r5, [r0, #4] (STATUS)
+    words.push_back(0xe2899001);                          // add r9, r9, #1
+    words.push_back(0xe3150c01);                          // tst r5, #0x100 (CLK_RUN)
+    branch(0x1a000000, stop);                             // bne
+    words.push_back(0xe2533001);                          // subs r3, r3, #1
+    branch(0x1a000000, top);                              // bne loop
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = cardWaits(g.words, false);
+    imx1SetCardLookahead(false);
+    const auto plain = cardWaits(g.words, true);
+    imx1SetCardLookahead(true);
+    const uint64_t reads = imx1MachineLeanStatusReads(nullptr), latches = imx1MachineJitCardLatches(nullptr);
+    const auto fast = cardWaits(g.words, true);
+    const uint64_t ahead = imx1MachineLeanStatusReads(nullptr) - reads;
+    print("jit card waits exact", exact); print("jit card waits blocks", plain); print("jit card waits lookahead", fast);
+    std::printf("jit card waits: %u command polls, %u stop polls; %llu STATUS reads past the board's time, "
+                "%llu register writes latched\n",
+                exact.run.result.registers[8], exact.run.result.registers[9], (unsigned long long)ahead,
+                (unsigned long long)(imx1MachineJitCardLatches(nullptr) - latches));
+    std::fflush(stdout);
+    const auto& e = exact.run.result.registers;
+    assert(e[3] == 0 && e[8] >= 40 && e[9] >= 40);
+    sameResult(plain, fast);
+    assert(fast.run.retiredInstructions == plain.run.retiredInstructions);
+    const auto near = [](uint32_t a, uint32_t b) { return a <= b ? b - a <= b / 100 : a - b <= a / 100; };
+    assert(near(fast.run.result.registers[8], e[8]) && near(fast.run.result.registers[9], e[9]));
+    assert(ahead >= (fast.run.result.registers[8] + fast.run.result.registers[9]) / 2);
+}
+
 // A graphics memory store and 62 other instructions a round while timer 1's compare IRQ comes due, with the display
 // off so the quiet spans are long. Each store's wait clocks count against the JIT run's budget with the cycles the
 // run has already done, so the IRQ comes at Exact's round, not up to a whole run late.
@@ -2401,6 +2474,7 @@ void jitLong() {
     jitSliceEndReads();
     jitBoardWrites();
     jitCardWrites();
+    jitCardWaits();
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();

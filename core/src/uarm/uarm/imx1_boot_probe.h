@@ -236,6 +236,16 @@ uint64_t imx1MachineJitCardWrites(const Imx1Machine*);
 uint64_t imx1MachineCardPollSkips(const Imx1Machine*);
 uint64_t imx1MachineCardPollRounds(const Imx1Machine*);
 void imx1SetCardPollSkip(bool skip);
+// Fast's card lookahead: quiet spans run past MMCSD events that only change STATUS (a clock stop's end, a masked
+// command end), and STATUS reads on the lean path are worked out at their own time. On unless
+// FROND_CARD_LOOKAHEAD=0; imx1SetCardLookahead(false) turns it off from the next slice, for tests.
+// imx1MachineLeanStatusReads counts those reads since the process started.
+void imx1SetCardLookahead(bool on);
+uint64_t imx1MachineLeanStatusReads(const Imx1Machine*);
+// Of jitCardWrites, those the lookahead took with nothing charged (Imx1Bootstrap::cardRegisterLatch).
+uint64_t imx1MachineJitCardLatches(const Imx1Machine*);
+// MMCSD and DMA register reads past a card event the lookahead ran over, charged in generated code.
+uint64_t imx1MachineJitChargedReads(const Imx1Machine*);
 // Ring pointer writes Fast blocks took in generated code with the run's cycles charged first (jitChargedWrite).
 uint64_t imx1MachineJitChargedWrites(const Imx1Machine*);
 uint64_t imx1MachineDelaySkips(const Imx1Machine*);

@@ -210,6 +210,21 @@ class Imx1Bootstrap {
     // call would take; the result holds for those until the board changes (changeCount).
     bool timerCountAfter(uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode, uint32_t& value,
                          uint64_t hclk = 0, uint64_t* sameUntil = nullptr) const;
+    // MMCSD STATUS as a read gives it after cycles more CPU cycles in this clock mode, then hclk HCLK cycles, with
+    // nothing charged; the same sums as timerCountAfter. Only inside the board's quiet time. False when the sum is
+    // too big to work out in one piece, the slot gives no STATUS, or the time is past an MMCSD event a read has to
+    // see charged (Imx1Mmcsd::statusAfterPerclk2); MMCSD and DMA register reads go to the step then.
+    bool mmcsdStatusAfter(uint64_t cycles, uint32_t mode, uint64_t hclk, uint32_t& value) const;
+    // Fast's card lookahead (Imx1Mmcsd::hardQuietPerclk2): the quiet time runs past MMCSD events that only change
+    // STATUS, so every STATUS read inside it has to go through mmcsdStatusAfter. Host side, not saved; Exact leaves
+    // it off.
+    void setMmcsdLookahead(bool on) { mmcsdLookahead = on; }
+    // With the lookahead: an MMCSD command register write (Imx1Mmcsd::latchAfterPerclk2) or a DMA channel 0 to 9
+    // address, count or request register write to an idle channel, after cycles more CPU cycles and then hclk
+    // HCLK cycles, taken with nothing charged. Neither changes an interrupt line or what bounds the quiet time.
+    // False leaves the write to access after a charge.
+    bool cardRegisterLatch(uint32_t address, uint32_t value, uint64_t cycles, uint32_t mode, uint64_t hclk);
+    bool mmcsdLookaheadOn() const { return mmcsdLookahead; }
     // Moves on whenever the board's state can have changed, and is never the same for two boards.
     uint64_t changeCount() const { return runCache.changes; }
     static bool timerCountAddress(uint32_t address) { return address == 0x00202010 || address == 0x00203010; }
@@ -589,6 +604,7 @@ class Imx1Bootstrap {
     uint32_t rmcr = 0, pwmr = 0;
     bool lcdcContrastOnly = false;
     uint32_t contrastPhase = 0, perclk2Phase = 0;
+    bool mmcsdLookahead = false;
     Imx1Uart uart1{false}, uart2{true};
     // ymfSeen: the clocks of this charge the YMF768 has been moved on by, brought up to each word's end.
     void advancePcm(uint64_t systemClocks, uint64_t& ymfSeen);
@@ -607,6 +623,8 @@ class Imx1Bootstrap {
     bool memoryDmaCounting() const { return memoryDma.active && sysctrl.dmaClockEnabled() && !dmaResetClocks && (dmaControl & 1); }
     void advanceMemoryDma(uint64_t hclk);
     // A counting memory-to-memory transfer whose DISR bit will raise the DMA interrupt (source 61).
+    // The card DMA's end raises no interrupt: DMA is off or DIMR masks every card channel under way.
+    bool cardDmaQuietEnd() const { return !dmaControl || !(cardDma.active & ~dmaMask & 0x3ff); }
     bool memoryDmaEndPossible() const { return memoryDmaCounting() && (memoryDma.active & ~dmaMask & 0x3ff); }
     // Channel 10 is taking beats and the end of its buffer raises the DMA interrupt (source 61).
     bool pcmDmaEndPossible() const {
