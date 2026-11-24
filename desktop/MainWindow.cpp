@@ -265,6 +265,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (!send(source->command, "clear")) source->stage = PrinterStage::None;
         });
     }
+    // A switch between apps waiting for the background slot goes once it's free.
+    connect(&client, &DesktopClient::backgroundResult, this, [this] { QTimer::singleShot(0, this, [this] { sendAppActive(); }); });
     connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
         if (command == "speed-state" && runningPreferences.showMips) {
             palmHolder->setMips(ok ? message : QString());
@@ -971,10 +973,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         if (client.property("danaCardRequest").toString()==command) return;
-        if (command == "app-active") {
-            if (stopping) save();
-            return;
-        }
         if (command == "dana-view" || command == "dana-view-state") {
             forceButton->hide(); refresh();
             if (stopping && exchangeStage == ExchangeStage::None) save();
@@ -3808,10 +3806,10 @@ bool MainWindow::installResult(bool ok, const QString& code, const QString& mess
     failure(failed.join('\n') + (hint ? tr("\n\nWait for Palm OS to finish its current activity, then try again.") : QString()));
     return true;
 }
-// Sent without send()'s busy state and Working… note, since it follows every switch between apps.
+// Goes in the background slot, so a switch between apps never holds up a command the user just gave.
 void MainWindow::sendAppActive() {
     if (appActiveUnsent.isEmpty() || !client.running() || stopping || !client.available()) return;
-    if (client.request("app-active", appActiveUnsent)) appActiveUnsent.clear();
+    if (client.requestBackground("app-active", appActiveUnsent)) appActiveUnsent.clear();
 }
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;
