@@ -37,6 +37,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.draw.alpha
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -392,7 +393,7 @@ private fun ConnectionsSheet(model: RunningModel, state: RunningBarState, action
             ConnRow.CRADLE -> MachineSwitchRow("Cradle attached", model.cradleAttached == true, true,
                 enabled = model.cradleAttached != null && model.busy == null && !model.waitingForGdb,
                 onChange = model::changeCradle)
-            ConnRow.HOTSYNC -> SheetAction("HotSync") { actions.closeSheet(); model.hotSync() }
+            ConnRow.HOTSYNC -> SheetAction("HotSync", enabled = !model.outOfCradle) { actions.closeSheet(); model.hotSync() }
         }
     }
     if (model.device.pendingUsb.isNotEmpty()) ConnItem(model.device.pendingUsb, false, null) { }
@@ -400,7 +401,7 @@ private fun ConnectionsSheet(model: RunningModel, state: RunningBarState, action
 }
 
 @Composable
-private fun SheetAction(label: String, iconRes: Int? = null, icon: androidx.compose.ui.graphics.vector.ImageVector? = null, onClick: () -> Unit) {
+private fun SheetAction(label: String, iconRes: Int? = null, icon: androidx.compose.ui.graphics.vector.ImageVector? = null, enabled: Boolean = true, onClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(label) },
         leadingContent = when {
@@ -409,7 +410,7 @@ private fun SheetAction(label: String, iconRes: Int? = null, icon: androidx.comp
             else -> null
         },
         colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
-        modifier = Modifier.clickableRow(onClick = onClick),
+        modifier = if (enabled) Modifier.clickableRow(onClick = onClick) else Modifier.alpha(0.38f),
     )
 }
 

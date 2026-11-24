@@ -183,7 +183,8 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
                 else -> Unit
             }
             state.syncProtocol?.let { protocol ->
-                IconButton(actions.startSync, Modifier.size(button), enabled = !state.syncStarting && !state.syncRunning && state.model?.busy == null) {
+                LaunchedEffect(state.model) { state.model?.readCradle() }
+                IconButton(actions.startSync, Modifier.size(button), enabled = !state.syncStarting && !state.syncRunning && state.model?.busy == null && state.model?.outOfCradle != true) {
                     Icon(painterResource(if (protocol == SyncProtocol.ACTIVE_SYNC) R.drawable.ic_activesync else R.drawable.ic_hotsync), contentDescription = protocol.label)
                 }
             }

@@ -1070,6 +1070,9 @@ class RunningModel(
     var cradleAttached by mutableStateOf<Boolean?>(null)
         private set
 
+    // A cradle device out of its cradle has no cable or HotSync button; network HotSync stays possible.
+    val outOfCradle: Boolean get() = device.zodiac && cradleAttached == false && !device.supportsNetworkHotSync()
+
     private fun cradleSetting(reply: ControlLink.Reply): Boolean? = if (reply.ok) when (reply.message) {
         "attached" -> true
         "detached" -> false
