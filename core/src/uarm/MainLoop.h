@@ -19,6 +19,8 @@ class MainLoop {
     void SetTimesliceUsec(uint64_t usec);
 
     uint64_t GetTimesliceSizeUsec() const;
+    // Host time, in timestampUsec terms, that the guest time run so far stands for.
+    uint64_t VirtualTimeUsec() const { return uint64_t(virtualTimeUsec); }
     int64_t GetSuggestedDelayUsec(uint64_t now) const;
 
     uint64_t GetCurrentIps() const;

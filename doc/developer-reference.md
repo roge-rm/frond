@@ -831,6 +831,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_DELAY_SKIP`, `FROND_POLL_SKIP` | Set to `0` to disable Fast delay-loop or GPIO polling-loop skips, respectively. |
 | `FROND_ASP_POLL_SKIP` | Set to `0` to disable the Zodiac Fast skip for the pen FIFO poll. |
 | `FROND_INPUT_TRACE` | Write host input timing to this file, or set it to `stderr`. |
+| `FROND_FRAME_TRACE` | Write a line per frame handed to the window to this file: host time, guest time and the host time the guest's time stands for (the end of the last slice in real time), all in microseconds. |
 | `FROND_ZODIAC_STOP_ON_EXCEPTION` | Stop at a Zodiac CPU exception instead of handing it to the guest. |
 | `FROND_ZODIAC_BT_LOG` | Print Zodiac Bluetooth diagnostics. |
 | `FROND_ACX_TRACE` | rx1950 Wi-Fi trace. Set to `1` for firmware activity or `2` to include register accesses. |
@@ -1200,6 +1201,7 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-battery-control` | Battery option and control socket on ARM and 68k smoke sessions. |
 | `test-zodiac-guest-calls`, `test-zodiac-resume` | Real-ROM guest database calls and reset, or save and resume parity, in Exact and Fast. Takes `ZODIAC_ROM` and `ZODIAC_STATE`. |
 | `test-zodiac-bluetooth` | Real-ROM radio relink, address persistence, OPP and DUN against the virtual Bluetooth controller and peers. Takes `ZODIAC_ROM` and `ZODIAC_STATE`. |
+| `test-zodiac-frame-handoff` | Real-ROM cold boot in Fast with `FROND_FRAME_TRACE`: each frame goes to the window when the next slice is due, a fixed time after the guest drew it. Takes `ZODIAC_ROM`. |
 | `test-native-budget` | Firmware-free guest call budget and timeout checks. |
 | `test-tx-lifecycle-rom`, `test-tx-power-rom`, `test-tx-usb-rom` | Build only. Run the program with a TX session. |
 | `test-z72-camera-rom` | Zire 72 session in `Z72_SESSION` and ffmpeg. Camera viewfinder and photos at each size against the test pattern, a save and load with the viewfinder up, then a picture file and pushed frames in the viewfinder and a photo, and a save going back to the pattern. |

@@ -1412,6 +1412,39 @@ bool gFastEngineMissing = false;
                 return saved;
             };
 
+            // FROND_FRAME_TRACE=FILE: a line per frame handed over: host time, guest time and the host time the
+            // guest's time stands for (the end of the last slice in real time), in microseconds.
+            FILE* frameTrace = getenv("FROND_FRAME_TRACE") ? fopen(getenv("FROND_FRAME_TRACE"), "w") : nullptr;
+            if (frameTrace) setvbuf(frameTrace, nullptr, _IOLBF, 0);
+            // Hands the frame to the SDL thread; it uploads and presents it.
+            auto handOff = [&](bool headless) {
+                if (headless) return;
+                const uint64_t handoffStart = zodiacSpeed ? timestampUsec() : 0;
+                const bool lcdEnabled = soc->LcdEnabled();
+                uint32_t firstDirtyLine = 0, lastDirtyLine = 0;
+                const uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
+                DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
+                // The pad's Hold slide stays over while it's on.
+                if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
+                DeviceStick stick = sdlEventHandler.Stick();
+                stick.lamp = attention.Shown().ledColour;
+                stick.lampShown = ledColours != 0;
+                const bool redrawRequested = sdlEventHandler.RedrawRequested();
+                if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
+                    link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
+                    if (frame) inputTrace::published();
+                    if (frame && frameTrace)
+                        fprintf(frameTrace, "%llu %llu %llu\n", (unsigned long long)timestampUsec(),
+                                (unsigned long long)(soc->GetTime() / 1000), (unsigned long long)mainLoop.VirtualTimeUsec());
+                    soc->ResetPendingFrame();
+                }
+                if (zodiacSpeed && frame) zodiacSpeed->HandedOver(timestampUsec() - handoffStart);
+            };
+            // The Zodiac hands each slice's frame over when the next slice is due, a fixed time after the guest
+            // drew it, so frames reach the window at the guest's pace. Handed over as soon as the emulation ends,
+            // a frame comes early by however long the host had left of the slice, which changes from slice to
+            // slice and makes even motion judder (Firehammer's scrolling).
+            const bool handOffAtSliceEnd = zodiac != nullptr;
             while (!link.Stopped()) {
                 uint64_t now = timestampUsec();
                 performance.BeginWork();
@@ -1531,6 +1564,7 @@ bool gFastEngineMissing = false;
                 usb.Service();
                 infrared.Service();
                 inputTrace::note("cycle", true, "start");
+                if (handOffAtSliceEnd) handOff(headless);
                 if (zodiacSpeed) {
                     const uint64_t cycleStart = timestampUsec();
                     mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
@@ -1573,26 +1607,7 @@ bool gFastEngineMissing = false;
                     change.gamepad = attached;
                     commandContext.changeDisplay(change);
                 }
-                // Hand the frame to the SDL thread; it uploads and presents it.
-                if (!headless) {
-                    const uint64_t handoffStart = zodiacSpeed ? timestampUsec() : 0;
-                    const bool lcdEnabled = soc->LcdEnabled();
-                    uint32_t firstDirtyLine = 0, lastDirtyLine = 0;
-                    const uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
-                    DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
-                    // The pad's Hold slide stays over while it's on.
-                    if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
-                    DeviceStick stick = sdlEventHandler.Stick();
-                    stick.lamp = attention.Shown().ledColour;
-                    stick.lampShown = ledColours != 0;
-                    const bool redrawRequested = sdlEventHandler.RedrawRequested();
-                    if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
-                        link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
-                        if (frame) inputTrace::published();
-                        soc->ResetPendingFrame();
-                    }
-                    if (zodiacSpeed && frame) zodiacSpeed->HandedOver(timestampUsec() - handoffStart);
-                }
+                if (!handOffAtSliceEnd) handOff(headless);
                 // A word from the display state, so once a slice. An unknown one (display off) keeps the last.
                 if (followGuest) {
                     const unsigned orientation = soc->GuestOrientation();
@@ -1699,6 +1714,7 @@ bool gFastEngineMissing = false;
                 const auto delay = mainLoop.GetSuggestedDelayUsec(timestampUsec());
                 if (delay > 10) link.WaitForInput(delay);
             }
+            if (frameTrace) fclose(frameTrace);
         };
 
         // Events go straight from SDL to the guest thread through the filter.

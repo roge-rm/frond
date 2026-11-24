@@ -1240,6 +1240,12 @@ test-zodiac-bluetooth: $(OBJ_ROOT)/test-zodiac-bluetooth
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" python3 tests/zodiac-bluetooth.py --fast 0 \
 		--btvirt $(BLUETOOTH_PROVIDER)/emulator/btvirt
 
+# The Zodiac hands each frame to the window when the next slice is due, from a short cold boot of ZODIAC_ROM.
+# Skipped without it.
+.PHONY: test-zodiac-frame-handoff
+test-zodiac-frame-handoff: out/frond
+	ZODIAC_ROM="$(ZODIAC_ROM)" python3 tests/zodiac-frame-handoff.py
+
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
 test-zodiac-session-cards: out/frond
