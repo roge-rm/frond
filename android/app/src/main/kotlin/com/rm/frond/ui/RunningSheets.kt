@@ -305,28 +305,37 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
 private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: RunningBarActions) {
     val device = model.device
     LaunchedEffect(Unit) { model.readMicrophone(); model.readCamera() }
-    val rows = RunningSheets.displayRows(device)
-    MachineDisplayRows(device, model.settings, true) { model.changeSettings(it) }
-    if (DisplayRow.ROTATE in rows) SheetAction("Rotate") { actions.closeSheet(); model.rotate() }
-    if (DisplayRow.SPEED in rows) MachineSpeedRow(device, model.settings, true) { model.changeSettings(it) }
-    if (DisplayRow.CAMERA in rows) CameraRow(model)
-    Header("Battery", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
-    MachineBatteryRows(model.settings, true, FrondActivity.running?.battery?.info ?: BatteryInfo()) { model.changeSettings(it) }
-    Header("Audio", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
-    for (row in RunningSheets.audioRows(device)) when (row) {
-        AudioRow.SOUND -> MachineSwitchRow("Sound", device.sound && state.sound, true, enabled = device.sound) { actions.toggleSound() }
-        AudioRow.HEADPHONES -> MachineHeadphonesRow(model.settings, true) { model.changeSettings(it) }
-        AudioRow.MICROPHONE -> MicrophoneRow(model)
-        AudioRow.AUDIO_PREVIEW -> MachineAudioPreviewRow(device, model.settings, true, APPLIES_AT_NEXT_START) { model.changeSettings(it) }
-        AudioRow.RUMBLE -> MachineRumbleRow(device, model.settings, true) { model.changeSettings(it) }
-    }
-    if (RunningSheets.controlsShown(device)) {
-        val context = androidx.compose.ui.platform.LocalContext.current
-        Header("Controller", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
-        SheetAction("Set controls") {
-            state.controls = ControlsEditor(context, device)
-            actions.openSheet(Sheet.CONTROLS)
+    val groups = RunningSheets.groups(device)
+    var picked by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
+    val index = picked.coerceIn(0, groups.size - 1)
+    androidx.compose.material3.ScrollableTabRow(selectedTabIndex = index, edgePadding = 8.dp, containerColor = Color.Transparent) {
+        groups.forEachIndexed { i, group ->
+            androidx.compose.material3.Tab(selected = i == index, onClick = { picked = i }, text = { Text(group.label) })
         }
+    }
+    val rows = RunningSheets.displayRows(device)
+    when (groups[index]) {
+        RunningSheets.Group.DISPLAY -> {
+            MachineDisplayRows(device, model.settings, true) { model.changeSettings(it) }
+            if (DisplayRow.CAMERA in rows) CameraRow(model)
+        }
+        RunningSheets.Group.AUDIO -> for (row in RunningSheets.audioRows(device)) when (row) {
+            AudioRow.SOUND -> MachineSwitchRow("Sound", device.sound && state.sound, true, enabled = device.sound) { actions.toggleSound() }
+            AudioRow.HEADPHONES -> MachineHeadphonesRow(model.settings, true) { model.changeSettings(it) }
+            AudioRow.MICROPHONE -> MicrophoneRow(model)
+            AudioRow.AUDIO_PREVIEW -> MachineAudioPreviewRow(device, model.settings, true, APPLIES_AT_NEXT_START) { model.changeSettings(it) }
+            AudioRow.RUMBLE -> MachineRumbleRow(device, model.settings, true) { model.changeSettings(it) }
+        }
+        RunningSheets.Group.GAME_CONTROLLER -> {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            SheetAction("Set controls") {
+                state.controls = ControlsEditor(context, device)
+                actions.openSheet(Sheet.CONTROLS)
+            }
+        }
+        RunningSheets.Group.BATTERY ->
+            MachineBatteryRows(model.settings, true, FrondActivity.running?.battery?.info ?: BatteryInfo()) { model.changeSettings(it) }
+        RunningSheets.Group.SPEED -> MachineSpeedRow(device, model.settings, true) { model.changeSettings(it) }
     }
 }
 

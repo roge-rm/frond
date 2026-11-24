@@ -33,6 +33,18 @@ class RunningSheetsTest {
         assertNull(RunningSheets.menuSheet(RunningMenu.Id.RESET))
     }
 
+    // The settings sheet groups follow the desktop's: Display, Audio, Game controller, Battery, Speed.
+    @Test fun settingsGroupsFollowTheDesktop() {
+        for (device in Device.entries) {
+            val groups = RunningSheets.groups(device)
+            assertEquals(device.id, groups.sortedBy { it.ordinal }, groups)
+            assertEquals(listOf(RunningSheets.Group.DISPLAY, RunningSheets.Group.AUDIO), groups.take(2))
+            assertTrue(device.id, RunningSheets.Group.BATTERY in groups)
+            assertEquals(device.id, RunningSheets.controlsShown(device), RunningSheets.Group.GAME_CONTROLLER in groups)
+        }
+        assertEquals("Settings", RunningSheets.title(Sheet.DISPLAY, Device.entries.first()))
+    }
+
     @Test fun appsGetLaunchAndExportOnly() {
         assertEquals(listOf(AppAction.LAUNCH, AppAction.EXPORT, AppAction.DELETE), RunningSheets.appActions)
         val list = listOf(
@@ -149,7 +161,6 @@ class RunningSheetsTest {
     @Test fun rotateIsForArmDevicesAndSpeedForAll() {
         for (device in Device.entries) {
             val rows = RunningSheets.displayRows(device)
-            assertEquals(device.id, !device.runs68k, DisplayRow.ROTATE in rows)
             assertTrue(device.id, DisplayRow.SPEED in rows)
             assertEquals(device.id, device.lcdContrast, DisplayRow.CONTRAST in rows)
             assertEquals(device.id, device.id == "sony-clie-tg50", DisplayRow.SHOW_KEYBOARD in rows && DisplayRow.JOG in rows)

@@ -20,7 +20,7 @@ object RunningSheets {
     fun title(sheet: Sheet, device: Device) = when (sheet) {
         Sheet.APPLICATIONS -> "Applications"
         Sheet.CARD -> "Storage"
-        Sheet.DISPLAY -> "Display"
+        Sheet.DISPLAY -> "Settings"
         Sheet.CONNECTIONS -> "Connections"
         Sheet.CONTROLS -> "Controls"
     }
@@ -92,15 +92,26 @@ object RunningSheets {
 
     // ---- Display and audio ----
 
-    enum class DisplayRow { SIZE, SMOOTH, CONTRAST, SHOW_KEYBOARD, JOG, ROTATE, SPEED, CAMERA }
+    enum class DisplayRow { SIZE, SMOOTH, CONTRAST, SHOW_KEYBOARD, JOG, SPEED, CAMERA }
     enum class AudioRow { SOUND, HEADPHONES, MICROPHONE, AUDIO_PREVIEW, RUMBLE }
 
+    // The groups of the settings sheet, in the desktop's order. Game controller is where the controller keys are set.
+    enum class Group(val label: String) { DISPLAY("Display"), AUDIO("Audio"), GAME_CONTROLLER("Game controller"), BATTERY("Battery"), SPEED("Speed") }
+
+    fun groups(device: Device): List<Group> {
+        val groups = mutableListOf(Group.DISPLAY, Group.AUDIO)
+        if (controlsShown(device)) groups += Group.GAME_CONTROLLER
+        groups += Group.BATTERY
+        if (DisplayRow.SPEED in displayRows(device)) groups += Group.SPEED
+        return groups
+    }
+
+    // Speed has its own group, so the Display group lists the rest.
     fun displayRows(device: Device): List<DisplayRow> {
         val rows = mutableListOf(DisplayRow.SIZE, DisplayRow.SMOOTH)
         if (device.lcdContrast) rows += DisplayRow.CONTRAST
         if (device.id == "sony-clie-tg50") rows += DisplayRow.SHOW_KEYBOARD
         if (device.jogControls) rows += DisplayRow.JOG
-        if (!device.runs68k) rows += DisplayRow.ROTATE
         rows += DisplayRow.SPEED
         if (device.camera) rows += DisplayRow.CAMERA
         return rows

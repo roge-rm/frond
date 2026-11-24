@@ -87,11 +87,11 @@ fun MachineSettingsScreen(model: HomeModel) {
             }
             if (draft.device.vibrate) MachineRumbleRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             if (draft.device.zodiac) MachineMusicRows(draft.settings, { model.changeMachineSettings(it) }) { model.importSoundFont(it) }
+            Header("Battery", Modifier.padding(top = 16.dp))
+            MachineBatteryRows(draft.settings, false, null) { model.changeMachineSettings(it) }
             if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
             if (rows.speed) MachineSpeedRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
-            Header("Battery", Modifier.padding(top = 16.dp))
-            MachineBatteryRows(draft.settings, false, null) { model.changeMachineSettings(it) }
             if (draft.device.infrared || draft.device.serialPort || draft.device.bluetooth) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
                 val choices = remember(draft.device, draft.settings.infrared) {

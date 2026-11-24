@@ -38,7 +38,7 @@ object RunningMenu {
         if (has(device.microphone)) rows += Row(Id.MICROPHONE, "Microphone", microphoneValue(s.microphone), enabled = device.microphone)
         if (has(device.networkSupported)) rows += Row(Id.NETWORK, "Network", s.network?.label, enabled = device.networkSupported && s.network != null)
         if (SyncProtocol.forDevice(device) != null) rows += Row(Id.SYNC_MANAGER, "Sync Manager…", group = 1)
-        rows += Row(Id.DISPLAY, "Display…", group = 1)
+        rows += Row(Id.DISPLAY, "Settings…", group = 1)
         rows += Row(Id.CONNECTIONS, "Connections…", group = 1)
         rows += Row(Id.SCREENSHOT, "Screenshot", group = 1)
         rows += Row(Id.HIDE_BAR, "Hide bar", group = 2)
