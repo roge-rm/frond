@@ -27,6 +27,7 @@ void mmuSetPermHook(struct ArmMmu *mmu, void (*hook)(void *), void *ctx) {
 }
 
 void mmuTlbFlush(struct ArmMmu *mmu) {
+    mmu->tlbWrites++;
     mmuPrvPermChanged(mmu);
     mmu->flushes++;
     mmu->revision = (mmu->revision + 1) & 0x0f;
@@ -193,6 +194,7 @@ translated:
     pa = (adr - va) + paPage;
 
     if (!inspect && sz > 1024) {
+        mmu->tlbWrites++;
         hostTlbFlush(&mmu->mem->hostTlb);
         for (uint32_t offset = 0; offset < sz; offset += 4096) {
             struct TlbEntry *tlbEntry = mmu->tlb + ((va + offset) >> 12);
@@ -626,6 +628,7 @@ void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
     mmu->S = s.mmuS;
     mmu->R = s.mmuR;
     // Revision 0 is never current, so every other entry is dead.
+    mmu->tlbWrites++;
     memset(mmu->tlb, 0, sizeof(mmu->tlb));
     mmu->revision = s.tlbRevision;
     mmu->flushes = s.tlbFlushes;

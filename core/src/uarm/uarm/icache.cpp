@@ -1,6 +1,7 @@
 //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
 
 #include "icache_internal.h"
+#include "MMU_internal.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -81,14 +82,26 @@ static FORCE_INLINE bool icachePrvArm920Fetch(struct icache* ic, uint32_t va, un
     // FCSE: the continuation above holds the VAs that followed an MMU switch; everything below is by MVA.
     if (va < 0x02000000u && ic->fcsePid) va |= *ic->fcsePid;
     if (ic->arm920LeanWord && ic->arm920LeanWord(ic->arm920LeanWordCtx, va, size, privileged, word)) return true;
-    const auto r = mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
-    if (!MMU_TRANSLATE_RESULT_OK(r)) {
-        *fsr = MMU_TRANSLATE_RESULT_FSR(r);
-        return false;
+    ArmMmu* const mmu = ic->memorySystem.mmu;
+    auto& memo = ic->arm920Translation;
+    uint32_t pa;
+    bool cacheable;
+    if (memo.valid && memo.page == va >> 12 && memo.privileged == privileged && memo.tlbWrites == mmu->tlbWrites &&
+        memo.permGen == ic->permGen && memo.ttp == mmu->transTablPA) {
+        pa = (memo.paPage << 12) | (va & 0xfff);
+        cacheable = memo.cacheable;
+    } else {
+        const auto r = mmuTranslate(mmu, va, privileged, false);
+        if (!MMU_TRANSLATE_RESULT_OK(r)) {
+            *fsr = MMU_TRANSLATE_RESULT_FSR(r);
+            return false;
+        }
+        pa = MMU_TRANSLATE_RESULT_PA(r);
+        cacheable = !mmuIsOn(mmu) || MMU_TRANSLATE_RESULT_CACHEABLE(r);
+        memo.valid = mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[va >> 12].revision == mmu->revision;
+        if (memo.valid) memo = {va >> 12, pa >> 12, mmu->tlbWrites, ic->permGen, mmu->transTablPA, privileged, cacheable, true};
     }
-    const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
-    const bool cached = ic->arm920Enabled && !ic->arm920LeanWord &&
-                        (!mmuIsOn(ic->memorySystem.mmu) || MMU_TRANSLATE_RESULT_CACHEABLE(r));
+    const bool cached = ic->arm920Enabled && !ic->arm920LeanWord && cacheable;
     if (!cached) {
         if (size == 2) {
             uint16_t halfword;

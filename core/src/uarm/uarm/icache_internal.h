@@ -96,6 +96,13 @@ struct icache {
     uint32_t arm920PrefetchVa, arm920PrefetchWord;
     // The line the prefetched word came from, or null when it came from outside the lines.
     Arm920Line* arm920PrefetchLine;
+    // The ARM920T fetch's last translation that the TLB answered (MMU on), with the MMU's tlbWrites, the
+    // permGen and TTB it was made at. While they hold, mmuTranslate would answer the same from the same entry
+    // with no side effects. Not saved.
+    struct {
+        uint32_t page, paPage, tlbWrites, permGen, ttp;
+        bool privileged, cacheable, valid;
+    } arm920Translation;
     // ARM920T Fast: answers a fetch from the lean decode cache or a plain host page, or returns false for
     // the model to read it uncached. While set the model fills no lines. Not saved.
     bool (*arm920LeanWord)(void* ctx, uint32_t va, unsigned size, bool privileged, uint32_t* word);
