@@ -445,10 +445,28 @@ void SyncProfile::DropUnusedBlobs() {
          ignored);
 }
 
-std::vector<std::string> SyncProfile::BackupDevices() {
+bool IsRecoverySource(const std::string& source, std::string* device) {
+    static const std::string marker = " / recovery ";
+    const auto at = source.rfind(marker);
+    if (at == std::string::npos) return false;
+    if (device) *device = source.substr(0, at);
+    return true;
+}
+
+std::vector<std::string> SyncProfile::BackupDevices(bool withRecovery) {
     std::vector<std::string> out;
     Query q(db, "SELECT DISTINCT device_key FROM backup ORDER BY device_key");
-    while (q.Row()) out.push_back(q.Text(0));
+    while (q.Row()) if (withRecovery || !IsRecoverySource(q.Text(0))) out.push_back(q.Text(0));
+    return out;
+}
+
+std::vector<RecoveryCopy> SyncProfile::RecoveryCopies(const std::string& deviceKey) {
+    std::vector<RecoveryCopy> out;
+    Query q(db, "SELECT device_key,MAX(stored_at) FROM backup GROUP BY device_key ORDER BY MAX(stored_at),device_key");
+    while (q.Row()) {
+        std::string device;
+        if (IsRecoverySource(q.Text(0), &device) && device == deviceKey) out.push_back({q.Text(0), q.Int(1)});
+    }
     return out;
 }
 

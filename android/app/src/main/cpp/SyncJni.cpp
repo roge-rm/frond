@@ -190,9 +190,15 @@ bool run(const std::string& root, JsonObjectConst in, JsonObject out, std::strin
     }
     if (op == "backups") {
         auto rows = out.createNestedArray("rows");
-        for (const auto& source : profile.BackupDevices()) for (const auto& backup : profile.Backups(source)) {
+        for (const auto& source : profile.BackupDevices(true)) for (const auto& backup : profile.Backups(source)) {
             auto row = rows.createNestedObject();
             row["device"] = source;
+            // A recovery copy belongs to its own device. "recovery" is when it was stored.
+            std::string owner;
+            if (IsRecoverySource(source, &owner)) {
+                row["owner"] = owner;
+                row["recovery"] = backup.storedAt;
+            }
             // Palm database names are raw bytes. Keep them as hex for the key and show their Palm text.
             const Bytes name(backup.name.begin(), backup.name.end());
             row["key"] = hex(name);

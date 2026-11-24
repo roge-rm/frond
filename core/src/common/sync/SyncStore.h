@@ -103,6 +103,14 @@ struct BackupEntry {
     int64_t storedAt{0};
 };
 
+struct RecoveryCopy {
+    std::string source;  // the key to give Backups, LoadBackup and QueueRestore
+    int64_t storedAt{0};
+};
+
+// True for a recovery source; device gets the key of the device it belongs to.
+bool IsRecoverySource(const std::string& source, std::string* device = nullptr);
+
 struct InstallItem {
     int64_t id{0};
     std::string deviceKey;  // empty: the next device in this profile to sync
@@ -152,7 +160,10 @@ class SyncProfile {
     // one can fast sync.
     uint32_t PcId() const { return pcId; }
 
-    std::vector<std::string> BackupDevices();
+    // Sources of stored backups. Recovery copies ("<device> / recovery <sha>") are listed only when asked for.
+    std::vector<std::string> BackupDevices(bool withRecovery = false);
+    // The recovery copies kept for a device, oldest first, with when each was stored.
+    std::vector<RecoveryCopy> RecoveryCopies(const std::string& deviceKey);
     std::vector<BackupEntry> Backups(const std::string& deviceKey);
     std::optional<BackupEntry> FindBackup(const std::string& deviceKey, const std::string& name);
     // Stores the file form of a database as the latest backup of it from this device.

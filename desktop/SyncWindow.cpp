@@ -581,6 +581,9 @@ SyncWindow::SyncWindow(QWidget* parent) : QDialog(parent) {
     backupDevice = new QComboBox(backup);
     backupDevice->setObjectName("syncBackupDevice");
     source->addRow(tr("Device"), backupDevice);
+    recoveryCopy = new QComboBox(backup);
+    recoveryCopy->setObjectName("syncRecoveryCopy");
+    source->addRow(tr("Recovery copies"), recoveryCopy);
     backups = table(backup, {tr("Database"), tr("Size"), tr("Backed up")});
     backups->setObjectName("syncBackups");
     backupLayout->addWidget(backups, 1);
@@ -622,7 +625,8 @@ SyncWindow::SyncWindow(QWidget* parent) : QDialog(parent) {
     connect(showPrivate, &QCheckBox::toggled, this, &SyncWindow::showRecords);
     connect(showArchived, &QCheckBox::toggled, this, &SyncWindow::showRecords);
     connect(palmConduits, &QCheckBox::toggled, this, &SyncWindow::setPalmConduits);
-    connect(backupDevice, &QComboBox::currentIndexChanged, this, &SyncWindow::showBackups);
+    connect(backupDevice, &QComboBox::currentIndexChanged, this, &SyncWindow::showRecoveryCopies);
+    connect(recoveryCopy, &QComboBox::currentIndexChanged, this, &SyncWindow::showBackups);
     connect(records, &QTableWidget::itemSelectionChanged, this, [this] {
         const auto count = selectedRows(records).size();
         edit->setEnabled(count == 1);
@@ -677,7 +681,7 @@ void SyncWindow::changeProfile() {
         if (at >= 0) backupDevice->setCurrentIndex(at);
     }
     showRecords();
-    showBackups();
+    showRecoveryCopies();
     showQueue();
     showLog();
 }
@@ -831,13 +835,31 @@ void SyncWindow::exportRecords() {
     if (!frondSyncFiles::write(dialog.selectedFiles().first(), kind(), items, error)) showError(this, error);
 }
 
+// Recovery copies kept for the chosen device. The first entry is its normal backups.
+void SyncWindow::showRecoveryCopies() {
+    {
+        const QSignalBlocker blocked(recoveryCopy);
+        recoveryCopy->clear();
+        recoveryCopy->addItem(tr("None, show the latest backups"), QString());
+        if (profile.IsOpen() && backupDevice->currentIndex() != -1)
+            for (const auto& copy : profile.RecoveryCopies(backupDevice->currentData().toString().toStdString()))
+                recoveryCopy->addItem(when(copy.storedAt), text(copy.source));
+        recoveryCopy->setEnabled(recoveryCopy->count() > 1);
+    }
+    showBackups();
+}
+
+std::string SyncWindow::backupSource() const {
+    const auto copy = recoveryCopy->currentData().toString();
+    return (copy.isEmpty() ? backupDevice->currentData().toString() : copy).toStdString();
+}
+
 void SyncWindow::showBackups() {
     backups->setRowCount(0);
     exportDb->setEnabled(false);
     restore->setEnabled(false);
     if (!profile.IsOpen() || backupDevice->currentIndex() == -1) return;
-    const auto key = backupDevice->currentData().toString().toStdString();
-    for (const auto& item : profile.Backups(key))
+    for (const auto& item : profile.Backups(backupSource()))
         addRow(backups, {text(PalmPimText(Bytes(item.name.begin(), item.name.end()))),
                          QLocale().formattedDataSize(item.size), when(item.storedAt)},
                QByteArray::fromStdString(item.name), bool(item.attributes & dbResource));
@@ -849,7 +871,7 @@ void SyncWindow::exportBackup() {
     if (!profile.IsOpen() || rows.size() != 1) return;
     const auto db = rows.first()->data(Qt::UserRole).toByteArray().toStdString();
     Bytes bytes;
-    if (!profile.LoadBackup(backupDevice->currentData().toString().toStdString(), db, bytes))
+    if (!profile.LoadBackup(backupSource(), db, bytes))
         return showError(this, tr("Couldn't read this backup."));
     const auto name = backupFilename(rows.first()->text(), rows.first()->data(Qt::UserRole + 1).toBool());
     const auto path = QFileDialog::getSaveFileName(this, tr("Export database"), name, tr("Palm databases (*.prc *.pdb)"));
@@ -860,6 +882,7 @@ void SyncWindow::exportBackup() {
 void SyncWindow::restoreBackups() {
     if (!profile.IsOpen() || backupDevice->currentIndex() == -1) return;
     const auto from = backupDevice->currentData().toString().toStdString();
+    const auto source = backupSource();
     const auto assignments = library.Assignments();
     QStringList devices;
     std::vector<std::string> keys;
@@ -888,7 +911,7 @@ void SyncWindow::restoreBackups() {
     std::string error;
     ProfileSyncLock lock;
     if (!lock.Acquire(library.Root(), profileId, error)) return showError(this, text(error));
-    const auto count = profile.QueueRestore(from, keys[target->currentIndex()], error);
+    const auto count = profile.QueueRestore(source, keys[target->currentIndex()], error);
     if (count <= 0) return showError(this, error.empty() ? tr("No backups to restore.") : text(error));
     showQueue();
     tabs->setCurrentIndex(2);

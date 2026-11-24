@@ -895,7 +895,17 @@ void TestInstallRecovery(const std::string& root) {
         CHECK(handheld.deletes == (refuse ? 0 : 2));
         CHECK(handheld.record == 1);
     }
-    const auto sources = profile.BackupDevices();
+    const auto sources = profile.BackupDevices(true);
+    const auto device = MachineDeviceKey(options.machineKey);
+    const auto plain = profile.BackupDevices();
+    CHECK(plain.size() < sources.size());
+    for (const auto& source : plain) CHECK(!IsRecoverySource(source));
+    const auto copies = profile.RecoveryCopies(device);
+    CHECK(!copies.empty() && copies.front().storedAt > 0 && profile.RecoveryCopies("machine:other").empty());
+    for (const auto& copy : copies) {
+        std::string owner;
+        CHECK(IsRecoverySource(copy.source, &owner) && owner == device);
+    }
     const auto recovery = std::find_if(sources.begin(), sources.end(), [](const auto& source) {
         return source.find(" / recovery ") != std::string::npos;
     });

@@ -42,6 +42,8 @@ class SyncWindow : public QDialog {
     void importRecords();
     void exportRecords();
     void showBackups();
+    void showRecoveryCopies();
+    std::string backupSource() const;
     void exportBackup();
     void restoreBackups();
     void showQueue();
@@ -57,7 +59,7 @@ class SyncWindow : public QDialog {
     frondSync::SyncLibrary library;
     frondSync::SyncProfile profile;
     int64_t profileId{0};
-    QComboBox *profiles, *recordKind, *backupDevice;
+    QComboBox *profiles, *recordKind, *backupDevice, *recoveryCopy;
     QTabWidget* tabs;
     QCheckBox *showPrivate, *showArchived, *palmConduits;
     QTableWidget *records, *backups, *queue, *log;

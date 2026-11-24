@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
         if (!open(args[1])) return 1;
         std::vector<std::string> devices;
         if (args.size() == 3) devices.push_back(args[2]);
-        else devices = profile.BackupDevices();
+        else devices = profile.BackupDevices(true);
         for (const auto& device : devices)
             for (const auto& b : profile.Backups(device))
                 std::cout << device << "\t" << b.name << "\t" << FourCc(b.type) << "\t" << FourCc(b.creator) << "\t" << b.size << "\t"

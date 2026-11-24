@@ -491,7 +491,7 @@ internal fun SyncManagerScreen(machines: List<Session>, refresh: Int = 0, onClos
                 when (section) {
                     SyncSection.BACKUPS -> ListItem(
                         headlineContent = { Text(row.optString("name")) },
-                        supportingContent = { Text(machineName(row.optString("device"))) },
+                        supportingContent = { Text(backupSourceLabel(row, { machineName(it) })) },
                         trailingContent = {
                             Row {
                                 TextButton(enabled = !work.busy, onClick = {
@@ -629,6 +629,11 @@ private fun recordTitle(kind: SyncKind, record: JSONObject): String {
         SyncKind.MEMOS -> fields.optString("text").lineSequence().firstOrNull().orEmpty()
     }.ifBlank { "Untitled" }
 }
+
+// A recovery copy is shown under its own device, with when it was stored.
+internal fun backupSourceLabel(row: JSONObject, machineName: (String) -> String): String =
+    if (row.has("recovery")) "${machineName(row.optString("owner"))} · Recovery copy ${readableTime(row.getLong("recovery"))}"
+    else machineName(row.optString("device"))
 
 private fun readableTime(seconds: Long) =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault()).format(Instant.ofEpochSecond(seconds))
