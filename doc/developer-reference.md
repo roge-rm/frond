@@ -421,6 +421,7 @@ Key names:
 | `jog-up`, `jog-down`, `jog-press` | Jog dial | TG50 |
 | `hold` | Hold switch, held while down | TG50 |
 | `hotsync` | The connector's HotSync line, low while down | TX, E2 |
+| `function`, `bluetooth`, `trigger-left`, `trigger-right`, `stick-press` | Function and Bluetooth buttons, the triggers, the stick pressed in | Zodiac |
 
 The TG50 keyboard keys are numbers 17 to 58, in rows from the top left.
 

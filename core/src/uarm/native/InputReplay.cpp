@@ -31,7 +31,9 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
         {"jog-up", keyIdJogUp}, {"jog-down", keyIdJogDown}, {"jog-press", keyIdJogPress},
         {"pad-up", keyIdPadUp}, {"pad-down", keyIdPadDown}, {"pad-left", keyIdPadLeft}, {"pad-right", keyIdPadRight},
         {"pad-a", keyIdPadA}, {"pad-b", keyIdPadB}, {"pad-x", keyIdPadX}, {"pad-y", keyIdPadY},
-        {"pad-home", keyIdPadHome}, {"pad-menu", keyIdPadMenu}, {"pad-hold", keyIdPadHold}};
+        {"pad-home", keyIdPadHome}, {"pad-menu", keyIdPadMenu}, {"pad-hold", keyIdPadHold},
+        {"function", keyIdFunction}, {"bluetooth", keyIdBluetooth}, {"trigger-left", keyIdTriggerLeft},
+        {"trigger-right", keyIdTriggerRight}, {"stick-press", keyIdStickPress}};
     std::string line;
     size_t number = 0;
     while (std::getline(file, line)) {
