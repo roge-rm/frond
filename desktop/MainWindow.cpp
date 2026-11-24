@@ -482,7 +482,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     networkLabel = label(tr("Network"), 2);
     keyboard = new QCheckBox(tr("Attached"),root);
     keyboard->setObjectName("keyboardAttached");
-    keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install Palm's Universal Wireless Keyboard driver 1.13 in the Palm and turn it on in Keyboard first. Type in the Palm window; modifiers and key releases are sent to the driver."));
+    keyboard->setToolTip(tr("Needs Palm's Universal Wireless Keyboard driver 1.13 in the Palm, turned on in Keyboard."));
     connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
     keyboardLabel = label(tr("Infrared keyboard"), 3);
     serial = new QComboBox(root);
