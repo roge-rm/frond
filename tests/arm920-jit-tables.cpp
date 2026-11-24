@@ -1,7 +1,8 @@
 // The ARM920T in Fast against Exact when the guest edits a page table entry under translated code. First the
 // TLB is flushed and then the entry for a hot code page is changed with no flush after it, so the next fetch
 // walks the new entry. Then a data load fills the TLB from the old entry and the table is changed back with
-// no flush, so the stale TLB entry keeps the old page. Fast runs the same code as Exact both times.
+// no flush, so the stale TLB entry keeps the old page. Last the entry is made a fault one and flushed, then
+// set to a third page with no flush (as WinCE maps a slot back). Fast runs the same code as Exact each time.
 
 #include <cassert>
 #include <cstdint>
@@ -18,8 +19,8 @@
 
 namespace {
 constexpr uint32_t ramSize = 4u << 20, ttb = 0x300000, l2 = 0x310000;
-// Small pages for VA 0x1000, uncached, read/write for all: A at PA 0x101000, B at PA 0x201000.
-constexpr uint32_t pageA = 0x101ff2, pageB = 0x201ff2;
+// Small pages for VA 0x1000, uncached, read/write for all: A at PA 0x101000, B at PA 0x201000, C at 0x281000.
+constexpr uint32_t pageA = 0x101ff2, pageB = 0x201ff2, pageC = 0x281ff2;
 
 constexpr uint32_t mcr(unsigned crn, unsigned rd) { return 0xee000f10u | crn << 16 | rd << 12; }
 constexpr uint32_t movPc(unsigned rm) { return 0xe1a0f000u | rm; }
@@ -59,6 +60,8 @@ struct Machine {
         word(0x101004, movPc(8));
         word(0x201000, 0xe2822801);  // ADD r2, r2, #0x10000
         word(0x201004, movPc(8));
+        word(0x281000, 0xe2822c01);  // ADD r2, r2, #0x100
+        word(0x281004, movPc(8));
         // Bootstrap: TTB, domain 0 manager, MMU with caches and high vectors, then 0xc0000200.
         word(0x100, mcr(2, 4));
         word(0x104, mcr(3, 5));
@@ -86,7 +89,15 @@ struct Machine {
         word(0x358, mcr(13, 3));
         word(0x35c, movReg(8, 1));
         word(0x360, movPc(10));
-        word(0x380, loop);
+        // Fault entry and flush, then C over the fault entry with no flush: the fetch walks C.
+        word(0x3a0, str(3, 13));
+        word(0x3a4, tlbFlush);
+        word(0x3a8, nop);
+        word(0x3ac, str(14, 13));
+        word(0x3b0, icacheInvalidate);
+        word(0x3b4, movReg(8, 4));
+        word(0x3b8, movPc(10));
+        word(0x3e0, loop);
         cpuReset(cpu, 0x100);
         cpuSetReg(cpu, ARM_REG_NUM_CPSR, 0xd3);
         for (unsigned i = 0; i < 15; ++i) cpuSetReg(cpu, i, 0);
@@ -97,7 +108,9 @@ struct Machine {
         cpuSetReg(cpu, 7, 0xc0000200);
         for (unsigned i = 0; i < 4; ++i) step();
         assert(reg(15) == 0xc0000200);
-        cpuSetReg(cpu, 1, 0xc0000380);
+        cpuSetReg(cpu, 1, 0xc00003a0);
+        cpuSetReg(cpu, 4, 0xc00003e0);
+        cpuSetReg(cpu, 14, pageC);
         cpuSetReg(cpu, 3, 0);
         cpuSetReg(cpu, 7, pageA);
         cpuSetReg(cpu, 8, 0xc0000304);
@@ -153,14 +166,14 @@ int main() {
         }
     };
     // Exact steps a round, Fast runs the same count, and the registers match after each.
-    for (unsigned round = 0; exact.reg(15) != 0xc0000380; ++round) {
+    for (unsigned round = 0; exact.reg(15) != 0xc00003e0; ++round) {
         assert(round < 200);
         const uint64_t count = 30 + round % 7;
         for (uint64_t i = 0; i < count; ++i) exact.step();
         runFast(count);
         for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
     }
-    assert(exact.reg(2) == 40 + 0x10000 + 1);
+    assert(exact.reg(2) == 40 + 0x10000 + 1 + 0x100);
     assert(translated > 0);
     std::printf("Fast: %llu of the instructions in translated blocks\n", (unsigned long long)translated);
     std::printf("PASS: ARM920T table edits under translated code\n");

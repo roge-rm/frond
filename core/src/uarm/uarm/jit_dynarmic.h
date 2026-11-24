@@ -97,8 +97,9 @@ bool jitWmmxCompiles(FrondJit *jit, uint32_t word);
 // (cpuJitSetCodeLines). False if the JIT holds no code from the page.
 bool jitCodeWritten(FrondJit *jit, uint8_t *hostPage, uint32_t offset, uint32_t size);
 // ARM920T Fast blocks: a store to [pa, pa + size) on a marked line of a RAM page code was translated
-// from. The same, by physical page.
-void jitCodeWrittenPa(FrondJit *jit, uint32_t pa, uint32_t size);
+// from. The same, by physical page. data: the bytes being stored while the page still holds the old ones,
+// or null.
+void jitCodeWrittenPa(FrondJit *jit, uint32_t pa, uint32_t size, const void *data = nullptr);
 // Sends stores to the RAM pages in [host, host + size) back through the callbacks.
 void jitWriteProtect(FrondJit *jit, const uint8_t *host, uint32_t size);
 // The same for the one RAM page at hostPage, after a line of it was flagged.

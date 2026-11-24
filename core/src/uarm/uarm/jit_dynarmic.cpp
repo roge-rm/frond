@@ -71,6 +71,7 @@ struct Stats {
     // fills, pages they dropped outside a check, and filled pages whose entry is the mapping their code has.
     uint64_t tlbLiveScans = 0, fillRechecks = 0, fillDrops = 0, fillSame = 0;
     uint64_t tableMoves = 0;  // mapping checks run with no flush, for table words that changed
+    uint64_t tableFaultFills = 0;  // stores of an entry over a fault one in a walked table word (no check)
     std::unordered_map<uint32_t, uint64_t> interpPc;
     // Instruction at each interpreted PC (Thumb: the halfword), and the guest PC current
     // at each whole-cache invalidation with the word there.
@@ -153,11 +154,12 @@ struct Stats {
                 (unsigned long long)suspendedMvaDrops);
         fprintf(stderr,
                 "jit: fullMapChecks %llu mapPagesChecked %llu tableLinesChanged %llu tableLines %llu tlbLiveScans %llu "
-                "fillRechecks %llu fillDrops %llu fillSame %llu tableMoves %llu\n",
+                "fillRechecks %llu fillDrops %llu fillSame %llu tableMoves %llu tableFaultFills %llu\n",
                 (unsigned long long)fullMapChecks, (unsigned long long)mapPagesChecked,
                 (unsigned long long)tableLinesChanged, (unsigned long long)tableLines,
                 (unsigned long long)tlbLiveScans, (unsigned long long)fillRechecks, (unsigned long long)fillDrops,
-                (unsigned long long)fillSame, (unsigned long long)tableMoves);
+                (unsigned long long)fillSame, (unsigned long long)tableMoves,
+                (unsigned long long)tableFaultFills);
         fprintf(stderr,
                 "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
                 "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
@@ -807,8 +809,8 @@ struct Env final : public A32::UserCallbacks {
     }
 
     // known: this level holds code from the page. True if the store dropped any.
-    bool CodeWrittenPa(uint32_t pa, uint32_t offset, uint32_t size) {
-        if (watchTables) TableWordsWritten(pa, offset, size);
+    bool CodeWrittenPa(uint32_t pa, uint32_t offset, uint32_t size, const void *data) {
+        if (watchTables) TableWordsWritten(pa, offset, size, data);
         const auto it = byPa.find(pa);
         return it != byPa.end() && RangeWritten(it->second, offset, size, true, pa, nullptr);
     }
@@ -837,12 +839,29 @@ struct Env final : public A32::UserCallbacks {
     }
 
     // A store to [offset, offset + size) of physical page pa hit a word marked in the CPU's code map: the table
-    // lines there with words walks read are dirty, for the next mapping check.
-    void TableWordsWritten(uint32_t pa, uint32_t offset, uint32_t size) {
+    // lines there with words walks read are dirty, for the next mapping check. data is what an aligned word
+    // store puts there, with the old word still in place (null if not known). Such a store that keeps the
+    // word, or puts an entry where a fault one was (WinCE maps a slot back that way), moves no code page's
+    // mapping: a page whose walk reads a fault entry there was dropped or suspended by the check after the
+    // store that put it there, and Resume and NoteSuspended walk it again. A fill through the new entry
+    // (TakeFills) is for such a page too, or for code compiled from it since, which has that mapping.
+    void TableWordsWritten(uint32_t pa, uint32_t offset, uint32_t size, const void *data) {
         for (uint32_t line = offset >> 6; line <= (offset + size - 1) >> 6; line++) {
             const auto it = tableLineAt.find((pa << 6) | line);
             if (it == tableLineAt.end() || !it->second->words) continue;
-            it->second->dirty = true;
+            TableLine &l = *it->second;
+            if (data && size == 4 && !(offset & 3) && !l.dirty) {
+                if (!(l.words & (1u << ((offset & 63) >> 2)))) continue;
+                uint32_t old, now;
+                std::memcpy(&old, l.host + (offset & 63), 4);
+                std::memcpy(&now, data, 4);
+                if (old == now) continue;
+                if (!(old & 3)) {
+                    stats.tableFaultFills++;
+                    continue;
+                }
+            }
+            l.dirty = true;
             tablesWritten = true;
         }
     }
@@ -2386,9 +2405,9 @@ bool jitCodeWritten(FrondJit *j, uint8_t *hostPage, uint32_t offset, uint32_t si
     return known;
 }
 
-void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size) {
+void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size, const void *data) {
     bool dropped = false;
-    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWrittenPa(pa >> 12, pa & 0xfffu, size); });
+    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWrittenPa(pa >> 12, pa & 0xfffu, size, data); });
     if (dropped && std::find(j->remaskPa.begin(), j->remaskPa.end(), pa >> 12) == j->remaskPa.end())
         j->remaskPa.push_back(pa >> 12);
 }

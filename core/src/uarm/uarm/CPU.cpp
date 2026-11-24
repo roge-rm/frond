@@ -1356,11 +1356,12 @@ static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
 // store overlaps, in the virtual pages translated from pa. Decoded code isn't tied to the physical pages
 // it came from, so a store to any of its lines drops it all. A store to other lines of those pages drops
 // nothing.
-static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size) {
+// data: the bytes being stored, before the page holds them (null if it already does or they aren't known).
+static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size, const void *data = nullptr) {
 #ifdef FROND_DYNARMIC
     // The word marks stay until jitRun works them out again from the blocks left.
     if (cpu->jitCode && unlikely(cpu->jitCode->page(pa)) && cpu->jitCode->hitWords(pa, size))
-        jitCodeWrittenPa(cpu->jit, pa, size);
+        jitCodeWrittenPa(cpu->jit, pa, size, data);
 #endif
     if (!cpu->leanCode || likely(!cpu->leanCode->page(pa)) || !cpu->leanCode->hit(pa, size)) return;
     cpu->leanCode->clear();
@@ -1464,7 +1465,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     // A page holding code keeps no write entry, so each store to it is checked against the code's lines.
     bool codePage = false;
     if constexpr (write) {
-        cpuPrvArm920Stored(cpu, MMU_TRANSLATE_RESULT_PA(r), size);
+        cpuPrvArm920Stored(cpu, MMU_TRANSLATE_RESULT_PA(r), size, buf);
         codePage = cpuPrvArm920CodePage(cpu, MMU_TRANSLATE_RESULT_PA(r));
     }
     uint8_t *host = page + (MMU_TRANSLATE_RESULT_PA(r) & 0xfffu);
@@ -6047,7 +6048,9 @@ bool cpuJitCodePageWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value
         e = {};
         return false;
     }
-    if ((jitPage && cpu->jitCode->hitWords(pa, size)) || (leanPage && cpu->leanCode->hit(pa, size))) return false;
+    // A store to code or a walked table word drops or notes it as the slow path would, before the store.
+    if ((jitPage && cpu->jitCode->hitWords(pa, size)) || (leanPage && cpu->leanCode->hit(pa, size)))
+        cpuPrvArm920Stored(cpu, pa, size, &value);
     memcpy(e.host + (va & 0xfffu), &value, size);
     cpu->leanBus += e.counted;
     return true;
