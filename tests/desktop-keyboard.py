@@ -101,7 +101,7 @@ with emulator(source, 'driver') as request:
     held=root/'held.replay';held.write_text('200 keyboard-down "Left Shift"\n')
     request('input-replay',held);time.sleep(1)
     request('save',root/'held.frond')
-with emulator(root/'held.frond','resumed') as request:
+with emulator(root/'held'/'held.frond','resumed') as request:
     assert request('keyboard-state') == 'attached'
     replay=root/'resume.replay';replay.write_text('500 keyboard-down Z\n650 keyboard-up Z\n')
     request('input-replay',replay);time.sleep(2)
@@ -109,7 +109,7 @@ with emulator(root/'held.frond','resumed') as request:
     assert characters(root/'resumed.zip') == list(map(ord,'zxZzz'))
     request('keyboard-attach','off');request('keyboard-key','1a d',ok=False)
     request('save',root/'detached.frond')
-with emulator(root/'detached.frond','detached') as request:
+with emulator(root/'detached'/'detached.frond','detached') as request:
     assert request('keyboard-state') == 'detached'
     request('keyboard-attach','on')
     request('input-replay',root/'resume.replay');time.sleep(2)
