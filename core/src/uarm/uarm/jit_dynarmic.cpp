@@ -855,10 +855,8 @@ struct Env final : public A32::UserCallbacks {
         stats.NoteCallback(va, true);
         if constexpr (sizeof(T) <= 4) {
             if (arm920) {
-                if (!memoryCost && cpuJitCodePageWrite(cpu, va, sizeof(T), uint32_t(v))) {
-                    AfterIo();
-                    return;
-                }
+                // Device pages and RAM code pages never share a page, so the order of the two tables doesn't
+                // matter; the device one (ring words) is the busier.
                 if (const int device = cpuJitLeanDeviceWrite(cpu, va, sizeof(T), uint32_t(v), RanNow())) {
                     if (device < 0) {
                         AccessFailed(va, sizeof(T), true, 0);
@@ -867,6 +865,10 @@ struct Env final : public A32::UserCallbacks {
                     CheckGen();
                     AfterIo();
                     if (memoryCost) Charged();
+                    return;
+                }
+                if (!memoryCost && cpuJitCodePageWrite(cpu, va, sizeof(T), uint32_t(v))) {
+                    AfterIo();
                     return;
                 }
             }

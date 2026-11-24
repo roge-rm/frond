@@ -1405,6 +1405,18 @@ struct Probe {
     static bool leanWrite(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t left,
                           uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
+        // A ring word the first write of the run checked the view for: the same checks pass, so it goes straight to
+        // the bank storage. The view (16080000-160bffff) meets none of the addresses below.
+        if (leanCs5.ringUsable && pa - leanCs5.ringLow < leanCs5.ringSpan && size == 4 && !(pa & 3)) {
+            if (p.failed || quietCycles <= ran || left < leanCs5.cost) return false;
+            p.graphicsMemory->writeWord(leanCs5.ringBank, leanCs5.ringOffset + ((pa - leanCs5.ringWrap) & leanCs5.ringMask),
+                                        value);
+            leanCs5.waitClocks += leanCs5.clocks;
+            leanCs5.waitCost += leanCs5.cost;
+            ++leanCs5Writes;
+            *cost = leanCs5.cost;
+            return true;
+        }
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
         if (inJit && jitCardWriteAddress(pa, value)) return size == 4 && p.jitCardWrite(pa, value, ran);
         if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran, cpuArm920TakeJitAccessPc(p.cpu));
@@ -1421,18 +1433,6 @@ struct Probe {
             return size == 4 && (pc == 0x200aa504 || pc == 0x200a9ed4 || pc == 0x200a9788) && p.graphicsMemory &&
                    p.cs5Configuration.virtualProfile() && !p.options.cs5ConfigurationObserver &&
                    p.jitChargedWrite(pa, 4, value, ran, pc);
-        }
-        // A ring word the first write of the run checked the view for: the same checks pass, so it goes straight to
-        // the bank storage.
-        if (leanCs5.ringUsable && pa - leanCs5.ringLow < leanCs5.ringSpan && size == 4 && !(pa & 3)) {
-            if (p.failed || quietCycles <= ran || left < leanCs5.cost) return false;
-            p.graphicsMemory->writeWord(leanCs5.ringBank, leanCs5.ringOffset + ((pa - leanCs5.ringWrap) & leanCs5.ringMask),
-                                        value);
-            leanCs5.waitClocks += leanCs5.clocks;
-            leanCs5.waitCost += leanCs5.cost;
-            ++leanCs5Writes;
-            *cost = leanCs5.cost;
-            return true;
         }
         if (!p.graphicsMemory || !p.cs5Configuration.virtualProfile() || !Imx1GraphicsMemory::owns(pa) ||
             p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)

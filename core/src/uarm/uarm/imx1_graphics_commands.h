@@ -534,7 +534,7 @@ class Imx1GraphicsCommands {
                     ((fill.keyed || fill.plain || fill.a4) && !memory.contains(configuration, eim, sourceStart(fill), sourceLength)))) return A::sequence;
             }
             // The overlay words go to a copy first, so a refused one leaves none of the batch written.
-            {
+            if (std::any_of(batch.fills.begin(), batch.fills.end(), [](const Fill& fill) { return displayFill(fill); })) {
                 auto display = configuration.displayState();
                 const auto status = displayWords(configuration, display, batch);
                 if (status != A::ok) return status;
