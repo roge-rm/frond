@@ -181,6 +181,12 @@ struct Arm920CodeMap {
             if ((w[i >> 6] >> (i & 63)) & 1) return true;
         return false;
     }
+    // hit and hitWords for the line and the word holding pa. The page must be marked.
+    bool hitLine(uint32_t pa) const { return (lines[pa >> 18][(pa >> 12) & 63] >> ((pa >> 6) & 63)) & 1; }
+    bool hitWord(uint32_t pa) const {
+        const uint64_t *w = words[pa >> 18];
+        return w && ((w[((pa >> 12) & 63) * 16 + ((pa >> 8) & 15)] >> ((pa >> 2) & 63)) & 1);
+    }
     void clearPage(uint32_t pa) {
         pages[pa >> 18] &= ~(uint64_t(1) << ((pa >> 12) & 63));
         lines[pa >> 18][(pa >> 12) & 63] = 0;
@@ -6023,7 +6029,8 @@ bool cpuJitCodePageWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value
         e = {};
         return false;
     }
-    if ((jitPage && cpu->jitCode->hitWords(pa, size)) || (leanPage && cpu->leanCode->hit(pa, size))) return false;
+    // Aligned and at most 4 bytes, so the store is inside one word and one line.
+    if ((jitPage && cpu->jitCode->hitWord(pa)) || (leanPage && cpu->leanCode->hitLine(pa))) return false;
     memcpy(e.host + (va & 0xfffu), &value, size);
     cpu->leanBus += e.counted;
     return true;
