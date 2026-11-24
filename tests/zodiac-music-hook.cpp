@@ -3,7 +3,8 @@
 // guest program with a library of the ROM's shape calls Open, Play, the real-time calls (one in a hot loop),
 // Stop, Close, a Play after the Close and an Open of a file that isn't an SMF; with the hooks on, Exact, lean
 // Fast and Fast with blocks each give the same events with the guest's arguments, and every engine ends as it
-// does with no hooks.
+// does with no hooks. The checks do work inside assert (here and in zodiac-fast-lean.cpp), so they stay on.
+#undef NDEBUG
 #define ZODIAC_FAST_LEAN_MAIN fastLeanMain
 #include "zodiac-fast-lean.cpp"
 
