@@ -66,6 +66,8 @@ class ZodiacMusicSynth {
         drainReturns();
         if (font_) tsf_close(font_);
     }
+    // Songs start this long after their Play (zodiac_music::dalTickNs to sound with the guest's FM). Before start.
+    void setSongDelay(uint64_t ns) { player_.setSongDelay(ns); }
     ZodiacMusicSynth(const ZodiacMusicSynth&) = delete;
     ZodiacMusicSynth& operator=(const ZodiacMusicSynth&) = delete;
 

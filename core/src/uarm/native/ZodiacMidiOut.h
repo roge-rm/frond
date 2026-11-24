@@ -69,6 +69,8 @@ class ZodiacMidiOut {
     ZodiacMidiOut(const ZodiacMidiOut&) = delete;
     ZodiacMidiOut& operator=(const ZodiacMidiOut&) = delete;
 
+    // Songs start this long after their Play (zodiac_music::dalTickNs to sound with the guest's FM). Before start.
+    void setSongDelay(uint64_t ns) { player_.setSongDelay(ns); }
     // Takes events straight from the hooks too; they must outlive this. Before start. Without it, only offer
     // feeds it.
     void attach(zodiac_music::Hooks* hooks) { hooks_ = hooks; }

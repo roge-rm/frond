@@ -261,6 +261,30 @@ void rangeAndChannel() {
     assert(!run(0x50, 0) && notes() == (Bytes{60, 62, 64, 65}));
 }
 
+// The song delay: a song starts one DAL tick after its Play, and ends that much later; real-time messages and
+// Stop don't wait.
+void songDelay() {
+    sent.clear();
+    Stages p;
+    p.p.setSongDelay(dalTickNs);
+    p.feed(play(1000 * ms, 7, smf(body)));
+    p.advance(1009 * ms);
+    assert(sent.empty() && p.p.nextNs() == 1010 * ms);
+    p.advance(1010 * ms);
+    assert(sent.size() == 1 && sent[0].t == 1010 * ms && sent[0].b == (Bytes{0x90, 0x3c, 0x64}));
+    Event cc = ev(1100 * ms, Kind::message, 0x1234);
+    cc.bytes[0] = 0xb1; cc.bytes[1] = 7; cc.bytes[2] = 100; cc.length = 3;
+    p.feed(cc);
+    assert(sent.size() == 2 && sent[1].t == 1100 * ms);
+    p.advance(1759 * ms);
+    assert(p.playing() == 1);
+    p.advance(1760 * ms);
+    assert(p.playing() == 0 && allOff(sent.size() - 32, 1760 * ms));
+    p.feed(play(2000 * ms, 7, smf(body)));
+    p.feed(ev(2005 * ms, Kind::stop, 7));
+    assert(p.playing() == 0 && allOff(sent.size() - 32, 2005 * ms) && p.settled());
+}
+
 void volumeAndSysEx() {
     sent.clear();
     Stages p;
@@ -383,10 +407,11 @@ int main() {
     twoSongs();
     dataBytes();
     rangeAndChannel();
+    songDelay();
     volumeAndSysEx();
     escapesAndLimits();
     skipAndBudget();
-    std::puts("PASS: Zodiac music player (times, data bytes over 0x7f, ranges and channels, sysex, stop, restart, merge, end, reset, volume, escapes, "
+    std::puts("PASS: Zodiac music player (times, data bytes over 0x7f, ranges and channels, the song delay, sysex, stop, restart, merge, end, reset, volume, escapes, "
               "song limit, Helds returned, skipped note-ons, budget)");
     return 0;
 }

@@ -1109,6 +1109,7 @@ bool gFastEngineMissing = false;
                 musicSynth->attach(&zodiacMusic->MusicHooks());
                 if (midiOut) musicSynth->tap([out = midiOut.get()](const zodiac_music::Event& e) { out->offer(e); });
                 musicSynth->setClock(&musicClock);
+                musicSynth->setSongDelay(zodiac_music::dalTickNs);
                 musicSynth->start();
                 audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count, const AudioQueueSpan& span) {
                     synth->mix(frames, count, span, GuestAudioClock::steadyNs());
@@ -1133,6 +1134,7 @@ bool gFastEngineMissing = false;
             // Timed by the guest audio playing; with no audio device, by the host clock alone.
             // The synth lag stays 0: a hardware synth's own lag is a few ms. A setting would go here.
             if (audioDriver.Running()) midiOut->setReference(&musicClock);
+            midiOut->setSongDelay(zodiac_music::dalTickNs);
             midiOut->start();
         }
         // Nobody takes the music events: print them with --music-hooks, else the hooks go off.

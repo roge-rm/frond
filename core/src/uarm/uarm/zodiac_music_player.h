@@ -9,6 +9,7 @@
 // Reset All Controllers and All Notes Off, which it doesn't read (sent as 0). Stop, Close, a reset or load and a song's end send all notes off (CC 123 and 120) on all
 // 16 channels. A Play with a range starts at its start (what comes before gives its state, and only notes from the
 // last 20 ms before it sound, as in the DAL) and ends at its end; one with a channel plays only that channel's notes.
+// setSongDelay starts every song that much after its Play, to sound where the guest's FM does (dalTickNs).
 // Host only, never saved; nothing here touches the machine.
 // Two stages, neither on the emulation thread:
 // - Preparer, on a helper thread, takes the hooks' events, parses each file at its first Play (keeping the last
@@ -55,6 +56,10 @@ struct Cue {
 };
 
 using Release = std::function<void(Held*)>;
+
+// The DAL sequences its songs on a 10 ms tick and the FM sounds one tick after the Play (seen in ZapEm and Doom
+// II), so a song played on the host starts that much later to line up with it.
+constexpr uint64_t dalTickNs = 10000000;
 
 class Preparer {
    public:
@@ -154,7 +159,7 @@ class Player {
                     songs_.erase(songs_.begin());
                     allNotesOff(c.timeNs, sink);
                 }
-                songs_.push_back({c.handle, c.held, c.held->song.get(), c.timeNs, 0, uint64_t(c.startMs) * 1000,
+                songs_.push_back({c.handle, c.held, c.held->song.get(), c.timeNs + songDelayNs_, 0, uint64_t(c.startMs) * 1000,
                                   c.endMs == Event::noEnd ? UINT64_MAX : uint64_t(c.endMs) * 1000, c.firstChannel,
                                   c.lastChannel});
                 break;
@@ -221,6 +226,9 @@ class Player {
     // dropped, and programs, controllers, pitch bend, note-offs and sysex still go. For a clock that jumped
     // forward, so the span it skipped doesn't sound all at once. 0 plays everything again.
     void skipBefore(uint64_t timeNs) { skipBeforeNs_ = timeNs; }
+    // Songs start this long after their Play (dalTickNs to follow the guest's FM); 0 by default. Songs already
+    // playing keep theirs.
+    void setSongDelay(uint64_t ns) { songDelayNs_ = ns; }
 
     size_t playing() const { return songs_.size(); }
     // When advance next has something to do: the earliest song event or song end, or UINT64_MAX with no song.
@@ -270,7 +278,7 @@ class Player {
         uint32_t handle;
         Held* held;
         const Parsed* parsed;
-        uint64_t startNs;  // guest time of the Play
+        uint64_t startNs;  // guest time of the Play, plus the song delay
         size_t next;
         uint64_t fromUs, toUs;  // the range played, song time; toUs UINT64_MAX to the end
         uint8_t firstChannel, lastChannel;
@@ -295,6 +303,7 @@ class Player {
     const Release release_;
     std::vector<Song> songs_;  // reserved for maxSongs, never grown
     uint64_t skipBeforeNs_ = 0;
+    uint64_t songDelayNs_ = 0;
     uint8_t sysEx_[maxFileSysEx + 1];
 
     void end(uint32_t handle, uint64_t timeNs, const Sink& sink, bool notesOff) {
