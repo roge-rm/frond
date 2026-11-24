@@ -51,6 +51,7 @@
 #include <QSpinBox>
 #include <QSlider>
 #include <QSignalBlocker>
+#include <QScopeGuard>
 #include "WindowScale.h"
 #include "Webcams.h"
 #include <QStandardItemModel>
@@ -973,6 +974,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         if (client.property("danaCardRequest").toString()==command) return;
+        // While stopping, a result that leaves the request slot free goes on to the save, whichever branch takes it.
+        // The save and quit results lead the stop on themselves, as do a Files exchange and a card move.
+        const auto saveWhenFree = qScopeGuard([this, command] {
+            if (stopping && command != "save" && command != "quit" && client.running() && client.available() &&
+                exchangeStage == ExchangeStage::None && cardMove.stage == CardMove::None)
+                save();
+        });
         if (command == "dana-view" || command == "dana-view-state") {
             forceButton->hide(); refresh();
             if (stopping && exchangeStage == ExchangeStage::None) save();

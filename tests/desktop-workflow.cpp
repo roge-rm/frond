@@ -1322,6 +1322,51 @@ for line in s.makefile('rb'):
         QCOMPARE(machineSetting("infrared", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), QString("tcp:5097"));
         QSettings().clear();
     }
+    // Closing right after the IR keyboard goes in, while the driver check's db-list is still out, saves once its
+    // reply comes and then closes.
+    void keyboardListThenClose() {
+        QSettings().clear(); QSettings().setValue("resume", false); QSettings().setValue("irdaMode", "off");
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile identity(source.fileName()+".device"); QVERIFY(identity.open(QIODevice::WriteOnly)); identity.write("palm-tx"); identity.close();
+        const auto listed = files.filePath("listed"), go = files.filePath("go");
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(QString(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys,time
+base=pathlib.Path(sys.argv[1]);device=pathlib.Path(str(base)+'.device').read_bytes()
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':device,b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'keyboard-attach':message=b'attached' if arg==b'on' else b'detached'
+    if cmd==b'db-list':
+        pathlib.Path('%1').write_text('listed')
+        while not pathlib.Path('%2').exists():time.sleep(0.02)
+        message=b''
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY").arg(listed, go).toUtf8());
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(),true);
+            auto* keyboard=window.findChild<QCheckBox*>("keyboardAttached");
+            QVERIFY(keyboard);
+            QTRY_VERIFY_WITH_TIMEOUT(keyboard->isEnabled(), 5000);
+            keyboard->click();
+            QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(listed), 5000);
+            window.close();
+            QVERIFY(window.isVisible());
+            QFile(go).open(QIODevice::WriteOnly);
+            QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        const auto saved = QSettings().value("lastSession").toString();
+        QVERIFY(!saved.isEmpty());
+        QFile session(saved); QVERIFY(session.open(QIODevice::ReadOnly)); QCOMPARE(session.readAll(), QByteArray("saved"));
+        QSettings().clear();
+    }
     // Leaving IR printer mode with a job arriving asks first. A Discard while a printer poll is still out
     // waits for its reply and then switches, so the core follows the choice.
     void infraredPrinterDiscard() {
