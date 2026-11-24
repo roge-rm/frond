@@ -2848,6 +2848,18 @@ static void zodiacControls() {
     padAxis(SDL_CONTROLLER_AXIS_RIGHTX,0);padAxis(SDL_CONTROLLER_AXIS_RIGHTY,-20000);guest.expect({{keyIdHard3,false},{keyIdHard4,true}});
     padAxis(SDL_CONTROLLER_AXIS_RIGHTY,20000);guest.expect({{keyIdHard1,true},{keyIdHard4,false}});
     padAxis(SDL_CONTROLLER_AXIS_RIGHTY,0);guest.expect({{keyIdHard1,false}});guest.noStick();
+    // Controllers follow the desktop app being in front as well as the window's own focus.
+    input.HandleEvent(lost);guest.expect({});
+    padButton(SDL_CONTROLLER_BUTTON_A,true);guest.expect({});padButton(SDL_CONTROLLER_BUTTON_A,false);
+    input.SetAppActive(true);guest.expect({});
+    padButton(SDL_CONTROLLER_BUTTON_A,true);guest.expect({{keyIdHard1,true}});
+    input.HandleEvent(lost);guest.expect({{keyIdHard1,false}});
+    padButton(SDL_CONTROLLER_BUTTON_A,false);padButton(SDL_CONTROLLER_BUTTON_A,true);guest.expect({{keyIdHard1,true}});
+    input.SetAppActive(false);guest.expect({{keyIdHard1,false}});assert(!input.PressedButtons());
+    padButton(SDL_CONTROLLER_BUTTON_A,false);padButton(SDL_CONTROLLER_BUTTON_A,true);guest.expect({});
+    padButton(SDL_CONTROLLER_BUTTON_A,false);
+    {SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED;input.HandleEvent(e);}
+    guest.expect({});
     // The trigger axes do nothing.
     padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT,32767);guest.expect({});guest.noStick();
     // Start and Guide together hold Home once, and a key held on the keyboard too stays down until both let go.

@@ -424,6 +424,10 @@ class MainWindow : public QMainWindow {
     void showControls();
     // A map the core hasn't taken yet, sent once its request slot is free; empty for none.
     QString controllerMapUnsent;
+    // Whether Frond is the active app ("on" or "off") when the core hasn't been told yet; empty for
+    // nothing to send. Controllers only drive the Palm while it's "on" or the Palm window has focus.
+    QString appActiveUnsent;
+    void sendAppActive();
     bool editSyncSettings(const QString& session, QWidget* parent);
     void startSync();
     void showSyncStatus(const QString& state);

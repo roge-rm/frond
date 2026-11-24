@@ -351,7 +351,11 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
             case SDL_WINDOWEVENT:
                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
                     event.window.event==SDL_WINDOWEVENT_HIDDEN ||
-                    event.window.event==SDL_WINDOWEVENT_MINIMIZED) ReleaseInputs();
+                    event.window.event==SDL_WINDOWEVENT_MINIMIZED) {
+                    ReleaseInputs();
+                    // Focus moved to the desktop app's own window: controllers still count.
+                    if (appActive && event.window.event==SDL_WINDOWEVENT_FOCUS_LOST) padFocused = true;
+                }
                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_GAINED ||
                     event.window.event==SDL_WINDOWEVENT_SHOWN ||
                     event.window.event==SDL_WINDOWEVENT_RESTORED) { padFocused = true; UpdateGamepad(); }
@@ -524,6 +528,12 @@ void SdlEventHandler::ReleaseFingers() {
     }
     UpdateStick();
     redrawRequested = true;
+}
+
+void SdlEventHandler::SetAppActive(bool active) {
+    appActive = active;
+    if (active) { padFocused = true; UpdateGamepad(); }
+    else if (!SDL_GetKeyboardFocus()) ReleaseInputs();
 }
 
 void SdlEventHandler::ReleaseInputs() {

@@ -2564,6 +2564,14 @@ class Runner {
             const auto result=DanaInputCommand(command,argument);
             return {result=="accepted",result,"Dana input: "+result};
         }
+        if (command == "app-active") {
+            // The desktop app is in front: controllers drive the device while it is or the window has focus.
+            if (argument != "on" && argument != "off") return {false, "invalid", "Use on or off."};
+            appActive = argument == "on";
+            if (window) controllers.SetFocused(appActive || SDL_GetKeyboardFocus() == window,
+                                               [this](KeyId key, bool down) { Key(key, down); });
+            return {true, "app-active", argument};
+        }
         if (command == "controller-map") {
             // KEY:BUTTON,... or none; entries the device can't use are dropped.
             if (!window || !controllers.Listed()) return {false, "unsupported", "This device takes no game controller."};
@@ -3619,9 +3627,11 @@ class Runner {
                     // and a replay from --input-replay.
                     if(deviceTypeIsDana5(profile->deviceType) && (event.window.event==SDL_WINDOWEVENT_HIDDEN||
                         event.window.event==SDL_WINDOWEVENT_MINIMIZED))ReleaseInput(windowPolled,!windowPolled);
+                    // Focus moving to the desktop app's own window keeps the controllers on.
                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST || event.window.event == SDL_WINDOWEVENT_HIDDEN ||
                         event.window.event == SDL_WINDOWEVENT_MINIMIZED)
-                        controllers.SetFocused(false, [this](KeyId key, bool down) { Key(key, down); });
+                        controllers.SetFocused(appActive && event.window.event == SDL_WINDOWEVENT_FOCUS_LOST,
+                                               [this](KeyId key, bool down) { Key(key, down); });
                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED || event.window.event == SDL_WINDOWEVENT_SHOWN ||
                         event.window.event == SDL_WINDOWEVENT_RESTORED)
                         controllers.SetFocused(true, [this](KeyId key, bool down) { Key(key, down); });
@@ -3823,6 +3833,8 @@ class Runner {
     bool smooth{false};
     SDL_Window* window{nullptr};
     bool windowFocused{false}, windowPolled{false}, keyboardGrabWanted{false}, keyboardGrabbed{false};
+    // The desktop app is in front (app-active); controllers count then even without window focus.
+    bool appActive{false};
     SDL_Renderer* renderer{nullptr};
     SDL_Texture* lcdTexture{nullptr};
     SDL_Texture* silkscreenTexture{nullptr};
@@ -4168,6 +4180,9 @@ int main(int argc, char** argv) {
     cerr << "frond-68k: " << profile->name << " (" << profile->displayName << ") from "
          << (isSession ? "session " : "ROM ") << options.image << endl;
 
+    // The window is often not the focused one (embedded in the desktop app, or beside it), and SDL
+    // drops controller events then; the runner decides when they count.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(options.runFor > 0 ? 0 : SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         cerr << "SDL failed to start: " << SDL_GetError() << endl;
         return 1;

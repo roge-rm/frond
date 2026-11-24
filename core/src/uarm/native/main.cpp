@@ -197,6 +197,9 @@ bool gFastEngineMissing = false;
 
     SDL_Window* initSdl(const char* title, DisplayConfiguration& displayConfiguration, float& scale, Rotation rotation,
                         const DeviceControlProfile& controls, const DeviceControlView& controlView, bool resizable) {
+        // The window is often not the focused one (embedded in the desktop app, or beside it), and SDL
+        // drops controller events then; SdlEventHandler decides when they count.
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) < 0) {
             cerr << "could not initialize SDL: " << SDL_GetError() << endl;
             return nullptr;
@@ -1317,6 +1320,7 @@ bool gFastEngineMissing = false;
                 return sdlEventHandler.GetControllerMap().encode();
             };
         }
+        commandContext.setAppActive = [&sdlEventHandler](bool active) { sdlEventHandler.SetAppActive(active); };
         commandContext.windowId = [&]() {
             string id;
             link.Call([&] { id = x11WindowId(window); });

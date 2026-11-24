@@ -945,7 +945,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (irdaQueued && client.running() && !stopping && client.available()) { irdaQueued = false; send("irda-mode", irdaArgument()); }
         if (!controllerMapUnsent.isEmpty() && client.running() && !stopping && client.available() &&
             send("controller-map", controllerMapUnsent)) controllerMapUnsent.clear();
+        sendAppActive();
     }); });
+    connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+        appActiveUnsent = state == Qt::ApplicationActive ? "on" : "off";
+        sendAppActive();
+    });
     connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
         const auto type = m.value("type").toString();
         if (type == "ir") showIrdaLink(m);
@@ -966,6 +971,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         if (client.property("danaCardRequest").toString()==command) return;
+        if (command == "app-active") {
+            if (stopping) save();
+            return;
+        }
         if (command == "dana-view" || command == "dana-view-state") {
             forceButton->hide(); refresh();
             if (stopping && exchangeStage == ExchangeStage::None) save();
@@ -2791,6 +2800,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     if (!runningPreferences.rumble) arguments << "--no-rumble";
     controllerMapUnsent.clear();
+    appActiveUnsent = QGuiApplication::applicationState() == Qt::ApplicationActive ? "on" : "off";
     if (runningPreferences.controllerMapSet && !runningPreferences.controllerMap.isEmpty())
         arguments << "--controller-map" << runningPreferences.controllerMap;
     if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac) arguments << frondSessions::musicArguments(runningPreferences);
@@ -3785,6 +3795,11 @@ bool MainWindow::installResult(bool ok, const QString& code, const QString& mess
     notify(tr("Installed %1 of %2.").arg(total - failed.size()).arg(total));
     failure(failed.join('\n') + (hint ? tr("\n\nWait for Palm OS to finish its current activity, then try again.") : QString()));
     return true;
+}
+// Sent without send()'s busy state and Working… note, since it follows every switch between apps.
+void MainWindow::sendAppActive() {
+    if (appActiveUnsent.isEmpty() || !client.running() || stopping || !client.available()) return;
+    if (client.request("app-active", appActiveUnsent)) appActiveUnsent.clear();
 }
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;

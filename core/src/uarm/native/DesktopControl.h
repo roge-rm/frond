@@ -1221,6 +1221,11 @@ class DesktopControl {
             if (layout.empty()) return {false, "unsupported", "There is no window."};
             return {true, "layout", layout};
         }
+        if (command == "app-active") {
+            if (path != "on" && path != "off") return {false, "invalid", "Use on or off."};
+            if (ctx.setAppActive) ctx.setAppActive(path == "on");
+            return {true, "app-active", path};
+        }
         if (command == "controller-map") {
             // KEY:BUTTON,... or none; entries the device can't use are dropped.
             if (!ctx.setControllerMap) return {false, "unsupported", "This device takes no game controller."};

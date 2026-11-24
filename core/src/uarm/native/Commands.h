@@ -56,6 +56,9 @@ namespace commands {
         // Sets the game controller map from its text (ControllerMap.h) and gives the map now in use; unset
         // without a window.
         std::function<std::string(const std::string&)> setControllerMap{};
+        // The desktop app is in front or not; controllers drive the device while it is, or while the
+        // window has focus. Unset without a window.
+        std::function<void(bool)> setAppActive{};
         // The window's X11 id as "x11 ID" for the desktop app to embed, empty without one.
         std::function<std::string()> windowId{};
         // The fitted device's rectangle in the window as "x y width height windowWidth windowHeight", empty without one.

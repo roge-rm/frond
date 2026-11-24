@@ -50,6 +50,9 @@ class SdlEventHandler {
     // map held and the new one doesn't are let go.
     void SetControllerMap(const ControllerMap& map);
     const ControllerMap& GetControllerMap() const { return controllerMap; }
+    // The desktop app is in front: controllers drive the device even while its window, not this
+    // one, has focus. Going out of front lets go of everything held, like losing focus.
+    void SetAppActive(bool active);
     // Attaching or detaching the CLIÉ game controller since the last call moves the buttons the
     // controllers hold between its keys and the CLIÉ's own.
     void FollowGamepadAttach();
@@ -140,6 +143,7 @@ class SdlEventHandler {
     GamepadDirections padDirections;
     SDL_JoystickID lastStickPad{-1};
     bool padFocused{true};
+    bool appActive{false};
     bool padAttachedSeen{false};
     // The rumble is on, and when it was last sent; SDL stops it after rumbleMs unless sent again.
     bool rumbling{false};
