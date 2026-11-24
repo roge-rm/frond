@@ -148,6 +148,8 @@ int DlpClient::ReadSysInfo(SysInfo& info) {
         info.compatMajor = Get16(&v->data[4]), info.compatMinor = Get16(&v->data[6]);
         info.maxRecordSize = Get32(&v->data[8]);
     }
+    const bool dlp14 = info.dlpMajor > 1 || (info.dlpMajor == 1 && info.dlpMinor >= 4);
+    largeEntryMax = dlp14 ? info.maxRecordSize : 0;
     return 0;
 }
 
@@ -304,7 +306,10 @@ int DlpClient::WriteSortBlock(uint8_t handle, const Bytes& data) {
 namespace {
 
 // The legacy read commands have 16-bit lengths. Leave room for the DLP wrappers so a
-// nearly 64 KiB resource, such as the T|X Wi-Fi library, does not overrun the Palm's reply buffer.
+// nearly 64 KiB resource does not overrun the Palm's reply buffer.
+// An entry over 64 KB reports its size modulo 64 KB but the Palm still sends what was asked for,
+// so it is read to its end while the 16-bit offset reaches: up to 0xf000 + 0xf000 bytes. The end
+// must match the reported size modulo 64 KB. Anything longer is dlpErrLimit, never a short copy.
 int ReadEntry(DlpClient& dlp, bool resource, uint8_t handle, uint32_t key, PalmRecord& out,
               uint8_t* recordFlags = nullptr, uint16_t* recordIndex = nullptr, bool byId = false) {
     constexpr uint16_t maxChunk = 0xf000;
@@ -312,8 +317,11 @@ int ReadEntry(DlpClient& dlp, bool resource, uint8_t handle, uint32_t key, PalmR
     const uint8_t argument = resource || byId ? 0x20 : 0x21;
     PalmRecord entry;
     size_t total = 0;
+    bool wrapped = false;  // the size field wrapped: total is unknown until a short reply
     for (size_t offset = 0;; offset = entry.data.size()) {
-        const uint16_t request = offset ? uint16_t(total - offset) : maxChunk;
+        if (offset > 0xffff) return dlpErrLimit;
+        // One byte over what should be left shows an entry whose real size is 64 KB more.
+        const uint16_t request = offset && !wrapped ? uint16_t(total - offset + 1) : maxChunk;
         std::vector<DlpArg> answer;
         Out data;
         data.U8(handle).U8(0);
@@ -327,16 +335,27 @@ int ReadEntry(DlpClient& dlp, bool resource, uint8_t handle, uint32_t key, PalmR
         const uint8_t* header = arg->data.data();
         const size_t reported = Get16(header + (resource ? 8 : 6));
         const size_t count = arg->data.size() - 10;
-        if (count > request || offset + count > reported) return dlpErrLimit;
+        if (count > request) return dlpErrLimit;
         if (offset) {
-            if (reported != total || count != request ||
-                (resource ? Get32(header) != entry.type || Get16(header + 4) != entry.id
-                          : (Get32(header) & 0xffffff) != entry.uid))
+            if (reported != (total & 0xffff) || (resource ? Get32(header) != entry.type || Get16(header + 4) != entry.id
+                                                          : (Get32(header) & 0xffffff) != entry.uid))
                 return dlpErrSize;
+            if (!wrapped && count == request) wrapped = true;
+            else if (!wrapped && count != total - offset) return dlpErrSize;
+            else if (wrapped && count < request) {
+                wrapped = false;
+                total = offset + count;
+                if ((total & 0xffff) != reported) return dlpErrSize;
+            }
         } else {
             total = reported;
             if (!resource && recordFlags && (header[8] & recDeleted) && count == 0) total = 0;
-            if (count != std::min(total, size_t(request))) return dlpErrSize;
+            if (count > reported) {
+                wrapped = true;
+                total = reported;  // the low 16 bits
+            } else if (count != std::min(total, size_t(request))) {
+                return dlpErrSize;
+            }
             if (resource) {
                 entry.type = Get32(header);
                 entry.id = Get16(header + 4);
@@ -348,7 +367,7 @@ int ReadEntry(DlpClient& dlp, bool resource, uint8_t handle, uint32_t key, PalmR
             }
         }
         entry.data.insert(entry.data.end(), arg->data.begin() + 10, arg->data.end());
-        if (entry.data.size() == total) {
+        if (!wrapped && entry.data.size() == total) {
             out = std::move(entry);
             return 0;
         }
@@ -422,7 +441,44 @@ int DlpClient::ReadRecordIds(uint8_t handle, std::vector<uint32_t>& out) {
 }
 
 int DlpClient::ReadResourceByIndex(uint8_t handle, uint16_t index, PalmRecord& out) {
-    return ReadEntry(*this, true, handle, index, out);
+    const int rc = ReadEntry(*this, true, handle, index, out);
+    if (rc != dlpErrLimit || !LargeEntries()) return rc;
+    // Over 64 KB: the legacy reply's 16-bit size can't hold it. Read it again in 32-bit pieces.
+    return ReadResourceEx(handle, index, out);
+}
+
+int DlpClient::ReadResourceEx(uint8_t handle, uint16_t index, PalmRecord& out) {
+    // Request: handle, 0, index, u32 offset, u32 count. Reply: type, id, index, u32 total size, data.
+    constexpr uint32_t maxChunk = 0x40000;
+    const uint32_t chunk = std::min(maxChunk, largeEntryMax);
+    PalmRecord entry;
+    uint32_t total = 0;
+    for (uint32_t offset = 0;; offset = uint32_t(entry.data.size())) {
+        const uint32_t request = offset ? std::min(chunk, total - offset) : chunk;
+        std::vector<DlpArg> answer;
+        const int rc = Call(dlpReadResourceEx, {{0x20, Out().U8(handle).U8(0).U16(index).U32(offset).U32(request).b}}, answer);
+        if (rc) return rc;
+        const DlpArg* arg = Find(answer, 0x20);
+        if (!arg || arg->data.size() < 12) return dlpErrSize;
+        const uint8_t* header = arg->data.data();
+        const uint32_t reported = Get32(header + 8);
+        const size_t count = arg->data.size() - 12;
+        if (count > request || offset + count > reported) return dlpErrSize;
+        if (offset) {
+            if (reported != total || Get32(header) != entry.type || Get16(header + 4) != entry.id || count == 0)
+                return dlpErrSize;
+        } else {
+            total = reported;
+            if (count != std::min(total, request)) return dlpErrSize;
+            entry.type = Get32(header);
+            entry.id = Get16(header + 4);
+        }
+        entry.data.insert(entry.data.end(), arg->data.begin() + 12, arg->data.end());
+        if (entry.data.size() == total) {
+            out = std::move(entry);
+            return 0;
+        }
+    }
 }
 
 int DlpClient::WriteRecord(uint8_t handle, uint8_t flags, const PalmRecord& r, uint32_t& newUid) {

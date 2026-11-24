@@ -345,6 +345,88 @@ void TestLegacyResourceRead() {
     CHECK(!resource.data.empty() && resource.data.front() == 0xef && resource.data.back() == 0xbe);
 }
 
+// Resources over 64 KB. The legacy reply's size field holds the size modulo 64 KB while the Palm
+// still sends what was asked for (seen on the T|X, DLP 1.2), so up to 0x1e000 bytes are read that way.
+// Past the 16-bit offset, a DLP 1.4 handheld is read with the 32-bit call; others stop with the limit.
+void TestLargeResourceRead() {
+    class Device : public PacketLink {
+       public:
+        Device(size_t size, bool dlp14) : size(size), dlp14(dlp14) {}
+        bool Send(const Bytes& message) override {
+            uint8_t function{};
+            std::vector<DlpArg> args;
+            if (!DlpParseRequest(message, function, args) || args.size() != 1) return false;
+            const auto& request = args.front().data;
+            if (function == dlpReadSysInfo) {
+                Bytes info(10);
+                Bytes version{0, 1, 0, uint8_t(dlp14 ? 4 : 2), 0, 1, 0, 0, 0x00, 0xff, uint8_t(dlp14 ? 0xff : 0), 0xe1};
+                reply = DlpResponse(function, 0, {{0x20, info}, {0x21, version}});
+                return true;
+            }
+            size_t offset = 0, limit = 0;
+            Bytes data{'l', 'i', 'b', 'r', 0, 1, 0, 2};
+            if (function == dlpReadResource && request.size() == 8) {
+                ++legacyCalls;
+                offset = (size_t(request[4]) << 8) | request[5];
+                limit = (size_t(request[6]) << 8) | request[7];
+                if (limit > 0xf000) return false;
+                data.insert(data.end(), {uint8_t(size >> 8), uint8_t(size)});
+            } else if (function == dlpReadResourceEx && dlp14 && request.size() == 12) {
+                ++exCalls;
+                offset = (size_t(request[4]) << 24) | (size_t(request[5]) << 16) | (size_t(request[6]) << 8) | request[7];
+                limit = (size_t(request[8]) << 24) | (size_t(request[9]) << 16) | (size_t(request[10]) << 8) | request[11];
+                data.insert(data.end(), {uint8_t(size >> 24), uint8_t(size >> 16), uint8_t(size >> 8), uint8_t(size)});
+            } else {
+                reply = DlpResponse(function, dlpErrIllegalReq, {});
+                return true;
+            }
+            if (request[0] != 1 || request[3] != 2 || offset > size) return false;
+            const auto count = std::min(size - offset, limit);
+            for (size_t i = 0; i < count; ++i) data.push_back(uint8_t((offset + i) * 7));
+            reply = DlpResponse(function, 0, {{0x20, std::move(data)}});
+            return true;
+        }
+
+        bool Receive(Bytes& message, int) override {
+            message = std::move(reply);
+            return true;
+        }
+        std::string Name() const override { return "test"; }
+
+        const size_t size;
+        const bool dlp14;
+        int legacyCalls = 0, exCalls = 0;
+        Bytes reply;
+    };
+    struct Case {
+        size_t size;
+        bool dlp14;
+        int result, legacy, ex;
+    };
+    const Case cases[] = {
+        {0xfff0, false, 0, 2, 0},     // under 64 KB, one byte over shows it ends there
+        {103940, false, 0, 2, 0},     // wraps to 38404, read in two pieces
+        {0x1e000, false, dlpErrLimit, 2, 0},  // the 16-bit offset can't reach its end
+        {0x1f010, false, dlpErrLimit, 3, 0},  // wraps to 0xf010, found by the one byte over
+        {0x1f010, true, 0, 3, 1},
+        {300000, true, 0, 2, 2},
+    };
+    for (const auto& c : cases) {
+        Device device(c.size, c.dlp14);
+        DlpClient dlp(device);
+        SysInfo info;
+        CHECK(dlp.ReadSysInfo(info) == 0 && dlp.LargeEntries() == c.dlp14);
+        PalmRecord resource;
+        const int rc = dlp.ReadResourceByIndex(1, 2, resource);
+        CHECK(rc == c.result && device.legacyCalls == c.legacy && device.exCalls == c.ex);
+        if (rc) continue;
+        CHECK(resource.type == 0x6c696272 && resource.id == 1 && resource.data.size() == c.size);
+        bool same = true;
+        for (size_t i = 0; i < resource.data.size(); ++i) same = same && resource.data[i] == uint8_t(i * 7);
+        CHECK(same);
+    }
+}
+
 void TestDlp() {
     // Tiny, small and long arguments, no padding between them.
     const Bytes small(300, 1), large(70000, 2);
@@ -1084,6 +1166,7 @@ int main(int argc, char** argv) {
     TestNetSyncTimeout(Transport::usb, false);
     TestDlp();
     TestLegacyResourceRead();
+    TestLargeResourceRead();
     TestPalmDb();
     TestInstallerFiles();
     TestStore(argv[1]);

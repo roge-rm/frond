@@ -71,6 +71,8 @@ enum DlpFunction : uint8_t {
     dlpReadFeature,
     dlpFindDB,
     dlpSetDBInfo,
+    // DLP 1.4, entries over 64 KB (as named in pilot-link).
+    dlpReadResourceEx = 0x64,
 };
 
 // DLP error codes in answers.
@@ -208,7 +210,9 @@ class DlpClient {
     int CleanUpDatabase(uint8_t handle);
     int ResetSyncFlags(uint8_t handle);
     int ReadRecordIds(uint8_t handle, std::vector<uint32_t>& out);
+    // Falls back to ReadResourceEx when the legacy read hits the 64 KB limit on a DLP 1.4 handheld.
     int ReadResourceByIndex(uint8_t handle, uint16_t index, PalmRecord& out);
+    int ReadResourceEx(uint8_t handle, uint16_t index, PalmRecord& out);
     int WriteRecord(uint8_t handle, uint8_t flags, const PalmRecord& record, uint32_t& newUid);
     int WritePimRecord(uint8_t handle, const DlpRecord& record, uint32_t& newUid);
     int WriteResource(uint8_t handle, const PalmRecord& resource);
@@ -225,9 +229,13 @@ class DlpClient {
     int WriteAppPreference(uint32_t creator, uint16_t id, uint16_t version, bool backedUp, const Bytes& data);
 
 
+    // Set by ReadSysInfo: the handheld has DLP 1.4 and takes entries over 64 KB.
+    bool LargeEntries() const { return largeEntryMax > 0xffff; }
+
    private:
     PacketLink& link;
     int timeoutMs;
+    uint32_t largeEntryMax{0};
 };
 
 }  // namespace frondSync

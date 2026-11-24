@@ -363,6 +363,7 @@ struct Session {
             PalmRecord r;
             rc = db.Resource() ? dlp.ReadResourceByIndex(handle, i, r) : dlp.ReadRecordByIndex(handle, i, r);
             if (rc == dlpErrNotFound && !db.Resource() && !recovery) continue;
+            if (rc == dlpErrLimit) return fail(rc, "A record or resource is larger than this handheld can send");
             if (rc) return fail(rc, "Reading a record");
             db.records.push_back(std::move(r));
         }
