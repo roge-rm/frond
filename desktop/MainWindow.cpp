@@ -1614,6 +1614,7 @@ void MainWindow::refresh() {
     cradleToggle->setEnabled(enabled && !cradleSetting.isEmpty());
     cradleToggle->setChecked(cradleSetting == "attached");
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
+    hotSyncButton->setEnabled(enabled && !(cradleSetting == "detached"));
     shown(!m68k, {rotateButton});
     contrast->setEnabled(enabled);
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
@@ -1797,7 +1798,7 @@ void MainWindow::refresh() {
     const auto syncLabel = protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
                            protocol == frondDesktopSync::Protocol::activeSync ? tr("ActiveSync") : QString();
     runningBar->setSyncButton(syncLabel, protocol == frondDesktopSync::Protocol::activeSync ? "activesync" : "hotsync",
-                              syncAvailable && !syncRunning && enabled);
+                              syncAvailable && !syncRunning && enabled && !outOfCradle());
     if (fullScreenOn) showOverlayBar(overlayBarShown);
     else runningBar->setVisible(running && runningBar->barShown());
 }
@@ -2166,6 +2167,10 @@ void MainWindow::afterDevice() {
 void MainWindow::afterCradle() {
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
          storageSupported() ? cardCommand("state", 0) : "network-state");
+}
+// A cradle device out of its cradle has no cable or HotSync button to sync with; network HotSync stays.
+bool MainWindow::outOfCradle() const {
+    return cradleSetting == "detached" && !deviceProfileNetworkHotSync5(frondFirmware::profile(runningDevice));
 }
 void MainWindow::showCradle(const QString& state) {
     cradleSetting = state == "attached" || state == "detached" ? state : QString();

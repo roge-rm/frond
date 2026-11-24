@@ -350,6 +350,7 @@ class MainWindow : public QMainWindow {
     QPushButton *rotateButton, *hotSyncButton;
     QCheckBox* cradleToggle;
     QString cradleSetting;
+    bool outOfCradle() const;
     bool cradleStartupPending{false};
     bool protectionKnown{false}, protection2Known{false}, protectionStartPending{false}, protection2StartPending{false};
     QLabel* holdLabel;

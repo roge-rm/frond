@@ -829,6 +829,8 @@ bool gFastEngineMissing = false;
         if (soc->BatterySupported()) soc->SetBattery(options.battery);
         else if (options.battery != BatteryPower{}) cerr << "this device's battery can't be set yet, it stays full" << endl;
         if (options.headphonesIn && deviceProfileHasPalmBoardInputs5(soc->GetDeviceType())) soc->SetHeadphones(true);
+        // A Zodiac starts in its cradle, where it normally syncs; the cradle option takes it out.
+        if (soc->CradleSupported()) soc->SetCradle(true);
 
         if (auto* chip = soc->GetNand()) {
             if (nandFromMalloc)

@@ -36,9 +36,16 @@ def main():
         evidence, "core")
     try:
         wait_for(client, "replay-state", "paused")
+        # A Zodiac starts in its cradle.
+        assert client.ok("cradle-setting") == "attached"
         client.ok("cradle", "detached")
         client.ok("usb-mode", "off")
         assert client.fails("hotsync", code="cradle") == "Attach the cradle or USB cable first."
+        client.fails("sync-start", "local", code="cradle")
+        client.ok("usb-mode", "tcp:0")
+        client.fails("sync-start", "local", code="cradle")
+        client.ok("usb-mode", "off")
+        client.ok("cradle", "attached")
         for route in ("off", relay, "sync"):
             client.ok("usb-mode", "off")
             client.ok("sync-start", "local")
