@@ -311,7 +311,7 @@ State commands take no argument. Mode commands change the setting and reply with
 | --- | --- | --- |
 | `hold-state` | | `hold`: `on`, `off` or `unavailable` |
 | `hold` | `on` or `off` | `hold` |
-| `hotsync` | | `hotsync`: pulls the connector's HotSync line low for 500 ms (T|X GPIO10, E2 GPIO4, Zodiac D22). With both the Zodiac cradle and cable detached, returns `cradle`. |
+| `hotsync` | | `hotsync`: pulls the connector's HotSync line low for 500 ms (T|X GPIO10, E2 GPIO4, Zodiac D22). With both the Zodiac cradle and cable detached, returns `cradle`. Right after a sync over the Sync Manager's USB route, while the device is still on the bus, the press waits until it leaves (at most 10 s). |
 | `keyboard-state` | | `keyboard`: `attached` or `detached` |
 | `keyboard-attach` | `on` or `off` | `keyboard`; `infrared` error if an infrared peer owns the UART |
 | `keyboard-key` | hex scan code, space, `d` or `u` | `keyboard` |
@@ -325,7 +325,7 @@ State commands take no argument. Mode commands change the setting and reply with
 | `cradle` | `attached` or `detached` | `cradle`: change the manual setting and return whether the guest is docked. |
 | `cradle-button-state`, `cradle-button` | None to read, `down` or `up` to set | `cradle-button`: actual button state, or `unavailable` for a read on devices without this control. |
 | `sync-state`, `sync-profile` | None to read, profile name to set (empty to use the assigned profile) | `sync`: Sync Manager status. The profile change applies to the next HotSync. |
-| `sync-start` | Empty, `local` or `network` | `sync`: start HotSync on USB or serial. `local` also disables Network HotSync. With `network`, open the guest's HotSync app and return `network` with a prompt to tap Network HotSync. |
+| `sync-start` | Empty, `local` or `network` | `sync`: start HotSync on USB or serial. Over USB the press goes in once the device comes up, or after 2 s (a Zodiac's USB only comes up once HotSync runs), and right after a sync it waits like `hotsync`. `local` also disables Network HotSync. With `network`, open the guest's HotSync app and return `network` with a prompt to tap Network HotSync. |
 | `activesync-start` | `usb`, `serial` or empty for the configured transport | `sync`: start ActiveSync on Windows Mobile. |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |

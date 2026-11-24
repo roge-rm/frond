@@ -76,20 +76,27 @@ class DesktopControl {
         lastSerial = state;
         event("serial", state);
     }
-    // The sync manager's state when it changes, and a HotSync press waiting for USB to come up.
+    // The sync manager's state when it changes, and a HotSync press waiting on the USB bus.
     void syncChanged(commands::Context& ctx) {
         cancelReplacedSyncPress(ctx);
+        const auto status = frondSync::SyncManager::Get().Status();
+        const bool syncing = status.state == frondSync::SyncStatus::State::syncing;
+        if (syncing) syncEnded = false;
+        else if (lastSyncing) {
+            syncEnded = true;
+            syncEndedAt = std::chrono::steady_clock::now();
+        }
+        lastSyncing = syncing;
         if (syncPressBridge) {
-            const auto* host = ctx.usb->Host();
-            if (host->GetPhase() == UsbBusHost::Phase::running) {
+            // A press after a sync waits for the device to leave the bus, a press for a new cable for it to come
+            // up. Either goes in by syncPressBy anyway: a Zodiac's USB only comes up once HotSync runs.
+            const bool up = ctx.usb->Host()->GetPhase() == UsbBusHost::Phase::running;
+            if (syncPressAfterSync != up || std::chrono::steady_clock::now() > syncPressBy) {
                 syncPressBridge = nullptr;
                 if (!ctx.soc->PressHotSync()) event("sync", "failed usb: The HotSync button could not be pressed.");
-            } else if (std::chrono::steady_clock::now() > syncPressBy) {
-                syncPressBridge = nullptr;
-                event("sync", "failed usb: USB didn't come up.");
             }
         }
-        const auto state = frondSync::SyncManager::Get().Status().Describe();
+        const auto state = status.Describe();
         if (state == lastSync || (state == "off" && lastSync.empty())) return;
         lastSync = state;
         event("sync", state);
@@ -216,7 +223,33 @@ class DesktopControl {
     std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth, lastSync;
     const UsbHostBridge* syncPressBridge{nullptr};
     uint64_t syncPressRoute{0};
+    bool syncPressAfterSync{false};
     std::chrono::steady_clock::time_point syncPressBy;
+    // When the last sync ended, as syncChanged saw it.
+    bool lastSyncing{false}, syncEnded{false};
+    std::chrono::steady_clock::time_point syncEndedAt;
+    // How long a press waits for a new cable's device to come up, and how long after a sync the guest may
+    // still be closing it.
+    static constexpr auto syncPressUsbWait = std::chrono::seconds(2);
+    static constexpr auto syncCloseWait = std::chrono::seconds(10);
+
+    void queueSyncPress(const commands::Context& ctx, bool afterSync) {
+        syncPressBridge = ctx.usb;
+        syncPressRoute = ctx.usb->RouteGeneration();
+        syncPressAfterSync = afterSync;
+        syncPressBy = std::chrono::steady_clock::now() + (afterSync ? syncCloseWait : syncPressUsbWait);
+    }
+    // A sync over the Sync Manager's USB route has just ended and the device is still on the bus: its HotSync
+    // app is still closing the sync, and the Zodiac ROM loses a cradle press then (seen, not traced).
+    bool guestClosingSync(const commands::Context& ctx) const {
+        if (!ctx.usb || ctx.usb->GetConfig().kind != HostSerial::Kind::syncManager || !ctx.usb->Host() ||
+            ctx.usb->Host()->GetPhase() != UsbBusHost::Phase::running)
+            return false;
+        const auto state = frondSync::SyncManager::Get().Status().state;
+        if (state != frondSync::SyncStatus::State::done && state != frondSync::SyncStatus::State::failed) return false;
+        // An end syncChanged hasn't seen yet is a new one.
+        return lastSyncing || (syncEnded && std::chrono::steady_clock::now() - syncEndedAt < syncCloseWait);
+    }
 
     void cancelReplacedSyncPress(const commands::Context& ctx) {
         if (!syncPressBridge) return;
@@ -702,16 +735,19 @@ class DesktopControl {
             if (ctx.soc->CradleSupported() && !ctx.soc->CradleAttached())
                 return {false, "cradle", "Put the device in the cradle first (Cradle attached), or use network HotSync."};
             if (path == "local") frondSync::SyncManager::Get().SetNetworkEnabled(false);
+            // A replug now would bring the closing sync's device back up, and the press would still be lost.
+            if (usbSync && guestClosingSync(ctx)) {
+                queueSyncPress(ctx, true);
+                return {true, "sync", "Starting a HotSync over USB."};
+            }
             const HostSerial::Config config{Kind::syncManager, 0, {}};
             const bool usbFree = caps.usb && ctx.usb && !UsbHostBridge::NetworkLink(ctx.soc) &&
                                  ctx.usb->GetConfig().kind == Kind::off;
             if (usbSync || (!serialSync && usbFree)) {
                 ctx.usbError.clear();
                 if (!ctx.usb->Start(ctx.soc, config, ctx.usbError)) return {false, "usb", ctx.usbError};
-                // Wait for enumeration after plugging in the cable for this sync.
-                syncPressBridge = ctx.usb;
-                syncPressRoute = ctx.usb->RouteGeneration();
-                syncPressBy = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+                // Presses once the device comes up after plugging in the cable for this sync, or after syncPressUsbWait.
+                queueSyncPress(ctx, false);
                 return {true, "sync", "Starting a HotSync over USB."};
             }
             if (!serialSync) {
@@ -729,6 +765,12 @@ class DesktopControl {
         if (command == "hotsync") {
             if (ctx.soc->CradleSupported() && !ctx.soc->CradleAttached())
                 return {false, "cradle", "Attach the cradle or USB cable first."};
+            cancelReplacedSyncPress(ctx);
+            if (syncPressBridge) return {false, "busy", "A HotSync is already starting."};
+            if (guestClosingSync(ctx)) {
+                queueSyncPress(ctx, true);
+                return {true, "hotsync", "HotSync button pressed."};
+            }
             if (!ctx.soc->PressHotSync())
                 return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
             return {true, "hotsync", "HotSync button pressed."};
