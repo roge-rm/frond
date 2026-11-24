@@ -893,6 +893,11 @@ std::string SocIMX1::StopText() const {
     std::snprintf(line, sizeof line, "%s (%s) at pc %08x, address %08x, value %08x", imx1ProbeStopName(result.stop),
                   imx1BootstrapAccessName(result.peripheralStatus), result.trace.pc, result.address, result.value);
     std::string text = line;
+    if (result.stop == Imx1ProbeStop::unsupportedInstruction && result.trace.fetched) {
+        std::snprintf(line, sizeof line, ", instruction %0*x", result.trace.instructionSize == 2 ? 4 : 8,
+                      result.trace.instruction);
+        text += line;
+    }
     // A refused graphics batch (the ring submit at 16010220) also says what it was.
     const auto refusal = imx1MachineGraphicsRefusal(machine);
     if (refusal.name && result.address == 0x16010220) {
