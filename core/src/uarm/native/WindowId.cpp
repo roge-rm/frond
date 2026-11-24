@@ -14,9 +14,28 @@ unsigned long windowId(SDL_Window* window) {
 }
 }
 
-std::string x11WindowId(SDL_Window* window) {
+std::string nativeWindowId(SDL_Window* window) {
     const auto id = windowId(window);
-    return id ? "x11 " + std::to_string(id) : std::string{};
+    if (id) return "x11 " + std::to_string(id);
+#ifdef SDL_VIDEO_DRIVER_WINDOWS
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (window && SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_WINDOWS && info.info.win.window)
+        return "win32 " + std::to_string(uint64_t(uintptr_t(info.info.win.window)));
+#endif
+    return {};
+}
+
+void focusEmbeddedWindow(SDL_Window* window) {
+#ifdef SDL_VIDEO_DRIVER_WINDOWS
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!window || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_WINDOWS) return;
+    const HWND hwnd = info.info.win.window;
+    if (hwnd && GetParent(hwnd) && GetFocus() != hwnd) SetFocus(hwnd);
+#else
+    (void)window;
+#endif
 }
 
 unsigned long watchX11Pointer(SDL_Window* window) {

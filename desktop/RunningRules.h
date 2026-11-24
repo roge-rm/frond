@@ -168,13 +168,17 @@ inline std::optional<Id> rowFor(Shortcut what) {
     }
 }
 
-// Embedding the Palm's window needs Qt on X11 (xcb). `forced` tries it anyway, for tests.
-inline bool embedPossible(const QString& platform, bool forced) { return forced || platform == QLatin1String("xcb"); }
+// Embedding the Palm's window needs Qt on X11 (xcb) or Windows. `forced` tries it anyway, for tests.
+inline bool embedPossible(const QString& platform, bool forced) {
+    return forced || platform == QLatin1String("xcb") || platform == QLatin1String("windows");
+}
 
-// The X11 window id out of the core's `window-id` reply ("x11 ID"), or 0.
-inline quint64 parseWindowId(const QString& reply) {
+// The native window id out of the core's `window-id` reply, or 0: "win32 HWND" on Qt's windows
+// platform, "x11 ID" on the others.
+inline quint64 parseWindowId(const QString& reply, const QString& platform = QStringLiteral("xcb")) {
     const auto parts = reply.trimmed().split(' ');
-    if (parts.size() != 2 || parts[0] != QLatin1String("x11")) return 0;
+    const auto kind = platform == QLatin1String("windows") ? QLatin1String("win32") : QLatin1String("x11");
+    if (parts.size() != 2 || parts[0] != kind) return 0;
     bool ok = false;
     const auto id = parts[1].toULongLong(&ok);
     return ok ? id : 0;

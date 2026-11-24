@@ -59,8 +59,10 @@ namespace commands {
         // The desktop app is in front or not; controllers drive the device while it is, or while the
         // window has focus. Unset without a window.
         std::function<void(bool)> setAppActive{};
-        // The window's X11 id as "x11 ID" for the desktop app to embed, empty without one.
+        // The window's native id as "x11 ID" or "win32 HWND" for the desktop app to embed, empty without one.
         std::function<std::string()> windowId{};
+        // Maps a window started with --window-hidden. Unset without a window.
+        std::function<void()> showWindow{};
         // The fitted device's rectangle in the window as "x y width height windowWidth windowHeight", empty without one.
         std::function<std::string()> windowLayout{};
         // The Zodiac's or the rx1950's speed over its last window: instructions per second of real time and the

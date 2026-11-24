@@ -177,6 +177,7 @@ class MainWindow : public QMainWindow {
     void fitWindow();
     // The core's reply to window-id: embeds the Palm, or keeps its own window.
     void embedReply(bool ok, const QString& message);
+    void afterEmbedding();
     void afterDevice();
     void afterCradle();
     void showCradle(const QString& state);
@@ -243,6 +244,7 @@ class MainWindow : public QMainWindow {
     bool fullScreenWasMaximized{false};
     QSize fullScreenReturnSize;  // the window's size to go back to, without a panel
     bool embedWanted{false}, embedTried{false}, embedded{false};
+    bool showPending{false};  // window-show sent after the embedding failed
     bool fitOffPending{false};  // `display fit=none` sent after the embedding failed
     bool panelWasOpen{false};
     int baseWidth{0};  // the window's width with no panel open, while the Palm is embedded

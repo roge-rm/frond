@@ -389,6 +389,8 @@ def common(c, root, device, unsupported, saved):
     c.fails('device-state', 'unexpected', code='argument')
     c.fails('window-id', code='unsupported')  # the dummy video driver has no X11 window
     c.fails('window-id', 'x', code='argument')
+    assert c.ok('window-show', code='window') == 'shown'
+    c.fails('window-show', 'x', code='argument')
     c.fails('save', 'relative.frond', code='argument')
     blocker = root / 'not-a-folder'
     blocker.write_text('')

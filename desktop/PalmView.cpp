@@ -14,6 +14,12 @@
 #include <algorithm>
 #include <memory>
 #include <vector>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #ifdef FROND_XCB
 #include <xcb/xcb.h>
 #include <QtGui/qguiapplication_platform.h>
@@ -94,7 +100,8 @@ bool KeySink::event(QEvent* event) {
 
 bool PalmHolder::embed(quint64 id) {
     release();
-    if (QGuiApplication::platformName() != QLatin1String("xcb") || !id) return false;
+    // The core's window starts unmapped (--window-hidden), and the container maps it inside this one.
+    if (!runningRules::embedPossible(QGuiApplication::platformName(), false) || !id) return false;
     auto* child = QWindow::fromWinId(WId(id));
     if (!child) return false;
 #ifdef FROND_XCB
@@ -114,6 +121,14 @@ bool PalmHolder::embed(quint64 id) {
             if (geometry && geometry->width > 1 && geometry->height > 1)
                 wanted = (QSizeF(geometry->width, geometry->height) / devicePixelRatioF()).toSize();
         }
+#endif
+#ifdef Q_OS_WIN
+    // The core's client area in device pixels: it shares Frond's DPI awareness.
+    if (wanted.isEmpty()) {
+        RECT client{};
+        if (GetClientRect(HWND(id), &client) && client.right > 1 && client.bottom > 1)
+            wanted = (QSizeF(client.right, client.bottom) / devicePixelRatioF()).toSize();
+    }
 #endif
     keySink->setGeometry(0, 0, 1, 1);
     keySink->show();

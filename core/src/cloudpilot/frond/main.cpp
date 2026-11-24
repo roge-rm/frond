@@ -215,6 +215,8 @@ struct Options {
     optional<string> saveOnDisconnect;
     // A fitted window (Android, or --window-fit) places the device by WindowLayout in the background colour.
     WindowFit fit{WindowFit::none};
+    // --window-hidden: the desktop embeds the window and maps it, or asks for window-show.
+    bool windowHidden{false};
     uint32_t windowBackground{0};
     int audioPeriod{512};
     // Where a jog side panel goes (T415): hidden, left of the LCD, or beside the silkscreen and buttons.
@@ -233,7 +235,7 @@ void usage() {
             "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
-            "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
+            "                 [--window-fit fit|whole|fill] [--window-hidden] [--window-background RRGGBB] [--audio-period FRAMES]\n"
             "                 [--battery \"max|level N|host N [charging|battery]\"] (default max charging)\n"
             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
             "The desktop's ARM-only options are taken and ignored."
@@ -2590,9 +2592,15 @@ class Runner {
 
         if (command == "device-state") return {true, "device", profile->name};
         if (command == "window-id") {
-            const string id = x11WindowId(window);
+            const string id = nativeWindowId(window);
             if (id.empty()) return {false, "unsupported", "The window is not an X11 window."};
             return {true, "window", id};
+        }
+        if (command == "window-show") {
+            // The window started with --window-hidden and the desktop couldn't embed it.
+            if (!window) return {false, "unsupported", "There is no window."};
+            SDL_ShowWindow(window);
+            return {true, "window", "shown"};
         }
         if (command == "guest-ready") {
             if (!ready) return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
@@ -3127,7 +3135,8 @@ class Runner {
         const int height = deviceTypeIsDana5(profile->deviceType) ? int(160*s+252) :
             int(DeviceHeight() * s);
         window = SDL_CreateWindow(profile->displayName, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
-                                  fit == WindowFit::none && !deviceTypeIsDana5(profile->deviceType) ? 0 : SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+                                  (fit == WindowFit::none && !deviceTypeIsDana5(profile->deviceType) ? 0 : SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI) |
+                                  (options.windowHidden ? SDL_WINDOW_HIDDEN : 0));
         if (!window) {
             cerr << "no window: " << SDL_GetError() << endl;
             return;
@@ -3714,6 +3723,9 @@ class Runner {
                 case SDL_MOUSEBUTTONDOWN:
                 case SDL_MOUSEBUTTONUP:
                 case SDL_MOUSEMOTION: {
+#ifdef _WIN32
+                    if (event.type == SDL_MOUSEBUTTONDOWN && options.windowHidden) focusEmbeddedWindow(window);
+#endif
                     // SDL's touch-to-mouse copies of the fingers above.
                     if ((event.type == SDL_MOUSEMOTION ? event.motion.which : event.button.which) == SDL_TOUCH_MOUSEID) break;
                     const bool down = event.type == SDL_MOUSEBUTTONDOWN;
@@ -4014,6 +4026,8 @@ bool parseOptions(int argc, char** argv, Options& options) {
         } else if (arg == "--window-fit") {
             const char* v = value();
             if (!v || !parseWindowFit(v, options.fit)) return false;
+        } else if (arg == "--window-hidden") {
+            options.windowHidden = true;
         } else if (arg == "--window-background") {
             const char* v = value();
             if (!v || !parseWindowColour(v, options.windowBackground)) return false;
@@ -4183,6 +4197,10 @@ int main(int argc, char** argv) {
     // The window is often not the focused one (embedded in the desktop app, or beside it), and SDL
     // drops controller events then; the runner decides when they count.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#ifdef _WIN32
+    // A child of the desktop's window has to work in the same pixels as it.
+    if (options.windowHidden) SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
     if (SDL_Init(options.runFor > 0 ? 0 : SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         cerr << "SDL failed to start: " << SDL_GetError() << endl;
         return 1;

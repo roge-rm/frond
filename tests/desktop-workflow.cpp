@@ -3737,7 +3737,13 @@ for line in s.makefile('rb'):
             auto* log = window.findChild<QPlainTextEdit*>("logText");
             QTRY_VERIFY_WITH_TIMEOUT(log->toPlainText().contains("The Palm stays in its own window: The window is not an X11 window."), 4000);
             QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display fit=none"), 4000);
-            QVERIFY(commands().indexOf("display fit=none") == commands().indexOf("window-id ") + 1);
+            // The core's window started hidden, and the core is asked to show it before the fit goes.
+            {
+                QFile args(files.path() + "/args"); QVERIFY(args.open(QIODevice::ReadOnly));
+                QVERIFY(QString::fromUtf8(args.readAll()).split('\n').contains("--window-hidden"));
+            }
+            QVERIFY(commands().indexOf("window-show ") == commands().indexOf("window-id ") + 1);
+            QVERIFY(commands().indexOf("display fit=none") == commands().indexOf("window-id ") + 2);
             // The chain went on after the refusal, and no error box is up.
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineNetwork")->isEnabled(), 4000);
             QVERIFY(!QApplication::activeModalWidget());
@@ -3791,6 +3797,7 @@ for line in s.makefile('rb'):
             QVERIFY(!log->toPlainText().contains("not an X11 window"));
             QVERIFY(!window.findChild<PalmHolder*>("palmHolder")->embedded());
             QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display fit=none"), 4000);
+            QVERIFY(commands().indexOf("window-show ") == commands().indexOf("window-id ") + 1);
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineNetwork")->isEnabled(), 4000);
             QVERIFY(!QApplication::activeModalWidget());
             window.findChild<QAction*>("machineSaveStop")->trigger();

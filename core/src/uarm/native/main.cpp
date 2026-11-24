@@ -112,6 +112,8 @@ struct Options {
     // Where the jog controls go in landscape with the game controller; unset is beside.
     optional<JogLandscape> jogLandscape;
     WindowFit windowFit;
+    // --window-hidden: the desktop embeds the window and maps it, or asks for window-show.
+    bool windowHidden;
     uint32_t windowBackground;
     optional<DisplayMode> displayMode;
     optional<string> device;
@@ -196,10 +198,15 @@ bool gFastEngineMissing = false;
     }
 
     SDL_Window* initSdl(const char* title, DisplayConfiguration& displayConfiguration, float& scale, Rotation rotation,
-                        const DeviceControlProfile& controls, const DeviceControlView& controlView, bool resizable) {
+                        const DeviceControlProfile& controls, const DeviceControlView& controlView, bool resizable,
+                        bool hidden) {
         // The window is often not the focused one (embedded in the desktop app, or beside it), and SDL
         // drops controller events then; SdlEventHandler decides when they count.
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+#ifdef _WIN32
+        // A child of the desktop's window has to work in the same pixels as it.
+        if (hidden) SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) < 0) {
             cerr << "could not initialize SDL: " << SDL_GetError() << endl;
             return nullptr;
@@ -225,7 +232,8 @@ bool gFastEngineMissing = false;
         auto window = SDL_CreateWindow(title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                        scale * deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
                                        scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView)),
-                                       SDL_WINDOW_ALLOW_HIGHDPI | (resizable ? SDL_WINDOW_RESIZABLE : 0));
+                                       SDL_WINDOW_ALLOW_HIGHDPI | (resizable ? SDL_WINDOW_RESIZABLE : 0) |
+                                       (hidden ? SDL_WINDOW_HIDDEN : 0));
 
         return window;
     }
@@ -1016,7 +1024,8 @@ bool gFastEngineMissing = false;
         const bool savedTerminate = sigaction(SIGTERM, nullptr, &terminate) == 0;
 #endif
         SDL_Window* window = initSdl(windowTitle.c_str(), displayConfiguration, scale, frameRotation(rotation),
-                                     deviceControls(deviceType, controlView), controlView, fitted);
+                                     deviceControls(deviceType, controlView), controlView, fitted,
+                                     options.windowHidden);
 #if defined(__linux__) && !defined(__ANDROID__)
         // Keep SDL's SIGINT cleanup and restore the process's SIGTERM disposition.
         if (savedTerminate) sigaction(SIGTERM, &terminate, nullptr);
@@ -1308,6 +1317,9 @@ bool gFastEngineMissing = false;
                 if (event.window.event == SDL_WINDOWEVENT_RESTORED || event.window.event == SDL_WINDOWEVENT_SHOWN)
                     microphone.AppEventOnDeviceThread(SDL_APP_DIDENTERFOREGROUND);
             }
+#ifdef _WIN32
+            if (event.type == SDL_MOUSEBUTTONDOWN && options.windowHidden) focusEmbeddedWindow(window);
+#endif
 #endif
         };
         sdlEventHandler.SetDirectCapture(false);
@@ -1323,9 +1335,10 @@ bool gFastEngineMissing = false;
         commandContext.setAppActive = [&sdlEventHandler](bool active) { sdlEventHandler.SetAppActive(active); };
         commandContext.windowId = [&]() {
             string id;
-            link.Call([&] { id = x11WindowId(window); });
+            link.Call([&] { id = nativeWindowId(window); });
             return id;
         };
+        commandContext.showWindow = [&]() { link.Call([&] { SDL_ShowWindow(window); }); };
         commandContext.windowLayout = [&]() {
             string text;
             link.Call([&] {
@@ -2124,6 +2137,9 @@ int main(int argc, char** argv) {
             if (!parseWindowColour(value, colour)) throw runtime_error("invalid window background: " + value);
             return colour;
         });
+    program.add_argument("--window-hidden")
+        .help("start with the window unmapped, for the desktop app to embed; window-show shows it")
+        .default_value(false).implicit_value(true);
     program.add_argument("--smooth-lcd")
         .help("smooth LCD scaling instead of sharp nearest-neighbour pixels")
         .default_value(false).implicit_value(true);
@@ -2302,6 +2318,7 @@ int main(int argc, char** argv) {
                        .jogPlacement = program.present<JogPlacement>("--jog-controls"),
                        .jogLandscape = program.present<JogLandscape>("--jog-controls-landscape"),
                        .windowFit = program.present<WindowFit>("--window-fit").value_or(WindowFit::none),
+                       .windowHidden = program.get<bool>("--window-hidden"),
                        .windowBackground = program.present<uint32_t>("--window-background").value_or(0),
                        .displayMode = program.present<DisplayMode>("--display"),
                        .device = program.present("--device"),

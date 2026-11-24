@@ -270,6 +270,7 @@ class RunningRulesTest : public QObject {
     }
     void embedRules() {
         QVERIFY(embedPossible("xcb", false));
+        QVERIFY(embedPossible("windows", false));
         QVERIFY(!embedPossible("offscreen", false) && !embedPossible("wayland", false) && !embedPossible("", false));
         QVERIFY(embedPossible("offscreen", true));
         QCOMPARE(parseWindowId("x11 12345"), quint64(12345));
@@ -279,6 +280,10 @@ class RunningRulesTest : public QObject {
         QCOMPARE(parseWindowId("x11"), quint64(0));
         QCOMPARE(parseWindowId("x11 abc"), quint64(0));
         QCOMPARE(parseWindowId("wayland 5"), quint64(0));
+        QCOMPARE(parseWindowId("win32 591234", "windows"), quint64(591234));
+        QCOMPARE(parseWindowId("win32 591234"), quint64(0));
+        QCOMPARE(parseWindowId("x11 12345", "windows"), quint64(0));
+        QCOMPARE(parseWindowId("x11 12345", "offscreen"), quint64(12345));
         QCOMPARE(parseWindowId(""), quint64(0));
     }
     void fullScreenRules() {

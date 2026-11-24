@@ -905,7 +905,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); cradleSetting.clear(); cradleStartupPending = false; showCamera("pattern");
         mipsTimer->stop();
         batteryTimer->stop();
-        palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
+        palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = showPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         if (internalFiles) internalFiles->close();
         internalJob = {}; internalListWanted = false;
@@ -1069,14 +1069,18 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "keyboard-grab") return;
         if (command == "window-id") {
             embedReply(ok, message);
-            // The core started fitted for the embedding; on its own it goes back to following the
-            // Palm's size (Rotate, keyboard, jog). frond-68k can't change that live and has no rotation.
-            if (!embedded && !stopping && !frondFirmware::runs68k(runningDevice) && send("display", "fit=none")) {
-                fitOffPending = true;
+            // The core's window started hidden for the embedding; without it the core shows it.
+            if (!embedded && !stopping && send("window-show")) {
+                showPending = true;
                 return;
             }
-            if (stopping) save();
-            else afterDevice();
+            afterEmbedding();
+            return;
+        }
+        if (command == "window-show" && showPending) {
+            showPending = false;
+            if (!ok) log->appendPlainText(command + ": " + message);
+            afterEmbedding();
             return;
         }
         if (command == "display" && fitOffPending) {
@@ -1942,10 +1946,21 @@ void MainWindow::setBarShown(bool shown) {
     }
     refresh();
 }
-// The window-id reply. An X11 id is wrapped and shown under the bar; anything else leaves the
+// After the window-id reply and the window-show it may need. The core started fitted for the
+// embedding; on its own it goes back to following the Palm's size (Rotate, keyboard, jog).
+// frond-68k can't change that live and has no rotation.
+void MainWindow::afterEmbedding() {
+    if (!embedded && !stopping && !frondFirmware::runs68k(runningDevice) && send("display", "fit=none")) {
+        fitOffPending = true;
+        return;
+    }
+    if (stopping) save();
+    else afterDevice();
+}
+// The window-id reply. An X11 or Windows id is wrapped and shown under the bar; anything else leaves the
 // core's own window and the bar-only window as they are.
 void MainWindow::embedReply(bool ok, const QString& message) {
-    const auto id = ok ? runningRules::parseWindowId(message) : 0;
+    const auto id = ok ? runningRules::parseWindowId(message, QGuiApplication::platformName()) : 0;
     embedded = id && palmHolder->embed(id);
     if (!embedded) {
         log->appendPlainText(!ok || !id ? tr("The Palm stays in its own window: %1").arg(message)
@@ -2837,7 +2852,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     embedWanted = runningRules::embedPossible(QGuiApplication::platformName(), qEnvironmentVariableIsSet("FROND_TRY_EMBED"));
     embedTried = embedded = false;
     // fit, so the Palm takes the window's size at the quarter steps too; whole would floor 1.25x to 1x.
-    if (embedWanted) arguments << "--window-fit" << "fit";
+    if (embedWanted) arguments << "--window-fit" << "fit" << "--window-hidden";
     runningBar->setBarShown(runningPreferences.barShown);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (m68k) {

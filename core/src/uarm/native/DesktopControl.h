@@ -1216,6 +1216,12 @@ class DesktopControl {
             if (id.empty()) return {false, "unsupported", "The window is not an X11 window."};
             return {true, "window", id};
         }
+        if (command == "window-show") {
+            // The window started with --window-hidden and the desktop couldn't embed it.
+            if (!ctx.showWindow) return {false, "unsupported", "There is no window."};
+            ctx.showWindow();
+            return {true, "window", "shown"};
+        }
         if (command == "window-layout") {
             const auto layout = ctx.windowLayout ? ctx.windowLayout() : std::string();
             if (layout.empty()) return {false, "unsupported", "There is no window."};
