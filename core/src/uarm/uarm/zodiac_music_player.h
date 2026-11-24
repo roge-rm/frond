@@ -3,8 +3,10 @@
 
 // The host sequencer for the Zodiac's music hooks (zodiac_music.h): plays each SMF the guest played from its Play
 // to its Stop, Close or end, in guest time, and passes the real-time calls on, as MIDI messages to a sink with the
-// guest time each is due. Master volume goes out as a Universal SysEx master volume message. Data bytes over 0x7f
-// are clamped to 0x7f. Stop, Close, a reset or load and a song's end send all notes off (CC 123 and 120) on all
+// guest time each is due. Master volume goes out as a Universal SysEx master volume message. A data byte over 0x7f
+// drops its message, as the ROM's DAL does (its handlers refuse a note, velocity, program or controller value over
+// 127), except pitch bend, which it masks to 7 bits, a song's note-off velocity and the value of All Sound Off,
+// Reset All Controllers and All Notes Off, which it doesn't read (sent as 0). Stop, Close, a reset or load and a song's end send all notes off (CC 123 and 120) on all
 // 16 channels. Host only, never saved; nothing here touches the machine.
 // Two stages, neither on the emulation thread:
 // - Preparer, on a helper thread, takes the hooks' events, parses each file at its first Play (keeping the last
@@ -147,8 +149,8 @@ class Player {
                 allNotesOff(c.timeNs, sink);
                 break;
             case Kind::message: {
-                uint8_t b[3] = {c.bytes[0], clamp(c.bytes[1]), clamp(c.bytes[2])};
-                sink(c.timeNs, b, c.length, false);
+                uint8_t b[3] = {c.bytes[0], c.bytes[1], c.bytes[2]};
+                if (fit(b, c.length, false)) sink(c.timeNs, b, c.length, false);
                 break;
             }
             case Kind::sysEx:
@@ -221,7 +223,24 @@ class Player {
         songs_.clear();
     }
 
-    static uint8_t clamp(uint8_t v) { return v > 0x7f ? 0x7f : v; }
+    // Data bytes over 0x7f as the DAL takes them (ROM 1.1, the SMF event dispatch at 200bf53c and its handlers):
+    // false drops the message. length counts the status byte; song is false for the real-time calls, whose
+    // note-off velocity the DAL checks.
+    static bool fit(uint8_t (&b)[3], size_t length, bool song) {
+        const uint8_t type = b[0] & 0xf0;
+        if (type == 0xe0) {
+            b[1] &= 0x7f;
+            b[2] &= 0x7f;
+            return true;
+        }
+        if (b[1] > 0x7f) return false;
+        if (length < 3 || b[2] <= 0x7f) return true;
+        if ((type == 0x80 && song) || (type == 0xb0 && (b[1] == 120 || b[1] == 121 || b[1] == 123))) {
+            b[2] = 0;
+            return true;
+        }
+        return false;
+    }
 
     static void allNotesOff(uint64_t timeNs, const Sink& sink) {
         for (uint8_t c = 0; c < 16; ++c) {
@@ -272,8 +291,9 @@ class Player {
         }
         const uint8_t type = e.status & 0xf0;
         if (type == 0x90 && e.data2 && timeNs < skipBeforeNs_) return;
-        const uint8_t b[3] = {e.status, clamp(e.data1), clamp(e.data2)};
-        sink(timeNs, b, type == 0xc0 || type == 0xd0 ? 2 : 3, false);
+        uint8_t b[3] = {e.status, e.data1, e.data2};
+        const size_t length = type == 0xc0 || type == 0xd0 ? 2 : 3;
+        if (fit(b, length, true)) sink(timeNs, b, length, false);
     }
 };
 

@@ -296,7 +296,7 @@ class Hooks {
         if (!ring_.push(std::move(e))) ++stats_.dropped;
     }
     void message(uint64_t timeNs, uint32_t handle, uint32_t status, uint32_t a, uint32_t b, uint8_t length) {
-        // Data bytes keep up to 8 bits; the player clamps them.
+        // Data bytes keep up to 8 bits; the player drops a message with one over 0x7f, as the DAL does.
         Event e = at(timeNs, Kind::message, handle);
         e.bytes[0] = uint8_t(status);
         e.bytes[1] = uint8_t(a > 0xff ? 0xff : a);

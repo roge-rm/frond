@@ -1,5 +1,5 @@
 // The Zodiac music player (zodiac_music_player.h): song messages at their guest times from Play, tempo applied,
-// clamped data bytes, sysex from the file, Stop and Close with all notes off, a Play of a playing handle starting
+// data bytes over 0x7f taken as the DAL takes them, sysex from the file, Stop and Close with all notes off, a Play of a playing handle starting
 // over, two songs merged in time order, a song's end, a reset, real-time messages and master volume, an F7 escape
 // sent as raw bytes, the song limit, every Held the preparer made handed back, a jumped clock's skipped note-ons and
 // the event budget. Built with ASan and UBSan.
@@ -49,11 +49,12 @@ bool allOff(size_t from, uint64_t t) {
 }
 constexpr uint64_t ms = 1000000;
 
-// Tempo 250000 (240 bpm): 96 ticks are 250 ms. Note on 60 at 0, program 0xff (clamped) at 96, sysex at 96, note
-// off with velocity 0x80 (clamped) at 192, end at 288.
+// Tempo 250000 (240 bpm): 96 ticks are 250 ms. Note on 60 at 0, program 0xff (dropped) and program 5 at 96, sysex
+// at 96, note off with velocity 0x80 (sent as 0) at 192, end at 288.
 const Bytes body = {0x00, 0xff, 0x51, 0x03, 0x03, 0xd0, 0x90,
                     0x00, 0x90, 0x3c, 0x64,
                     0x60, 0xc2, 0xff,
+                    0x00, 0xc2, 0x05,
                     0x00, 0xf0, 0x03, 0x7e, 0x01, 0xf7,
                     0x60, 0x80, 0x3c, 0x80,
                     0x60, 0xff, 0x2f, 0x00};
@@ -68,10 +69,10 @@ void songPlays() {
     p.advance(1249 * ms);
     assert(sent.size() == 1);
     p.advance(1250 * ms);
-    assert(sent.size() == 3 && sent[1].b == (Bytes{0xc2, 0x7f}) && sent[2].b == (Bytes{0xf0, 0x7e, 0x01, 0xf7}));
+    assert(sent.size() == 3 && sent[1].b == (Bytes{0xc2, 0x05}) && sent[2].b == (Bytes{0xf0, 0x7e, 0x01, 0xf7}));
     assert(sent[1].t == 1250 * ms && sent[2].t == 1250 * ms);
     p.advance(1600 * ms);
-    assert(sent.size() == 4 && sent[3].t == 1500 * ms && sent[3].b == (Bytes{0x80, 0x3c, 0x7f}));
+    assert(sent.size() == 4 && sent[3].t == 1500 * ms && sent[3].b == (Bytes{0x80, 0x3c, 0}));
     assert(p.playing() == 1);
     // The end at 1750 ms: notes off there, and the song is done.
     p.advance(2000 * ms);
@@ -85,9 +86,9 @@ void stopAndRestart() {
     p.feed(play(0, 7, s));
     // A message from the guest at 300 ms: the song's 250 ms messages go first.
     Event cc = ev(300 * ms, Kind::message, 0x1234);
-    cc.bytes[0] = 0xb1; cc.bytes[1] = 7; cc.bytes[2] = 200; cc.length = 3;
+    cc.bytes[0] = 0xb1; cc.bytes[1] = 7; cc.bytes[2] = 100; cc.length = 3;
     p.feed(cc);
-    assert(sent.size() == 4 && sent[3].t == 300 * ms && sent[3].b == (Bytes{0xb1, 7, 0x7f}));
+    assert(sent.size() == 4 && sent[3].t == 300 * ms && sent[3].b == (Bytes{0xb1, 7, 100}));
     // Play again: notes off, then from the top.
     p.feed(play(400 * ms, 7, s));
     assert(sent.size() == 36 && allOff(4, 400 * ms) && p.playing() == 1);
@@ -126,6 +127,48 @@ void twoSongs() {
     assert(p.playing() == 1 && sent.size() == 38 && allOff(6, 250 * ms));
     p.advance(261 * ms);
     assert(sent.size() == 38 && p.settled());
+}
+
+// Data bytes over 0x7f, from a song and from the real-time calls: dropped as the DAL drops them, pitch bend masked,
+// a song's note-off velocity and the channel mode controllers' values sent as 0.
+void dataBytes() {
+    sent.clear();
+    Stages p;
+    const Bytes song = {0x00, 0x90, 0x3c, 0x80,   // velocity over 0x7f: dropped
+                        0x00, 0x90, 0x85, 0x40,   // note over 0x7f: dropped
+                        0x00, 0xb0, 0x07, 0xff,   // CC 7 0xff (Outpost): dropped
+                        0x00, 0xb0, 0x0a, 0x80,   // CC 10 0x80 (Interstellar Flames): dropped
+                        0x00, 0xb0, 0x7b, 0x80,   // All Notes Off: value read as 0
+                        0x00, 0xb0, 0x85, 0x00,   // controller over 0x7f: dropped
+                        0x00, 0xe0, 0xff, 0xc0,   // pitch bend: masked
+                        0x00, 0xc0, 0x7f,         // program 127: kept
+                        0x00, 0x90, 0x3c, 0x40,
+                        0x10, 0x80, 0x3c, 0xff,   // note off velocity: not read, sent as 0
+                        0x00, 0xff, 0x2f, 0x00};
+    p.feed(play(0, 3, smf(song)));
+    p.advance(1 * ms);
+    assert(sent.size() == 4);
+    assert(sent[0].b == (Bytes{0xb0, 0x7b, 0}) && sent[1].b == (Bytes{0xe0, 0x7f, 0x40}));
+    assert(sent[2].b == (Bytes{0xc0, 0x7f}) && sent[3].b == (Bytes{0x90, 0x3c, 0x40}));
+    p.advance(100 * ms);
+    assert(sent[4].b == (Bytes{0x80, 0x3c, 0}));
+    sent.clear();
+    // The real-time calls: the DAL checks a note-off's velocity too.
+    const auto rt = [&](uint8_t a, uint8_t b, uint8_t c, uint8_t length) {
+        Event e = ev(200 * ms, Kind::message, 0x1234);
+        e.bytes[0] = a; e.bytes[1] = b; e.bytes[2] = c; e.length = length;
+        p.feed(e);
+    };
+    rt(0x91, 0x3c, 0xff, 3);
+    rt(0x81, 0x3c, 0x80, 3);
+    rt(0xb1, 0x0a, 0x80, 3);
+    rt(0xc1, 0xff, 0, 2);
+    assert(sent.empty());
+    rt(0xb1, 0x79, 0xff, 3);
+    rt(0xc1, 0x10, 0, 2);
+    assert(sent.size() == 2 && sent[0].b == (Bytes{0xb1, 0x79, 0}) && sent[1].b == (Bytes{0xc1, 0x10}));
+    p.advance(1000 * ms);
+    assert(p.settled());
 }
 
 void volumeAndSysEx() {
@@ -248,10 +291,11 @@ int main() {
     songPlays();
     stopAndRestart();
     twoSongs();
+    dataBytes();
     volumeAndSysEx();
     escapesAndLimits();
     skipAndBudget();
-    std::puts("PASS: Zodiac music player (times, clamping, sysex, stop, restart, merge, end, reset, volume, escapes, "
+    std::puts("PASS: Zodiac music player (times, data bytes over 0x7f, sysex, stop, restart, merge, end, reset, volume, escapes, "
               "song limit, Helds returned, skipped note-ons, budget)");
     return 0;
 }
