@@ -37,8 +37,8 @@ struct ArmMmu {
     uint32_t staleTtb;
     uint32_t flushes;  // counts mmuTlbFlush calls, for the JIT; not saved
     // The JIT's code pages (mmuSetFillWatch): a byte per 4 KB MVA page, null for none. Each fill that makes the
-    // entry of a page whose byte is set live counts in watchedFills, and the last 8 such pages are kept in
-    // watchedFillPage (by count & 7). Not saved.
+    // entry of a page whose byte is set live counts in watchedFills, and the last 8 such fills are kept in
+    // watchedFillPage (by count & 7) as the first page | (pages - 1) << 20. Not saved.
     const uint8_t *fillWatch;
     uint32_t watchedFills;
     uint32_t watchedFillPage[8];

@@ -6279,6 +6279,13 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
     return (uint8_t *)romGetPeepholeBuffer(rom) + (data - (uint8_t *)romGetData(rom));
 }
 
+void cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa) {
+    if (!cpu->jitCode) return;
+    // A newly marked page loses its host TLB entries, so its stores come through cpuPrvArm920Stored.
+    if (cpu->jitCode->note(pa, false)) hostTlbFlush(&cpu->mem->hostTlb);
+    cpu->jitCode->noteWord(pa);
+}
+
 void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa) {
     if (cpu->jitCode && cpu->jitCode->page(pa)) cpu->jitCode->noteWord(pa);
 }

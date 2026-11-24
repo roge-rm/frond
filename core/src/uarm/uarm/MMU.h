@@ -36,9 +36,10 @@ MMUTranslateResult mmuTranslateInspect(ArmMmu*, uint32_t, bool write);
 uint32_t mmuFlushCount(const struct ArmMmu *mmu);
 // Whether a live TLB entry answers va (MMU on).
 bool mmuTlbLive(const struct ArmMmu *mmu, uint32_t va);
-// The JIT's code pages, a byte per 4 KB MVA page (null for none): a walk that makes the TLB entry of a page
+// The JIT's code pages, a byte per 4 KB MVA page (null for none): a walk that makes the TLB entries of a page
 // whose byte is set live is counted. mmuWatchedFills gives the count and, in *pages, the last 8 of those
-// pages by count & 7; a count that moved on by more than 8 lost some (a state load moves it on by 9).
+// fills by count & 7, each as its first page | (pages - 1) << 20; a count that moved on by more than 8 lost
+// some (a state load moves it on by 9).
 void mmuSetFillWatch(struct ArmMmu *mmu, const uint8_t *pages);
 uint32_t mmuWatchedFills(const struct ArmMmu *mmu, const uint32_t **pages);
 MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged, bool write);

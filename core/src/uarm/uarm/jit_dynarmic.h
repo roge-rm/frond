@@ -149,6 +149,9 @@ bool cpuJitTlbLive(ArmCpu *cpu, uint32_t va);
 // mmuSetFillWatch and mmuWatchedFills of the CPU's MMU.
 void cpuJitSetFillWatch(ArmCpu *cpu, const uint8_t *pages);
 uint32_t cpuJitWatchedFills(ArmCpu *cpu, const uint32_t **pages);
+// ARM920T Fast blocks: marks the page table word at pa in the code map, so a store to it from any path comes
+// back through jitCodeWrittenPa.
+void cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa);
 // Whether code from a page with that access may be fetched now, in the current mode.
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
 // Domains, S and R: what cpuJitAccessReadable depends on besides the access and the

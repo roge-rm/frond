@@ -215,7 +215,7 @@ translated:
         // (never in the TLB; Fast keeps those until a TLB flush even if the guest edits their entry). The
         // walked page's own entry is dead, so a flush is needed only when a live entry (another page of a
         // 64 KB page or section) changes.
-        bool replaced = false;
+        bool replaced = false, watched = false;
         for (uint32_t offset = 0; offset < sz; offset += 4096) {
             struct TlbEntry *tlbEntry = mmu->tlb + ((va + offset) >> 12);
 
@@ -231,9 +231,9 @@ translated:
             tlbEntry->section = section;
             tlbEntry->pa = (paPage + offset) >> 12;
             tlbEntry->gen = mmu->gen;
-            if (mmu->fillWatch && mmu->fillWatch[(va + offset) >> 12])
-                mmu->watchedFillPage[mmu->watchedFills++ & 7] = (va + offset) >> 12;
+            if (mmu->fillWatch && mmu->fillWatch[(va + offset) >> 12]) watched = true;
         }
+        if (watched) mmu->watchedFillPage[mmu->watchedFills++ & 7] = (va >> 12) | ((sz >> 12) - 1) << 20;
         if (replaced) hostTlbFlush(&mmu->mem->hostTlb);
     }
 
