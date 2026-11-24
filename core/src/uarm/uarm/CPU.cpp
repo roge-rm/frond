@@ -310,6 +310,9 @@ struct ArmCpu {
     } memorySystem;
 
     struct icache *ic;
+    // MMU kinds: the CP15's data cache model and control register, fixed once the CP15 is made. Null otherwise.
+    Arm920DataCache *arm920DataCache;
+    const uint32_t *cp15ControlWord;
     struct ArmMem *mem;
 
     union {
@@ -1579,9 +1582,9 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
             }
         }
         if constexpr (arm920) {
-            auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
+            auto* dc = cpu->arm920DataCache;
             dc->mem = cpu->mem;
-            const auto ctl = cp15MMUArm920Control(cpu->cp15.cp15mmu);
+            const auto ctl = *cpu->cp15ControlWord;
             const auto result = dc->access(vaddr, translateResult, size, write, buf, ctl & 4, ctl & 0x4000);
             if (result == Arm920DataResult::ok) return true;
             if (result == Arm920DataResult::unsupported) { if (fsrP) *fsrP = 0; return false; }
@@ -4635,6 +4638,8 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
         icacheArm920SetFcsePid(cpu->ic, &cpu->pid);
         cpu->cp15.cp15mmu =
             cp15MMUInit(cpu, cpu->memorySystem.mmu, cpu->ic, cpuid, cacheId, xscale, omap);
+        cpu->arm920DataCache = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
+        cpu->cp15ControlWord = cp15MMUControlWord(cpu->cp15.cp15mmu);
 
         paceInit(cpu->mem, cpu->memorySystem.mmu);
     } else {
@@ -4673,7 +4678,7 @@ ArmCpuModel cpuGetModel(const ArmCpu* cpu) { return cpu->model; }
 uint64_t cpuExceptionSequence(const ArmCpu* cpu) { return cpu->exceptionSequence; }
 
 uint32_t cpuArm920ClockMode(const ArmCpu* cpu) {
-    return cp15MMUClockMode(cpu->cp15.cp15mmu);
+    return *cpu->cp15ControlWord >> 30;
 }
 
 void cpuClearNativeRuntime(ArmCpu* cpu) {
@@ -5830,7 +5835,7 @@ uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint3
 }
 
 bool cpuArm920AlignmentFaults(const ArmCpu *cpu) {
-    return cpu->model == ArmCpuModel::arm920t && cp15MMUAlignmentEnabled(cpu->cp15.cp15mmu);
+    return cpu->model == ArmCpuModel::arm920t && (*cpu->cp15ControlWord & 2);
 }
 
 void cpuArm920SetLean(ArmCpu *cpu, Arm920LeanPage page, Arm920LeanGuard guard, void *context) {

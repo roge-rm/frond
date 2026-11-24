@@ -120,7 +120,14 @@ Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsi
                 return Arm920DataResult::unsupported;
             }
         }
-        if (hit) {
+        if (hit && size <= 4 && !(va & (size - 1))) {
+            // An aligned access within one word: the same bytes as the loop below.
+            const unsigned offset = va & 31, shift = (offset & 3) * 8;
+            const uint32_t mask = size == 4 ? ~0u : ((1u << (size * 8)) - 1) << shift;
+            auto& word = hit->words[offset / 4];
+            word = (word & ~mask) | ((uint32_t(value) << shift) & mask);
+            if (bufferable) hit->dirty |= 1u << (offset / 16);
+        } else if (hit) {
             // Cache words have host integer order; guest data are little endian.
             for (unsigned i = 0; i < size; ++i) {
                 const unsigned offset = (va & 31) + i;
@@ -172,9 +179,15 @@ Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsi
         hit = &line;
     }
     uint64_t value = 0;
-    for (unsigned i = 0; i < size; ++i) {
-        const unsigned offset = (va & 31) + i;
-        value |= uint64_t(uint8_t(hit->words[offset / 4] >> ((offset & 3) * 8))) << (i * 8);
+    if (size <= 4 && !(va & (size - 1))) {
+        const unsigned offset = va & 31;
+        const uint32_t word = hit->words[offset / 4] >> ((offset & 3) * 8);
+        value = size == 4 ? word : word & ((1u << (size * 8)) - 1);
+    } else {
+        for (unsigned i = 0; i < size; ++i) {
+            const unsigned offset = (va & 31) + i;
+            value |= uint64_t(uint8_t(hit->words[offset / 4] >> ((offset & 3) * 8))) << (i * 8);
+        }
     }
     switch (size) {
         case 1: *static_cast<uint8_t*>(data) = value; break;

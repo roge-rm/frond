@@ -507,6 +507,7 @@ void cp15MMUArm920SetIcacheIndexCompatibility(ArmCP15MMU* cp15, bool enabled) {
 }
 
 uint32_t cp15MMUArm920Control(const ArmCP15MMU* cp15) { return cp15->control; }
+const uint32_t* cp15MMUControlWord(const ArmCP15MMU* cp15) { return &cp15->control; }
 Arm920DataCache* cp15MMUArm920DataCache(ArmCP15MMU* cp15) { return &cp15->dataCache; }
 
 void cp15MMUConfigureArm920Bootstrap(struct ArmCP15MMU* cp15) {

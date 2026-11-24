@@ -19,6 +19,8 @@ void cp15MMUSetFaultStatus(struct ArmCP15MMU* cp15, uint32_t addr, uint_fast8_t 
 void cp15MMUSetInstructionFaultStatus(struct ArmCP15MMU* cp15, uint_fast8_t faultStatus);
 void cp15MMUArm920SetIcacheIndexCompatibility(ArmCP15MMU*, bool);
 uint32_t cp15MMUArm920Control(const ArmCP15MMU*);
+// The control register's storage, fixed for the CP15's lifetime, for readers that look at it on every access.
+const uint32_t* cp15MMUControlWord(const ArmCP15MMU*);
 Arm920DataCache* cp15MMUArm920DataCache(ArmCP15MMU*);
 void cp15MMUCycle(struct ArmCP15MMU* cp15);
 bool cp15MMUAlignmentEnabled(const struct ArmCP15MMU* cp15);
