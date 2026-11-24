@@ -3397,6 +3397,8 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     if (p->boundReached()) return false;
     ++p->work;
+    uint32_t stepCpsr = 0;
+    bool stepCpsrKnown = p->options.bootstrapPeripherals;
     if (p->options.bootstrapPeripherals) {
         if (!quiet) {
             p->updateInterrupts();
@@ -3412,7 +3414,10 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         const auto cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
         const auto lr = cpuGetRegisters(p->cpu)[14];
         const auto sp = cpuGetRegisters(p->cpu)[13];
+        // With no interrupt taken nothing has changed, so the trace below takes this CPSR.
+        stepCpsr = cpsr;
         if (cpuProcessPendingInterrupts(p->cpu)) {
+            stepCpsrKnown = false;
             const auto vector = cpuGetRegisters(p->cpu)[15];
             const auto mode = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) & 31;
             if (p->blPrefix) {
@@ -3435,7 +3440,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     auto& t = p->result.trace;
     t = {step, cpuGetRegisters(p->cpu)[15], 0,
-         cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
+         stepCpsrKnown ? stepCpsr : cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
     uint_fast8_t fsr = 0;
     // A fetch that aborts goes to the prefetch abort vector in the step below, outside a Thumb BL pair.
     bool fetchAbort = false;
@@ -3505,7 +3510,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
             p->graphicsSampleOffset = registers[12];
         }
     }
-    Probe::Recent recent{};
+    Probe::Recent recent;
     if (p->options.diagnosticSnapshot) {
         const auto* r=cpuGetRegisters(p->cpu);
         recent={t.step,t.pc,t.instruction,t.cpsr,r[13],r[14],r[0],r[1],r[2],r[3]};
