@@ -1575,7 +1575,9 @@ struct Env final : public A32::UserCallbacks {
         return true;
     }
 
+    bool queuedExit = false;
     void CompileQueued(A32::VAddr, bool) override {
+        queuedExit = true;
         stats.cold++;
         stats.queued++;
         jit->HaltExecution(kCold);
@@ -2083,6 +2085,7 @@ struct FrondJit {
     // [0] user, [1] privileged. Both are made by jitCreate.
     std::unique_ptr<Level> level[2];
     uint32_t maxUnchecked = 0, hot = 1;
+    unsigned queuedBranches = 1;
     bool singleStep = false;  // ARM920T probe diagnostic: one instruction per check, blocks end at each line
     A32::Jit::CompileThread mode{};
     unsigned ahead = 0;
@@ -2267,6 +2270,9 @@ FrondJit *jitCreate(ArmCpu *cpu, bool singleStep) {
     j->cpu = cpu;
     j->singleStep = singleStep;
     j->maxUnchecked = singleStep ? 1 : jitPrvMaxUnchecked();
+    const char *branches = getenv("FROND_QUEUED_BRANCHES");
+    if (branches && (strcmp(branches, "2") == 0 || strcmp(branches, "4") == 0))
+        j->queuedBranches = unsigned(branches[0] - '0');
     j->hot = cpuGetModel(cpu) == ArmCpuModel::arm920t && singleStep ? 1 : jitPrvHot();
     j->mode = jitPrvCompileThread();
     j->ahead = jitPrvAhead(j->mode);
@@ -2545,6 +2551,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     e.undo = 0;
     e.dataAbort.set = false;
     j->running = &e;
+    e.queuedExit = false;
     const HaltReason hr = jit.Run();
     j->running = nullptr;
     jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege | kSwi | kCharged);
@@ -2577,11 +2584,13 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     else if (Has(hr, kSlowPath))
         stop = FROND_JIT_HALT;
     else if (Has(hr, kCold))
-        stop = FROND_JIT_COLD;
+        stop = e.queuedExit && j->queuedBranches > 1 && cpuJitWmmx(e.cpu) ? FROND_JIT_QUEUED : FROND_JIT_COLD;
     else
         stop = FROND_JIT_BUDGET;
     return clocks;
 }
+
+unsigned jitQueuedBranches(const FrondJit *j) { return j->queuedBranches; }
 
 uint32_t jitLastInstructions(const FrondJit *j) { return j->lastInstructions; }
 

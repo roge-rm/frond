@@ -7190,15 +7190,18 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
                 if (cpuJitFetch(cpu, pc, &word) && cpuJitPlain(cpu, pc, word, cpu->T)) break;
             }
             if (cpu->slowPath) break;
-        } else if (stop == FROND_JIT_COLD) {
-            // Code not compiled yet: the interpreter runs it up to its next taken branch,
-            // where the JIT looks again.
+        } else if (stop == FROND_JIT_COLD || stop == FROND_JIT_QUEUED) {
+            // Retry cold code at the next taken branch. A pending PXA270 job can wait a few branches.
+            const bool queued = stop == FROND_JIT_QUEUED;
+            unsigned branches = queued ? jitQueuedBranches(cpu->jit) : 1;
+            const bool startingPrivilege = cpu->privileged;
             for (;;) {
                 const uint32_t pc = cpu->regs[REG_NO_PC];
                 const bool thumb = cpu->T;
                 cpuPrvJitInterpretOne<memorySystemKind>(cpu, acc);
                 if (cpu->slowPath || acc >= cycles) break;
-                if (cpu->T != thumb || cpu->regs[REG_NO_PC] != pc + (thumb ? 2 : 4)) break;
+                if (cpu->T != thumb || (queued && (cpu->privileged != startingPrivilege || cpu->modePace))) break;
+                if (cpu->regs[REG_NO_PC] != pc + (thumb ? 2 : 4) && --branches == 0) break;
             }
             if (cpu->slowPath) break;
         }

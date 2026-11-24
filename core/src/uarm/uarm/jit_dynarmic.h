@@ -23,6 +23,7 @@ enum FrondJitStop {
     FROND_JIT_ABORT,      // regs[15] is a load or store whose access failed after it ran in
                           // the JIT up to there; the CPU takes the data abort jitLastAbort
                           // gives without running it again
+    FROND_JIT_QUEUED,     // PXA270 async compilation pending, with a longer branch retry budget
 };
 
 // The failed access behind FROND_JIT_ABORT: its address, fault status, size in bytes and
@@ -46,6 +47,8 @@ const FrondJitAbort &jitLastAbort(const FrondJit *jit);
 // off, 1 when its condition fails). Returns the clocks run, at most
 // cycles - 1 + jitMaxUnchecked(jit) x the largest instruction cost for cycles >= 1.
 uint32_t jitRun(FrondJit *jit, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop);
+// Taken branches before a FROND_JIT_QUEUED retry.
+unsigned jitQueuedBranches(const FrondJit *jit);
 // The instructions the last jitRun ran, a Thumb pair counted 2 (ARM920T); its clocks elsewhere.
 uint32_t jitLastInstructions(const FrondJit *jit);
 // ARM920T: FCSE PID tags handed out since the last restart, and the restarts (every tag taken, code dropped).
