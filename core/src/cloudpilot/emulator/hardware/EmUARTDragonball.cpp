@@ -300,6 +300,7 @@ void EmUARTDragonball::StateChanged(State& newState, Bool sendTxData) {
     // could appear in the UART registers as it's being configured).
 
     if (newState.UART_ENABLE && transport) {
+        if (!(fState.UART_ENABLE && fState.RX_ENABLE)) SettleDropForBaud(transport, config.fBaud);
         transport->SetConfig(config);
     }
 
@@ -710,8 +711,10 @@ void EmUARTDragonball::ReceiveRxFIFO(EmTransportSerial* transport, bool receiver
 
 // Drops bytes that reach the receiver while it's off. The transport has no arrival times, so
 // a byte counts as arriving no earlier than when it's first seen pending, and bytes go one
-// byte time (10 bits) each from then on. A reply that turns up just before the receiver comes
-// back on stays in the transport for it, however much the transport would let through at once.
+// byte time (10 bits) each from then on. Only bytes already seen at an earlier poll can go,
+// so a reply that turns up after a long gap between polls starts its own clock. A reply that
+// turns up just before the receiver comes back on stays in the transport for it, however
+// much the transport would let through at once.
 void EmUARTDragonball::DropWhileOff(EmTransportSerial* transport) {
     if (transport->BytesPending() == 0) {
         dropMarkSet = false;
@@ -724,27 +727,41 @@ void EmUARTDragonball::DropWhileOff(EmTransportSerial* transport) {
     if (!dropMarkSet || now < dropMark) {
         dropMark = now;
         dropMarkSet = true;
+        dropSeen = transport->BytesPending();
         return;
     }
 
     const long baud = std::max<long>(transport->GetConfig().fBaud, 300);
     const uint64 perByte = std::max<uint64>(1, uint64(gSession->GetClocksPerSecond()) * 10 / baud);
-    uint64 due = (now - dropMark) / perByte;
+    uint64 due = std::min<uint64>((now - dropMark) / perByte, dropSeen);
 
     char buffer[kMaxFifoSize];
     while (due > 0) {
         const size_t pending = transport->BytesPending();
-        if (pending == 0) {
-            dropMarkSet = false;
-            break;
-        }
+        if (pending == 0) break;
         long count = long(std::min<uint64>({due, uint64(pending), uint64(sizeof(buffer))}));
         if (!transport->Read(count, buffer) || count <= 0) break;
         PRINTF("UART: Dropped %ld bytes, receiver off.", count);
         due -= uint64(count);
+        dropSeen -= std::min<size_t>(dropSeen, size_t(count));
         dropMark += uint64(count) * perByte;
     }
-    if (dropMarkSet && transport->BytesPending() == 0) dropMarkSet = false;
+
+    const size_t left = transport->BytesPending();
+    if (left == 0) {
+        dropMarkSet = false;
+        return;
+    }
+    // Bytes first seen now queue behind the ones still waiting, or start now if none are.
+    if (dropSeen == 0) dropMark = now;
+    dropSeen = left;
+}
+
+// Drops what's due at the old rate before a baud change, so time spent at one rate isn't
+// counted at the other.
+void EmUARTDragonball::SettleDropForBaud(EmTransportSerial* transport, long newBaud) {
+    if (!dropMarkSet || transport->GetConfig().fBaud == newBaud) return;
+    DropWhileOff(transport);
 }
 
 /***********************************************************************

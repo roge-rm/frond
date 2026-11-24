@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <deque>
+#include <vector>
 
 #include "EmHAL.h"
 #include "EmRegsEZ.h"
@@ -63,11 +64,14 @@ class Line : public EmTransportSerial {
     void SetBreak(bool) override {}
     bool RequiresSync() override { return false; }
     void OnTransactionStateChange(EmUARTDragonball::TransactionState,
-                                  EmUARTDragonball::TransactionState) override {}
+                                  EmUARTDragonball::TransactionState to) override {
+        states.push_back(to);
+    }
     void Send(int n, uint8 first) {
         for (int i = 0; i < n; ++i) bytes.push_back(uint8(first + i));
     }
     std::deque<uint8> bytes;
+    std::vector<EmUARTDragonball::TransactionState> states;
 };
 
 constexpr emuptr USTCNT = 0xfffff900, UBAUD = 0xfffff902, URX = 0xfffff904, SPIMCONT = 0xfffff802,
@@ -164,6 +168,114 @@ static void CheckUart(B& board, Line& line, const char* name) {
     printf("%s UART drops bytes while the receiver is off\n", name);
 }
 
+// Polls far apart, a baud change in the middle of a drop and bursts over the 64-byte buffer.
+template <typename B>
+static void CheckUartDropTiming(B& board, Line& line, const char* name) {
+    const uint16 rxOff = UEN | TXEN | 0x0100, rxOn = UEN | RXEN | TXEN | 0x0100;
+    const uint64 byte = ByteTime(line);
+
+    // A reply that arrives after a long gap with no poll starts its own clock, so it isn't
+    // dropped for time that passed before it came.
+    board.Put(USTCNT, 2, rxOff);
+    line.Send(5, 0x20);
+    board.CycleSlowly(false);
+    gNow += 50 * byte;
+    line.Send(3, 0x41);
+    board.CycleSlowly(false);
+    assert(line.bytes.size() == 3);
+    gNow += byte / 2;
+    board.Put(USTCNT, 2, rxOn);
+    ReadBytes(board, 0x41, 3);
+
+    // Bytes that come while earlier ones still wait queue behind them.
+    board.Put(USTCNT, 2, rxOff);
+    line.Send(10, 0x10);
+    board.CycleSlowly(false);
+    gNow += 4 * byte;
+    line.Send(3, 0x50);
+    board.CycleSlowly(false);
+    assert(line.bytes.size() == 9);
+    gNow += 7 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.size() == 2);
+    assert(line.bytes.front() == 0x51);
+    gNow += 2 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+
+    // A baud change mid-drop: time before it goes at the old rate, time after at the new one.
+    line.Send(40, 0x10);
+    board.CycleSlowly(false);
+    gNow += 10 * byte;
+    board.Put(UBAUD, 2, 0x033f);  // divide by 8
+    assert(line.bytes.size() == 30);
+    const uint64 slow = ByteTime(line);
+    assert(slow == 8 * byte);
+    gNow += 20 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.size() == 28);
+    board.Put(UBAUD, 2, 0x003f);
+    gNow += 28 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+
+    // A burst over 64 bytes drops at the line's rate in more than one read.
+    line.Send(200, 0);
+    board.CycleSlowly(false);
+    gNow += 150 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.size() == 50);
+    assert(line.bytes.front() == 150);
+    gNow += 50 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+
+    // And one read with the receiver on arrives whole and in order through the FIFO.
+    board.Put(USTCNT, 2, rxOn);
+    line.Send(100, 0);
+    ReadBytes(board, 0, 100);
+    assert(line.bytes.empty());
+    printf("%s UART drop timing: sparse polls, baud change, long bursts\n", name);
+}
+
+// Sync mode: bytes reaching a receiver that's off don't start a receive, and RX going off
+// mid-receive leaves it waiting for data.
+template <typename B>
+static void CheckUartSync(B& board, Line& line, const char* name) {
+    using TS = EmUARTDragonball::TransactionState;
+    const uint16 rxOff = UEN | TXEN | 0x0100, rxOn = UEN | RXEN | TXEN | 0x0100;
+    const uint64 byte = ByteTime(line);
+    board.SetUARTSync(true);
+    line.states.clear();
+
+    board.Put(USTCNT, 2, rxOff);
+    line.Send(5, 0x20);
+    board.CycleSlowly(false);
+    gNow += 5 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+    assert(line.states.empty());
+
+    board.Put(USTCNT, 2, rxOn);
+    line.Send(3, 0x30);
+    board.CycleSlowly(false);
+    assert(line.states.size() == 1 && line.states.back() == TS::receiving);
+    line.Send(2, 0x40);
+    board.Put(USTCNT, 2, rxOff);
+    board.CycleSlowly(false);
+    assert(line.states.size() == 2 && line.states.back() == TS::waitingForData);
+    assert(!(board.GetWord(URX) & DATA_READY));
+    // The bytes left over go at the line's rate and start nothing.
+    gNow += 2 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+    assert(line.states.size() == 2);
+
+    board.SetUARTSync(false);
+    board.Put(USTCNT, 2, rxOn);
+    printf("%s UART sync mode: RX off drops and starts no receive\n", name);
+}
+
 template <typename B>
 static void CheckSpim(B& board, const char* name) {
     board.Put(IMR, 4, 0);  // nothing masked
@@ -229,6 +341,8 @@ static void Check(const char* name) {
     Line* line = new Line;  // owned by the session
     gSession->SetTransportSerial(kUARTIR, line);
     CheckUart(board, *line, name);
+    CheckUartDropTiming(board, *line, name);
+    CheckUartSync(board, *line, name);
     CheckSpim(board, name);
     board.Dispose();
     EmHAL::onSystemClockChange.RemoveHandler(clock);

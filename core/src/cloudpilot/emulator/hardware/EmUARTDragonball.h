@@ -138,6 +138,7 @@ class EmUARTDragonball {
     void TransmitTxFIFO(EmTransportSerial*);
     void ReceiveRxFIFO(EmTransportSerial*, bool receiverOn);
     void DropWhileOff(EmTransportSerial*);
+    void SettleDropForBaud(EmTransportSerial*, long newBaud);
 
     EmTransportSerial* GetTransport(void);
 
@@ -168,6 +169,8 @@ class EmUARTDragonball {
     // when bytes are first seen pending.
     uint64 dropMark{0};
     bool dropMarkSet{false};
+    // Bytes pending at the last drop poll, the only ones that may go at the next.
+    size_t dropSeen{0};
 
     TransactionState transactionState{TransactionState::idle};
     uint64 transactionTimeoutCycles{0};
