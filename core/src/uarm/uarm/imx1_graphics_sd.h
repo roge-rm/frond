@@ -164,6 +164,37 @@ class Imx1GraphicsSd {
         a.Require(card.used && card.phase <= phaseWrite && card.work <= workStop && card.word <= 128 &&
                   card.count <= 0xffff && card.blocksLeft <= 0xffff, "graphics sd card");
     }
+    // Fast: a data port write that isn't a block's last word, which only fills the block.
+    bool quietCardWrite(uint32_t pc, uint32_t address, uint32_t size, uint32_t value) {
+        if (!card.used || !released || resetHeld || interface != 0x08000000 || address != 0x16202060 || size != 4 ||
+            pc < 0x204d2140 || pc >= 0x204d3b20 || !card.blockReady || card.word >= 127 || card.phase != phaseWrite)
+            return false;
+        uint8_t* bytes = card.block + card.word * 4;
+        for (unsigned i = 0; i < 4; ++i) bytes[i] = uint8_t(value >> (8 * i));
+        ++card.word;
+        return true;
+    }
+    // Fast's lean path: a read of the block (16202000-162021ff) by the driver with a card, as access answers it, inside
+    // a quiet span (no clock, command or data event due, so the state is the one access would see). Registers but the
+    // data port change nothing. A data port read takes its word, but not the block's last, whose read sets the next
+    // block's time and is left to the step. Everything is checked first: false takes nothing.
+    bool quietCardRead(uint32_t pc, uint32_t address, uint32_t size, uint32_t& value) {
+        if (!card.used || !released || resetHeld || interface != 0x08000000 || address < 0x16202000 ||
+            address >= 0x16202200 || (address & 3) || (size != 4 && size != 2) || pc < 0x204d2140 || pc >= 0x204d3b20)
+            return false;
+        const uint32_t offset = address - 0x16202000;
+        if (offset == 0x60) {
+            if (size != 4 || !card.blockReady || card.word >= 127 || card.phase != phaseRead) return false;
+            const uint8_t* bytes = card.block + card.word * 4;
+            value = uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 | uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
+            ++card.word;
+            return true;
+        }
+        uint32_t datum = 0;
+        if (cardAccess(pc, offset, size, false, datum) != Imx1BootstrapAccess::ok) return false;
+        value = datum;
+        return true;
+    }
     Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
         using A = Imx1BootstrapAccess;
         if (ownsHandlerRead(pc, address)) {

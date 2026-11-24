@@ -128,6 +128,23 @@ bool cardLookahead = [] {
 uint64_t leanStatusReads = 0, jitCardLatches = 0, jitChargedReads = 0;  // for tests
 // Every lookahead MMCSD and DMA register read in generated code charged first, as one past a card event is; for tests.
 bool chargeCardReads = false;
+// Fast: slot 2's SD block reads on the lean path (leanSlot2Read), for plain Fast runs only, set each slice in runSlice.
+// FROND_SLOT2_LEAN=0 turns it off, for measuring. leanSlot2Reads counts those reads since the process started.
+bool slot2Lean = [] {
+    const char* v = std::getenv("FROND_SLOT2_LEAN");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+bool slot2LeanOn = false;
+uint64_t leanSlot2Reads = 0, leanSlot2Writes = 0, jitSlot2Accesses = 0;  // for tests
+// Fast blocks: slot 2's status waits (skipSlot2Poll), with slot2Lean. A status read on the lean path that sees the
+// wait go on ends the JIT run (slot2Halted); slot2HaltOff stops that until the next step or charged access once a
+// skip after such a halt passed nothing. FROND_SLOT2_POLL_SKIP=0 turns the skip off, for measuring.
+bool slot2PollSkip = [] {
+    const char* v = std::getenv("FROND_SLOT2_POLL_SKIP");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+bool slot2Halted = false, slot2HaltOff = false;
+uint64_t slot2PollSkips = 0, slot2PollRounds = 0;  // for tests
 // Fast blocks: a quiet span can run past queued graphics batches' completions to the last one's (spanCrosses), where
 // the run reads nothing those completions change: the ring and status registers, graphics memory and the option word.
 // The fills, the read pointer and the option word are then applied at the span's charge, in order, and the batches'
@@ -190,6 +207,22 @@ constexpr uint16_t cardDataCode[] = {
     0x1c06, 0xf009, 0xffdd, 0x6900, 0x69c0, 0x1b41, 0x42a8, 0xd203, 0x2101, 0x07c9, 0x1b49, 0x1809, 0x20ff, 0x30f5,
     0x4281, 0xd909, 0x6860, 0x05c0, 0xd406, 0xf009, 0xffcb, 0x6900, 0x69c5, 0x2006, 0xf7ff, 0xff5c, 0x6860, 0x49ab,
     0x4008, 0xd0c5};
+// The slot 2 (W4200 SD block) driver's loads that Fast blocks answer in generated code (leanSlot2Read), all Thumb: the
+// data port read in its 128-word block copy (204d3730), the status2 load of its block wait (204d23b8) and the status1
+// load of its transfer wait (204d23fe), and the chip identity read each round of both waits makes.
+constexpr uint32_t slot2DataLoadPc = 0x204d3736, slot2Status2LoadPc = 0x204d23c2, slot2Status1LoadPc = 0x204d2408;
+// Slot 2's driver's status waits (Thumb). The status 2 wait (23c2-23ee) reads status 2 (r1 + 28) into [sp], reads the
+// chip identity ([r4]) and loops while bits 15, 6 and 8 are all clear; a run halted at its load goes on at 23d8 or
+// at the loop's head. The status 1 wait (2408-2416) reads status 1 (r2 + 24) into r4 and [sp], reads the identity
+// ([r1]) and loops while bit 2 is clear. Neither has a time-out.
+constexpr uint32_t slot2Status2Round = 0x204d23d8;
+constexpr uint16_t slot2Status2Code[] = {0x8b8a, 0xab00, 0x801a, 0x6822, 0x881a, 0x0bd2, 0x2a01, 0xd102,
+                                         0x4867, 0x3807, 0xe00b, 0xab00, 0x881a, 0x0652, 0xd003, 0x4668,
+                                         0xf7ff, 0xffa1, 0xe003, 0xab00, 0x881a, 0x05d2, 0xd5e8};
+// A round from 23d8 back to it, as indices into slot2Status2Code.
+constexpr uint8_t slot2Status2Run[] = {11, 12, 13, 14, 19, 20, 21, 22, 0, 1, 2, 3, 4, 5, 6, 7};
+constexpr uint16_t slot2Status1Code[] = {0x8b14, 0xab00, 0x801c, 0x680b, 0xab00, 0x881b, 0x075b, 0xd5f7};
+constexpr uint32_t slot2IdentityPc = 0x204d23c8, slot2Identity1Pc = 0x204d240e;
 constexpr uint32_t cardDataMaskAt = 0x204c61bc;  // the 0x80d the data wait's ldr r1, [pc, #684] loads
 // The data wait's halfwords (indexes into cardDataCode) a round runs while the clock runs (r7 0, CLK_RUN set): the
 // timer call, the CLK_RUN check, the getter call and tick read, then the wrap's four when the ticks are below r5,
@@ -1014,6 +1047,21 @@ struct Probe {
         if (inJit && (pa & ~1u) == 0x15000000) return single && size == 1 && p.jitYmfAccess(pa, false, *value, ran, pc);
         if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
             return single && p.leanGraphicsRead(pa, size, ran, left, *value, *cost);
+        if (slot2LeanOn && (Imx1GraphicsSd::owns(pa) || pa == 0x16010000) && pc >= 0x204d2140 && pc < 0x204d3b20)
+        {
+            if (!single) return false;
+            if (p.leanSlot2Read(pa, size, pc, ran, left, *value, *cost)) {
+                // A status wait's load that sees the wait go on ends the run, for skipSlot2Poll.
+                if (inJit && slot2PollSkip && !slot2HaltOff && !jitHalt &&
+                    ((pc == slot2Status2LoadPc && !(*value & 0x8140)) || (pc == slot2Status1LoadPc && !(*value & 4))) &&
+                    quietCycles > uint64_t(ran) + cardHaltSpan) {
+                    jitHalt = slot2Halted = true;
+                    cpuSetSlowPath(p.cpu, SLOW_PATH_REASON_RESCHEDULE);
+                }
+                return true;
+            }
+            return inJit && p.jitSlot2Access(pa, size, false, *value, ran, pc);
+        }
         if (size != 4) return false;
         if (Imx1Bootstrap::quietReadAddress(pa)) {
             if (!single || (!(pa == 0x00214004 && p.leanStatusRead(ran, *value)) && !p.leanBoardRead(pa, ran, *value)))
@@ -1196,6 +1244,81 @@ struct Probe {
         cost = leanCs5.cost;
         return true;
     }
+    // Fast: a read of slot 2's SD block from its driver, or the chip identity read the driver makes each status poll
+    // round, from generated code (slot2Lean, marked access pcs). As leanRegisterRead: inside the quiet span no SD
+    // event is due, so the block reads as the step would after charging, and only the wait clocks are left. A data
+    // port read takes its word from the block (Imx1GraphicsSd::quietCardRead); every check comes before it.
+    __attribute__((noinline)) bool leanSlot2Read(uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t left,
+                                                 uint32_t& value, uint32_t& cost) {
+        if (!graphicsMemory || !cs5Configuration.virtualProfile() || options.cs5ConfigurationObserver ||
+            options.busObserver || failed || quietCycles <= ran || cs5Configuration.engineState().completed() ||
+            crossRefused())
+            return false;
+        if (!leanCs5Ready() || left < leanCs5.cost) return false;
+        const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
+        if (peripherals.eimState().cs5Transfer(pa, size, false, user) != Imx1EimAccess::ok || !leanRegisterReady() ||
+            !cs5Configuration.quietSdRead(peripherals.eimState(), pc, pa, size, value))
+            return false;
+        leanCs5.waitClocks += leanCs5.clocks;
+        leanCs5.waitCost += leanCs5.cost;
+        ++leanCs5Reads;
+        ++leanSlot2Reads;
+        cost = leanCs5.cost;
+        return true;
+    }
+    // Fast: slot 2's data port write from its driver in generated code, but a block's last word, as leanSlot2Read
+    // takes a read.
+    __attribute__((noinline)) bool leanSlot2Write(uint32_t pa, uint32_t size, uint32_t value, uint32_t pc, uint32_t ran,
+                                                  uint32_t left, uint32_t& cost) {
+        if (pa != 0x16202060 || !graphicsMemory || !cs5Configuration.virtualProfile() ||
+            options.cs5ConfigurationObserver || options.busObserver || failed || quietCycles <= ran ||
+            cs5Configuration.engineState().completed() || crossRefused())
+            return false;
+        if (!leanCs5Ready() || left < leanCs5.cost) return false;
+        const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
+        if (peripherals.eimState().cs5Transfer(pa, size, true, user) != Imx1EimAccess::ok || !leanRegisterReady() ||
+            !cs5Configuration.quietSdWrite(peripherals.eimState(), pc, pa, size, value))
+            return false;
+        leanCs5.waitClocks += leanCs5.clocks;
+        leanCs5.waitCost += leanCs5.cost;
+        ++leanCs5Writes;
+        ++leanSlot2Writes;
+        cost = leanCs5.cost;
+        return true;
+    }
+    // Fast: any other access of slot 2's driver to its block or the identity register from generated code. The run's
+    // cycles are charged first, as jitChargedRead charges them, then access takes it as the step does, with pc as the
+    // instruction's and its wait clocks, and the span is worked out again.
+    __attribute__((noinline)) bool jitSlot2Access(uint32_t pa, uint32_t size, bool write, uint32_t& value, uint32_t ran,
+                                                  uint32_t pc) {
+        if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver ||
+            options.cs5ConfigurationObserver || !pc)
+            return false;
+        deferredHclk += leanCs5.waitClocks;
+        result.cs5WaitClocks += leanCs5.waitClocks;
+        work += leanCs5.waitClocks;
+        leanCs5 = {};
+        deferredCycles += ran;
+        cpuArm920JitCharge(cpu, ran, 0);
+        if (!chargeDeferred()) return false;
+        finishGraphicsBusStall();
+        if (graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
+        auto& t = result.trace;
+        const auto saved = t;
+        t.pc = pc;
+        t.cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        graphicsSampledPin = 32;
+        graphicsSampleOffset = 0;
+        uint32_t datum = value;
+        const bool ok = access(this, pa, uint_fast8_t(size), write, &datum);
+        t = saved;
+        if (!ok) return false;
+        if (!write) value = size == 2 ? datum & 0xffff : datum;
+        ++jitSlot2Accesses;
+        slot2HaltOff = false;
+        respan();
+        return true;
+    }
     // A graphics memory write on the lean path, answered as access answers it: the write now, its wait clocks
     // deferred with the CPU cycles.
     static bool leanWrite(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t left,
@@ -1204,6 +1327,11 @@ struct Probe {
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
         if (inJit && jitCardWriteAddress(pa, value)) return size == 4 && p.jitCardWrite(pa, value, ran);
         if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran, cpuArm920TakeJitAccessPc(p.cpu));
+        if (inJit && slot2LeanOn && Imx1GraphicsSd::owns(pa)) {
+            const uint32_t pc = cpuArm920TakeJitAccessPc(p.cpu);
+            if (pc < 0x204d2140 || pc >= 0x204d3b20) return false;
+            return p.leanSlot2Write(pa, size, value, pc, ran, left, *cost) || p.jitSlot2Access(pa, size, true, value, ran, pc);
+        }
         // The graphics ring pointer writes of the ROM's keyed copy and copy helper producers (Origo submits about 190000
         // a second in a mission briefing) and of the blend (200a9788, about 4000 a second in Origo's missions).
         // All are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
@@ -1895,6 +2023,88 @@ struct Probe {
         for (unsigned i = 0; i < run; ++i) round += cost::thumbCost(code[i], cost::Core::arm920t);
         instructions += 1 + 1 + 2 + 3 + run;
         return true;
+    }
+    // Fast blocks: slot 2's status waits (slot2Status2Code, slot2Status1Code). Inside the quiet span the SD block's
+    // status stays as it is (no SD event is due), the identity read changes nothing, and a round stores only the
+    // status it read to [sp], so every round runs the same instructions and leaves the same registers. At the
+    // round's start, after a round that went on (the registers show what it left), the rounds up to the span's end
+    // pass at once with their cost model clocks and the two reads' wait clocks, as the JIT takes them with the reads
+    // on the lean path; the last rounds run in the JIT and see the change. hard is the most work the slice has left.
+    // Returns the instructions passed.
+    uint64_t skipSlot2Poll(uint64_t hard) {
+        if (!slot2PollSkip || !slot2LeanOn || !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu) || failed ||
+            graphicsWireStatus != Imx1BootstrapAccess::ok || !graphicsMemory || options.cs5ConfigurationObserver ||
+            options.busObserver || cs5Configuration.engineState().completed() || crossRefused())
+            return 0;
+        const uint32_t* r = cpuGetRegisters(cpu);
+        const uint32_t pc = r[15];
+        const uint32_t cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const bool second = pc == slot2Status2Round || pc == slot2Status2LoadPc, head = pc == slot2Status2LoadPc;
+        if ((!second && pc != slot2Status1LoadPc) || (cpsr & 31) == ARM_SR_MODE_USR) return 0;
+        const bool user = false;
+        // The status and identity addresses the round reads, and the halfword at [sp] it stored.
+        uint32_t statusPa, identityPa, stored, pa;
+        const uint32_t statusVa = second ? r[1] + 28 : r[2] + 24, identityVa = second ? r[4] : r[1];
+        if (!cpuArm920PeekWord(cpu, statusVa, nullptr, &statusPa) || statusPa != (second ? 0x1620203cu : 0x16202038u) ||
+            !cpuArm920PeekWord(cpu, identityVa, nullptr, &identityPa) || identityPa != 0x16010000 ||
+            !cpuArm920PeekWord(cpu, r[13], &stored, &pa) || (r[13] & 3) || !Imx1Bootstrap::isRamAddress(pa))
+            return 0;
+        uint64_t round = 0, instructions = 0;
+        uint32_t flags, status, identity;
+        if (second) {
+            if (!thumbCodeAt(slot2Status2LoadPc, slot2Status2Code, std::size(slot2Status2Code)))
+                return 0;
+            for (const uint8_t i : slot2Status2Run) round += cost::thumbCost(slot2Status2Code[i], cost::Core::arm920t);
+            instructions = std::size(slot2Status2Run);
+        } else {
+            if (!thumbCodeAt(slot2Status1LoadPc, slot2Status1Code, std::size(slot2Status1Code))) return 0;
+            for (const uint16_t half : slot2Status1Code) round += cost::thumbCost(half, cost::Core::arm920t);
+            instructions = std::size(slot2Status1Code);
+        }
+        // Both reads as the lean path takes them, which changes nothing.
+        leanCs5 = {};
+        const bool ready = leanCs5Ready() &&
+            peripherals.eimState().cs5Transfer(statusPa, 2, false, user) == Imx1EimAccess::ok &&
+            peripherals.eimState().cs5Transfer(identityPa, 4, false, user) == Imx1EimAccess::ok && leanRegisterReady() &&
+            cs5Configuration.quietSdRead(peripherals.eimState(), second ? slot2Status2LoadPc : slot2Status1LoadPc,
+                                         statusPa, 2, status) &&
+            cs5Configuration.quietSdRead(peripherals.eimState(), second ? slot2IdentityPc : slot2Identity1Pc,
+                                         identityPa, 4, identity);
+        const uint32_t clocks = leanCs5.clocks, cost = leanCs5.cost;
+        leanCs5 = {};
+        if (!ready) return 0;
+        status &= 0xffff;
+        if (second && head) {
+            // At 23c2, after the bpl: r2 the status << 23 and its flags, N clear (bit 8), C bit 9, V as it was; r3 sp.
+            const uint32_t shifted = status << 23;
+            flags = (shifted ? 0 : 0x40000000u) | ((status & 0x200) << 20) | (cpsr & 0x10000000u);
+            if ((status & 0x8140) || r[2] != shifted || r[3] != r[13] || (stored & 0xffff) != status) return 0;
+        } else if (second) {
+            // What the round leaves at 23d8: r2 status >> 15 (0), r3 sp, N set and Z, C and V clear from cmp r2, #1.
+            flags = 0x80000000u;
+            if ((status & 0x8140) || r[2] || r[3] != r[13] || (stored & 0xffff) != status) return 0;
+        } else {
+            // At 2408: r4 the status, r3 the status << 29 and its flags, N clear (bit 2), C bit 3, V as it was.
+            const uint32_t shifted = status << 29;
+            flags = (shifted ? 0 : 0x40000000u) | ((status & 8) << 26) | (cpsr & 0x10000000u);
+            if ((status & 4) || r[4] != status || r[3] != shifted || (stored & 0xffff) != status) return 0;
+        }
+        if ((cpsr & 0xf0000000u) != flags) return 0;
+        // The span keeps room for the last rounds; the slice for the work the rounds add.
+        const uint64_t span = round + 2 * uint64_t(cost);
+        const uint64_t keep = leanMinimumSpan + 4 * span;
+        if (quietCycles <= keep) return 0;
+        const uint64_t n = std::min((quietCycles - keep) / span, hard / (instructions + 1));
+        if (!n) return 0;
+        deferredCycles += round * n;
+        quietCycles -= span * n;
+        deferredHclk += 2 * uint64_t(clocks) * n;
+        result.cs5WaitClocks += 2 * uint64_t(clocks) * n;
+        work += 2 * uint64_t(clocks) * n + instructions * n;
+        retired += instructions * n;
+        ++slot2PollSkips;
+        slot2PollRounds += n;
+        return instructions * n;
     }
     // Fast blocks: the card driver's STATUS waits (cardWaitCode, cardDataCode). STATUS changes only at an MMCSD event
     // (a command's end, the data's end), which ends the quiet span, and the tick count only in the tick interrupt,
@@ -3123,6 +3333,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
     // with it off).
     p->peripherals.setMmcsdLookahead(cardLookahead && p->fastEngine && p->options.bootstrapPeripherals &&
                                      !p->observer && !p->options.diagnosticSnapshot && !p->options.busObserver);
+    slot2LeanOn = slot2Lean && p->fastEngine && p->options.bootstrapPeripherals && !p->observer &&
+                  !p->options.diagnosticSnapshot && !p->options.busObserver;
     if (!p->fastEngine || !p->options.bootstrapPeripherals || p->observer || p->options.diagnosticSnapshot ||
         p->options.busObserver) {
         // Exact: UART status polls pass at once (skipUartPollStepped). Not with an observer, which sees every step.
@@ -3158,6 +3370,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             scanHalted = scanHaltOff = false;
             aspHalted = aspHaltOff = false;
             cardHalted = cardHaltOff = false;
+            slot2Halted = slot2HaltOff = false;
             for (;;) {
                 // A span the JIT ran to its end, or one a step started with the interrupt lines still to look at,
                 // goes on at once where it can (spanBoundary).
@@ -3167,6 +3380,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     if (next < 0) { ended = true; break; }
                     if (!next) break;
                     cardHaltOff = false;
+                    slot2HaltOff = false;
                 }
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
                     cpuArm920ClockMode(p->cpu) != quietMode || p->pcStop.armed) break;
@@ -3218,6 +3432,14 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                             continue;
                         }
                         cardHaltOff = true;
+                    }
+                    if (std::exchange(slot2Halted, false)) {
+                        p->flushSubmitBoard();
+                        if (const uint64_t passed = p->skipSlot2Poll(hard - jitSlack)) {
+                            slice += uint32_t(passed);
+                            continue;
+                        }
+                        slot2HaltOff = true;
                     }
                     int stop;
                     jitBudget = uint32_t(std::min(quietCycles, hard - jitSlack + 1));
@@ -3350,7 +3572,16 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0,
                                              0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030,
                                              0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4, 0x200a9788,
-                                             aspPollPc, cardWaitLoadPc, cardDataLoadPc};
+                                             aspPollPc, cardWaitLoadPc, cardDataLoadPc,
+                                             slot2DataLoadPc, slot2Status2LoadPc, slot2Status1LoadPc,
+                                             slot2IdentityPc, slot2Identity1Pc,
+                                             // The rest of slot 2's driver's block and identity accesses (jitSlot2Access).
+                                             0x204d2178, 0x204d217a, 0x204d2180, 0x204d2184, 0x204d218a, 0x204d218e,
+                                             0x204d2300, 0x204d2310, 0x204d2314, 0x204d2316, 0x204d231c, 0x204d237c,
+                                             0x204d2382, 0x204d23ae, 0x204d23b0, 0x204d23f4, 0x204d23f6, 0x204d2428,
+                                             0x204d242a, 0x204d2502, 0x204d250a, 0x204d250c, 0x204d2512, 0x204d2518,
+                                             0x204d251c, 0x204d251e, 0x204d2522, 0x204d252e, 0x204d2534, 0x204d254e,
+                                             0x204d2574, 0x204d257e, 0x204d2bbe, 0x204d2bcc};
     cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
@@ -3386,6 +3617,12 @@ uint64_t imx1MachineCardPollRounds(const Imx1Machine*) { return cardPollRounds; 
 void imx1SetCardPollSkip(bool skip) { cardPollSkip = skip; }
 void imx1SetCardLookahead(bool on) { cardLookahead = on; }
 void imx1SetChargedCardReads(bool on) { chargeCardReads = on; }
+void imx1SetSlot2Lean(bool on) { slot2Lean = on; }
+uint64_t imx1MachineLeanSlot2Reads(const Imx1Machine*) { return leanSlot2Reads; }
+uint64_t imx1MachineLeanSlot2Writes(const Imx1Machine*) { return leanSlot2Writes; }
+uint64_t imx1MachineJitSlot2Accesses(const Imx1Machine*) { return jitSlot2Accesses; }
+uint64_t imx1MachineSlot2PollRounds(const Imx1Machine*) { return slot2PollRounds; }
+void imx1SetSlot2PollSkip(bool skip) { slot2PollSkip = skip; }
 uint64_t imx1MachineLeanStatusReads(const Imx1Machine*) { return leanStatusReads; }
 uint64_t imx1MachineJitCardLatches(const Imx1Machine*) { return jitCardLatches; }
 uint64_t imx1MachineJitChargedReads(const Imx1Machine*) { return jitChargedReads; }

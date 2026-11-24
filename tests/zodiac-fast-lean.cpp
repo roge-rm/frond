@@ -1365,6 +1365,157 @@ void jitCardResponses() {
     assert(reads >= 20);
 }
 
+// Slot 2's SD block with a card, from Thumb code at its driver's pcs: the clock, then single-block reads (CMD17)
+// of sectors 1 to 6, a single-block write (CMD24) to sector 9 and a two-block read (CMD18) of sectors 8 and 9. The
+// status 2 and status 1 waits are the driver's own loops (too short here for skipSlot2Poll to pass rounds). Each
+// data word read is added into r6. Fast with slot2Lean (data port and status reads and data port writes in generated
+// code, the rest charged there) reads Exact's words, as Fast without it does.
+std::vector<uint8_t> slot2Disk(64 * 512);
+bool slot2DiskRead(uint32_t sector, void* buf) {
+    if (sector >= 64) return false;
+    std::memcpy(buf, slot2Disk.data() + sector * 512, 512);
+    return true;
+}
+bool slot2DiskWrite(uint32_t sector, const void* buf) {
+    if (sector >= 64) return false;
+    std::memcpy(slot2Disk.data() + sector * 512, buf, 512);
+    return true;
+}
+VSD* slot2Card() {
+    for (size_t i = 0; i < slot2Disk.size(); ++i) slot2Disk[i] = uint8_t(i * 7 + (i >> 9) * 13 + 1);
+    VSD* card = vsdInit(slot2DiskRead, slot2DiskWrite, 64);
+    assert(card);
+    uint8_t reply[17]{};
+    vsdCommand(card, 0, 0, reply);
+    for (unsigned i = 0; i < 100; ++i) {
+        vsdCommand(card, 55, 0, reply);
+        vsdCommand(card, 41, 0x00ff8000, reply);
+        if (reply[1] & 0x80) break;
+    }
+    vsdCommand(card, 2, 0, reply);
+    vsdCommand(card, 3, 0, reply);
+    const uint32_t rca = uint32_t(reply[1]) << 8 | reply[2];
+    vsdCommand(card, 7, rca << 16, reply);
+    return card;
+}
+Outcome slot2Run(const std::vector<uint32_t>& words, bool fast) {
+    auto o = graphicsOptions(false);
+    o.ramMiB = 32;
+    Imx1ProbeResult error{};
+    Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
+                                       Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
+    assert(m);
+    if (fast) assert(imx1MachineSetFastEngine(m, true) && imx1MachineFastEngine(m));
+    imx1MachineSetGraphicsSdCard(m, slot2Card());
+    return finish(m);
+}
+void jitSlot2Reads() {
+    GraphicsGuest g;
+    g.words.resize(0x500000 / 4);
+    g.setup(); g.display(); g.clocks();
+    g.graphics(0xc51a0, 0x1c0, 0x203f2000);               // aperture 2 over the SD block
+    // Thumb code at pc, image offset pc - 0x20000000.
+    const auto thumb = [&](uint32_t pc, std::initializer_list<uint16_t> code) {
+        for (const uint16_t half : code) {
+            uint32_t& w = g.words[(pc - 0x20000000) / 4];
+            const unsigned shift = (pc & 2) * 8;
+            assert(!((w >> shift) & 0xffff) || ((w >> shift) & 0xffff) == half);
+            w |= uint32_t(half) << shift;
+            pc += 2;
+        }
+    };
+    constexpr uint16_t bxLr = 0x4770, strR1 = 0x6001, ldrhR2 = 0x8802;
+    constexpr uint32_t sd = 0x16202000;
+    // An ARM stub that loads r0-r4, r7, lr and r12, then goes to the Thumb code at pc.
+    const auto call = [&](uint32_t pc, uint32_t r0, uint32_t r1 = 0, uint32_t r2 = 0, uint32_t r3 = 0, uint32_t r4 = 0,
+                          uint32_t r7 = 0) {
+        const uint32_t at = g.cursor;
+        for (const uint32_t reg : {0u, 1u, 2u, 3u, 4u, 7u, 14u, 12u}) { g.word(g.cursor, 0xe59f001c | reg << 12); g.cursor += 4; }
+        g.word(g.cursor, 0xe12fff1c); g.cursor += 4;           // bx r12
+        for (const uint32_t v : {r0, r1, r2, r3, r4, r7, 0x20000000 + at + 0x44, pc | 1}) { g.words[g.cursor / 4] = v; g.cursor += 4; }
+    };
+    thumb(0x204d26c2, {strR1, bxLr});                     // the interface select
+    thumb(0x204d26cc, {strR1, bxLr});                     // reset 0, then 7
+    thumb(0x204d26d8, {strR1, bxLr});
+    thumb(0x204d2310, {strR1, bxLr});                     // clock
+    thumb(0x204d2316, {ldrhR2, 0x05d3, 0xd5fc, bxLr});    // while !(clock & 0x100)
+    thumb(0x204d2476, {ldrhR2, 0x0453, 0xd4fc, bxLr});    // while status 2 & 0x4000
+    thumb(0x204d2178, {0x63c1, 0x6381, bxLr});            // status 2 and 1 cleared
+    thumb(0x204d2502, {0x64c1, bxLr});                    // block length
+    thumb(0x204d250a, {0x6101, 0x6142, bxLr});            // multi and count
+    thumb(0x204d2512, {0x6101, bxLr});                    // single
+    thumb(0x204d2518, {0x6081, 0x46c0, 0x60c2, 0x6003, bxLr});  // argument and command
+    thumb(0x204d252e, {ldrhR2, 0x07d3, 0xd5fc, bxLr});    // while !(status 1 & 1)
+    thumb(0x204d254e, {strR1, bxLr});                     // status 1 cleared
+    thumb(0x204d237c, {ldrhR2, 0x0593, 0xd5fc, bxLr});    // while !(status 2 & 0x200)
+    thumb(0x204d23f4, {strR1, bxLr});                     // status 2 cleared
+    thumb(0x204d2428, {strR1, bxLr});                     // status 1 cleared
+    // The driver's status waits, each with a return after it.
+    thumb(0x204d23c2, {0x8b8a, 0xab00, 0x801a, 0x6822, 0x881a, 0x0bd2, 0x2a01, 0xd102, 0x4867, 0x3807, 0xe00b, 0xab00,
+                       0x881a, 0x0652, 0xd003, 0x4668, 0xf7ff, 0xffa1, 0xe003, 0xab00, 0x881a, 0x05d2, 0xd5e8, bxLr});
+    thumb(0x204d2408, {0x8b14, 0xab00, 0x801c, 0x680b, 0xab00, 0x881b, 0x075b, 0xd5f7, bxLr});
+    // r7 data words: read and add into r6 (ror 1 between), or written from r5 counting up by r3.
+    thumb(0x204d3736, {0x6a25, 0x1976, 0x41de, 0x3f01, 0xd1fa, bxLr});
+    thumb(0x204d2bbe, {0x6225, 0x18ed, 0x3f01, 0xd1fb, bxLr});
+    g.word(g.cursor, 0xe3a06000); g.cursor += 4;           // mov r6, #0
+    g.word(g.cursor, 0xe3a05000 | 0x5a); g.cursor += 4;   // mov r5, #0x5a
+    g.word(g.cursor, 0xe59fd000); g.word(g.cursor + 4, 0xea000000); g.words[g.cursor / 4 + 2] = 0x0030f000;
+    g.cursor += 12;                                       // ldr sp, =0x0030f000
+    call(0x204d26c2, 0x1601090c, 0x08000000);
+    call(0x204d26cc, sd + 0x1c0, 0);
+    g.spin(2000);
+    call(0x204d26d8, sd + 0x1c0, 7);
+    call(0x204d2310, sd + 0x48, 0x140);                  // the slow clock, for long waits
+    call(0x204d2316, sd + 0x48);
+    const auto command = [&](uint32_t value, uint32_t sector, uint32_t count) {
+        call(0x204d2476, sd + 0x3c);
+        call(0x204d2178, sd, 0);
+        call(0x204d2502, sd, 0x200);
+        if (count > 1) call(0x204d250a, sd, 0x100, count);
+        else call(0x204d2512, sd, 0);
+        call(0x204d2518, sd, (sector << 9) & 0xffff, (sector << 9) >> 16, value);
+        call(0x204d252e, sd + 0x38);
+        call(0x204d254e, sd + 0x38, 0xfffe);
+    };
+    const auto readBlock = [&] {
+        call(0x204d23c2, 0, sd + 0x20, 0, 0, 0x16010000);
+        call(0x204d23f4, sd + 0x3c, 0);
+        call(0x204d3736, 0, 0, 0, 1, sd + 0x40, 128);
+    };
+    for (uint32_t sector = 1; sector <= 6; ++sector) { command(0x5c11, sector, 1); readBlock(); }
+    command(0x4c18, 9, 1);
+    call(0x204d237c, sd + 0x3c);
+    call(0x204d23f4, sd + 0x3c, 0);
+    call(0x204d2bbe, 0, 0, 0, 0x01030507, sd + 0x40, 128);
+    command(0x3c12, 8, 2);
+    call(0x204d2428, sd + 0x38, 0xfffb);
+    readBlock(); readBlock();
+    call(0x204d2408, 0, 0x16010000, sd + 0x20);
+    call(0x204d2428, sd + 0x38, 0xfffb);
+    g.end();
+    const auto exact = slot2Run(g.words, false);
+    imx1SetSlot2Lean(false);
+    const auto plain = slot2Run(g.words, true);
+    imx1SetSlot2Lean(true);
+    const uint64_t reads = imx1MachineLeanSlot2Reads(nullptr), writes = imx1MachineLeanSlot2Writes(nullptr);
+    const uint64_t charged = imx1MachineJitSlot2Accesses(nullptr), rounds = imx1MachineSlot2PollRounds(nullptr);
+    const auto fast = slot2Run(g.words, true);
+    print("jit slot 2 exact", exact); print("jit slot 2 blocks", plain); print("jit slot 2 lean", fast);
+    std::printf("jit slot 2: sum %08x against %08x; %llu reads and %llu writes on the lean path, %llu charged, "
+                "%llu wait rounds passed\n", fast.run.result.registers[6], exact.run.result.registers[6],
+                (unsigned long long)(imx1MachineLeanSlot2Reads(nullptr) - reads),
+                (unsigned long long)(imx1MachineLeanSlot2Writes(nullptr) - writes),
+                (unsigned long long)(imx1MachineJitSlot2Accesses(nullptr) - charged),
+                (unsigned long long)(imx1MachineSlot2PollRounds(nullptr) - rounds));
+    std::fflush(stdout);
+    assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.registers[6]);
+    sameResult(exact, plain);
+    sameResult(exact, fast);
+    assert(imx1MachineLeanSlot2Reads(nullptr) - reads >= 8 * 100);
+    assert(imx1MachineLeanSlot2Writes(nullptr) - writes >= 100);
+    assert(imx1MachineJitSlot2Accesses(nullptr) > charged);
+}
+
 // A graphics memory store and 62 other instructions a round while timer 1's compare IRQ comes due, with the display
 // off so the quiet spans are long. Each store's wait clocks count against the JIT run's budget with the cycles the
 // run has already done, so the IRQ comes at Exact's round, not up to a whole run late.
@@ -2579,6 +2730,7 @@ void jitLong() {
     jitCardWrites();
     jitCardWaits();
     jitCardResponses();
+    jitSlot2Reads();
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();

@@ -248,6 +248,17 @@ uint64_t imx1MachineJitCardLatches(const Imx1Machine*);
 uint64_t imx1MachineJitChargedReads(const Imx1Machine*);
 // For tests: every such read with the lookahead on is charged first, as one past a card event is.
 void imx1SetChargedCardReads(bool on);
+// Fast's slot 2 reads: the W4200 SD block's registers and data port and the identity read its driver's waits make,
+// answered in generated code. On unless FROND_SLOT2_LEAN=0; imx1SetSlot2Lean(false) turns it off from the next slice,
+// for tests. imx1MachineLeanSlot2Reads counts those reads since the process started.
+void imx1SetSlot2Lean(bool on);
+uint64_t imx1MachineLeanSlot2Reads(const Imx1Machine*);
+uint64_t imx1MachineLeanSlot2Writes(const Imx1Machine*);
+uint64_t imx1MachineJitSlot2Accesses(const Imx1Machine*);
+// Fast blocks: slot 2's status wait rounds passed at once (skipSlot2Poll) since the process started; the skip is on
+// unless FROND_SLOT2_POLL_SKIP=0, and imx1SetSlot2PollSkip(false) turns it off, for tests.
+uint64_t imx1MachineSlot2PollRounds(const Imx1Machine*);
+void imx1SetSlot2PollSkip(bool skip);
 // Ring pointer writes Fast blocks took in generated code with the run's cycles charged first (jitChargedWrite).
 uint64_t imx1MachineJitChargedWrites(const Imx1Machine*);
 uint64_t imx1MachineDelaySkips(const Imx1Machine*);

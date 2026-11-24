@@ -246,6 +246,31 @@ class Imx1Cs5Configuration {
             return false;
         return display.scanStatusAfter(pc, ticks, value, &region, scanRate);
     }
+    // Fast's lean path: a read of slot 2's block as access takes it (Imx1GraphicsSd::quietCardRead), or the identity
+    // read the SD driver makes in its status waits once slot 2 has had a card. False takes nothing.
+    bool quietSdRead(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint32_t size, uint32_t& value) {
+        if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || Imx1GraphicsUsb::driverPc(pc) ||
+            !memoryReady(eim) || !clocks.programmed() || !sd.cardUsed() || pc < 0x204d2140 || pc >= 0x204d3b20)
+            return false;
+        if (address == 0x16010000) return size == 4 && quietIdentityRead(eim, value);
+        if (!Imx1GraphicsSd::owns(address) || address < 0x16200000) return false;
+        const auto window = windows.aperture2();
+        if (!window.known || address - 0x16000000 < window.first ||
+            uint64_t(address - 0x16000000) + size > uint64_t(window.last) + 1)
+            return false;
+        return sd.quietCardRead(pc, address, size, value);
+    }
+    // Fast: slot 2's data port write from its driver, as quietSdRead checks a read.
+    bool quietSdWrite(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint32_t size, uint32_t value) {
+        if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || !memoryReady(eim) || !clocks.programmed() ||
+            !sd.cardUsed() || address != 0x16202060)
+            return false;
+        const auto window = windows.aperture2();
+        if (!window.known || address - 0x16000000 < window.first ||
+            uint64_t(address - 0x16000000) + size > uint64_t(window.last) + 1)
+            return false;
+        return sd.quietCardWrite(pc, address, size, value);
+    }
     // The identity read in the register read helper (200871dc) as access answers it, changing nothing. No other
     // model owns 0x16010000, so access reaches its identity case.
     bool quietIdentityRead(const Imx1Eim& eim, uint32_t& value) const {
