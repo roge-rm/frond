@@ -442,6 +442,13 @@ uint64_t cpuArm920LeanCodeDrops(const ArmCpu*);
 // Fast blocks: generated code notes the pc of these instructions for the lean read callback's pc, which the
 // graphics model keys some register reads on. The list stays the caller's and is set before the JIT compiles.
 void cpuArm920SetJitAccessPcs(ArmCpu*, const uint32_t* pcs, uint32_t count);
+// Fast blocks: an SWI whose return address is returnPc ends the JIT run at the SWI vector, in SVC mode, as a budget
+// stop, so the board can look at the state there. 0 turns it off.
+void cpuArm920SetJitSwiHalt(ArmCpu*, uint32_t returnPc);
+// The USR/SYS bank's sp and lr, whatever the mode.
+bool cpuArm920UsrRegisters(const ArmCpu*, uint32_t* sp, uint32_t* lr);
+// Whether an IRQ or FIQ is raised, masked or not.
+bool cpuArm920InterruptRaised(const ArmCpu*);
 // Fast: code hooks, pcs (bit 0 ignored) the lean path and translated code never run, so the guarded step runs
 // every instruction at one of them and its caller can act there first. Setting replaces the ones before and drops
 // translated code when they change. False on another model or for more than ARM920_MAX_CODE_HOOKS. None set

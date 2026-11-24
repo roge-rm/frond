@@ -201,6 +201,8 @@ bool cpuJitCp15Xfer(ArmCpu *cpu, uint32_t word, uint32_t *value);
 // cpsr the JIT's: enters SVC at the SWI vector, switching the banked r8-r14 in regs and
 // setting regs[15] to the vector. Returns the new CPSR.
 uint32_t cpuJitSwi(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr);
+// ARM920T Fast blocks: whether an SWI returning to returnPc ends the run at the vector (cpuArm920SetJitSwiHalt).
+bool cpuJitSwiHalts(const ArmCpu *cpu, uint32_t returnPc);
 
 // The p15 instructions the JIT's p15 slot runs, by word (cond and Rd not checked): MRC and
 // MCR p15, 0, Rd, c3 (domain access control), MCR c7, c5, 1 (I-cache line invalidate),

@@ -198,6 +198,9 @@ class SocIMX1 : public SoC {
     uint64_t DelayHaltSkips() const { return imx1MachineDelayHaltSkips(machine); }
     // The pen routine's ASP FIFO wait: skips, rounds and CPU cycles passed (imx1MachineAspPollSkips).
     uint64_t AspPollSkips() const { return imx1MachineAspPollSkips(machine); }
+    // Xploids' draw retry: skips and rounds passed (imx1MachineSurfaceWaitSkips).
+    uint64_t SurfaceWaitSkips() const { return imx1MachineSurfaceWaitSkips(machine); }
+    uint64_t SurfaceWaitRounds() const { return imx1MachineSurfaceWaitRounds(machine); }
     uint64_t AspPollRounds() const { return imx1MachineAspPollRounds(machine); }
     uint64_t AspPollCycles() const { return imx1MachineAspPollCycles(machine); }
     uint64_t YmfReadyReads() const { return imx1MachineYmfReadyReads(machine); }

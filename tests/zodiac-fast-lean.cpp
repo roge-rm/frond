@@ -2720,6 +2720,98 @@ void aspPolls() {
     imx1SetAspPollSkip(was);
     assert(skips >= 6 && rounds >= 10000);
 }
+// Xploids' draw retry (surfaceWaitLoop in imx1_boot_probe.cpp) where the ROM and the game have it: the game's loop
+// calls the DAL surface routine through its table, which returns 0x7115 while the surface is busy, then SysTaskDelay(0),
+// whose KALTaskDelay makes SWI 30. The SWI handler here only returns, and the busy bit never clears: timer 1's IRQ
+// ends the run at the IRQ vector. chosen is the kernel's chosen ready task, the current one being 1.
+Lines surfaceWaitLines(bool fast, uint32_t chosen) {
+    GraphicsGuest g;
+    g.words.resize(0x220000 / 4);
+    g.setup(); g.clocks();
+    g.store(0x00223008, 59);                              // INTENNUM 59: timer 1
+    g.store(0x00202004, 255);                             // TPRER1
+    g.store(0x00202008, 3000);                            // TCMP1
+    g.store(0x00202000, 0x13);                            // TCTL1: on, PERCLK1, IRQ
+    const uint32_t loopAt = 0x200000, handlerAt = 0xfe000;
+    std::vector<uint32_t> words;
+    // Sections: 0 and 0x200 the ROM, 0x202 the ROM's 0x200000, 0x003 the SRAM. MMU on, caches off.
+    load(words, 0, 0x00304000);
+    store(words, 0, 0, 0x20000c1a); store(words, 0, 0xc, 0x00300c1a);
+    store(words, 0, 0x800, 0x20000c1a); store(words, 0, 0x808, 0x20200c1a);
+    words.push_back(0xee020f10);                          // TTB
+    load(words, 1, 0x0d); words.push_back(0xee031f10);     // domain 0 client, 1 manager
+    load(words, 1, 0x79); words.push_back(0xee011f10);     // MMU on
+    // In the SRAM: the surface (tagged, busy), the game's struct (r6), its table (through sl + 0x772d8) and the
+    // kernel's tasks (through r9).
+    load(words, 0, 0x00310000); store(words, 0, 0, 0x5a5a1234); store(words, 0, 44, 1);
+    load(words, 0, 0x00310100); store(words, 0, 12, 0x00310000);
+    load(words, 0, 0x00312000); store(words, 0, 0, 0x00311000);
+    load(words, 0, 0x00311000); store(words, 0, 1496, 0x2021444c); store(words, 0, 644, 0x20214294);
+    load(words, 0, 0x00313000); store(words, 0, 0, 0x00313010); store(words, 0, 0x10, 0x00314000);
+    load(words, 0, 0x00318a3c); store(words, 0, 0, 0x00316000);
+    load(words, 0, 0x003181c0); store(words, 0, 0, chosen); store(words, 0, 4, 1); store(words, 0, 0x10, 0);
+    load(words, 13, 0x0031c000);                          // SVC stack
+    load(words, 6, 0x00310100); load(words, 10, 0x00312000 - 0x772d8); load(words, 9, 0x00313000); load(words, 5, 0);
+    words.push_back(0xe321f01f);                          // msr cpsr_c, #0x1f: SYS, IRQ and FIQ on
+    load(words, 13, 0x0031e000);
+    const uint32_t jump = g.cursor + uint32_t(words.size()) * 4;
+    words.push_back(0);                                   // b the loop
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(jump, loopAt);
+    // The game's loop and its literals.
+    static constexpr uint32_t loop[] = {0xe596000c, 0xe28d1000, 0xe1a02005, 0xe59f3050, 0xe7b3400a, 0xe59435d8,
+                                        0xe1a0e00f, 0xe12fff13, 0xe59f1040, 0xe1500001, 0x1a000007, 0xe3a04001,
+                                        0xe3a00000, 0xe59f1028, 0xe7b1200a, 0xe5921284, 0xe1a0e00f, 0xe12fff11,
+                                        0xea000000, 0xe3a04000, 0xe3540000, 0x1affffe9, 0xe28dd010, 0xe8bd4070,
+                                        0xe12fff1e, 0x000772d8, 0x00007115};
+    for (uint32_t i = 0; i < std::size(loop); ++i) g.word(loopAt + 4 * i, loop[i]);
+    // The table's glue: ldr pc to the DAL routine; ldr r12 and bx to SysTaskDelay (Thumb).
+    g.word(0x21444c, 0xe51ff004); g.word(0x214450, 0x2009bc3c);
+    g.word(0x214294, 0xe59fc000); g.word(0x214298, 0xe12fff1c); g.word(0x21429c, 0x20060ccd);
+    // The DAL routine to its busy return, then a plain return of 0, and its literals.
+    static constexpr uint32_t dal[] = {0xe92d42f0, 0xe5999000, 0xe24dd018, 0xe5999000, 0xe1b04000, 0xe1a07002,
+                                       0x0a000003, 0xe5940000, 0xe59f2264, 0xe1500002, 0x0a000003, 0xe59f025c,
+                                       0xe28dd018, 0xe8bd42f0, 0xe12fff1e, 0xe594002c, 0xe3100001, 0x159f0234,
+                                       0x1afffff8, 0xe3a00000, 0xeafffff6};
+    for (uint32_t i = 0; i < std::size(dal); ++i) g.word(0x9bc3c + 4 * i, dal[i]);
+    g.word(0x9bebc, 0x7115); g.word(0x9bec8, 0x5a5a1234); g.word(0x9becc, 0x7101);
+    // SysTaskDelay: push {r7, lr}; bl KALTaskDelay; pop {r7}; pop {r3}; bx r3.
+    g.word(0x60ccc, 0xb580 | 0xf047u << 16); g.word(0x60cd0, 0xff74 | 0xbc80u << 16); g.word(0x60cd4, 0xbc08 | 0x4718u << 16);
+    // KALTaskDelay at 200a8bba, after a nop.
+    static constexpr uint16_t kal[] = {0x46c0, 0xb5b0, 0x1c05, 0x2100, 0x43c9, 0x2d00, 0xdb00, 0x1c29, 0x1c08,
+                                       0xdf1e, 0x1c04, 0xd102, 0xbcb0, 0xbc08, 0x4718, 0x46c0};
+    for (uint32_t i = 0; i < std::size(kal); i += 2) g.word(0xa8bb8 + 2 * i, kal[i] | uint32_t(kal[i + 1]) << 16);
+    g.word(handlerAt, 0xe1b0f00e);                        // SWI handler: movs pc, lr
+    g.branch(8, handlerAt);
+    g.word(0x18, 0xe7f000f0);                             // IRQ vector: undefined, the run stops there
+    return runLines(g.words, fast, false);
+}
+// Fast with the skip passes most rounds and takes the IRQ where Fast without it does; with another task chosen
+// it passes none.
+void surfaceWaits() {
+    const char* env = std::getenv("FROND_SURFACE_WAIT_SKIP");
+    const bool was = !(env && *env && !std::strcmp(env, "0"));
+    imx1SetSurfaceWaitSkip(true);
+    for (const uint32_t chosen : {1u, 2u}) {
+        const uint64_t s = imx1MachineSurfaceWaitSkips(nullptr), r = imx1MachineSurfaceWaitRounds(nullptr);
+        const auto exact = surfaceWaitLines(false, chosen);
+        assert(imx1MachineSurfaceWaitSkips(nullptr) == s);
+        const auto fast = surfaceWaitLines(true, chosen);
+        const uint64_t skips = imx1MachineSurfaceWaitSkips(nullptr) - s, rounds = imx1MachineSurfaceWaitRounds(nullptr) - r;
+        imx1SetSurfaceWaitSkip(false);
+        const auto plain = surfaceWaitLines(true, chosen);
+        imx1SetSurfaceWaitSkip(true);
+        std::printf("surface waits, chosen task %u: %llu skips of %llu rounds\n", chosen, (unsigned long long)skips,
+                    (unsigned long long)rounds);
+        printLines("  exact", exact); printLines("  fast", fast); printLines("  no skip", plain);
+        std::fflush(stdout);
+        assert(exact.entries.size() == 1 && exact.out.run.result.trace.pc == 0x18);
+        assert(sameLines(plain, fast));
+        if (chosen == 1) assert(skips >= 1 && rounds >= 1000);
+        else assert(!skips);
+    }
+    imx1SetSurfaceWaitSkip(was);
+}
 void jitLong() {
     imx1SetFastBlocksDefault(true);
     cpuSetJitSync(true);
@@ -2749,6 +2841,7 @@ void jitLong() {
     uartPollIrqs();
     uartPollStates();
     aspPolls();
+    surfaceWaits();
     jitDomain();
     jitReturns();
     jitSwi();

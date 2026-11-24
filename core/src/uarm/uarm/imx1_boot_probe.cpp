@@ -109,6 +109,50 @@ bool aspPollSkip = [] {
     return !(v && *v && !std::strcmp(v, "0"));
 }();
 bool aspHalted = false, aspHaltOff = false;
+// Fast blocks: Xploids' draw retry (skipSurfaceWait). FROND_SURFACE_WAIT_SKIP=0 turns it off, for measuring.
+bool surfaceWaitSkip = [] {
+    const char* v = std::getenv("FROND_SURFACE_WAIT_SKIP");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+uint64_t surfaceWaitSkips = 0, surfaceWaitRounds = 0;  // for tests and traces
+// Xploids' draw retry (ARM, game code, at 30952890 in the z15 runs, found by its words): it calls the DAL surface
+// routine at 2009bc3c through [[sl + 0x772d8] + 1496] (glue 2021444c), which returns 0x7115 while the surface's busy
+// bit ([surface + 44] bit 0, surface = [r6 + 12]) is set, then SysTaskDelay(0) through [[sl + 0x772d8] + 644] (glue
+// 20214294), and loops. It keeps no count and reads no time; only a transfer's completion interrupt (20098fd8) clears
+// the bit. SysTaskDelay(0) goes through KALTaskDelay (Thumb, 200a8bba) to SWI 30 at 200a8bca, which returns at once
+// for 0. The SWI's exit (20083516, 2008357e) switches tasks only when the kernel's chosen ready task [P + 0x21c0]
+// isn't the current one [P + 0x21c4] and neither lock byte (P + 0x21d0, 0x21d1) is set, P = [[[r9]] + 0x4a3c]. So
+// with that task the current one and no interrupt raised, a round from the SWI vector back to it changes nothing
+// but time until the next board event. The SWI ends the JIT run there (cpuArm920SetJitSwiHalt); one round is run
+// in the JIT and on the lean path and measured, and when it comes back to the state it started from the rounds up
+// to the span's end pass at once.
+constexpr uint32_t surfaceWaitSwiReturn = 0x200a8bcc;
+// From the loop's head to its literals; the call to SysTaskDelay returns to word 18.
+constexpr uint32_t surfaceWaitLoop[] = {0xe596000c, 0xe28d1000, 0xe1a02005, 0xe59f3050, 0xe7b3400a, 0xe59435d8,
+                                        0xe1a0e00f, 0xe12fff13, 0xe59f1040, 0xe1500001, 0x1a000007, 0xe3a04001,
+                                        0xe3a00000, 0xe59f1028, 0xe7b1200a, 0xe5921284, 0xe1a0e00f, 0xe12fff11,
+                                        0xea000000, 0xe3a04000, 0xe3540000, 0x1affffe9, 0xe28dd010, 0xe8bd4070,
+                                        0xe12fff1e, 0x000772d8, 0x00007115};
+constexpr uint32_t surfaceWaitLoopReturn = 18;
+// The DAL routine's entry up to its busy return (2009bc3c-2009bc84), and its literals at 2009bebc (0x7115) and
+// 2009bec8 (the surface's tag).
+constexpr uint32_t surfaceDalAt = 0x2009bc3c;
+constexpr uint32_t surfaceDalCode[] = {0xe92d42f0, 0xe5999000, 0xe24dd018, 0xe5999000, 0xe1b04000, 0xe1a07002,
+                                       0x0a000003, 0xe5940000, 0xe59f2264, 0xe1500002, 0x0a000003, 0xe59f025c,
+                                       0xe28dd018, 0xe8bd42f0, 0xe12fff1e, 0xe594002c, 0xe3100001, 0x159f0234,
+                                       0x1afffff8};
+// KALTaskDelay (200a8bba-200a8bd4): r1 = r0 < 0 ? -1 : r0; swi 30; returns r0 when 0.
+constexpr uint32_t surfaceKalAt = 0x200a8bba;
+constexpr uint16_t surfaceKalCode[] = {0xb5b0, 0x1c05, 0x2100, 0x43c9, 0x2d00, 0xdb00, 0x1c29, 0x1c08,
+                                       0xdf1e, 0x1c04, 0xd102, 0xbcb0, 0xbc08, 0x4718};
+// The round being measured: the state at its start, the retired count then and the cost model clocks and
+// instructions the JIT and the lean path ran since. Anything else (a step, a span boundary, another skip) ends it.
+// Host only, not saved.
+struct SurfaceWait {
+    bool armed = false;
+    uint32_t state[20]{};
+    uint64_t retiredAt = 0, cycles = 0, instructions = 0;
+} surfaceWait;
 // Fast blocks: the ROM card driver's STATUS waits (skipCardPoll). FROND_CARD_POLL_SKIP=0 turns them off, for
 // measuring. A STATUS read by either wait's last load that sees its loop go on ends the JIT run, so the next run
 // starts at the loop's head (cardHalted); cardHaltOff stops that until the next step or quiet span once a skip after
@@ -2113,6 +2157,97 @@ struct Probe {
     // what it left), the rounds up to the span's end pass at once with their cost model clocks, as the JIT takes them
     // with the reads on the lean path; the last rounds run in the JIT and see the change. hard is the most work the
     // slice has left. Returns the instructions passed.
+    // Whether the CPU is at the SWI vector from KALTaskDelay's SWI 30 in Xploids' draw retry (surfaceWaitLoop), with
+    // the surface busy, the current task the kernel's chosen one and no interrupt raised. state gets the registers.
+    bool atSurfaceWait(uint32_t (&state)[20]) {
+        const uint32_t* r = cpuGetRegisters(cpu);
+        const uint32_t cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const uint32_t spsr = cpuGetRegExternal(cpu, ARM_REG_NUM_SPSR);
+        if ((r[15] != 8 && r[15] != 0xffff0008) || r[14] != surfaceWaitSwiReturn || (cpsr & 0x3f) != ARM_SR_MODE_SVC ||
+            !(spsr & ARM_SR_T) || (spsr & 0xc0) || ((spsr & 31) != ARM_SR_MODE_SYS && (spsr & 31) != ARM_SR_MODE_USR) ||
+            cpuArm920InterruptRaised(cpu))
+            return false;
+        uint32_t sp, lr;
+        cpuArm920UsrRegisters(cpu, &sp, &lr);
+        const auto peek = [&](uint32_t va, uint32_t& w) {
+            uint32_t pa;
+            return !(va & 3) && cpuArm920PeekWord(cpu, va, &w, &pa);
+        };
+        // KALTaskDelay's frame, then SysTaskDelay's: their return addresses.
+        uint32_t back, ret, w;
+        if (!peek(sp + 12, back) || back != 0x20060cd3 || !peek(sp + 20, ret) || ret < 4 * surfaceWaitLoopReturn)
+            return false;
+        const uint32_t head = ret - 4 * surfaceWaitLoopReturn;
+        for (unsigned i = 0; i < std::size(surfaceWaitLoop); ++i)
+            if (!peek(head + 4 * i, w) || w != surfaceWaitLoop[i]) return false;
+        for (unsigned i = 0; i < std::size(surfaceDalCode); ++i)
+            if (!peek(surfaceDalAt + 4 * i, w) || w != surfaceDalCode[i]) return false;
+        if (!thumbCodeAt(surfaceKalAt, surfaceKalCode, std::size(surfaceKalCode))) return false;
+        uint32_t table, entry, tag, busy;
+        if (!peek(0x2009bebc, w) || w != 0x7115 || !peek(r[10] + 0x772d8, table) || !peek(table + 1496, entry) ||
+            entry != 0x2021444c || !peek(table + 644, entry) || entry != 0x20214294)
+            return false;
+        // The surface the DAL routine looks at: tagged and busy.
+        uint32_t surface;
+        if (!peek(r[6] + 12, surface) || !peek(surface, tag) || !peek(0x2009bec8, w) || tag != w ||
+            !peek(surface + 44, busy) || !(busy & 1))
+            return false;
+        // The kernel's chosen ready task is the current one, and no lock is held.
+        uint32_t k, kernel, chosen, current, locks;
+        if (!peek(r[9], k) || !peek(k, k) || !peek(k + 0x4a3c, kernel) || !peek(kernel + 0x21c0, chosen) ||
+            !peek(kernel + 0x21c4, current) || !peek(kernel + 0x21d0, locks) || !chosen || chosen != current ||
+            (locks & 0xffff))
+            return false;
+        std::copy(r, r + 15, state);
+        state[15] = cpsr;
+        state[16] = spsr;
+        state[17] = sp;
+        state[18] = lr;
+        state[19] = surface;
+        return true;
+    }
+    // Fast blocks: Xploids' draw retry (surfaceWaitLoop). Back at the SWI vector in the state the round started from,
+    // with only that round's JIT and lean runs since, the rounds up to the span's end pass at once, each the clocks and
+    // instructions the round took. The last rounds of the span run. hard is the most work the slice has left.
+    // Returns the instructions passed.
+    uint64_t skipSurfaceWait(uint64_t hard) {
+        uint32_t state[20];
+        if (!surfaceWaitSkip) surfaceWait.armed = false;
+        // Elsewhere in the round, the measuring goes on.
+        if (!surfaceWaitSkip || !cpuArm920JitCanRun(cpu) || failed || graphicsWireStatus != Imx1BootstrapAccess::ok ||
+            !atSurfaceWait(state))
+            return 0;
+        uint64_t passed = 0;
+        if (surfaceWait.armed && surfaceWait.instructions && retired == surfaceWait.retiredAt + surfaceWait.instructions &&
+            std::equal(state, state + 20, surfaceWait.state)) {
+            const uint64_t round = surfaceWait.cycles, count = surfaceWait.instructions;
+            const uint64_t keep = leanMinimumSpan + 2 * round;
+            const uint64_t n = quietCycles > keep && round ? std::min((quietCycles - keep) / round, hard / count) : 0;
+            if (n) {
+                deferredCycles += round * n;
+                quietCycles -= round * n;
+                work += count * n;
+                retired += count * n;
+                ++surfaceWaitSkips;
+                surfaceWaitRounds += n;
+                passed = count * n;
+            }
+        }
+        // The next round is measured from here.
+        surfaceWait.armed = true;
+        std::copy(state, state + 20, surfaceWait.state);
+        surfaceWait.retiredAt = retired;
+        surfaceWait.cycles = surfaceWait.instructions = 0;
+        return passed;
+    }
+    // A JIT or lean run's clocks and instructions, for the round being measured. waits is whether the run had
+    // graphics wait clocks or charged accesses, which end it.
+    void surfaceWaitRan(uint64_t cycles, uint64_t instructions, bool waits) {
+        if (!surfaceWait.armed) return;
+        surfaceWait.armed = !waits;
+        surfaceWait.cycles += cycles;
+        surfaceWait.instructions += instructions;
+    }
     uint64_t skipCardPoll(uint64_t hard) {
         if (!cardPollSkip || !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu) || failed ||
             graphicsWireStatus != Imx1BootstrapAccess::ok)
@@ -3371,11 +3506,13 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             aspHalted = aspHaltOff = false;
             cardHalted = cardHaltOff = false;
             slot2Halted = slot2HaltOff = false;
+            surfaceWait.armed = false;
             for (;;) {
                 // A span the JIT ran to its end, or one a step started with the interrupt lines still to look at,
                 // goes on at once where it can (spanBoundary).
                 if ((quietCycles < leanMinimumSpan || linesPending) && p->fastJit && !p->blPrefix &&
                     slice + 1 < retiredBudget && !p->pcStop.armed) {
+                    surfaceWait.armed = false;
                     const int next = p->spanBoundary();
                     if (next < 0) { ended = true; break; }
                     if (!next) break;
@@ -3441,6 +3578,10 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         }
                         slot2HaltOff = true;
                     }
+                    if (const uint64_t passed = p->skipSurfaceWait(hard - jitSlack)) {
+                        slice += uint32_t(passed);
+                        continue;
+                    }
                     int stop;
                     jitBudget = uint32_t(std::min(quietCycles, hard - jitSlack + 1));
                     leanCs5 = {};
@@ -3471,6 +3612,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         }
                         quietCycles = used < quietCycles ? quietCycles - used : 0;
                     };
+                    const bool runWaits = leanCs5.waitCost || leanCs5.waitClocks || cpuArm920JitCharged(p->cpu);
                     useSpan(leanCs5.waitCost);
                     leanCs5 = {};
                     ++jitRuns;
@@ -3485,6 +3627,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         slice += instructions;
                         p->blPrefix = false;  // a Thumb BL pair runs whole in the JIT
                     }
+                    p->surfaceWaitRan(ran, instructions, runWaits);
                     if (stop == arm920JitBudget) {
                         delayPassed = p->skipDelay() == 2;
                         if (ran) continue;
@@ -3527,12 +3670,14 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 p->result.busAccesses += busAccesses;
                 // Graphics memory writes add their wait clocks to the work and the deferred charge, and their
                 // cost to the span used, as cs5Wait would.
+                const bool leanWaits = leanCs5.waitCost || leanCs5.waitClocks;
                 deferredHclk += leanCs5.waitClocks;
                 p->result.cs5WaitClocks += leanCs5.waitClocks;
                 p->work += leanCs5.waitClocks;
                 quietCycles -= leanCs5.waitCost;
                 leanCs5 = {};
                 if (!ran) break;
+                p->surfaceWaitRan(clocks, ran, leanWaits);
                 deferredCycles += clocks;
                 quietCycles -= clocks;
                 p->retired += ran;
@@ -3583,6 +3728,7 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
                                              0x204d251c, 0x204d251e, 0x204d2522, 0x204d252e, 0x204d2534, 0x204d254e,
                                              0x204d2574, 0x204d257e, 0x204d2bbe, 0x204d2bcc};
     cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
+    cpuArm920SetJitSwiHalt(p->cpu, fast && surfaceWaitSkip ? surfaceWaitSwiReturn : 0);
     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
     // Fast keeps no cache contents: dirty data goes to memory first.
@@ -3641,6 +3787,9 @@ uint64_t imx1MachineAspPollSkips(const Imx1Machine*) { return aspPollSkips; }
 uint64_t imx1MachineAspPollRounds(const Imx1Machine*) { return aspPollRounds; }
 uint64_t imx1MachineAspPollCycles(const Imx1Machine*) { return aspPollCycles; }
 void imx1SetAspPollSkip(bool skip) { aspPollSkip = skip; }
+uint64_t imx1MachineSurfaceWaitSkips(const Imx1Machine*) { return surfaceWaitSkips; }
+uint64_t imx1MachineSurfaceWaitRounds(const Imx1Machine*) { return surfaceWaitRounds; }
+void imx1SetSurfaceWaitSkip(bool skip) { surfaceWaitSkip = skip; surfaceWait = {}; }
 uint64_t imx1MachineCrossSpans(const Imx1Machine*) { return crossSpans; }
 uint64_t imx1MachineCrossRefusals(const Imx1Machine*) { return crossRefusals; }
 void imx1SetCrossCompletions(bool on) { crossCompletions = on; crossBlocked = spanCrosses = false; }

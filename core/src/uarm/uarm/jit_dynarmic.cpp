@@ -1070,6 +1070,12 @@ struct Env final : public A32::UserCallbacks {
     void CallSVC(std::uint32_t) override {
         stats.swi++;
         jit->SetCpsr(cpuJitSwi(cpu, jit->Regs().data(), jit->Cpsr()));
+        // The board looks at the state at the vector (cpuArm920SetJitSwiHalt); regs[14] is the return address.
+        if (arm920 && cpuJitSwiHalts(cpu, jit->Regs()[14])) {
+            ClearSetChange();
+            jit->HaltExecution(kSwi);
+            return;
+        }
         if (cpuJitPrivileged(cpu) != privileged) stats.privSwitches++;
         else if (arm920 && ran < budget && (ClearSetChange(), !cpuJitSlowPath(cpu))) return;
         jit->HaltExecution(kSwi);

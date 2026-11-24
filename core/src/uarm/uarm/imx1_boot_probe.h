@@ -283,6 +283,11 @@ uint64_t imx1MachineAspPollSkips(const Imx1Machine*);
 uint64_t imx1MachineAspPollRounds(const Imx1Machine*);
 uint64_t imx1MachineAspPollCycles(const Imx1Machine*);
 void imx1SetAspPollSkip(bool skip);
+// Xploids' draw retry rounds Fast blocks passed at once, since the process started: the times and the rounds. On
+// unless FROND_SURFACE_WAIT_SKIP=0; imx1SetSurfaceWaitSkip(false) turns it off, for tests.
+uint64_t imx1MachineSurfaceWaitSkips(const Imx1Machine*);
+uint64_t imx1MachineSurfaceWaitRounds(const Imx1Machine*);
+void imx1SetSurfaceWaitSkip(bool skip);
 // Fast spans that ran past queued graphics batches' completions, and the lean accesses that refused for them, since
 // the process started. On unless FROND_ZODIAC_CROSS=0; imx1SetCrossCompletions(false) turns it off, for tests.
 uint64_t imx1MachineCrossSpans(const Imx1Machine*);

@@ -401,6 +401,8 @@ struct ArmCpu {
     uint32_t jitCharged;
     const uint32_t *jitAccessPcs;
     uint32_t jitAccessPcCount;
+    // Fast blocks: an SWI returning to this address ends the JIT run at the vector (cpuArm920SetJitSwiHalt), 0 for none.
+    uint32_t jitSwiHalt;
     // Fast: code hooks (cpuArm920SetCodeHooks). The lean path and translated code stop before these pcs and leave
     // them to the step. Host only, never saved.
     uint32_t codeHooks[ARM920_MAX_CODE_HOOKS];
@@ -5891,6 +5893,18 @@ void cpuArm920JitCharge(ArmCpu *cpu, uint32_t cycles, uint32_t span) {
 
 uint32_t cpuArm920JitCharged(const ArmCpu *cpu) { return cpu->jitCharged; }
 
+void cpuArm920SetJitSwiHalt(ArmCpu *cpu, uint32_t returnPc) { cpu->jitSwiHalt = returnPc; }
+
+bool cpuArm920UsrRegisters(const ArmCpu *cpu, uint32_t *sp, uint32_t *lr) {
+    const unsigned mode = cpu->M & 31;
+    const bool usr = mode == ARM_SR_MODE_USR || mode == ARM_SR_MODE_SYS;
+    *sp = usr ? cpu->regs[13] : cpu->bank_usr.R13;
+    *lr = usr ? cpu->regs[14] : cpu->bank_usr.R14;
+    return true;
+}
+
+bool cpuArm920InterruptRaised(const ArmCpu *cpu) { return cpu->waitingIrqs || cpu->waitingFiqs; }
+
 void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
     cpu->jitAccessPcs = pcs;
     cpu->jitAccessPcCount = count;
@@ -6261,6 +6275,8 @@ bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc) {
         if (cpu->jitAccessPcs[i] == pc) return true;
     return false;
 }
+
+bool cpuJitSwiHalts(const ArmCpu *cpu, uint32_t returnPc) { return cpu->jitSwiHalt && cpu->jitSwiHalt == returnPc; }
 
 bool cpuJitPrivileged(ArmCpu *cpu) { return cpu->privileged; }
 
