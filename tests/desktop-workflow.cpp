@@ -4067,7 +4067,8 @@ for line in s.makefile('rb'):
         QStringList want = commands();
         expect(want);
         menuAction("machineKeyboard")->trigger();
-        want << "keyboard-attach on"; expect(want);
+        // Attaching the keyboard also checks the Palm for its driver.
+        want << "keyboard-attach on" << "db-list "; expect(want);
         QTRY_VERIFY(menuAction("machineKeyboard")->isChecked());
         QVERIFY(bar->findChild<QAction*>("barKeyboard")->isVisible());
         menuAction("machineNetwork_internet")->trigger();
