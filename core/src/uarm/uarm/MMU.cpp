@@ -215,23 +215,63 @@ translated:
         // (never in the TLB; Fast keeps those until a TLB flush even if the guest edits their entry). The
         // walked page's own entry is dead, so a flush is needed only when a live entry (another page of a
         // 64 KB page or section) changes.
-        bool replaced = false, watched = false;
-        for (uint32_t offset = 0; offset < sz; offset += 4096) {
-            struct TlbEntry *tlbEntry = mmu->tlb + ((va + offset) >> 12);
-
-            if (tlbEntry->gen == mmu->gen &&
-                (tlbEntry->ap != ap || tlbEntry->c != c || tlbEntry->b != b || tlbEntry->x != x ||
-                 tlbEntry->domain != dom || tlbEntry->section != section || tlbEntry->pa != (paPage + offset) >> 12))
-                replaced = true;
-            tlbEntry->ap = ap;
-            tlbEntry->c = c;
-            tlbEntry->b = b;
-            tlbEntry->x = x;
-            tlbEntry->domain = dom;
-            tlbEntry->section = section;
-            tlbEntry->pa = (paPage + offset) >> 12;
-            tlbEntry->gen = mmu->gen;
-            if (mmu->fillWatch && mmu->fillWatch[(va + offset) >> 12]) watched = true;
+        // Entries are filled as whole 8-byte words: the entry for the first page, and the same with pa one
+        // more for each page on (pa is the low bits of the second word, and a 64 KB page or section never
+        // carries out of it). A plain loop the compiler can vectorize, as a section is 256 entries.
+        struct TlbEntry proto = {}, next = {};
+        proto.gen = next.gen = mmu->gen;
+        proto.ap = next.ap = ap;
+        proto.c = next.c = c;
+        proto.b = next.b = b;
+        proto.x = next.x = x;
+        proto.domain = next.domain = dom;
+        proto.section = next.section = section;
+        proto.pa = paPage >> 12;
+        next.pa = (paPage >> 12) + 1;
+        struct TlbEntry fields = {};  // every bit the fields use, to leave any padding out of the compare
+        fields.gen = ~0u;
+        fields.pa = 0xfffff;
+        fields.ap = 3;
+        fields.domain = 15;
+        fields.c = fields.section = fields.b = fields.x = 1;
+        uint64_t want, step, mask;
+        memcpy(&want, &proto, 8);
+        memcpy(&step, &next, 8);
+        memcpy(&mask, &fields, 8);
+        step -= want;
+        const uint32_t pages = sz >> 12, gen = mmu->gen;
+        struct TlbEntry *entries = mmu->tlb + (va >> 12);
+        uint64_t replacedAny = 0;
+        uint32_t n = 0;
+        if (pages >= 2 && !uint32_t(step)) {
+            // Two entries at a time as four 32-bit lanes (gen, fields): SSE2 and NEON have every op used.
+            typedef uint32_t V4 __attribute__((vector_size(16)));
+            const uint32_t w0 = uint32_t(want >> 32), s0 = uint32_t(step >> 32), m = uint32_t(mask >> 32);
+            const V4 masks = {~0u, m, ~0u, m}, steps = {0, 2 * s0, 0, 2 * s0};
+            V4 wants = {gen, w0, gen, w0 + s0}, any = {};
+            for (; n + 2 <= pages; n += 2, wants += steps) {
+                V4 old;
+                memcpy(&old, entries + n, 16);
+                const V4 same = (old & masks) == wants;
+                // Lanes 0 and 2: the entry was live and its fields differ.
+                any |= same & ~__builtin_shuffle(same, V4{1, 0, 3, 2});
+                memcpy(entries + n, &wants, 16);
+            }
+            replacedAny = any[0] | any[2];
+            want += uint64_t(n) * step;
+        }
+        for (; n < pages; n++, want += step) {
+            uint64_t old;
+            memcpy(&old, entries + n, 8);
+            replacedAny |= uint64_t(uint32_t(old) == gen) & uint64_t((old & mask) != want);
+            memcpy(entries + n, &want, 8);
+        }
+        const bool replaced = replacedAny != 0;
+        bool watched = false;
+        if (mmu->fillWatch) {
+            uint8_t any = 0;
+            for (uint32_t n = 0; n < pages; n++) any |= mmu->fillWatch[(va >> 12) + n];
+            watched = any != 0;
         }
         if (watched) mmu->watchedFillPage[mmu->watchedFills++ & 7] = (va >> 12) | ((sz >> 12) - 1) << 20;
         if (replaced) hostTlbFlush(&mmu->mem->hostTlb);
