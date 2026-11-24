@@ -34,12 +34,13 @@ MMUTranslateResult mmuTranslateInspect(ArmMmu*, uint32_t, bool write);
 // Moves on with every TLB flush, which every mapping change (TTB, MMU on or off, TLB
 // maintenance, reset, load) goes through.
 uint32_t mmuFlushCount(const struct ArmMmu *mmu);
-// Moves on with every walk or state load that makes TLB entries live; sinceFlush gets those since every entry
-// was last made dead. A TTB write on the ARM920T keeps the entries (as the hardware does), so a mapping check
-// can't rely on flushes alone.
-uint32_t mmuTlbFills(const struct ArmMmu *mmu, uint32_t *sinceFlush);
 // Whether a live TLB entry answers va (MMU on).
 bool mmuTlbLive(const struct ArmMmu *mmu, uint32_t va);
+// The JIT's code pages, a byte per 4 KB MVA page (null for none): a walk that makes the TLB entry of a page
+// whose byte is set live is counted. mmuWatchedFills gives the count and, in *pages, the last 8 of those
+// pages by count & 7; a count that moved on by more than 8 lost some (a state load moves it on by 9).
+void mmuSetFillWatch(struct ArmMmu *mmu, const uint8_t *pages);
+uint32_t mmuWatchedFills(const struct ArmMmu *mmu, const uint32_t **pages);
 MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged, bool write);
 // A 4 KB page the TLB doesn't hold (a small page with a different AP for each 1 KB subpage): whether every
 // subpage allows the access and maps to the same physical 4 KB page with the same C and B. Walks the tables

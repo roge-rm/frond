@@ -144,9 +144,11 @@ struct MmuCodeWalkMemo;
 bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, MmuCodeWalkMemo *memo);
 // The translation table base the MMU walks now (MMU_DISABLED_TTP with the MMU off).
 uint32_t cpuJitTtb(ArmCpu *cpu);
-// mmuTlbFills and mmuTlbLive of the CPU's MMU.
-uint32_t cpuJitTlbFills(ArmCpu *cpu, uint32_t *sinceFlush);
+// mmuTlbLive of the CPU's MMU.
 bool cpuJitTlbLive(ArmCpu *cpu, uint32_t va);
+// mmuSetFillWatch and mmuWatchedFills of the CPU's MMU.
+void cpuJitSetFillWatch(ArmCpu *cpu, const uint8_t *pages);
+uint32_t cpuJitWatchedFills(ArmCpu *cpu, const uint32_t **pages);
 // Whether code from a page with that access may be fetched now, in the current mode.
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
 // Domains, S and R: what cpuJitAccessReadable depends on besides the access and the

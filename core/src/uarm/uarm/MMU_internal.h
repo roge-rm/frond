@@ -36,8 +36,12 @@ struct ArmMmu {
     uint8_t staleOn;
     uint32_t staleTtb;
     uint32_t flushes;  // counts mmuTlbFlush calls, for the JIT; not saved
-    uint32_t fills;     // counts walks and loads that made TLB entries live, for the JIT; not saved
-    uint32_t genFills;  // of those, since the entries were last all made dead (a new gen)
+    // The JIT's code pages (mmuSetFillWatch): a byte per 4 KB MVA page, null for none. Each fill that makes the
+    // entry of a page whose byte is set live counts in watchedFills, and the last 8 such pages are kept in
+    // watchedFillPage (by count & 7). Not saved.
+    const uint8_t *fillWatch;
+    uint32_t watchedFills;
+    uint32_t watchedFillPage[8];
     // Called when the TLB, domains, S or R change, so anything that checked a permission
     // before checks it again (the I-cache's fetch key). Not saved.
     void (*permChanged)(void *ctx);

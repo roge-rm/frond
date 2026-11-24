@@ -32,7 +32,6 @@ static void mmuPrvNextGen(struct ArmMmu *mmu) {
         for (size_t i = 0; i < TLB_SIZE; i++) mmu->tlb[i].gen = 0;
         mmu->gen = 1;
     }
-    mmu->genFills = 0;
 }
 
 void mmuTlbFlush(struct ArmMmu *mmu) {
@@ -232,9 +231,9 @@ translated:
             tlbEntry->section = section;
             tlbEntry->pa = (paPage + offset) >> 12;
             tlbEntry->gen = mmu->gen;
+            if (mmu->fillWatch && mmu->fillWatch[(va + offset) >> 12])
+                mmu->watchedFillPage[mmu->watchedFills++ & 7] = (va + offset) >> 12;
         }
-        mmu->fills++;
-        mmu->genFills++;
         if (replaced) hostTlbFlush(&mmu->mem->hostTlb);
     }
 
@@ -392,9 +391,11 @@ uint32_t mmuGetTTP(struct ArmMmu *mmu) { return mmu->transTablPA; }
 
 uint32_t mmuFlushCount(const struct ArmMmu *mmu) { return mmu->flushes; }
 
-uint32_t mmuTlbFills(const struct ArmMmu *mmu, uint32_t *sinceFlush) {
-    *sinceFlush = mmu->genFills;
-    return mmu->fills;
+void mmuSetFillWatch(struct ArmMmu *mmu, const uint8_t *pages) { mmu->fillWatch = pages; }
+
+uint32_t mmuWatchedFills(const struct ArmMmu *mmu, const uint32_t **pages) {
+    *pages = mmu->watchedFillPage;
+    return mmu->watchedFills;
 }
 
 bool mmuTlbLive(const struct ArmMmu *mmu, uint32_t va) {
@@ -725,8 +726,7 @@ void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
         e.x = 0;
         e.gen = mmu->gen;
     }
-    mmu->fills++;
-    mmu->genFills++;
+    mmu->watchedFills += 9;  // more than the ring holds: every live entry counts as filled
     mmuPrvPermChanged(mmu);
 }
 
