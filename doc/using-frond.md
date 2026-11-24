@@ -138,7 +138,7 @@ On the TG50 and the rx1950, and on a T|X, E2, E3 or Zire 72 with other firmware,
 
 Click or tap the buttons under the screen and the silkscreen areas. Click and hold to hold a button, and chords of different buttons work. Holds are released when the window loses focus.
 
-Keys, with the infrared keyboard detached:
+Keys, with the infrared keyboard detached (attached, they go to the Palm's keyboard driver instead, see [Infrared keyboard](#infrared-keyboard)):
 
 | Key | T\|X | E2 / E3 | Zire 72 | TG50 | 68k Palms |
 |---|---|---|---|---|---|
@@ -572,7 +572,9 @@ python3 tools/link-irda.py 5030 5031
 
 `link-irda.py` reconnects when a device wakes.
 
-Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keyboard. Install Palm's keyboard driver (version 1.13, not included), reset if it asks, open Keyboard in Palm OS and turn it ON. Then type in the device window. Left Alt is Fn and right Alt is AltGr, and the layout follows physical US keys, so pick the matching one in the driver. F1 to F4 and Escape keep their button and power uses. The attachment is saved with the machine.
+### Infrared keyboard
+
+Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keyboard, on the T|X, E2, E3, Zire 72 and TG50. It needs Palm's Universal Wireless Keyboard driver 1.13 in the Palm (the infrared one, not the Bluetooth Palm Wireless Keyboard driver), which Frond doesn't include. Install it, reset when it asks, open Keyboard in Palm OS and set Status to ON. Then attach the keyboard (the Machine menu on Linux, the corner menu on Android) and type in the device window. If the driver isn't in the Palm when you attach the keyboard, Frond says so. While it's attached every key goes to the driver, arrows included, so with the driver off nothing you type reaches the Palm. Left Alt is Fn and right Alt is AltGr, and the layout follows physical US keys, so pick the matching one in the driver. F1 to F4 and Escape keep their button and power uses. The attachment is saved with the machine.
 
 ### Bluetooth
 

@@ -23,6 +23,14 @@ class PalmDatabasesTest {
         assertFalse(list[1].application)
     }
 
+    @Test fun findsTheKeyboardDriver() {
+        val memo = "6170706c ${hex("memo")} 0001 ${hex("Memos")}\n"
+        assertFalse(PalmDatabases.keyboardDriverInstalled(PalmDatabases.parseList(memo)))
+        // Its data with the same creator isn't the driver.
+        assertFalse(PalmDatabases.keyboardDriverInstalled(PalmDatabases.parseList(memo + "44415441 ${hex("DFKB")} 0000 ${hex("Keyboard Prefs")}\n")))
+        assertTrue(PalmDatabases.keyboardDriverInstalled(PalmDatabases.parseList(memo + "6170706c ${hex("DFKB")} 0001 ${hex("Keyboard")}\n")))
+    }
+
     @Test fun skipsLinesThatDontParse() {
         val text = "\n6170706c 48454c4f 0001\nzz70706c 48454c4f 0001 41\n6170706c 48454c4f 0001 4\n" +
             "6170706c 48454c4f 0001 ${hex("A".repeat(31))}"

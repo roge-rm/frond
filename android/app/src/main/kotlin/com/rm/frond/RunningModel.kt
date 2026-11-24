@@ -812,6 +812,14 @@ class RunningModel(
         device(if (on) "Attaching" else "Detaching", if (on) "Couldn't attach the keyboard" else "Couldn't detach the keyboard", false) { l ->
             val reply = l.request("keyboard-attach", if (on) "on" else "off", timeoutSeconds = 30)
             if (reply.ok) activity.runOnUiThread { keyboard = reply.message == "attached" }
+            // Without Palm's driver the keys go nowhere, so say so once the keyboard is in.
+            if (reply.ok && reply.message == "attached") {
+                val list = l.request("db-list", timeoutSeconds = 30)
+                if (list.ok && !PalmDatabases.keyboardDriverInstalled(PalmDatabases.parseList(list.message)))
+                    activity.runOnUiThread {
+                        alert = "No keyboard driver" to "Install Palm's Universal Wireless Keyboard driver 1.13 in the Palm and turn it on in Keyboard."
+                    }
+            }
             if (reply.ok) null else reply.message
         }
     }

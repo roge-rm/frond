@@ -263,6 +263,7 @@ class MainWindow : public QMainWindow {
     QLabel* internalHeading{nullptr};
     QPushButton* internalButton{nullptr};
     bool internalListWanted{false};
+    bool keyboardDriverCheck{false};  // the next db-list answer says whether the keyboard driver is in the Palm
     struct InternalJob {
         bool active{false};
         QString kind, folder;  // "install", "export" or "delete"; where an export goes

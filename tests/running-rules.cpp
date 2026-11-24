@@ -241,6 +241,14 @@ class RunningRulesTest : public QObject {
         QCOMPARE(data[0].name, QString("Memo Data"));
         QVERIFY(dataOf(all, apps[0]).empty());
     }
+    void keyboardDriver() {
+        auto hex = [](const char* text) { return QString::fromLatin1(QByteArray(text).toHex()); };
+        const auto memo = hex("appl") + " " + hex("memo") + " 00000001 " + hex("Memos") + "\n";
+        QVERIFY(!keyboardDriverInstalled(parseDatabases(memo)));
+        // Its data with the same creator isn't the driver.
+        QVERIFY(!keyboardDriverInstalled(parseDatabases(memo + hex("DATA") + " " + hex("DFKB") + " 00000000 " + hex("Keyboard Prefs") + "\n")));
+        QVERIFY(keyboardDriverInstalled(parseDatabases(memo + hex("appl") + " " + hex("DFKB") + " 00000001 " + hex("Keyboard") + "\n")));
+    }
     void shortcutNames() {
         QCOMPARE(*shortcutFor("ctrl+s"), Shortcut::Save);
         QCOMPARE(*shortcutFor("ctrl+shift+s"), Shortcut::SaveCopy);

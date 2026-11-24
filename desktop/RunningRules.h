@@ -373,6 +373,13 @@ inline std::vector<Database> applications(const std::vector<Database>& all) {
     return out;
 }
 
+// Palm's Universal Wireless Keyboard driver (the Keyboard application, creator DFKB), which the
+// infrared keyboard needs in the Palm's RAM.
+inline bool keyboardDriverInstalled(const std::vector<Database>& all) {
+    for (const auto& d : all) if (d.application() && d.creator == QLatin1String("DFKB")) return true;
+    return false;
+}
+
 // The databases that go with an application: the others with its creator.
 inline std::vector<Database> dataOf(const std::vector<Database>& all, const Database& app) {
     std::vector<Database> out;

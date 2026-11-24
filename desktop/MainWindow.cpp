@@ -482,7 +482,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     networkLabel = label(tr("Network"), 2);
     keyboard = new QCheckBox(tr("Attached"),root);
     keyboard->setObjectName("keyboardAttached");
-    keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install and enable its Palm OS driver first. Type in the Palm window; modifiers and key releases are sent to the driver."));
+    keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install Palm's Universal Wireless Keyboard driver 1.13 in the Palm and turn it on in Keyboard first. Type in the Palm window; modifiers and key releases are sent to the driver."));
     connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
     keyboardLabel = label(tr("Infrared keyboard"), 3);
     serial = new QComboBox(root);
@@ -1283,6 +1283,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (command == "camera-state" || command == "camera-mode") { showCamera(message); refresh(); if (command == "camera-state") return; }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
+        // Without Palm's driver the keys go nowhere, so say so once the keyboard is in.
+        if (command == "keyboard-attach" && ok && message == "attached" && !stopping) {
+            keyboardDriverCheck = true;
+            if (send("db-list")) return;
+            keyboardDriverCheck = false;
+        }
         if (command == "gamepad") gamepadReply(message);
         if (command == "headphones") {
             runningPreferences.headphonesIn = message == "in";
@@ -3509,6 +3515,12 @@ void MainWindow::listApps() {
 }
 void MainWindow::databasesReply(bool ok, const QString& code, const QString& message) {
     const auto all = ok ? runningRules::parseDatabases(message) : std::vector<runningRules::Database>{};
+    if (keyboardDriverCheck) {
+        keyboardDriverCheck = false;
+        if (ok && !runningRules::keyboardDriverInstalled(all))
+            notify(tr("No keyboard driver in the Palm: install Palm's Universal Wireless Keyboard driver 1.13 and turn it on in Keyboard."), 15000);
+        else notify(QString());
+    }
     if (deleteApp.active && deleteApp.lookup) { deleteLookup(ok, message, all); return; }
     if (internalFiles) {
         // A failed list keeps the last one and says why; it isn't asked for again until the next change.

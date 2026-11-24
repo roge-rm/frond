@@ -135,6 +135,10 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
             return found.toList().sortedBy { it.name.lowercase() }
         }
 
+        // Palm's Universal Wireless Keyboard driver (the Keyboard application, creator DFKB), which the
+        // infrared keyboard needs in the Palm's RAM.
+        fun keyboardDriverInstalled(all: List<Info>) = all.any { it.application && it.creator == "DFKB" }
+
         // The databases that go with an application: the others with its creator.
         fun dataOf(all: List<Info>, app: Info) = all.filter { it.creator == app.creator && it.name != app.name }
 
