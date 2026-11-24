@@ -220,8 +220,9 @@ class Control:
                     raise RunError('closed', 'Palm window was closed during the run')
                 if fields[:3] in (['0', 'event', 'serial'], ['0', 'event', 'usb'],
                                   ['0', 'event', 'infrared'], ['0', 'event', 'bluetooth'], ['0', 'event', 'microphone'],
-                                  ['0', 'event', 'sd-progress']):
-                    continue  # asynchronous endpoint status or card progress, never a command reply
+                                  ['0', 'event', 'sd-progress'], ['0', 'event', 'attention'],
+                                  ['0', 'event', 'rumble'], ['0', 'event', 'dana-view'], ['0', 'event', 'sync']):
+                    continue  # asynchronous status, card progress, LED and rumble, never a command reply
                 if fields[:3] == ['0', 'event', 'card'] and len(fields) == 4:
                     self.events.append(('card', bytes.fromhex(fields[3]).decode()))
                     continue  # a card put in at load went in
