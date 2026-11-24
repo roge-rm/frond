@@ -93,6 +93,7 @@ uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0,
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
 uint64_t uartPollSkips = 0, uartPollRounds = 0;  // for tests
 uint64_t jitChargedWrites = 0;  // for tests
+uint64_t jitCardWrites = 0;  // for tests
 // Fast blocks: set by jitChargedWrite around its access when the write's wait clocks pass with no change. access then
 // commits the write at once, with no preview and no cs5Wait, and jitChargedWrite defers the clocks (deferredHclk).
 bool leanSubmit = false;
@@ -108,6 +109,16 @@ bool aspPollSkip = [] {
     return !(v && *v && !std::strcmp(v, "0"));
 }();
 bool aspHalted = false, aspHaltOff = false;
+// Fast blocks: the ROM card driver's STATUS waits (skipCardPoll). FROND_CARD_POLL_SKIP=0 turns them off, for
+// measuring. A STATUS read by either wait's last load that sees its loop go on ends the JIT run, so the next run
+// starts at the loop's head (cardHalted); cardHaltOff stops that until the next step or quiet span once a skip after
+// such a halt passed nothing.
+bool cardPollSkip = [] {
+    const char* v = std::getenv("FROND_CARD_POLL_SKIP");
+    return !(v && *v && !std::strcmp(v, "0"));
+}();
+bool cardHalted = false, cardHaltOff = false;
+uint64_t cardPollSkips = 0, cardPollRounds = 0;  // for tests and traces
 // Fast blocks: a quiet span can run past queued graphics batches' completions to the last one's (spanCrosses), where
 // the run reads nothing those completions change: the ring and status registers, graphics memory and the option word.
 // The fills, the read pointer and the option word are then applied at the span's charge, in order, and the batches'
@@ -149,6 +160,47 @@ uint64_t aspPollSkips = 0, aspPollRounds = 0, aspPollCycles = 0;  // for tests a
 // It waits for the write pointer to reach 3, the calibration round's three samples. Its load is a marked access pc.
 constexpr uint32_t aspPollPc = 0x20096d92;
 constexpr uint16_t aspPollCode[] = {0x6b43, 0x071b, 0x0f1b, 0x2b03, 0xd3fa};
+// The card driver's two STATUS waits (Thumb, in the function at 204c5df6), r4 the MMCSD base. Each round calls the
+// HAL globals getter (bl 204cfe98: bx pc to an ARM b 204cf878, which jumps through [r9 - 4] to the glue at 200cd354,
+// which goes on to the Thumb getter at 200884bc) and reads the system tick count at [[getter + 16] + 28], which only
+// the tick interrupt moves, then STATUS. The command wait (204c5e2c) gives up once more than 100 ticks have passed
+// since r5 (r7 is 0x80000000 - r5, for a count that wrapped) and loops while STATUS has none of r6's bits. The data
+// wait (204c5ea0), with r7 0 while the clock runs, also calls the HAL timer read (bl 204cfec0, the same way through
+// [r9 - 4] + 948 to 20084982, a read of timer 1's count it doesn't use), reads STATUS for CLK_RUN, then the ticks,
+// and once more than 500 have passed since r5 STATUS again, and loops while STATUS has none of DATA_TRANS_DONE,
+// WRITE_OP_DONE and the CRC and time-out bits (0x80d). Their last loads (204c5e40, 204c5f0c) are marked access pcs.
+constexpr uint32_t cardWaitPc = 0x204c5e2c, cardWaitLoadPc = 0x204c5e40;
+constexpr uint16_t cardWaitCode[] = {0xf00a, 0xf834, 0x6900, 0x69c0, 0x1b41, 0x42a8, 0xd200, 0x1839,
+                                     0x2964, 0xd80c, 0x6860, 0x4030, 0xd0f2};
+// The span a halt at either load leaves at least, for the skip to pass a few rounds after keeping its last ones.
+constexpr uint64_t cardHaltSpan = 1024;
+constexpr uint32_t cardDataPc = 0x204c5ea0, cardDataLoadPc = 0x204c5f0c;
+constexpr uint16_t cardDataCode[] = {
+    0xf00a, 0xf80e, 0x2f00, 0xd011, 0x6861, 0x05c9, 0xd501, 0x2700, 0xe013, 0x1b81, 0x42b0, 0xd201, 0x1c71, 0x1a41,
+    0x20ff, 0x30f5, 0x4281, 0xd90a, 0x2006, 0xf7ff, 0xff7d, 0xe006, 0x6860, 0x05c0, 0xd403, 0x2701, 0xf009, 0xfff4,
+    0x1c06, 0xf009, 0xffdd, 0x6900, 0x69c0, 0x1b41, 0x42a8, 0xd203, 0x2101, 0x07c9, 0x1b49, 0x1809, 0x20ff, 0x30f5,
+    0x4281, 0xd909, 0x6860, 0x05c0, 0xd406, 0xf009, 0xffcb, 0x6900, 0x69c5, 0x2006, 0xf7ff, 0xff5c, 0x6860, 0x49ab,
+    0x4008, 0xd0c5};
+constexpr uint32_t cardDataMaskAt = 0x204c61bc;  // the 0x80d the data wait's ldr r1, [pc, #684] loads
+// The data wait's halfwords (indexes into cardDataCode) a round runs while the clock runs (r7 0, CLK_RUN set): the
+// timer call, the CLK_RUN check, the getter call and tick read, then the wrap's four when the ticks are below r5,
+// then the 500 compare, then the second STATUS read's three when more than 500 have passed, then the last load.
+constexpr uint8_t cardDataRound[] = {0, 1, 2, 3, 22, 23, 24, 29, 30, 31, 32, 33, 34, 35};
+constexpr uint8_t cardDataWrap[] = {36, 37, 38, 39};
+constexpr uint8_t cardDataCompare[] = {40, 41, 42, 43};
+constexpr uint8_t cardDataLate[] = {44, 45, 46};
+constexpr uint8_t cardDataEnd[] = {54, 55, 56, 57};
+constexpr uint16_t cardVeneerCode[] = {0x4778, 0x46c0};  // 204cfe98 and 204cfec0: bx pc
+constexpr uint32_t cardGetterVeneer = 0xeafffe75, cardTimerVeneer = 0xeafffeab;  // 204cfe9c, 204cfec4: b
+constexpr uint32_t cardGetterJump[] = {0xe519c004, 0xe59cf000};  // 204cf878: ldr r12, [r9, #-4]; ldr pc, [r12]
+constexpr uint32_t cardTimerJump[] = {0xe519c004, 0xe59cf3b4};   // 204cf978: ldr r12, [r9, #-4]; ldr pc, [r12, #948]
+constexpr uint32_t cardGetterGlueAt = 0x200cd354, cardTimerGlueAt = 0x200cdf24;
+constexpr uint32_t cardGetterGlue[] = {0xe59fc004, 0xe08cc00f, 0xe12fff1c, 0xfffbb15d};  // r12 = 200884bd; bx r12
+constexpr uint32_t cardTimerGlue[] = {0xe59fc004, 0xe08cc00f, 0xe12fff1c, 0xfffb6a53};   // r12 = 20084983; bx r12
+constexpr uint32_t cardGetterAt = 0x200884bc;  // r1 = [[r9]]; r0 = r1 + 0x4a28; bx lr (and its literal)
+constexpr uint16_t cardGetterCode[] = {0x4649, 0x6809, 0x6809, 0x4801, 0x1840, 0x4770, 0x4a28, 0x0000};
+constexpr uint32_t cardTimerAt = 0x20084982;  // r0 = [0x80002000 + 16]; bx lr (and its literal)
+constexpr uint16_t cardTimerCode[] = {0x4801, 0x6900, 0x4770, 0x2000, 0x8000};
 // Fast blocks: a vertical wait read (200adb08, 200adb14) that saw the value its loop waits on ends the JIT run, so
 // the next run starts on the load and skipScanPoll can pass the rounds (scanHalted). scanHaltOff stops that until
 // the next step once a skip after such a halt passed nothing.
@@ -962,6 +1014,15 @@ struct Probe {
                 jitHalt = aspHalted = true;
                 cpuSetSlowPath(p.cpu, SLOW_PATH_REASON_RESCHEDULE);
             }
+            // So does a card driver STATUS wait's last load that sees its loop go on, with room left in the span
+            // for skipCardPoll to pass rounds.
+            if (inJit && pa == 0x00214004 && cardPollSkip && !cardHaltOff && !jitHalt &&
+                ((pc == cardWaitLoadPc && !(*value & 0x2022)) ||
+                 (pc == cardDataLoadPc && !(*value & 0x80d) && (*value & 0x100))) &&
+                quietCycles > uint64_t(ran) + cardHaltSpan) {
+                jitHalt = cardHalted = true;
+                cpuSetSlowPath(p.cpu, SLOW_PATH_REASON_RESCHEDULE);
+            }
             return true;
         }
         if (!Imx1Bootstrap::timerCountAddress(pa))
@@ -1131,6 +1192,7 @@ struct Probe {
                           uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
+        if (inJit && jitCardWriteAddress(pa, value)) return size == 4 && p.jitCardWrite(pa, value, ran);
         if (inJit && (pa & ~1u) == 0x15000000) return size == 1 && p.jitYmfAccess(pa, true, value, ran, cpuArm920TakeJitAccessPc(p.cpu));
         // The graphics ring pointer writes of the ROM's keyed copy and copy helper producers (Origo submits about 190000
         // a second in a mission briefing) and of the blend (200a9788, about 4000 a second in Origo's missions).
@@ -1347,6 +1409,46 @@ struct Probe {
         t = saved;
         if (!ok) return false;
         if (!write) value = datum;
+        updateInterrupts();
+        uint64_t side = 0;
+        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, false, &side) : 0;
+        boardSlack = side > quietCycles ? side - quietCycles : 0;
+        spanCrosses = false;
+        cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
+        if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
+            jitHalt = true;
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+        }
+        return true;
+    }
+    // The card driver's writes Fast blocks take in generated code (jitCardWrite): the MMCSD registers and DMA channels
+    // 0 to 9, but a CCR write that starts a memory to memory transfer. None of these change which pages are plain (only
+    // the PCM channel, 10, does), so the run's page table stays.
+    static bool jitCardWriteAddress(uint32_t pa, uint32_t value) {
+        if (pa >= 0x00214000 && pa <= 0x00214030) return !(pa & 3);
+        if (pa < 0x00209080 || pa >= 0x00209300 || (pa & 3) || (pa & 0x3f) >= 0x1c) return false;
+        return (pa & 0x3f) != 0x0c || !(value & 1) || (value & 8);
+    }
+    // A card driver write from generated code: the cycles before the run and the run's finished blocks (ran) are
+    // charged first, then the board takes it as the step does, so it lands up to one block early. A command start
+    // or a clock stop sets a new quiet span; a card DMA start moves the data already waiting. The interrupt lines
+    // follow at once, and the run stops at its next block if the new span ends before its budget.
+    __attribute__((noinline)) bool jitCardWrite(uint32_t pa, uint32_t value, uint32_t ran) {
+        if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver) return false;
+        deferredHclk += leanCs5.waitClocks;
+        result.cs5WaitClocks += leanCs5.waitClocks;
+        work += leanCs5.waitClocks;
+        leanCs5 = {};
+        deferredCycles += ran;
+        cpuArm920JitCharge(cpu, ran, 0);
+        if (!chargeDeferred()) return false;
+        finishGraphicsBusStall();
+        if (graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
+        uint32_t datum = value;
+        if (peripherals.access(pa, 4, true, datum, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok) return false;
+        ++result.busAccesses;
+        ++jitCardWrites;
+        cardHaltOff = false;
         updateInterrupts();
         uint64_t side = 0;
         quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode, true, false, &side) : 0;
@@ -1733,6 +1835,142 @@ struct Probe {
         aspPollRounds += n;
         aspPollCycles += round * n;
         return 5 * n;
+    }
+    // Whether the halfwords at va are code.
+    bool thumbCodeAt(uint32_t va, const uint16_t* code, size_t count) {
+        uint32_t w = 0, pa, at = ~0u;
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t a = va + 2 * uint32_t(i);
+            if ((a & ~3u) != at) {
+                at = a & ~3u;
+                if (!cpuArm920PeekWord(cpu, at, &w, &pa)) return false;
+            }
+            if (((a & 2) ? w >> 16 : w & 0xffff) != code[i]) return false;
+        }
+        return true;
+    }
+    bool armCodeAt(uint32_t va, const uint32_t* code, size_t count) {
+        uint32_t w, pa;
+        for (size_t i = 0; i < count; ++i)
+            if (!cpuArm920PeekWord(cpu, va + 4 * uint32_t(i), &w, &pa) || w != code[i]) return false;
+        return true;
+    }
+    // The HAL call a card wait round makes through [r9 - 4] + slot: the Thumb veneer at veneer, its ARM branch, the
+    // jump, the glue the table points at and the Thumb code it goes on to. Adds the instructions and their cost model
+    // clocks to instructions and round.
+    bool cardHalCall(uint32_t veneer, uint32_t branch, const uint32_t* jump, uint32_t slot, uint32_t glueAt,
+                     const uint32_t* glue, uint32_t at, const uint16_t* code, unsigned run, uint64_t& instructions,
+                     uint64_t& round) {
+        const uint32_t* r = cpuGetRegisters(cpu);
+        uint32_t w = 0, table = 0, target = 0, pa;
+        const uint32_t jumpAt = veneer + 4 + 4 * int32_t(int32_t(branch << 8) >> 8) + 8;
+        if (!thumbCodeAt(veneer, cardVeneerCode, std::size(cardVeneerCode)) ||
+            !cpuArm920PeekWord(cpu, veneer + 4, &w, &pa) || w != branch || !armCodeAt(jumpAt, jump, 2) ||
+            !cpuArm920PeekWord(cpu, r[9] - 4, &table, &pa) || !cpuArm920PeekWord(cpu, table + slot, &target, &pa) ||
+            target != glueAt || !armCodeAt(glueAt, glue, 4) || !thumbCodeAt(at, code, run + 2))
+            return false;
+        // bx pc, b, the jump's two loads, the glue's three, then the Thumb code's run.
+        round += cost::thumbCost(cardVeneerCode[0], cost::Core::arm920t) + cost::armCost(branch, cost::Core::arm920t);
+        for (unsigned i = 0; i < 2; ++i) round += cost::armCost(jump[i], cost::Core::arm920t);
+        for (unsigned i = 0; i < 3; ++i) round += cost::armCost(glue[i], cost::Core::arm920t);
+        for (unsigned i = 0; i < run; ++i) round += cost::thumbCost(code[i], cost::Core::arm920t);
+        instructions += 1 + 1 + 2 + 3 + run;
+        return true;
+    }
+    // Fast blocks: the card driver's STATUS waits (cardWaitCode, cardDataCode). STATUS changes only at an MMCSD event
+    // (a command's end, the data's end), which ends the quiet span, and the tick count only in the tick interrupt,
+    // which can't come inside it, and a round stores nothing, so inside the span every round runs the same
+    // instructions and leaves the same registers. At the loop's head, after a round that went on (the registers show
+    // what it left), the rounds up to the span's end pass at once with their cost model clocks, as the JIT takes them
+    // with the reads on the lean path; the last rounds run in the JIT and see the change. hard is the most work the
+    // slice has left. Returns the instructions passed.
+    uint64_t skipCardPoll(uint64_t hard) {
+        if (!cardPollSkip || !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu) || failed ||
+            graphicsWireStatus != Imx1BootstrapAccess::ok)
+            return 0;
+        const uint32_t* r = cpuGetRegisters(cpu);
+        const uint32_t pc = r[15];
+        const uint32_t cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const bool data = pc == cardDataPc;
+        if ((!data && pc != cardWaitPc) || (cpsr & 31) == ARM_SR_MODE_USR) return 0;
+        // STATUS, as the next round reads it.
+        uint32_t pa, status;
+        if (!cpuArm920PeekWord(cpu, r[4] + 4, nullptr, &pa) || pa != 0x00214004 ||
+            peripherals.access(pa, 4, false, status, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok)
+            return 0;
+        // The tick count the round reads: [[[r9]] + 0x4a28 + 16] + 28.
+        uint32_t globals, block, ticks;
+        if (!cpuArm920PeekWord(cpu, r[9], &globals, &pa) || !cpuArm920PeekWord(cpu, globals, &globals, &pa) ||
+            !cpuArm920PeekWord(cpu, globals + 0x4a28 + 16, &block, &pa) ||
+            !cpuArm920PeekWord(cpu, block + 28, &ticks, &pa) || !Imx1Bootstrap::isRamAddress(pa))
+            return 0;
+        // The flags cmp a, b leaves.
+        const auto compare = [](uint32_t a, uint32_t b) {
+            const uint32_t d = a - b;
+            return (d & 0x80000000u) | (d ? 0 : 0x40000000u) | (a >= b ? 0x20000000u : 0) |
+                   (((a ^ b) & (a ^ d)) >> 31 << 28);
+        };
+        uint64_t instructions = 0, round = 0;
+        uint32_t flags;
+        const auto add = [&](const uint16_t* code, const uint8_t* at, size_t count) {
+            for (size_t i = 0; i < count; ++i) round += cost::thumbCost(code[at[i]], cost::Core::arm920t);
+            instructions += count;
+        };
+        if (!data) {
+            // Ticks passed since r5, as the round works them out (subs, cmp, bcs, adds), at most 100.
+            const bool wrap = ticks < r[5];
+            const uint32_t passed = wrap ? r[7] + ticks : ticks - r[5];
+            static constexpr uint8_t run[] = {0, 1, 2, 3, 4, 5, 6}, wrapRun[] = {7}, end[] = {8, 9, 10, 11, 12};
+            if ((status & r[6]) || r[6] != 0x2022 || r[7] != 0x80000000u - r[5] || passed > 100 ||
+                !thumbCodeAt(pc, cardWaitCode, std::size(cardWaitCode)) ||
+                !cardHalCall(0x204cfe98, cardGetterVeneer, cardGetterJump, 0, cardGetterGlueAt, cardGetterGlue,
+                             cardGetterAt, cardGetterCode, 6, instructions, round))
+                return 0;
+            add(cardWaitCode, run, std::size(run));
+            if (wrap) add(cardWaitCode, wrapRun, 1);
+            add(cardWaitCode, end, std::size(end));
+            // What the round leaves: r0 0 from ands, r1 the ticks passed, N clear and Z set from ands, C and V from
+            // cmp r1, #100; r12 the getter (with its Thumb bit) from the glue, lr the BL's return.
+            flags = 0x40000000u | (compare(passed, 100) & 0x30000000u);
+            if (r[0] || r[1] != passed || r[12] != (cardGetterAt | 1) || r[14] != ((cardWaitPc + 4) | 1)) return 0;
+        } else {
+            uint32_t mask;
+            const bool wrap = ticks < r[5];
+            const uint32_t passed = wrap ? 0x80000000u - r[5] + ticks : ticks - r[5];
+            const bool late = passed > 500;
+            if ((status & 0x80d) || !(status & 0x100) || r[7] || !cpuArm920PeekWord(cpu, cardDataMaskAt, &mask, &pa) ||
+                mask != 0x80d || !thumbCodeAt(pc, cardDataCode, std::size(cardDataCode)) ||
+                !cardHalCall(0x204cfec0, cardTimerVeneer, cardTimerJump, 948, cardTimerGlueAt, cardTimerGlue,
+                             cardTimerAt, cardTimerCode, 3, instructions, round) ||
+                !cardHalCall(0x204cfe98, cardGetterVeneer, cardGetterJump, 0, cardGetterGlueAt, cardGetterGlue,
+                             cardGetterAt, cardGetterCode, 6, instructions, round))
+                return 0;
+            add(cardDataCode, cardDataRound, std::size(cardDataRound));
+            if (wrap) add(cardDataCode, cardDataWrap, std::size(cardDataWrap));
+            add(cardDataCode, cardDataCompare, std::size(cardDataCompare));
+            if (late) add(cardDataCode, cardDataLate, std::size(cardDataLate));
+            add(cardDataCode, cardDataEnd, std::size(cardDataEnd));
+            // What the round leaves: r0 0 and r1 0x80d from the last load and ands, N clear and Z set from ands, V
+            // from cmp r1, #500, C from it too, or from lsls r0, #23 of STATUS when past 500; r12 the getter, lr the
+            // second BL's return.
+            const uint32_t compared = compare(passed, 500);
+            flags = 0x40000000u | (compared & 0x10000000u) |
+                    (late ? (status & 0x200) << 20 : compared & 0x20000000u);
+            if (r[0] || r[1] != 0x80d || r[12] != (cardGetterAt | 1) || r[14] != (0x204c5ede | 1)) return 0;
+        }
+        if ((cpsr & 0xf0000000u) != flags) return 0;
+        // The span keeps room for the last rounds; the slice for the work the rounds add.
+        const uint64_t keep = leanMinimumSpan + 4 * round;
+        if (quietCycles <= keep) return 0;
+        const uint64_t n = std::min((quietCycles - keep) / round, hard / (instructions + 1));
+        if (!n) return 0;
+        deferredCycles += round * n;
+        quietCycles -= round * n;
+        work += instructions * n;
+        retired += instructions * n;
+        ++cardPollSkips;
+        cardPollRounds += n;
+        return instructions * n;
     }
     // Fast blocks: the ROM's graphics FIFO wait (200b9010-200b9078) calls the Thumb delay at 20084912 for one timer
     // count, reads the engine's read pointer (1601021c) and loops while the ring has too little room, r5 counting
@@ -2816,6 +3054,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             delayHalted = delayHaltOff = delayPassed = false;
             scanHalted = scanHaltOff = false;
             aspHalted = aspHaltOff = false;
+            cardHalted = cardHaltOff = false;
             for (;;) {
                 // A span the JIT ran to its end, or one a step started with the interrupt lines still to look at,
                 // goes on at once where it can (spanBoundary).
@@ -2824,6 +3063,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     const int next = p->spanBoundary();
                     if (next < 0) { ended = true; break; }
                     if (!next) break;
+                    cardHaltOff = false;
                 }
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
                     cpuArm920ClockMode(p->cpu) != quietMode || p->pcStop.armed) break;
@@ -2867,6 +3107,14 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                             continue;
                         }
                         aspHaltOff = true;
+                    }
+                    if (std::exchange(cardHalted, false)) {
+                        p->flushSubmitBoard();
+                        if (const uint64_t passed = p->skipCardPoll(hard - jitSlack)) {
+                            slice += uint32_t(passed);
+                            continue;
+                        }
+                        cardHaltOff = true;
                     }
                     int stop;
                     jitBudget = uint32_t(std::min(quietCycles, hard - jitSlack + 1));
@@ -2999,7 +3247,7 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0,
                                              0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030,
                                              0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4, 0x200a9788,
-                                             aspPollPc};
+                                             aspPollPc, cardWaitLoadPc, cardDataLoadPc};
     cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
@@ -3029,6 +3277,10 @@ uint64_t imx1MachineJitRuns(const Imx1Machine*) { return jitRuns; }
 uint64_t imx1MachineJitReads(const Imx1Machine*) { return jitReads; }
 uint64_t imx1MachineJitRegisterReads(const Imx1Machine*) { return jitRegisterReads; }
 uint64_t imx1MachineJitBoardWrites(const Imx1Machine*) { return jitBoardWrites; }
+uint64_t imx1MachineJitCardWrites(const Imx1Machine*) { return jitCardWrites; }
+uint64_t imx1MachineCardPollSkips(const Imx1Machine*) { return cardPollSkips; }
+uint64_t imx1MachineCardPollRounds(const Imx1Machine*) { return cardPollRounds; }
+void imx1SetCardPollSkip(bool skip) { cardPollSkip = skip; }
 uint64_t imx1MachineJitChargedWrites(const Imx1Machine*) { return jitChargedWrites; }
 uint64_t imx1MachineDelaySkips(const Imx1Machine*) { return delaySkips; }
 uint64_t imx1MachineDelayHaltSkips(const Imx1Machine*) { return delayHaltSkips; }

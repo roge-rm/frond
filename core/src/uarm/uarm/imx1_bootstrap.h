@@ -221,9 +221,13 @@ class Imx1Bootstrap {
     // And the RTC's registers: reads only mark it used, and the span ends at its next second or sampling period.
     // And DMA's error registers DBTOSR, DRTOSR, DSESR and DBOSR (0x0020900c-18), which read 0 and change nothing.
     // And MMCSD STATUS: a read changes nothing, and the span ends where the clock stop or command in progress does.
+    // And the rest of the MMCSD registers up to RES_FIFO, and DMA channels 0 to 9's registers: plain register reads,
+    // and a RES_FIFO read takes the next halfword of a response that was all in at its command's start.
     static bool quietReadAddress(uint32_t address) {
         const uint32_t timer = address & ~0x1000u;
-        return address == 0x0021501c || address == 0x00215034 || address == 0x00214004 || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
+        return address == 0x0021501c || address == 0x00215034 || (address >= 0x00214000 && address <= 0x00214034 && !(address & 3)) ||
+               (address >= 0x00209080 && address < 0x00209300 && !(address & 3) && (address & 0x3f) < 0x1c) ||
+               Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
                address == 0x0021b000 || (timer >= 0x00202000 && timer <= 0x00202014 && timer != 0x00202010 && !(timer & 3)) ||
                address == 0x00209004 || address == 0x00209008 || (address >= 0x0020900c && address <= 0x00209018 && !(address & 3)) || (Imx1Rtc::registerName(address) && !(address & 3));
     }

@@ -1150,6 +1150,45 @@ void jitBoardWrites() {
     assert(writes >= 300);
 }
 
+// MMCSD BLK_LEN and ARGL and DMA channel 0's source and destination written 300 times a run, then read back: Fast
+// blocks take the writes in generated code and answer the reads there, with Exact's results.
+void jitCardWrites() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00210000, 0xffffc400);                      // AIPI2 PSR0 and PSR1: MMCSD on the 32-bit bus
+    g.store(0x00210004, 0xfffffbff);
+    g.store(0x00214000, 0x08);                            // STR_STP_CLK: reset, then 8 stop writes to get ready
+    g.store(0x00214000, 0x0d);
+    for (unsigned i = 0; i < 8; ++i) g.store(0x00214000, 0x05);
+    std::vector<uint32_t> words;
+    load(words, 0, 0x00214000); load(words, 1, 0x00209080); load(words, 3, 300); load(words, 4, 0x08000000);
+    words.push_back(0xe5803018);                          // loop: str r3, [r0, #0x18] (BLK_LEN)
+    words.push_back(0xe5803030);                          // str r3, [r0, #0x30] (ARGL)
+    words.push_back(0xe5814000);                          // str r4, [r1] (DMA SAR0)
+    words.push_back(0xe5814004);                          // str r4, [r1, #4] (DAR0)
+    words.push_back(0xe2844004);                          // add r4, r4, #4
+    words.push_back(0xe2533001);                          // subs r3, r3, #1
+    words.push_back(0x1afffff8);                          // bne loop
+    words.push_back(0xe5905018);                          // ldr r5, [r0, #0x18]
+    words.push_back(0xe5906030);                          // ldr r6, [r0, #0x30]
+    words.push_back(0xe5917000);                          // ldr r7, [r1]
+    words.push_back(0xe5918004);                          // ldr r8, [r1, #4]
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = runGuest(g.words, false);
+    const uint64_t before = imx1MachineJitCardWrites(nullptr);
+    const auto fast = runGuest(g.words, true);
+    const uint64_t writes = imx1MachineJitCardWrites(nullptr) - before;
+    print("jit card writes exact", exact); print("jit card writes blocks", fast);
+    std::printf("jit card writes: %llu in generated code, BLK_LEN %x ARGL %x SAR0 %08x DAR0 %08x\n",
+                (unsigned long long)writes, exact.run.result.registers[5], exact.run.result.registers[6],
+                exact.run.result.registers[7], exact.run.result.registers[8]);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[3] == 0 && exact.run.result.registers[7] == 0x08000000 + 299 * 4);
+    sameResult(exact, fast);
+    assert(writes >= 1000);
+}
+
 // A graphics memory store and 62 other instructions a round while timer 1's compare IRQ comes due, with the display
 // off so the quiet spans are long. Each store's wait clocks count against the JIT run's budget with the cycles the
 // run has already done, so the IRQ comes at Exact's round, not up to a whole run late.
@@ -2361,6 +2400,7 @@ void jitLong() {
     jitReads();
     jitSliceEndReads();
     jitBoardWrites();
+    jitCardWrites();
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();

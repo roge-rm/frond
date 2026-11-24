@@ -229,6 +229,13 @@ uint64_t imx1MachineJitRuns(const Imx1Machine*);
 uint64_t imx1MachineJitReads(const Imx1Machine*);
 uint64_t imx1MachineJitRegisterReads(const Imx1Machine*);
 uint64_t imx1MachineJitBoardWrites(const Imx1Machine*);
+// MMCSD and card DMA writes Fast blocks took in generated code (jitCardWrite).
+uint64_t imx1MachineJitCardWrites(const Imx1Machine*);
+// The card driver's STATUS wait rounds Fast blocks passed at once, since the process started: the times and the
+// rounds. On unless FROND_CARD_POLL_SKIP=0; imx1SetCardPollSkip(false) turns it off, for tests.
+uint64_t imx1MachineCardPollSkips(const Imx1Machine*);
+uint64_t imx1MachineCardPollRounds(const Imx1Machine*);
+void imx1SetCardPollSkip(bool skip);
 // Ring pointer writes Fast blocks took in generated code with the run's cycles charged first (jitChargedWrite).
 uint64_t imx1MachineJitChargedWrites(const Imx1Machine*);
 uint64_t imx1MachineDelaySkips(const Imx1Machine*);
