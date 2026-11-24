@@ -743,7 +743,7 @@ static void tickReadTests() {
     // back: cmp r3, r3; ldrne r1, [r0, #0x40] (marked); add r4, r4, #1 x64; ldr r5, [r0, #0x40]; add r7, r7, r5
     // ldr r1, [r6] (marked); add r4, r4, #1 x64; ldr r8, [r0, #0x40]; add r9, r9, r8; add r4, r4, #1 x32
     // ldr r10, [r0, #0x40] (marked); add r11, r11, r10; ldr pc, [pc, #-4] (marked) to the next but one word;
-    // add r4, r4, #1 x32; ldr r2, [r0, #0x40]; add r9, r9, r2; mov r12, #0x800; subs r12, r12, #1; bne back 1
+    // ldreq r2, [r0, #0x40]; add r4, r4, #1 x32; ldr r2, [r0, #0x40]; add r9, r9, r2; mov r12, #0x800; subs r12, r12, #1; bne back 1
     // add r3, r3, #1; b back
     std::vector<uint32_t> program{0xe3a00451, 0xe3a06203, 0xe2866801, 0xe1530003};
     static uint32_t marked[4];
@@ -759,13 +759,16 @@ static void tickReadTests() {
     marked[2] = code + uint32_t(program.size()) * 4;
     program.insert(program.end(), {0xe590a040, 0xe08bb00a});
     marked[3] = code + uint32_t(program.size()) * 4;
-    program.insert(program.end(), {0xe51ff004, marked[3] + 8});
+    program.insert(program.end(), {0xe51ff004, marked[3] + 8, 0x05902040});
     program.insert(program.end(), 32, 0xe2844001);
     program.insert(program.end(), {0xe5902040, 0xe0899002, 0xe3a0cb02, 0xe25cc001, 0x1afffffd, 0xe2833001});
     program.push_back(0xea000000u | ((3 - int32_t(program.size()) - 2) & 0xffffff));
     auto exact = make(program), fast = make(program);
     if (!fast->setFastEngine(true)) return;
     cpuArm920SetJitAccessPcs(fast->cpu(), marked, 4, true);
+    fast->mmioTrace = [](uint32_t pc, uint32_t address, unsigned, bool write, uint32_t) {
+        if (address == 0x51000040 && !write) assert(pc != marked[3]);
+    };
     for (auto* m : {exact.get(), fast.get()}) {
         m->pwm.tcfg0 = 0;  // prescaler 0 and the 1/2 divider: TCNTO4 moves every 2 PCLK ticks
         m->pwm.tcfg1 = 0;

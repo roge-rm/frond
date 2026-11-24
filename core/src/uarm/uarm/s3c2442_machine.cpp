@@ -586,7 +586,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
 }
 
 // CPU cycles until the next timer, watchdog, frame or RTC event, UINT64_MAX with none due.
-uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly, bool openTimers) const {
+uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly, bool fast) const {
     const uint64_t cpuHz = this->cpuHz();
     uint64_t best = UINT64_MAX;
     auto consider = [&](uint64_t ticks, uint64_t hz, uint64_t rest) {
@@ -604,11 +604,11 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly, bool openTimers) const {
     if (hostNextNs != UINT64_MAX && hostService)
         consider(hostNextNs <= elapsedNs ? 0 : hostNextNs - elapsedNs, 1000000000, nsRest);
     if (!wakeOnly) {
-        const uint32_t timers = openTimers ? (~intc.intmsk >> s3cIrq::timer0) & 0x1f : 0x1f;
+        const uint32_t timers = fast ? (~intc.intmsk >> s3cIrq::timer0) & 0x1f : 0x1f;
         consider(std::min({pwm.ticksToEvent(timers), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
         consider(rtc.ticksToEvent(), 32768, rtcRest);
-        return std::min(best, audioCyclesToEvent(false));
+        return std::min(best, audioCyclesToEvent(false, fast));
     }
     auto open = [&](unsigned source) { return !(intc.intmsk & (1u << source)); };
     const uint32_t timers = (~intc.intmsk >> s3cIrq::timer0) & 0x1f;
@@ -843,20 +843,26 @@ void S3c2442Machine::pumpAudioDma() {
     }
 }
 
-uint64_t S3c2442Machine::audioCyclesToEvent(bool wakeOnly) const {
+uint64_t S3c2442Machine::audioCyclesToEvent(bool wakeOnly, bool frameBoundary) const {
     if (!iis.enabled() || !(clock.clkcon & iisClock)) return UINT64_MAX;
     uint64_t frames = UINT64_MAX;
     auto check = [&](S3cDmaRequest request, bool moving) {
         if (!moving) return;
         const int ch = dma.channelFor(request);
-        if (ch < 0 || !dma.interruptAtEnd(unsigned(ch)) || !dma.unitBytes(unsigned(ch))) return;
+        if (ch < 0 || !dma.unitBytes(unsigned(ch))) return;
+        if (frameBoundary) {
+            // A Fast span defers clock advancement. DMA can touch RAM on each frame.
+            frames = 1;
+            return;
+        }
+        if (!dma.interruptAtEnd(unsigned(ch))) return;
         if (wakeOnly && (intc.intmsk & (1u << (s3cIrq::dma0 + unsigned(ch))))) return;
         // A frame moves four bytes through the FIFO, which the DMA keeps topped up.
         const uint64_t f = (uint64_t(dma.remaining(unsigned(ch))) * dma.transferBytes(unsigned(ch)) + 3) / 4;
         frames = std::min(frames, std::max<uint64_t>(f, 1));
     };
-    check(S3cDmaRequest::iisOut, iis.transmitting() && iis.txDmaOn());
-    check(S3cDmaRequest::iisIn, iis.receiving() && iis.rxDmaOn());
+    check(S3cDmaRequest::iisOut, iis.txDmaOn() && (frameBoundary || iis.transmitting()));
+    check(S3cDmaRequest::iisIn, iis.rxDmaOn() && (frameBoundary || iis.receiving()));
     const uint64_t hz = iisMasterHz();
     if (frames == UINT64_MAX || !hz) return UINT64_MAX;
     // Cycles c with (c * hz + iisRest) / (cpuHz * divider) >= frames.

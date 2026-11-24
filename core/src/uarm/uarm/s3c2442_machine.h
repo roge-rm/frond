@@ -310,7 +310,7 @@ class S3c2442Machine {
     // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset. With openTimers, a PWM timer
     // whose interrupt INTMSK holds back isn't an event (Fast spans): advance() applies its underflows
     // later just the same, and every guest look at it (SFR access, lean PWM read) settles time first.
-    uint64_t cyclesToEvent(bool wakeOnly = false, bool openTimers = false) const;
+    uint64_t cyclesToEvent(bool wakeOnly = false, bool fast = false) const;
     // Sleep: the sources that wake it, pending now; time asleep, which moves only the RTC.
     uint32_t wakeSources() const;
     void sleepAdvance(uint64_t cpuCycles);
@@ -320,7 +320,7 @@ class S3c2442Machine {
     void audioFrames(uint64_t frames);
     void pumpAudioDma();
     // CPU cycles until a DMA interrupt the IIS's frames bring, UINT64_MAX with none; wakeOnly as cyclesToEvent.
-    uint64_t audioCyclesToEvent(bool wakeOnly) const;
+    uint64_t audioCyclesToEvent(bool wakeOnly, bool frameBoundary = false) const;
     uint64_t iisMasterHz() const;
     bool codecPowered() const;
     // After a GPIO write: the codec's reset pin (GPD0, high resets it).

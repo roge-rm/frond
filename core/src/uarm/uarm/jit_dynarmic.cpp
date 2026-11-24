@@ -248,8 +248,7 @@ thread_local uint32_t cp15Pc = ~0u, cp15Rd = 0, cp15Word = 0;
 // host page, or none, leaves nothing set for a later read at another pc: by the marked block's second
 // instruction, and by every other block as it starts, for a marked block that ended right after its access (a
 // capped or single-step block, a load to pc, a line bound). clearPending: the clear is still to come in this
-// block. A conditional first instruction needs an empty block (IsConditionPassed), so its clear waits for the
-// second one.
+// block. The entry clear for a conditional block runs when the condition passes.
 thread_local bool clearPending = false;
 
 inline void ClearAccessPc(A32::IREmitter &ir) {
@@ -281,11 +280,10 @@ inline bool Unconditional(bool thumb, uint32_t word, A32::VAddr pc, const A32::I
 
 // After a code read that goes to the JIT. A marked pc's value goes to cpuJitAccessPcSlot before the instruction
 // (psr slot, opc1 3). One that starts its block is only noted unconditional, as a failed one would leave the slot
-// set (and a conditional first instruction needs an empty block).
+// set when the block is skipped.
 void NoteAccessPc(bool thumb, uint32_t word, bool marked, bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
     const bool note = marked && (!startsBlock || Unconditional(thumb, word, pc, ir));
-    if (clearPending && !note && pc == A32::LocationDescriptor{ir.block.Location()}.PC() &&
-        Unconditional(thumb, word, pc, ir)) {
+    if (clearPending && !note && pc == A32::LocationDescriptor{ir.block.Location()}.PC()) {
         ClearAccessPc(ir);
         clearPending = false;
     }
@@ -1429,24 +1427,26 @@ struct Env final : public A32::UserCallbacks {
         // there. PID 0's slot 0 has no MVA of its own. Code from 32 MB up reads the same under every PID.
         const bool otherPid = arm920 && s.pid != cpuGetPid(cpu) && s.base < 0x02000000u;
         if (otherPid && !s.pid) return false;
-        const uint32_t mvaBase = otherPid ? s.base | s.pid : 0;
         for (size_t i = 0; i < s.words.size(); i++) {
             if (!s.read[i]) continue;
             uint32_t w = 0;
-            bool ok = otherPid ? cpuJitFetchMva(cpu, mvaBase + uint32_t(i) * 4, &w)
-                               : cpuJitFetch(cpu, s.base + uint32_t(i) * 4, &w);
-            if (!ok && otherPid && s.fetched[i]) ok = FetchUnmapped(s, s.base + uint32_t(i) * 4, mvaBase + uint32_t(i) * 4, &w);
+            const uint32_t va = s.base + uint32_t(i) * 4;
+            const bool inSlot = otherPid && va < 0x02000000u;
+            const uint32_t mva = va | s.pid;
+            bool ok = inSlot ? cpuJitFetchMva(cpu, mva, &w) : cpuJitFetch(cpu, va, &w);
+            if (!ok && inSlot && s.fetched[i]) ok = FetchUnmapped(s, va, mva, &w);
             if (ok != bool(s.fetched[i]) || (ok && w != s.words[i])) return false;
         }
         if (otherPid) stats.otherPidInstalls++;
         for (size_t i = 0; i < s.words.size(); i++) {
             if (!s.read[i]) continue;
-            if (otherPid) {
-                const uint32_t mva = mvaBase + uint32_t(i) * 4;
+            const uint32_t va = s.base + uint32_t(i) * 4;
+            if (otherPid && va < 0x02000000u) {
+                const uint32_t mva = va | s.pid;
                 if (!code.count(mva >> 12)) {
                     // Only FetchUnmapped passes a page that isn't mapped now: watch it at the snapshot's
                     // physical page, suspended until its PID runs again.
-                    const auto *m = s.MapOf(s.base + uint32_t(i) * 4);
+                    const auto *m = s.MapOf(va);
                     uint32_t access;
                     if (m && CodePa(mva >> 12, access) == ~0u) {
                         auto it = NotePage(mva >> 12, m->pa, m->access);
@@ -1456,7 +1456,7 @@ struct Env final : public A32::UserCallbacks {
                 }
                 NoteCodeAt(mva >> 12, mva & 0xfffu);
             } else {
-                NoteCode(s.base + uint32_t(i) * 4);
+                NoteCode(va);
             }
         }
         return true;
