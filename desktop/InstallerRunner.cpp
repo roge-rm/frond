@@ -1157,7 +1157,13 @@ RunResult run(QWidget* parent, const QString& installer, const QString& user, bo
     if (cancelled) report(QObject::tr("The installer was cancelled."));
     else if (!started) report(process.errorString());
     else if (process.exitStatus() == QProcess::CrashExit) report(QObject::tr("The installer launcher crashed."));
+#ifdef Q_OS_WIN
+    else if (process.exitCode())
+        report(QObject::tr("The installer exited with code %1. Some installers only finish when Frond runs as administrator.")
+                   .arg(process.exitCode()));
+#else
     else if (process.exitCode()) report(QObject::tr("The installer exited with code %1.").arg(process.exitCode()));
+#endif
 
 #ifdef Q_OS_LINUX
     if (cancelled && process.state() != QProcess::NotRunning) {
