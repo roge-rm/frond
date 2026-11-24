@@ -1554,6 +1554,8 @@ for line in s.makefile('rb'):
         s.sendall(i+b'\tok\tcard\t'+b'none'.hex().encode()+b'\n');continue
     if cmd == b'battery-state':
         s.sendall(i+b'\tok\tbattery\t'+b'unavailable'.hex().encode()+b'\n');continue
+    if cmd == b'app-active':
+        s.sendall(i+b'\tok\tapp-active\t'+arg+b'\n');continue
     assert cmd == b'save', 'Closing after a failed save must not send quit'
     s.sendall(i+b'\terror\twrite\t'+b'Disk full'.hex().encode()+b'\n')
 )PY");
@@ -2557,7 +2559,9 @@ for line in s.makefile('rb'):
             QVERIFY2(commands.contains("sd-attach\t\"" + real + "/sd.frondsd\" " + n1.key + " writable sd\n"), qPrintable(commands));
             QVERIFY2(commands.contains("sd2-attach\t\"" + real + "/sd2.frondsd\" " + n2.key + " writable mmc\n"), qPrintable(commands));
             QVERIFY(commands.indexOf("sd2-attach\t") < commands.indexOf("network-state\t"));
-            // No card in slot 2: eject after the confirmation, take out, to the drawer.
+            // No card in slot 2: eject after the confirmation, take out, to the drawer. The view setting
+            // sent at start holds the request slot and a pick during it does nothing, so wait it out.
+            QTRY_VERIFY(read("commands").contains("dana-view\tkeyboard="));
             showCardPanel(pick2); QTRY_VERIFY(pick2->isVisible() && pick2->isEnabled());
             whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
                 for (auto* r : d->findChildren<QRadioButton*>("cardChoice"))
@@ -3422,7 +3426,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     text=bytes.fromhex(arg.decode())
     if cmd==b'input-replay': text=open(text,'rb').read().replace(b'\n',b'|')
-    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state',b'gamepad-state',b'battery-state'):
+    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state',b'gamepad-state',b'battery-state',b'app-active'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
     if cmd==b'camera-mode':
