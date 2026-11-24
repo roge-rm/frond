@@ -128,6 +128,23 @@ int main() {
         SDL_PushEvent(&event);
         check(pending.inputPending.load(), "a release ends a slice");
         pending.TakeInputs(taken);
+        // What Android pushes: touches, and controller buttons from ZodiacPad (its axes don't end a slice).
+        for (const uint32_t type : {uint32_t(SDL_FINGERDOWN), uint32_t(SDL_FINGERUP), uint32_t(SDL_CONTROLLERBUTTONDOWN),
+                                    uint32_t(SDL_CONTROLLERBUTTONUP)}) {
+            event = {};
+            event.type = type;
+            SDL_PushEvent(&event);
+            check(pending.inputPending.load(), "a touch or controller button ends a slice");
+            pending.TakeInputs(taken);
+        }
+        event = {};
+        event.type = SDL_CONTROLLERAXISMOTION;
+        SDL_PushEvent(&event);
+        event = {};
+        event.type = SDL_FINGERMOTION;
+        SDL_PushEvent(&event);
+        check(!pending.inputPending.load(), "stick and finger motion don't end a slice");
+        pending.TakeInputs(taken);
         SDL_SetEventFilter(nullptr, nullptr);
     }
 
