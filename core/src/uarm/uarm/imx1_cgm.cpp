@@ -54,8 +54,9 @@ bool Imx1Cgm::mcuReferenceSupported(uint64_t denominator) const {
 void Imx1Cgm::wakePlls() {
     const bool mcu = !mcuEnabled();
     cscr |= 2;
-    if (mcu) { wakeMcuPll(); return; }
-    // The System PLL alone: the same nominal lock time, with the MCU PLL's state left as it is.
+    if (mcu) wakeMcuPll();
+    // Stop mode: MC9328MX1RM 12.4.2's nominal nine CLK32 periods (274.66 us), within the 300 us wake bound, for the
+    // System PLL alone too, with the MCU PLL's state left as it is.
     mcuWakeRemaining = 9;
     mcuWakePhase = 0;
     mcuWakeDenominator = 1;
@@ -67,8 +68,10 @@ void Imx1Cgm::wakeMcuPll() {
     mcuTimingUnknown = true;
     mcuRestartComplete = false;
     mcuContinuous = false;
-    // MC9328MX1RM 12.4.2: nominal nine CLK32 periods (274.66 us), within the 300 us wake bound.
-    mcuWakeRemaining = 9;
+    // ASSUMPTION: one CLK32 period to relock. With the RM's nominal nine (12.4.2) Firehammer's frame copy, 76 DMA
+    // interrupts each waking the ROM idle, took 27 ms of its 30 ms frame. tools/zodiac-twgfx/twtime.c times it on a
+    // real Zodiac. Stop mode keeps nine (wakePlls).
+    mcuWakeRemaining = 1;
     mcuWakePhase = 0;
     mcuWakeDenominator = 1;
 }

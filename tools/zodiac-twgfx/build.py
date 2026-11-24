@@ -5,7 +5,8 @@
 The ARM image is linked twice, at 0 and at 0x100000; every word that differs by exactly that much holds an
 address and goes in the relocation table start.s applies at run time.
 
-Usage: build.py OUTDIR (writes OUTDIR/TwGfxTest.prc)."""
+Usage: build.py OUTDIR (writes OUTDIR/TwGfxTest.prc), or build.py OUTDIR twtime for TwTime.prc, the
+TwGfxWriteSurface timing program (twtime.c). Use a separate OUTDIR for each."""
 import datetime
 import gzip
 import os
@@ -17,6 +18,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ARM_FLAGS = ['-O2', '-Wall', '-std=gnu99', '-marm', '-mcpu=arm920t', '-mthumb-interwork', '-ffixed-r9',
              '-fno-builtin', '-ffreestanding', '-nostdinc']
 SHIFT = 0x100000
+# Program: source, PRC name, creator, launcher name.
+PROGRAMS = {'twgfx': ('twgfxtest', 'TwGfxTest', 'FTGx', b'TwGfx'), 'twtime': ('twtime', 'TwTime', 'FTTm', b'TwTime')}
 
 
 def run(*args):
@@ -38,9 +41,10 @@ def link(out, base, objects):
 
 def main():
     out = os.path.abspath(sys.argv[1])
+    source_name, prc_name, creator, label = PROGRAMS[sys.argv[2] if len(sys.argv) > 2 else 'twgfx']
     os.makedirs(out, exist_ok=True)
     objects = []
-    for source in ('start.s', 'twgfxtest.c'):
+    for source in ('start.s', source_name + '.c'):
         obj = os.path.join(out, os.path.splitext(source)[0] + '.o')
         run('arm-palmos-gcc', *ARM_FLAGS, '-c', os.path.join(HERE, source), '-o', obj)
         objects.append(obj)
@@ -48,8 +52,8 @@ def main():
     cwd = os.getcwd()
     os.chdir(out)
     try:
-        low = link(out, 0, ['start.o', 'twgfxtest.o'])
-        high = link(out, SHIFT, ['start.o', 'twgfxtest.o'])
+        low = link(out, 0, ['start.o', source_name + '.o'])
+        high = link(out, SHIFT, ['start.o', source_name + '.o'])
     finally:
         os.chdir(cwd)
     if len(low) != len(high) or len(low) % 4:
@@ -76,13 +80,13 @@ def main():
         f.write(gzip.compress(bytes(image), mtime=0))
     tain = os.path.join(out, 'tAIN03e8.bin')
     with open(tain, 'wb') as f:
-        f.write(b'TwGfx\0')
+        f.write(label + b'\0')
     stub_o = os.path.join(out, 'stub.o')
     stub = os.path.join(out, 'stub')
     run('m68k-palmos-gcc', '-O2', '-Wall', '-c', os.path.join(HERE, 'stub.c'), '-o', stub_o)
     run('m68k-palmos-gcc', stub_o, '-o', stub)
-    prc = os.path.join(out, 'TwGfxTest.prc')
-    run('build-prc', '-o', prc, '-n', 'TwGfxTest', '-c', 'FTGx', stub, armz, tain)
+    prc = os.path.join(out, prc_name + '.prc')
+    run('build-prc', '-o', prc, '-n', prc_name, '-c', creator, stub, armz, tain)
     # Fixed dates (2026-01-01, Palm seconds from 1904) so the PRC is the same from build to build. The card
     # view leaves out a database dated 0.
     stamp = (datetime.date(2026, 1, 1) - datetime.date(1904, 1, 1)).days * 86400

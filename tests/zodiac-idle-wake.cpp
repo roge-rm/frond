@@ -124,13 +124,14 @@ void sequence(bool fiq, bool masked, bool pending, bool timerEnabled, bool limit
     auto run=[&](bool fast,Events& events){
         Imx1ProbeOptions o{};o.bootstrapPeripherals=true;o.assumeMpllSettled=true;
         o.virtualMpllRetune=true;o.assumeSpllSettled=true;
-        o.idleHclkBudget=limited?(repeat?3000:16):idleBudget;
+        // repeat: both waits and their one-CLK32 wakes take 1112 idle HCLK, so 800 runs out in the second.
+        o.idleHclkBudget=limited?(repeat?800:16):idleBudget;
         o.interruptObserver=interrupt;o.interruptContext=&events;o.busObserver=bus;o.busContext=&events;
         return imx1BootProbe(reinterpret_cast<const uint8_t*>(v.data()),v.size()*4,
             Imx1ProbeEntry::resetAlias,30000,nullptr,nullptr,fast,&o);
     };
     Events ea,eb;const auto a=run(false,ea);
-    if(limited || !idleBudget){assert(a.stop==Imx1ProbeStop::idleBudget && a.idleHclk==(limited?(repeat?3000u:16u):0u) && a.registers[15]==wfi+4);}
+    if(limited || !idleBudget){assert(a.stop==Imx1ProbeStop::idleBudget && a.idleHclk==(limited?(repeat?800u:16u):0u) && a.registers[15]==wfi+4);}
     else if(!timerEnabled){assert(a.stop==Imx1ProbeStop::idleNoWake && a.registers[15]==wfi+4);}
     else {
         if(a.stop!=Imx1ProbeStop::unsupportedInstruction)std::fprintf(stderr,"stop %s pc%08x step%llu addr%08x status%s wfi%x\n",imx1ProbeStopName(a.stop),a.registers[15],(unsigned long long)a.trace.step,a.address,imx1BootstrapAccessName(a.peripheralStatus),wfi);
