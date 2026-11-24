@@ -262,6 +262,9 @@ uint64_t SocGeneric<T>::RunUntil(uint64_t maxCycles, uint64_t cyclesPerSecond) {
 
         if constexpr (breakReason > 0) {
             if (cpuGetSlowPathReason(cpu) & breakReason) break;
+        } else if constexpr (!injected) {
+            // Host input waiting: end at this scheduler update (see SoC::SetHostInputPending).
+            if (this->HostInputPending()) break;
         }
     }
 

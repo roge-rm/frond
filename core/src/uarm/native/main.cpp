@@ -1741,11 +1741,13 @@ bool gFastEngineMissing = false;
 #ifdef __linux__
             pthread_setname_np(pthread_self(), "FrondCore");
 #endif
+            soc->SetHostInputPending(&link.inputPending);
             try {
                 guestLoop();
             } catch (...) {
                 guestError = current_exception();
             }
+            soc->SetHostInputPending(nullptr);
             // A save still writing finishes here, on this thread, before the core stops.
             if (desktop) desktop->finishPendingSave(commandContext);
             link.Finish();

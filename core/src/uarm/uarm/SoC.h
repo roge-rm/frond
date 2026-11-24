@@ -3,6 +3,7 @@
 
 #include <memory.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -123,6 +124,10 @@ class SoC {
     virtual void HardReset();
 
     virtual uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
+    // Set by the host while a press or release waits for the guest thread. Run then ends at its next
+    // slice end, so the press goes in within about a millisecond. Only live input sets it, so replays and
+    // runs without live input don't change.
+    void SetHostInputPending(const std::atomic<bool>* pending) { hostInputPending = pending; }
     // The core clock in Hz as the guest has set it, 0 where the board has none to follow.
     virtual uint64_t CoreHz() const { return 0; }
     // Original speed: a run call whose cyclesPerSecond is at least CoreHz() runs at CoreHz() as it
@@ -259,6 +264,12 @@ class SoC {
     virtual DisplayMode GetDisplayMode() = 0;
     virtual void SuspendTimerInterrupts(bool suspendInterrupts) = 0;
     virtual bool LcdEnabled() = 0;
+
+   protected:
+    bool HostInputPending() const {
+        return hostInputPending && hostInputPending->load(std::memory_order_relaxed);
+    }
+    const std::atomic<bool>* hostInputPending{nullptr};
 
    protected:
     // Actual SoC needs to implement those, the other virtuals are taken

@@ -1,6 +1,7 @@
 // RenderLink's event handover: queued events and ones pushed by another thread while the
 // filter goes in reach the guest queue once each, in order, and render resets ask for a
-// full redraw and a new renderer, and an event ends the guest thread's wait.
+// full redraw and a new renderer, an event ends the guest thread's wait, and a press or
+// release marks input pending until it's taken.
 #include <SDL.h>
 
 #include <atomic>
@@ -103,6 +104,30 @@ int main() {
         started = std::chrono::steady_clock::now();
         waiting.WaitForInput(20000);
         check(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(19), "taken input doesn't wake");
+        SDL_SetEventFilter(nullptr, nullptr);
+    }
+
+    // A queued press or release marks input pending for the running SoC until it's taken; other events don't.
+    {
+        RenderLink pending(4, 4);
+        pending.InstallFilter();
+        std::vector<RenderLink::Input> taken;
+        pushUser(3);
+        SDL_Event event{};
+        event.type = SDL_MOUSEMOTION;
+        SDL_PushEvent(&event);
+        check(!pending.inputPending.load(), "motion and other events don't end a slice");
+        event = {};
+        event.type = SDL_MOUSEBUTTONDOWN;
+        SDL_PushEvent(&event);
+        check(pending.inputPending.load(), "a press ends a slice");
+        pending.TakeInputs(taken);
+        check(!pending.inputPending.load() && taken.size() == 3, "taking the input clears it");
+        event = {};
+        event.type = SDL_KEYUP;
+        SDL_PushEvent(&event);
+        check(pending.inputPending.load(), "a release ends a slice");
+        pending.TakeInputs(taken);
         SDL_SetEventFilter(nullptr, nullptr);
     }
 

@@ -1071,6 +1071,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         TickUsbHost();
         if (now.time.compare(until) >= 0) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
+        if (HostInputPending()) break;
     }
     const uint64_t elapsed = imx1MachineGetStatus(machine).time.ticks - before.time.ticks;
     // Nothing can wake a waiting guest but input, so host time just passes. Its own clock stands

@@ -1041,6 +1041,7 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         }
         if (machine->nanoseconds() >= before + wanted) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
+        if (HostInputPending()) break;
     }
     runInstructions = machine->retired();
     if (machine->asleep() != wasAsleep) {

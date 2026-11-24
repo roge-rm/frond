@@ -4,6 +4,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -190,6 +191,7 @@ class RenderLink {
         std::lock_guard<std::mutex> lock(mutex);
         out.swap(inputs);
         inputWoken = false;
+        inputPending.store(false, std::memory_order_relaxed);
     }
     // Guest thread: sleeps for usec, or less when the filter queues an event, so input reaches
     // the guest without waiting out the rest of the timeslice.
@@ -383,6 +385,19 @@ class RenderLink {
         for (const auto& event : held) Take(event);
         held.clear();
     }
+    // Presses and releases end a running guest slice early; motion waits for the slice end.
+    static bool PressOrRelease(uint32_t type) {
+        switch (type) {
+            case SDL_KEYDOWN: case SDL_KEYUP:
+            case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP:
+            case SDL_FINGERDOWN: case SDL_FINGERUP:
+            case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP:
+            case SDL_JOYBUTTONDOWN: case SDL_JOYBUTTONUP:
+                return true;
+            default:
+                return false;
+        }
+    }
     // With the mutex held: queues an event for the guest thread and notes what the SDL
     // thread has to act on.
     void Take(const SDL_Event& event) {
@@ -393,6 +408,7 @@ class RenderLink {
             inputs.push_back(Input{false, {}, {}, std::nullopt, {}, time});
         } else {
             inputs.push_back(Input{false, event, {}, std::nullopt, {}});
+            if (PressOrRelease(event.type)) inputPending.store(true, std::memory_order_relaxed);
         }
         inputWoken = true;
         inputWake.notify_one();
@@ -439,6 +455,13 @@ class RenderLink {
     // The guest thread's wait in WaitForInput, ended by Take.
     std::condition_variable inputWake;
     bool inputWoken{false};
+
+   public:
+    // A press or release is queued and not yet taken: the SoC ends its run at the next slice end
+    // (SoC::SetHostInputPending). Set by the filter, cleared by TakeInputs.
+    std::atomic<bool> inputPending{false};
+
+   private:
 
     // Frames. back and staleLines belong to the guest thread; middle, front and pending
     // are shared under the mutex.
