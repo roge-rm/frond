@@ -124,6 +124,11 @@ def parser():
                    help='export one named database/log into a ZIP; repeat for several')
     p.add_argument('--run-for', type=nonnegative, default=0, metavar='SECONDS',
                    help='minimum replay interval, extended to include the last event/screenshot')
+    p.add_argument('--engine', choices=('fast', 'exact'), default='exact',
+                   help='CPU engine passed to the core (default exact, the interpreter; fast is the JIT where the device has one)')
+    p.add_argument('--emulated-time', action='store_true',
+                   help='time the replay (waits, taps, screenshots) and --run-for in guest time, not host time (default: host time); '
+                        'a slow host then only makes the run take longer')
     p.add_argument('--settle', type=nonnegative, default=1, metavar='SECONDS',
                    help='wait after launch before checking readiness and starting replay (default 1)')
     p.add_argument('--timeout', type=positive, default=180, help='overall wall time, including slot wait (default 180)')
@@ -137,7 +142,7 @@ def parser():
     return p
 
 
-def prepare_replay(source, root, screenshots):
+def prepare_replay(source, root, screenshots, end_ms=0):
     events, captures = [], []
     previous = 0
     if source:
@@ -165,6 +170,11 @@ def prepare_replay(source, root, screenshots):
         path = root / f'screenshot-{index:03d}.png'
         captures.append({'at_ms': at, 'path': str(path)})
         events.append((at, f'{at} snapshot {quote_replay_path(path)}'))
+    if end_ms and end_ms > max([at for at, _ in events], default=0):
+        # Guest-time padding: a snapshot at the end keeps the replay running to --run-for.
+        path = root / 'run-for-end.png'
+        captures.append({'at_ms': end_ms, 'path': str(path)})
+        events.append((end_ms, f'{end_ms} snapshot {quote_replay_path(path)}'))
     events.sort(key=lambda event: event[0])
     target = root / 'input.replay'
     target.write_text(''.join(line + '\n' for _, line in events))
@@ -412,7 +422,8 @@ def run(args):
                     raise RunError('input-changed', f'Input changed while copying: {path}')
                 record['copy'] = str(copy)
             result['inputs'].append(record)
-        replay, last_ms, captures = prepare_replay(replay_source, root, args.screenshot)
+        replay, last_ms, captures = prepare_replay(replay_source, root, args.screenshot,
+                                                        int(args.run_for * 1000) if args.emulated_time else 0)
         result['artifacts']['screenshots'] = captures
         result['artifacts']['exports'] = []
         result['origin'] = {'mode': 'session-restore' if args.session else 'cold-boot',
@@ -430,6 +441,12 @@ def run(args):
                     str(root / 'core'), *boot, '--desktop-socket', address]
                 if args.test_palm_wifi:
                     command.append('--test-palm-wifi')
+                command += ['--engine', args.engine]
+                if args.emulated_time:
+                    command.append('--emulated-time')
+                result['engine'] = args.engine
+                result['time_base'] = 'guest' if args.emulated_time else 'host'
+                print(f'frond-run: engine={args.engine} time={result["time_base"]}', file=sys.stderr)
                 if not args.sound:
                     command.append('--no-sound')
                 if args.serial:
@@ -509,7 +526,7 @@ def run(args):
                         control.require('sd-wifi-insert')
                 result['stage'] = 'replay'
                 control.require('input-replay', replay)
-                until = time.monotonic() + max(args.run_for, last_ms / 1000)
+                until = time.monotonic() + (0 if args.emulated_time else max(args.run_for, last_ms / 1000))
                 while True:
                     state = control.require('replay-state')
                     if state['code'] not in ('running', 'finished'):

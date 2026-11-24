@@ -518,6 +518,8 @@ python3 tools/frond-run.py --session ready.frond \
 | `--output DIR` | New result folder, mode 0700. It must not exist. |
 | `--install FILE` | PRC or PDB. Repeat; installed in order. A reset request resets and waits again before the next one. |
 | `--app NAME` | Exact Palm database name to launch (case matters). |
+| `--engine fast\|exact` | CPU engine for the core. Default `exact` (the interpreter); `fast` is the JIT where the device has one. The engine and time base are printed to stderr at start and kept in `result.json` as `engine` and `time_base`. |
+| `--emulated-time` | Time the replay (waits, taps, screenshots) and `--run-for` in guest time. Default is host time, which on a slow Exact run reads as a stall. `--settle` and the other timeouts stay host time. |
 | `--resume-app` | Continue the saved app without launching it. Use one of `--app` or `--resume-app`. |
 | `--replay FILE` | Input replay. Its `snapshot` paths are replaced by `replay-snapshot-NNN.png` in the output folder. |
 | `--screenshot MS` | Capture at this many ms after the replay starts. Repeat. Files are `screenshot-NNN.png`. |
