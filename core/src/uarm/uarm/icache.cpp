@@ -50,8 +50,11 @@ void icacheArm920Control(struct icache* ic, bool enabled, bool roundRobin) {
     ic->arm920RoundRobin = roundRobin;
 }
 
-bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privileged,
-                       uint_fast8_t* fsr, uint32_t* word) {
+// *from is the line the word was read from, or null when it came from elsewhere (prefetch with no line,
+// continuation, lean word, uncached read).
+static FORCE_INLINE bool icachePrvArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privileged,
+                                              uint_fast8_t* fsr, uint32_t* word, icache::Arm920Line** from) {
+    *from = nullptr;
     if ((size != 2 && size != 4) || (va & (size - 1))) {
         *fsr = 3;
         return false;
@@ -60,6 +63,7 @@ bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privi
         ic->arm920Prefetched = false;
         if (va == ic->arm920PrefetchVa && size == ic->arm920PrefetchSize && privileged == ic->arm920PrefetchPrivileged) {
             *word = ic->arm920PrefetchWord;
+            *from = ic->arm920PrefetchLine;
             return true;
         }
     }
@@ -97,16 +101,27 @@ bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privi
         return false;
     }
     const unsigned segment = (va >> 5) & 7;
-    const auto& recent = ic->arm920Lines[segment][ic->arm920Recent[segment] & 63];
+    auto& recent = ic->arm920Lines[segment][ic->arm920Recent[segment] & 63];
     if (recent.valid && recent.base == maskLine(va)) {
         *word = extract(recent.words[(va & 31) / 4]);
+        *from = &recent;
+        return true;
+    }
+    uint8_t& hint = ic->arm920Hint[(va >> 5) & 2047];
+    auto& hinted = ic->arm920Lines[segment][hint & 63];
+    if (hinted.valid && hinted.base == maskLine(va)) {
+        ic->arm920Recent[segment] = uint8_t(hint & 63);
+        *word = extract(hinted.words[(va & 31) / 4]);
+        *from = &hinted;
         return true;
     }
     for (unsigned index = 0; index < 64; ++index) {
-        const auto& line = ic->arm920Lines[segment][index];
+        auto& line = ic->arm920Lines[segment][index];
         if (line.valid && line.base == maskLine(va)) {
             ic->arm920Recent[segment] = uint8_t(index);
+            hint = uint8_t(index);
             *word = extract(line.words[(va & 31) / 4]);
+            *from = &line;
             return true;
         }
     }
@@ -131,16 +146,26 @@ bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privi
     line.base = maskLine(va);
     std::memcpy(line.words, words, sizeof(words));
     line.valid = true;
+    line.armDecoded = 0;
+    line.thumbDecoded = 0;
     ic->arm920Recent[segment] = uint8_t(victim);
+    hint = uint8_t(victim);
     ic->epoch++;
     *word = extract(words[(va & 31) / 4]);
+    *from = &line;
     return true;
+}
+
+bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privileged,
+                       uint_fast8_t* fsr, uint32_t* word) {
+    icache::Arm920Line* from;
+    return icachePrvArm920Fetch(ic, va, size, privileged, fsr, word, &from);
 }
 
 bool icacheArm920Prefetch(struct icache* ic, uint32_t va, unsigned size, bool privileged,
                           uint_fast8_t* fsr, uint32_t* word) {
     ic->arm920Prefetched = false;
-    if (!icacheArm920Fetch(ic, va, size, privileged, fsr, word)) return false;
+    if (!icachePrvArm920Fetch(ic, va, size, privileged, fsr, word, &ic->arm920PrefetchLine)) return false;
     ic->arm920Prefetched = true;
     ic->arm920PrefetchVa = va;
     ic->arm920PrefetchSize = uint8_t(size);
@@ -214,7 +239,10 @@ void icacheArm920Apply(struct icache* ic, const Arm920SavedState& s) {
             to.base = from.base;
             std::memcpy(to.words, from.words, sizeof(to.words));
             to.valid = from.valid;
+            to.armDecoded = 0;
+            to.thumbDecoded = 0;
         }
+    ic->arm920Prefetched = false;
     ic->epoch++;
 }
 
@@ -303,6 +331,10 @@ void icacheSetCost(struct icache* ic, bool on, uint8_t core) {
         m.cost = uint8_t(on ? cost::armCost(0, cost::Core(core)) : 1);
     }
     ic->lastCost = ICACHE_COST_ONE;
+    for (auto& m : ic->arm920DecodedArm) m.valid = false;
+    for (auto& m : ic->arm920DecodedThumb) m.valid = false;
+    for (auto& segment : ic->arm920Lines)
+        for (auto& line : segment) line.armDecoded = line.thumbDecoded = 0;
     icacheInval(ic);  // lines hold slots charged under the old setting
 }
 
@@ -511,7 +543,8 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
         uint32_t word;
         if (ic->arm920ContinuationCount && (va & ~3u) != ic->arm920ContinuationPc)
             icacheArm920Branch(ic);
-        if (!icacheArm920Fetch(ic, va, sz, privileged, fsrP, &word)) return false;
+        icache::Arm920Line* from;
+        if (!icachePrvArm920Fetch(ic, va, sz, privileged, fsrP, &word, &from)) return false;
         if (ic->arm920ContinuationCount) {
             --ic->arm920ContinuationCount;
             if (ic->arm920ContinuationCount) {
@@ -520,11 +553,53 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
             }
             ic->arm920ContinuationPc += 4;
         }
+        if (from) {
+            // The line's words are what the fetch read, so its decode is this word's.
+            if constexpr (sz == 2) {
+                const unsigned slot = (va & 31) / 2;
+                if (!(from->thumbDecoded & (1u << slot))) {
+                    from->thumbExec[slot] = cpuDecodeThumb<msys>(word, from->thumbInstr[slot]);
+                    from->thumbCost[slot] = icachePrvCost<2>(ic, word);
+                    from->thumbDecoded |= uint16_t(1u << slot);
+                }
+                instr = from->thumbInstr[slot];
+                decoded = from->thumbExec[slot];
+                ic->lastCost = from->thumbCost[slot];
+            } else {
+                const unsigned slot = (va & 31) / 4;
+                if (!(from->armDecoded & (1u << slot))) {
+                    from->armExec[slot] = cpuDecodeArm<msys>(word);
+                    from->armCost[slot] = icachePrvCost<4>(ic, word);
+                    from->armDecoded |= uint8_t(1u << slot);
+                }
+                instr = word;
+                decoded = from->armExec[slot];
+                ic->lastCost = from->armCost[slot];
+            }
+            return true;
+        }
         if constexpr (sz == 2) {
-            decoded = cpuDecodeThumb<msys>(word, instr);
-            ic->lastCost = icachePrvCost<2>(ic, word);
+            auto& m = ic->arm920DecodedThumb[(word ^ (word >> 11)) & 2047];
+            if (!m.valid || m.word != word) {
+                m.decoded = cpuDecodeThumb<msys>(word, m.instr);
+                m.cost = icachePrvCost<2>(ic, word);
+                m.word = word;
+                m.valid = true;
+            }
+            instr = m.instr;
+            decoded = m.decoded;
+            ic->lastCost = m.cost;
         } else {
-            icacheDecodeFetch<msys, sz>(ic, word, va, instr, decoded);
+            auto& m = ic->arm920DecodedArm[(word ^ (word >> 12) ^ (word >> 24)) & 4095];
+            if (!m.valid || m.word != word) {
+                m.decoded = cpuDecodeArm<msys>(word);
+                m.cost = icachePrvCost<4>(ic, word);
+                m.word = word;
+                m.valid = true;
+            }
+            instr = word;
+            decoded = m.decoded;
+            ic->lastCost = m.cost;
         }
         return true;
     }

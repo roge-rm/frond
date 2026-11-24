@@ -23,6 +23,9 @@ struct Arm920DataCache {
     // never holds two valid lines with one address, as a line is only filled after a search found none, so the
     // order lines are looked at in doesn't change what is found. Not saved.
     uint8_t recent[8][4];
+    // The index a line with bits 15:5 of its address was last found or filled at, looked at after recent and
+    // before the whole segment (bits 7:5 are the segment). Only a hint: it is checked against the line. Not saved.
+    uint8_t hint[2048];
     ArmMem* mem;
     Arm920MemoryCheck check;
     void* context;

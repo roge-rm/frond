@@ -84,9 +84,13 @@ Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsi
         unsigned found = 64;
         for (unsigned r = 0; r < 4; ++r)
             if (segment[last[r] & 63].valid && segment[last[r] & 63].va == base) { found = last[r] & 63; break; }
-        if (found == 64)
-            for (unsigned index = 0; index < 64; ++index)
-                if (segment[index].valid && segment[index].va == base) { found = index; break; }
+        if (found == 64) {
+            uint8_t& h = hint[(va >> 5) & 2047];
+            if (segment[h & 63].valid && segment[h & 63].va == base) found = h & 63;
+            else
+                for (unsigned index = 0; index < 64; ++index)
+                    if (segment[index].valid && segment[index].va == base) { found = index; h = uint8_t(index); break; }
+        }
         if (found != 64) {
             hit = &segment[found];
             remember(last, uint8_t(found));
@@ -163,6 +167,7 @@ Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsi
         line.bufferable = bufferable;
         line.valid = true;
         remember(recent[segment], uint8_t(index));
+        hint[(va >> 5) & 2047] = uint8_t(index);
         if (roundRobin) ++victim[segment]; else random = nextRandom;
         hit = &line;
     }

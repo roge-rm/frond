@@ -65,19 +65,37 @@ struct icache {
     uint8_t arm920ContinuationCount;
     uint32_t arm920Random;
     uint8_t arm920Victim[8];
-    struct {
+    struct Arm920Line {
         uint32_t base;
         uint32_t words[8];
         bool valid;
+        // Exact's decode of the words, filled at a slot's first fetch (bit set in armDecoded or thumbDecoded) and
+        // dropped when the words change (fill, load). Not saved.
+        uint8_t armDecoded;
+        uint16_t thumbDecoded;
+        uint16_t armCost[8], thumbCost[16];
+        uint32_t armExec[8], thumbExec[16], thumbInstr[16];
     } arm920Lines[8][64];
     // The line each segment's last fetch hit, looked at first. A segment never holds two valid lines
     // with one base, as a line is only filled after a search found none. Not saved.
     uint8_t arm920Recent[8];
+    // The index a line with bits 15:5 of its base was last found or filled at, looked at after arm920Recent and
+    // before the whole segment (bits 7:5 are the segment). Only a hint: it is checked against the line. Not saved.
+    uint8_t arm920Hint[2048];
+    // ARM920T: decode results by instruction word (ARM) or halfword (Thumb), direct mapped. The decode and the
+    // charge slot only depend on the word and the cost setting; icacheSetCost drops them. Not saved.
+    struct Arm920Decoded {
+        uint32_t word, instr, decoded;
+        uint16_t cost;
+        bool valid;
+    } arm920DecodedArm[4096], arm920DecodedThumb[2048];
     // A fetch runStep made just before the step (cpuPrefetchInstruction), answered again by the step's own
     // fetch of the same VA, size and mode with nothing run between. Not saved.
     bool arm920Prefetched, arm920PrefetchPrivileged;
     uint8_t arm920PrefetchSize;
     uint32_t arm920PrefetchVa, arm920PrefetchWord;
+    // The line the prefetched word came from, or null when it came from outside the lines.
+    Arm920Line* arm920PrefetchLine;
     // ARM920T Fast: answers a fetch from the lean decode cache or a plain host page, or returns false for
     // the model to read it uncached. While set the model fills no lines. Not saved.
     bool (*arm920LeanWord)(void* ctx, uint32_t va, unsigned size, bool privileged, uint32_t* word);
