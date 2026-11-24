@@ -59,6 +59,9 @@ struct SteppedInstruction {
     bool plain;
 };
 SteppedInstruction stepped[3]{};
+// runStep's bootstrapInstructionChecked answers for words where only the word matters, direct mapped.
+struct CheckMemo { uint32_t word; bool valid, result; };
+thread_local CheckMemo checkMemo[4096]{};
 uint32_t lastBusAddress = 0;
 uint64_t leanRetired = 0;  // instructions the Fast engine ran on the lean path since the machine was made
 uint64_t leanTimerReads = 0;  // timer count reads answered on the lean path, for tests
@@ -2047,11 +2050,17 @@ struct Probe {
     // the rounds up to the span's end (less a few) add the round's instructions, work, bus accesses and cycles at
     // once; the cycles wait in deferredCycles as the step's own do. The last rounds of the span run as steps and see
     // the change. hard is the most instructions the slice has left. Returns the instructions passed.
-    uint64_t skipUartPollStepped(uint64_t hard) {
-        // Runs after every step: the checks on the probe's own state go first, the CPU calls after them.
+    // The checks skipUartPollStepped starts with, on the probe's own state alone: false when it would pass nothing.
+    bool uartPollCandidate() const {
         if (!uartPollSkip || failed || graphicsWireStatus != Imx1BootstrapAccess::ok || blPrefix || pcStop.armed ||
             !quietCycles || linesPending || deferredHclk || retired < 3)
-            return 0;
+            return false;
+        const uint32_t w2 = stepped[(retired - 1) % 3].instruction;
+        return w2 == 0x0afffffcu || w2 == 0x1afffffcu;
+    }
+    uint64_t skipUartPollStepped(uint64_t hard) {
+        // Runs after every step: the checks on the probe's own state go first, the CPU calls after them.
+        if (!uartPollCandidate()) return 0;
         const uint32_t* r = cpuGetRegisters(cpu);
         const uint32_t pc = r[15];
         const SteppedInstruction& load = stepped[(retired - 3) % 3];
@@ -2884,7 +2893,7 @@ struct Probe {
     }
 };
 
-bool condition(uint32_t instruction, uint32_t cpsr) {
+constexpr bool conditionSwitch(uint32_t instruction, uint32_t cpsr) {
     const bool n = cpsr & ARM_SR_N, z = cpsr & ARM_SR_Z;
     const bool c = cpsr & ARM_SR_C, v = cpsr & ARM_SR_V;
     switch (instruction >> 28) {
@@ -2897,6 +2906,17 @@ bool condition(uint32_t instruction, uint32_t cpsr) {
         case 12: return !z && n == v; case 13: return z || n != v;
         case 14: return true; default: return false;
     }
+}
+// conditionSwitch as a table: bit NZCV of entry cond.
+constexpr auto conditionTable = [] {
+    struct { uint16_t passes[16]; } t{};
+    for (uint32_t cond = 0; cond < 16; ++cond)
+        for (uint32_t flags = 0; flags < 16; ++flags)
+            if (conditionSwitch(cond << 28, flags << 28)) t.passes[cond] |= uint16_t(1u << flags);
+    return t;
+}();
+inline bool condition(uint32_t instruction, uint32_t cpsr) {
+    return (conditionTable.passes[instruction >> 28] >> (cpsr >> 28)) & 1;
 }
 
 bool softwareInterrupt(uint32_t i, bool thumb) {
@@ -2928,6 +2948,13 @@ bool guestEntry(ArmCpu* cpu, const Imx1ProbeTrace& t, uint64_t before, bool unde
 bool armMode(uint32_t mode) {
     return mode == 0x10 || mode == 0x11 || mode == 0x12 || mode == 0x13 ||
            mode == 0x17 || mode == 0x1b || mode == 0x1f;
+}
+// Whether bootstrapInstructionChecked's answer for i depends on the registers, CPSR, SPSR or alignmentFaults:
+// LDM and STM with S, and data processing space words with Rd = PC or bits 7 and 4 set (halfword transfers,
+// multiplies, swaps). For every other word it depends on i alone.
+inline bool bootstrapCheckUsesState(uint32_t i) {
+    return (i & 0x0e400000) == 0x08400000 ||
+           ((i & 0x0c000000) == 0 && (((i >> 12) & 15) == 15 || (i & 0x90) == 0x90));
 }
 // alignmentFaults: CP15 c1 A is set and the guest takes aborts. A misaligned word or halfword load or store
 // then takes an alignment data abort on the ARM920T (DDI0151C 3.6), which the CPU model raises, so it runs.
@@ -3433,15 +3460,25 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     if (p->observer) p->observer(p->observerContext, t);
     const bool thumb = t.instructionSize == 2;
-    const bool alignmentFaults = p->guestExceptions && cpuArm920AlignmentFaults(p->cpu);
+    // The ARM condition against the CPSR before the step, which every check below asks about.
+    const bool passes = condition(t.instruction, t.cpsr);
+    const auto alignmentFaults = [p] { return p->guestExceptions && cpuArm920AlignmentFaults(p->cpu); };
+    // bootstrapInstructionChecked, remembered by word where its answer depends on the word alone.
+    const auto armChecked = [&] {
+        const uint32_t i = t.instruction;
+        if (bootstrapCheckUsesState(i))
+            return bootstrapInstructionChecked(i, cpuGetRegisters(p->cpu), t.cpsr,
+                                               cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR), alignmentFaults());
+        auto& m = checkMemo[(i ^ (i >> 12) ^ (i >> 24)) & (std::size(checkMemo) - 1)];
+        if (!m.valid || m.word != i) m = {i, true, bootstrapInstructionChecked(i, nullptr, 0, 0, false)};
+        return m.result;
+    };
     const bool refused = !fetchAbort && (p->prefixCapacityExceeded ||
         (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
         (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc,
-                                 alignmentFaults) :
+                                 alignmentFaults()) :
          (t.instruction >> 28 == 15 && !neverExecutedPld(t.instruction)) ||
-         (condition(t.instruction, t.cpsr) &&
-          !bootstrapInstructionChecked(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
-                                       cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR), alignmentFaults))));
+         (passes && !armChecked())));
     // A refused ARM instruction passed its condition, so an undefined one here takes the exception.
     const bool undefined = refused && p->guestExceptions && !p->prefixCapacityExceeded && !p->blPrefix &&
                            undefinedInstruction(t.instruction, thumb);
@@ -3450,7 +3487,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         return false;
     }
     // Validate the prospective clock before the CP15 instruction can change state.
-    if (!thumb && p->options.bootstrapPeripherals && condition(t.instruction, t.cpsr) &&
+    if (!thumb && p->options.bootstrapPeripherals && passes &&
         (t.instruction & 0x0fff0fff) == 0x0e010f10 &&
         !p->peripherals.cpuClockModeSupported(t.operand >> 30, p->options.assumeMpllSettled)) {
         p->result.stop = Imx1ProbeStop::unsupportedCp15;
@@ -3484,7 +3521,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         return false;
     }
     const bool softwareEntry = softwareInterrupt(t.instruction, thumb) &&
-                               (thumb || condition(t.instruction, t.cpsr));
+                               (thumb || passes);
     const bool entered = cpuExceptionSequence(p->cpu) != exceptions;
     const bool guestTaken = entered && p->guestExceptions &&
                             !(!fetchAbort && !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10) &&
@@ -3509,7 +3546,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     p->blPrefix = thumb && (t.instruction & 0xf800) == 0xf000;
     p->blNextPc = t.pc + 2;
-    const bool contextReturn = !thumb && condition(t.instruction, t.cpsr) &&
+    const bool contextReturn = !thumb && passes &&
         (((t.instruction & 0x0ffffff0) == 0x01b0f000) ||
          ((t.instruction & 0x0fffffff) == 0x025ef004) ||
          ((t.instruction & 0x0e508000) == 0x08508000));
@@ -3597,7 +3634,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                               !p->options.diagnosticSnapshot && !p->options.busObserver;
         for (uint32_t slice = 0; slice < retiredBudget; ++slice) {
             if (!runStep(p, idleHclkLimit)) break;
-            if (!pollSkip || slice + 2 >= retiredBudget) continue;
+            if (!pollSkip || slice + 2 >= retiredBudget || !p->uartPollCandidate()) continue;
             // The slice always ends on a step.
             uint64_t hard = retiredBudget - slice - 2;
             if (p->bounds) {
