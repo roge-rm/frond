@@ -149,12 +149,13 @@ class SocIMX1 : public SoC {
     bool CradleButtonDown() const override { return cradleDown; }
     bool SetCradleButton(bool down) override;
     // The cradle: A11 (attach detect) and A1 high and the accessory ID line at the bottom of its ADC range.
-    // It's in while the user put it in or the USB bridge's cable is in; each takes out only its own.
+    // It's in only while the user put it in: the USB cable plugs into the cradle, so without the cradle the
+    // Zodiac sees neither the attach pins nor the bus.
     bool CradleSupported() const override { return true; }
-    bool CradleAttached() const override { return cradle || usbCable; }
+    bool CradleAttached() const override { return cradle; }
     bool CradleSetting() const override { return cradle; }
     bool SetCradle(bool attached) override;
-    // The USB bridge's cable, which comes in through the cradle.
+    // The USB bridge's cable, plugged into the cradle. It reaches the Zodiac only with the cradle in.
     bool UsbCableAttached() const { return usbCable; }
     bool SetUsbCable(bool attached);
     // The accessory inputs the machine has now, for tests: A11 and A1 high and the aux ADC sample.
@@ -174,7 +175,7 @@ class SocIMX1 : public SoC {
     void BeginSerialCheckpoint() override { ++serialCheckpoints; }
     void EndSerialCheckpoint() override { if (serialCheckpoints) --serialCheckpoints; }
     // The W4200 USB function as a UsbDevicePort, for UsbHostBridge. The bus comes through the cradle, so the
-    // bridge's cable puts the cradle in (SetUsbCable). Hooks tick between run slices on GetTime's clock; while
+    // bridge's cable counts only with the cradle in (SetUsbCable). Hooks tick between run slices on GetTime's clock; while
     // the host has work due, an idle guest's clock runs on to it instead of waiting.
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }

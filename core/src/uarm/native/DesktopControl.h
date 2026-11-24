@@ -698,6 +698,9 @@ class DesktopControl {
                 return {true, "network", "Tap Network HotSync on the device."};
             }
             if (!path.empty() && path != "local") return {false, "argument", "Use local or network."};
+            // The cable and the HotSync button are on the cradle: out of it there is nothing to sync over.
+            if (ctx.soc->CradleSupported() && !ctx.soc->CradleAttached())
+                return {false, "cradle", "Put the device in the cradle first (Cradle attached), or use network HotSync."};
             if (path == "local") frondSync::SyncManager::Get().SetNetworkEnabled(false);
             const HostSerial::Config config{Kind::syncManager, 0, {}};
             const bool usbFree = caps.usb && ctx.usb && !UsbHostBridge::NetworkLink(ctx.soc) &&

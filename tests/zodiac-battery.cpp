@@ -220,13 +220,14 @@ void machine() {
         assert(usb.Start(soc, {HostSerial::Kind::off, 0, {}}, error));
         run(usb);
         assert(!soc->UsbCableAttached() && cradleIn());
-        // With no cradle of the user's, the cable alone puts it in and Stop takes it out.
+        // With no cradle of the user's, the cable plugs into nothing: the Zodiac sees no cradle pins.
         assert(soc->SetCradle(false) && !soc->CradleAttached() && !soc->AccessoryPinsHigh());
         assert(usb.Start(soc, {HostSerial::Kind::pty, 0, {}}, error));
         run(usb);
-        assert(soc->UsbCableAttached() && cradleIn() && !soc->CradleSetting());
-        assert(soc->SetCradle(true) && soc->CradleSetting() && cradleIn());
-        assert(soc->SetCradle(false) && !soc->CradleSetting() && cradleIn());
+        assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+        // Putting the Zodiac in the cradle brings the cable's bus with it; taking it out drops both.
+        assert(soc->SetCradle(true) && cradleIn());
+        assert(soc->SetCradle(false) && !soc->CradleAttached() && !soc->AccessoryPinsHigh());
         usb.Stop();
         assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
     }
