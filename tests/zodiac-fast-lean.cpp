@@ -18,6 +18,7 @@
 #include "zodiac-machine-state.cpp"
 
 #include <string>
+#include "vSD.h"
 
 namespace {
 // 200 rounds of: load [r2], add it to reg.
@@ -1262,6 +1263,108 @@ void jitCardWaits() {
     assert(ahead >= (fast.run.result.registers[8] + fast.run.result.registers[9]) / 2);
 }
 
+// A card in the virtual slot, put in the transfer state host side, answers CMD13 20 times; each round reads its R1
+// from RES_FIFO, three halfwords. With every lookahead card read in generated code charged first (the path a read
+// past a card event takes), each read takes one halfword, so Fast reads Exact's responses.
+std::vector<uint8_t> cardDisk(64 * 512);
+bool cardDiskRead(uint32_t sector, void* buf) {
+    if (sector >= 64) return false;
+    std::memcpy(buf, cardDisk.data() + sector * 512, 512);
+    return true;
+}
+bool cardDiskWrite(uint32_t sector, const void* buf) {
+    if (sector >= 64) return false;
+    std::memcpy(cardDisk.data() + sector * 512, buf, 512);
+    return true;
+}
+Outcome cardResponses(const std::vector<uint32_t>& words, VSD* card, bool fast) {
+    auto o = graphicsOptions(false);
+    o.ramMiB = 32;
+    o.mmcsdEmptySlot = true;
+    o.gpioBInputKnown = true; o.gpioBInput = imx1MmcsdCardDetectPin;  // card detect high: no card yet
+    Imx1ProbeResult error{};
+    Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
+                                       Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
+    assert(m);
+    if (fast) assert(imx1MachineSetFastEngine(m, true) && imx1MachineFastEngine(m));
+    assert(imx1MachineSetMmcsdCard(m, card) == Imx1BootstrapAccess::ok);
+    return finish(m);
+}
+VSD* transferCard(uint32_t& rca) {
+    VSD* card = vsdInit(cardDiskRead, cardDiskWrite, 64);
+    assert(card);
+    uint8_t reply[17]{};
+    vsdCommand(card, 0, 0, reply);
+    for (unsigned i = 0; i < 100; ++i) {
+        vsdCommand(card, 55, 0, reply);
+        vsdCommand(card, 41, 0x00ff8000, reply);
+        if (reply[1] & 0x80) break;
+    }
+    vsdCommand(card, 2, 0, reply);
+    vsdCommand(card, 3, 0, reply);
+    rca = uint32_t(reply[1]) << 8 | reply[2];
+    vsdCommand(card, 7, rca << 16, reply);
+    return card;
+}
+void jitCardResponses() {
+    uint32_t rca = 0;
+    VSD* exactCard = transferCard(rca);
+    VSD* fastCard = transferCard(rca);
+    assert(rca);
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00210000, 0xffffc400);                      // AIPI2 PSR0 and PSR1: MMCSD on the 32-bit bus
+    g.store(0x00210004, 0xfffffbff);
+    g.store(0x00214000, 0x08);                            // STR_STP_CLK: reset, then 8 stop writes to get ready
+    g.store(0x00214000, 0x0d);
+    for (unsigned i = 0; i < 8; ++i) g.store(0x00214000, 0x05);
+    g.store(0x00214024, 0x7f);                            // INT_MASK: all masked
+    std::vector<uint32_t> words;
+    load(words, 0, 0x00214000); load(words, 2, 1); load(words, 3, 20); load(words, 4, 13); load(words, 6, 6);
+    load(words, 7, 5); load(words, 10, 0); load(words, 11, rca); load(words, 12, 0);
+    const auto branch = [&](uint32_t condition, size_t target) {
+        words.push_back(condition | ((uint32_t(target) - uint32_t(words.size()) - 2) & 0xffffff));
+    };
+    const size_t top = words.size();
+    words.push_back(0xe580200c);                          // loop: str r2, [r0, #0x0c] (CMD_DAT_CONT: R1)
+    words.push_back(0xe5804028);                          // str r4, [r0, #0x28] (CMD 13)
+    words.push_back(0xe580b02c);                          // str r11, [r0, #0x2c] (ARGH: RCA)
+    words.push_back(0xe580c030);                          // str r12, [r0, #0x30] (ARGL)
+    words.push_back(0xe5806000);                          // str r6, [r0]: start the command
+    const size_t command = words.size();
+    words.push_back(0xe5905004);                          // ldr r5, [r0, #4] (STATUS)
+    words.push_back(0xe3150a02);                          // tst r5, #0x2000 (END_CMD_RES)
+    branch(0x0a000000, command);                          // beq
+    for (unsigned i = 0; i < 3; ++i) {
+        words.push_back(0xe5905034);                      // ldr r5, [r0, #0x34] (RES_FIFO)
+        words.push_back(0xe08aa08a);                      // add r10, r10, r10, lsl #1
+        words.push_back(0xe08aa005);                      // add r10, r10, r5
+    }
+    words.push_back(0xe5807000);                          // str r7, [r0]: stop the clock
+    const size_t stop = words.size();
+    words.push_back(0xe5905004);                          // ldr r5, [r0, #4] (STATUS)
+    words.push_back(0xe3150c01);                          // tst r5, #0x100 (CLK_RUN)
+    branch(0x1a000000, stop);                             // bne
+    words.push_back(0xe2533001);                          // subs r3, r3, #1
+    branch(0x1a000000, top);                              // bne loop
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = cardResponses(g.words, exactCard, false);
+    imx1SetChargedCardReads(true);
+    const uint64_t charged = imx1MachineJitChargedReads(nullptr);
+    const auto fast = cardResponses(g.words, fastCard, true);
+    const uint64_t reads = imx1MachineJitChargedReads(nullptr) - charged;
+    imx1SetChargedCardReads(false);
+    print("jit card responses exact", exact); print("jit card responses charged", fast);
+    std::printf("jit card responses: sum %08x against %08x, %llu card reads charged in generated code\n",
+                fast.run.result.registers[10], exact.run.result.registers[10], (unsigned long long)reads);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[3] == 0 && exact.run.result.registers[10]);
+    assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.registers[3] == 0);
+    assert(fast.run.result.registers[10] == exact.run.result.registers[10]);
+    assert(reads >= 20);
+}
+
 // A graphics memory store and 62 other instructions a round while timer 1's compare IRQ comes due, with the display
 // off so the quiet spans are long. Each store's wait clocks count against the JIT run's budget with the cycles the
 // run has already done, so the IRQ comes at Exact's round, not up to a whole run late.
@@ -2475,6 +2578,7 @@ void jitLong() {
     jitBoardWrites();
     jitCardWrites();
     jitCardWaits();
+    jitCardResponses();
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();

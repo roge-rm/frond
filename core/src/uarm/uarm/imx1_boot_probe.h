@@ -246,6 +246,8 @@ uint64_t imx1MachineLeanStatusReads(const Imx1Machine*);
 uint64_t imx1MachineJitCardLatches(const Imx1Machine*);
 // MMCSD and DMA register reads past a card event the lookahead ran over, charged in generated code.
 uint64_t imx1MachineJitChargedReads(const Imx1Machine*);
+// For tests: every such read with the lookahead on is charged first, as one past a card event is.
+void imx1SetChargedCardReads(bool on);
 // Ring pointer writes Fast blocks took in generated code with the run's cycles charged first (jitChargedWrite).
 uint64_t imx1MachineJitChargedWrites(const Imx1Machine*);
 uint64_t imx1MachineDelaySkips(const Imx1Machine*);

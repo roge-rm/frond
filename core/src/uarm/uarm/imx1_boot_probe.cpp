@@ -126,6 +126,8 @@ bool cardLookahead = [] {
     return !(v && *v && !std::strcmp(v, "0"));
 }();
 uint64_t leanStatusReads = 0, jitCardLatches = 0, jitChargedReads = 0;  // for tests
+// Every lookahead MMCSD and DMA register read in generated code charged first, as one past a card event is; for tests.
+bool chargeCardReads = false;
 // Fast blocks: a quiet span can run past queued graphics batches' completions to the last one's (spanCrosses), where
 // the run reads nothing those completions change: the ring and status registers, graphics memory and the option word.
 // The fills, the read pointer and the option word are then applied at the span's charge, in order, and the batches'
@@ -2110,17 +2112,21 @@ struct Probe {
     // timer count is, and an MMCSD or DMA register read past a data phase's end goes to the step, which charges first.
     __attribute__((noinline)) bool leanBoardRead(uint32_t pa, uint32_t ran, uint32_t& value) {
         if (quietCycles <= ran || failed || graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
-        if (peripherals.access(pa, 4, false, value, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok) return false;
-        if (peripherals.mmcsdLookaheadOn() &&
-            ((pa >= 0x00214000 && pa <= 0x00214034) || (pa >= 0x00209000 && pa < 0x00209300))) {
-            uint32_t status;
+        // Every check comes before the access: a RES_FIFO read takes a response halfword, so a read refused after it
+        // would take one twice.
+        const bool card = peripherals.mmcsdLookaheadOn() &&
+                          ((pa >= 0x00214000 && pa <= 0x00214034) || (pa >= 0x00209000 && pa < 0x00209300));
+        uint32_t status = 0;
+        if (card) {
             if (quietCycles <= uint64_t(ran) + leanCs5.waitCost) return false;
-            if (!peripherals.mmcsdStatusAfter(deferredCycles + ran, quietMode, deferredHclk + leanCs5.waitClocks, status))
+            if (chargeCardReads ||
+                !peripherals.mmcsdStatusAfter(deferredCycles + ran, quietMode, deferredHclk + leanCs5.waitClocks, status))
                 return inJit && jitChargedRead(pa, ran, value);
-            if (pa == 0x00214004) {
-                value = status;
-                ++leanStatusReads;
-            }
+        }
+        if (peripherals.access(pa, 4, false, value, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok) return false;
+        if (card && pa == 0x00214004) {
+            value = status;
+            ++leanStatusReads;
         }
         ++leanBoardReads;
         return true;
@@ -3113,8 +3119,10 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
     for (auto& e : stepped) e.step = UINT64_MAX;
     // Crossing starts afresh each slice, so a state load runs as the slice after a save would.
     spanCrosses = crossBlocked = false;
-    // The card lookahead is Fast's alone (a state load brings a board with it off).
-    p->peripherals.setMmcsdLookahead(cardLookahead && p->fastEngine && p->options.bootstrapPeripherals);
+    // The card lookahead is for plain Fast runs alone, not stepped ones with an observer (a state load brings a board
+    // with it off).
+    p->peripherals.setMmcsdLookahead(cardLookahead && p->fastEngine && p->options.bootstrapPeripherals &&
+                                     !p->observer && !p->options.diagnosticSnapshot && !p->options.busObserver);
     if (!p->fastEngine || !p->options.bootstrapPeripherals || p->observer || p->options.diagnosticSnapshot ||
         p->options.busObserver) {
         // Exact: UART status polls pass at once (skipUartPollStepped). Not with an observer, which sees every step.
@@ -3377,6 +3385,7 @@ uint64_t imx1MachineCardPollSkips(const Imx1Machine*) { return cardPollSkips; }
 uint64_t imx1MachineCardPollRounds(const Imx1Machine*) { return cardPollRounds; }
 void imx1SetCardPollSkip(bool skip) { cardPollSkip = skip; }
 void imx1SetCardLookahead(bool on) { cardLookahead = on; }
+void imx1SetChargedCardReads(bool on) { chargeCardReads = on; }
 uint64_t imx1MachineLeanStatusReads(const Imx1Machine*) { return leanStatusReads; }
 uint64_t imx1MachineJitCardLatches(const Imx1Machine*) { return jitCardLatches; }
 uint64_t imx1MachineJitChargedReads(const Imx1Machine*) { return jitChargedReads; }
