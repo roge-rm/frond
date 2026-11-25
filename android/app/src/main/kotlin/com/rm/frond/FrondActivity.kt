@@ -695,6 +695,7 @@ open class FrondActivity : SDLActivity() {
     private val rightStick = RightStickAxes()
     private val captureSticks = StickKeys()
     private val captureRight = RightStickAxes()
+    private val captureHat = HatKeys()
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
         val editor = bar.controls
         if (editor != null && event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
@@ -706,6 +707,8 @@ open class FrondActivity : SDLActivity() {
             captureSticks.update(event.deviceId, ControllerMap.STICK_RIGHT,
                 captureRight.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
                 captureRight.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)), assign)
+            captureHat.update(event.deviceId, event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
+                event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y), assign)
             if (capture) return true
         }
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {

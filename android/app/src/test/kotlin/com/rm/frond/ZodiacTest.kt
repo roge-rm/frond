@@ -260,6 +260,30 @@ class ZodiacTest {
         assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_X, -32768)), events)
     }
 
+    @Test fun aReboundDpadDirectionIsSavedAndUsed() {
+        // A hat d-pad is assigned while a button waits, as the d-pad key.
+        val assigned = mutableListOf<Pair<Int, Boolean>>()
+        val hat = HatKeys()
+        hat.update(1, 0f, -1f) { key, down -> assigned += key to down }
+        hat.update(1, 0f, -1f) { key, down -> assigned += key to down }
+        hat.update(1, 0f, 0f) { key, down -> assigned += key to down }
+        assertEquals(listOf(KeyEvent.KEYCODE_DPAD_UP to true, KeyEvent.KEYCODE_DPAD_UP to false), assigned)
+
+        // Up goes to Action 2, the key comes off Stick up, and the saved map keeps it.
+        val map = ControllerMap.defaults(zodiac).clear(PalmButton.UP).assign(PalmButton.APP2, KeyEvent.KEYCODE_DPAD_UP)
+        assertEquals(map, ControllerMap.decode(map.encode(), zodiac))
+        assertEquals(listOf(KeyEvent.KEYCODE_DPAD_UP), map.keysFor(PalmButton.APP2).filter { it == KeyEvent.KEYCODE_DPAD_UP })
+        assertTrue(map.keysFor(PalmButton.UP).isEmpty())
+
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(map) { events += it }
+        pad.axes(1, 0f, 0f, 0f, -1f, 0f, 0f, 0f, 0f)
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_B, true)), events)
+        events.clear()
+        pad.axes(1, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_B, false)), events)
+    }
+
     @Test fun theRightStickPressesWhatTheMapGivesIt() {
         val events = mutableListOf<ZodiacPad.Event>()
         val map = ControllerMap.defaults(zodiac)

@@ -513,6 +513,7 @@ class HomeActivity : ComponentActivity() {
     // middle is assigned, so a stick already held over doesn't take the next button too.
     private val captureSticks = StickKeys()
     private val captureRight = RightStickAxes()
+    private val captureHat = HatKeys()
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             val capture = model.controls?.capturing != null && model.settingsOpen
@@ -522,6 +523,8 @@ class HomeActivity : ComponentActivity() {
             captureSticks.update(event.deviceId, ControllerMap.STICK_RIGHT,
                 captureRight.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
                 captureRight.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)), assign)
+            captureHat.update(event.deviceId, event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
+                event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y), assign)
             if (capture) return true
         }
         return super.dispatchGenericMotionEvent(event)

@@ -420,6 +420,28 @@ class StickKeys {
     fun forgetAll() = held.clear()
 }
 
+// The hat axes (a controller's d-pad on many devices) as the d-pad keys, for assigning while a button
+// waits: the hat gives no key event of its own once the sheet takes its motion events. Call from the UI thread.
+class HatKeys {
+    private val held = mutableMapOf<Int, MutableSet<Int>>()
+
+    // Calls change for each d-pad key that went down or up.
+    fun update(device: Int, x: Float, y: Float, change: (Int, Boolean) -> Unit) {
+        val keys = held.getOrPut(device) { mutableSetOf() }
+        for ((key, value) in listOf(
+            KeyEvent.KEYCODE_DPAD_LEFT to -x, KeyEvent.KEYCODE_DPAD_RIGHT to x,
+            KeyEvent.KEYCODE_DPAD_UP to -y, KeyEvent.KEYCODE_DPAD_DOWN to y,
+        )) {
+            if (key in keys) {
+                if (!(value >= ControllerInput.RELEASE)) { keys.remove(key); change(key, false) }
+            } else if (value > ControllerInput.PRESS) {
+                keys.add(key)
+                change(key, true)
+            }
+        }
+    }
+}
+
 // The right stick on Z and RZ. Some controllers put their triggers there, so an axis counts only when
 // the device reports it centred (range reaching below 0, not 0..1), and one already past the press
 // point the first time it is seen is ignored until it comes back to rest. Call from the UI thread.
