@@ -540,6 +540,7 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
     soc->battery = battery;
     S3c2442Options options;
     options.rtcStart = rx1950RtcStart;
+    options.rtcBinaryYear = true;
     // No serial cable.
     options.pinLevels[rx1950CablePort] &= ~(1u << rx1950CableBit);
     rx1950BatteryPins(soc->battery, options);

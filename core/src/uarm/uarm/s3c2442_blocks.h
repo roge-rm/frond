@@ -465,6 +465,11 @@ class S3cRtc {
     // 32 kHz ticks until the next tick interrupt (tick) or alarm check (alarmCheck), UINT64_MAX with none due.
     uint64_t ticksToEvent(bool tick = true, bool alarmCheck = true) const;
 
+    // Board setting, not state: the year byte is a binary count of years from baseYear (rx1950's WM5) and not the
+    // manual's two BCD digits.
+    bool binaryYear = false;
+    unsigned baseYear = 1950;
+
     uint32_t rtccon, ticnt, rtcalm, rtcrst, alarm[6], bcd[7];
     uint64_t secondPhase, tickPhase;
     template <class A> void state(A& a) {

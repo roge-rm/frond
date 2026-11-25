@@ -102,6 +102,7 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
     memory.reset();
     pwm.reset();
     watchdog.reset();
+    rtc.binaryYear = options.rtcBinaryYear;
     rtc.reset(options.rtcStart);
     sdi.reset();
     usbDevice.reset();

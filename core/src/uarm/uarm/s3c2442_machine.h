@@ -33,6 +33,8 @@ struct S3c2442Options {
     // GSTATUS2 after a power-on reset.
     uint32_t resetCause = 1;
     S3cRtc::Time rtcStart{6, 1, 1, 7, 12, 0, 0};
+    // The year byte counts binary years from 1950 (WM5) and not two BCD digits.
+    bool rtcBinaryYear = false;
     // Board pin levels per port, A to J. Every pin reads high unless set.
     uint32_t pinLevels[S3cGpio::ports] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
     // nGCS5 (0x28000000, the debug board on a development unit) is an empty bus: writes are dropped and

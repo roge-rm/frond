@@ -643,6 +643,7 @@ static std::vector<uint32_t> rtcRegisters(S3cRtc& rtc) {
 // raised. A machine whose registers hold no time is left alone.
 static void rtcRestoreTests() {
     auto a = make({loop});
+    a->rtc.binaryYear = true;
     a->rtc.ticnt = 0x85;
     a->rtc.alarm[2] = 0x07;
     a->rtc.secondPhase = 1234;
@@ -655,6 +656,7 @@ static void rtcRestoreTests() {
     std::string why;
     assert(a->saveState(state, why));
     auto b = make({loop});
+    b->rtc.binaryYear = true;
     assert(b->loadState(state.data(), state.size(), why));
     int64_t t = 0;
     assert(rx1950RtcSeconds(b->rtc, t));
@@ -715,6 +717,50 @@ static void rtcRestoreTests() {
     const auto before = rtcRegisters(b->rtc);
     assert(!rx1950RtcForward(b->rtc, b->intc, 100));
     assert(rtcRegisters(b->rtc) == before);
+}
+
+// The clock counting over a month end, a year end and a leap day, in the manual's two BCD digits (00 a leap year, 99
+// rolling to 00) and in WM5's binary years from 1950; and the forward on the rx1950 agreeing with that counting.
+static void rtcCalendarTests() {
+    auto m = make({loop});
+    // From the second before midnight on (date, month, year) to one second after, as the registers read.
+    auto cross = [&](bool binary, uint32_t dt, uint32_t mo, uint32_t yr, uint32_t wd) {
+        m->rtc.binaryYear = binary;
+        m->rtc.rtccon = 1;
+        const uint32_t set[7] = {0x59, 0x59, 0x23, dt, wd, mo, yr};
+        for (unsigned i = 0; i < 7; ++i) assert(m->rtc.write(0x70 + 4 * i, set[i]) == S3cAccess::ok);
+        m->rtc.secondPhase = 0;
+        m->rtc.advance(2 * 32768, m->intc);
+        return rtcRegisters(m->rtc);
+    };
+    using V = std::vector<uint32_t>;
+    // Manual, BCD: 28 Feb 2004 goes to 29 Feb, 28 Feb 2003 to 1 Mar, 28 Feb 00 (2000) to 29 Feb, 31 Dec 99 to 1 Jan 00.
+    assert(cross(false, 0x28, 0x02, 0x04, 3) == (V{0x01, 0x00, 0x00, 0x29, 4, 0x02, 0x04}));
+    assert(cross(false, 0x28, 0x02, 0x03, 3) == (V{0x01, 0x00, 0x00, 0x01, 4, 0x03, 0x03}));
+    assert(cross(false, 0x28, 0x02, 0x00, 3) == (V{0x01, 0x00, 0x00, 0x29, 4, 0x02, 0x00}));
+    assert(cross(false, 0x31, 0x12, 0x99, 7) == (V{0x01, 0x00, 0x00, 0x01, 1, 0x01, 0x00}));
+    assert(cross(false, 0x31, 0x12, 0x07, 7) == (V{0x01, 0x00, 0x00, 0x01, 1, 0x01, 0x08}));
+    // WM5, binary years from 1950: 2028 (78) is a leap year, 2027 (77) isn't, 2100 (150) isn't, 2000 (50) is.
+    assert(cross(true, 0x28, 0x02, 78, 3) == (V{0x01, 0x00, 0x00, 0x29, 4, 0x02, 78}));
+    assert(cross(true, 0x28, 0x02, 77, 3) == (V{0x01, 0x00, 0x00, 0x01, 4, 0x03, 77}));
+    assert(cross(true, 0x28, 0x02, 150, 3) == (V{0x01, 0x00, 0x00, 0x01, 4, 0x03, 150}));
+    assert(cross(true, 0x28, 0x02, 50, 3) == (V{0x01, 0x00, 0x00, 0x29, 4, 0x02, 50}));
+    assert(cross(true, 0x31, 0x12, 76, 5) == (V{0x01, 0x00, 0x00, 0x01, 6, 0x01, 77}));
+    assert(cross(true, 0x31, 0x12, 99, 7) == (V{0x01, 0x00, 0x00, 0x01, 1, 0x01, 100}));
+    // The forward gives what counting those seconds gives, over a year end and a leap day.
+    m->rtc.binaryYear = true;
+    const int64_t start = rx1950DaysFromCivil(2027, 12, 31) * 86400 + 86399;
+    for (int64_t gap : {int64_t(1), int64_t(59 * 86400 + 1)}) {
+        m->rtc.setTime(rx1950RtcTimeAt(start));
+        m->rtc.secondPhase = 0;
+        auto b = make({loop});
+        b->rtc.binaryYear = true;
+        b->rtc.setTime(rx1950RtcTimeAt(start));
+        b->rtc.secondPhase = 0;
+        assert(rx1950RtcForward(m->rtc, m->intc, uint64_t(gap)));
+        for (int64_t i = 0; i < gap; ++i) b->rtc.advance(32768, b->intc);
+        assert(rtcRegisters(m->rtc) == rtcRegisters(b->rtc));
+    }
 }
 
 // UART bit rates from the FCLK/n clock WM5 picks, and a byte from the far end raising the receive interrupt.
@@ -934,6 +980,7 @@ int main() {
     vbusLoadTests();
     cableRestoreTests();
     rtcRestoreTests();
+    rtcCalendarTests();
     uartTests();
     sdTests();
     audioTests();
