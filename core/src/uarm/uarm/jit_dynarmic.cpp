@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "CPU.h"
+#include "jit_fastmem_arena.h"
 #include "MMU.h"
 #include "pxa270_WMMX.h"
 #include "xscale_cost.h"
@@ -34,6 +35,9 @@ namespace {
 
 using namespace Dynarmic;
 using PageTable = std::array<std::uint8_t *, A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>;
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+static_assert(JitFastmemArena::pageCount == A32::UserConfig::NUM_PAGE_TABLE_ENTRIES);
+#endif
 
 // MRC and MCR p15 c3 run in privileged mode from generated code, for jitDomainCalls.
 std::atomic<uint64_t> domainCalls{0};
@@ -99,6 +103,9 @@ struct Stats {
     // Pages mapped for direct stores, and pages sent back to the callbacks by
     // jitWriteProtect or a code flag.
     uint64_t writeMaps = 0, writeProtects = 0;
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+    JitFastmemArenaStats arena;
+#endif
     // Compile thread counts: JITs still alive at exit, and those of JITs gone before.
     std::vector<const A32::Jit *> jits;  // under jitsMutex: user level JITs are made on emulation threads
     std::mutex jitsMutex;
@@ -118,6 +125,20 @@ struct Stats {
     }
     ~Stats() {
         if (!on) return;
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+        if (arena.reservations || arena.failures)
+            fprintf(stderr,
+                    "jit: fastmem arenas %llu maps %llu protects %llu drops %llu clears %llu "
+                    "unbacked %llu checks %llu checkedPages %llu failures %llu faults %llu "
+                    "retries %llu slowSites %llu cappedSites %llu pendingSlowFaults %llu\n",
+                    (unsigned long long)arena.reservations.load(), (unsigned long long)arena.maps.load(),
+                    (unsigned long long)arena.protects.load(), (unsigned long long)arena.drops.load(),
+                    (unsigned long long)arena.clears.load(), (unsigned long long)arena.unbacked.load(),
+                    (unsigned long long)arena.checks.load(), (unsigned long long)arena.checkedPages.load(),
+                    (unsigned long long)arena.failures.load(), (unsigned long long)arena.faults.load(),
+                    (unsigned long long)arena.retries.load(), (unsigned long long)arena.slowSites.load(),
+                    (unsigned long long)arena.cappedSites.load(), (unsigned long long)arena.pendingSlowFaults.load());
+#endif
         for (const A32::Jit *j : jits) AddCompiled(*j);
         fprintf(stderr,
                 "jit: compile thread queued %llu installed %llu stale %llu cancelled %llu overflow %llu "
@@ -448,6 +469,13 @@ struct Env final : public A32::UserCallbacks {
     uint64_t blocks = 0, instructions = 0;
     A32::Jit *jit = nullptr;
     PageTable *pages = nullptr;
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+    std::unique_ptr<JitFastmemArena> arena;
+    bool verifyArena = false;
+#endif
+#if defined(FROND_GUEST_MEMORY_PLATFORM) && defined(__aarch64__)
+    bool fastmemConfigured = false;
+#endif
     // Filled page table entries by their page's domain (MMU_DOMAIN_NONE with the MMU off,
     // MMU_DOMAIN_UNKNOWN when the TLB didn't hold the page), each with what its TLB entry
     // allows while the domain is a client (cpuJitPageClientAccess).
@@ -487,7 +515,7 @@ struct Env final : public A32::UserCallbacks {
     // the host page less the guest page for loads, and for stores where the entry is writable, null otherwise.
     PageTable *readPages = nullptr, *writePages = nullptr;
 #endif
-    // Every page table entry is set here, which keeps the arm64 tables in step.
+    // Every page table entry is set here, which keeps the split tables and the arena in step.
     void SetPage(uint32_t page, uint8_t *entry) {
         (*pages)[page] = entry;
 #ifdef __aarch64__
@@ -495,7 +523,37 @@ struct Env final : public A32::UserCallbacks {
         (*readPages)[page] = entry ? (uint8_t *)(host - offset) : nullptr;
         (*writePages)[page] = entry && !(uintptr_t(entry) & 1) ? (uint8_t *)(host - offset) : nullptr;
 #endif
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+        if (arena) {
+            arena->setPage(page, entry);
+            CheckArena();
+        }
+#endif
     }
+
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+    void CheckArena() {
+#ifdef __aarch64__
+        if (fastmemConfigured && !arena->base()) jit->FrondDisableFastmem();
+#endif
+    }
+
+    void VerifyArena() const {
+        if (!arena || !arena->base()) return;
+        size_t checked = 0;
+        for (const auto& list : filled) {
+            for (const Filled f : list) {
+                if (arena->verifyPage(f.page, (*pages)[f.page], checked)) continue;
+                fprintf(stderr, "jit: fastmem shadow mismatch at %08x, privileged %d\n", f.page << 12, privileged);
+                abort();
+            }
+        }
+        if (!arena->verifyCount(checked)) {
+            fprintf(stderr, "jit: fastmem shadow page count mismatch, privileged %d\n", privileged);
+            abort();
+        }
+    }
+#endif
 
     void ProtectHost(uint8_t *host) {
         const auto it = writable.find(host);
@@ -1173,6 +1231,12 @@ struct Env final : public A32::UserCallbacks {
         // The data cache hint is keyed by va alone and assumes the policy each page had when its
         // entry was noted, so it goes with the mappings.
         cpuCostHintClear(cpu);
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+        if (arena) {
+            arena->clear();
+            CheckArena();
+        }
+#endif
         for (auto &list : filled) {
             for (const Filled &f : list) SetPage(f.page, nullptr);
             list.clear();
@@ -1605,14 +1669,38 @@ struct Env final : public A32::UserCallbacks {
         jit->HaltExecution(kInterpret);
     }
 
-    std::uint8_t MemoryRead8(A32::VAddr va) override { return Read<uint8_t>(va); }
-    std::uint16_t MemoryRead16(A32::VAddr va) override { return Read<uint16_t>(va); }
-    std::uint32_t MemoryRead32(A32::VAddr va) override { return Read<uint32_t>(va); }
-    std::uint64_t MemoryRead64(A32::VAddr va) override { return Read<uint64_t>(va); }
-    void MemoryWrite8(A32::VAddr va, std::uint8_t v) override { Write(va, v); }
-    void MemoryWrite16(A32::VAddr va, std::uint16_t v) override { Write(va, v); }
-    void MemoryWrite32(A32::VAddr va, std::uint32_t v) override { Write(va, v); }
-    void MemoryWrite64(A32::VAddr va, std::uint64_t v) override { Write(va, v); }
+    void FinishFastmemFault([[maybe_unused]] A32::VAddr va, [[maybe_unused]] bool write) {
+#if defined(FROND_GUEST_MEMORY_PLATFORM) && defined(__aarch64__)
+        if (!fastmemConfigured || !jit->FrondFastmemFaultPending()) return;
+        const bool unmapped = !arena->allows(va / JitFastmemArena::pageSize, write);
+        using Fault = A32::Jit::FastmemFault;
+        const auto fault = jit->FrondFastmemFaultSlow(unmapped);
+        stats.arena.faults++;
+        if (fault == Fault::Retry) stats.arena.retries++;
+        if (fault == Fault::Unmapped) stats.arena.slowSites++;
+        if (fault == Fault::Capped) stats.arena.cappedSites++;
+        if (fault == Fault::AlreadySlow) stats.arena.pendingSlowFaults++;
+#endif
+    }
+    template <typename T>
+    T MemoryRead(A32::VAddr va) {
+        const T value = Read<T>(va);
+        FinishFastmemFault(va, false);
+        return value;
+    }
+    template <typename T>
+    void MemoryWrite(A32::VAddr va, T value) {
+        Write(va, value);
+        FinishFastmemFault(va, true);
+    }
+    std::uint8_t MemoryRead8(A32::VAddr va) override { return MemoryRead<uint8_t>(va); }
+    std::uint16_t MemoryRead16(A32::VAddr va) override { return MemoryRead<uint16_t>(va); }
+    std::uint32_t MemoryRead32(A32::VAddr va) override { return MemoryRead<uint32_t>(va); }
+    std::uint64_t MemoryRead64(A32::VAddr va) override { return MemoryRead<uint64_t>(va); }
+    void MemoryWrite8(A32::VAddr va, std::uint8_t v) override { MemoryWrite(va, v); }
+    void MemoryWrite16(A32::VAddr va, std::uint16_t v) override { MemoryWrite(va, v); }
+    void MemoryWrite32(A32::VAddr va, std::uint32_t v) override { MemoryWrite(va, v); }
+    void MemoryWrite64(A32::VAddr va, std::uint64_t v) override { MemoryWrite(va, v); }
 
     // An in-place MSR CPSR that couldn't run in place (psrInterpret set) has had its tick
     // counted, so it's taken back for the interpreter's.
@@ -2178,6 +2266,14 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     Env &e = l->env;
     e.cpu = j->cpu;
     e.pages = l->pages;
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+    e.verifyArena = GuestMemory::verifyJitArena();
+    bool reserveArena = e.verifyArena;
+#ifdef __aarch64__
+    reserveArena |= GuestMemory::fastmemEnabled();
+#endif
+    if (reserveArena) e.arena = std::make_unique<JitFastmemArena>(stats.arena);
+#endif
 #ifdef __aarch64__
     e.readPages = l->readPages;
     e.writePages = l->writePages;
@@ -2200,6 +2296,14 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
 #endif
     conf.page_table_writes_via_callbacks = false;
     conf.page_table_write_protect_bit = true;
+#if defined(FROND_GUEST_MEMORY_PLATFORM) && defined(__aarch64__)
+    if (GuestMemory::fastmemEnabled() && e.arena && e.arena->base()) {
+        e.fastmemConfigured = true;
+        conf.fastmem_pointer = reinterpret_cast<uintptr_t>(e.arena->base());
+        conf.recompile_on_fastmem_failure = false;
+        conf.frond_fastmem_defer_faults = true;
+    }
+#endif
     e.hinted = jitPrvCostHint;
     conf.frond_cost_hint = e.hinted ? cpuJitCostHint(j->cpu) : nullptr;
     conf.frond_cost_hint_on = &e.memoryCost;
@@ -2543,6 +2647,9 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     j->running = &e;
     const HaltReason hr = jit.Run();
     j->running = nullptr;
+#ifdef FROND_GUEST_MEMORY_PLATFORM
+    if (e.verifyArena) jitPrvEach(j, [](Env &level) { level.VerifyArena(); });
+#endif
     jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege | kSwi | kCharged);
     if (e.rewindPc != ~0u) {
         jit.Regs()[15] = e.rewindPc;

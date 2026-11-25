@@ -27,6 +27,7 @@ public:
     IR::Block GenerateIR(IR::LocationDescriptor) const override;
 
     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+    void InvalidateFastmemBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors);
     // Frond: live block code, for A32::Jit::HasCodeIn and CodeWords. Take code_mutex.
     bool HasCodeIn(u32 first, u32 last);
     void CodeWords(u32 page_base, u64* words);
@@ -76,6 +77,8 @@ protected:
 
     // The code space and block maps are shared with the compile thread under code_mutex.
     std::mutex code_mutex;
+    // A host-only recompile keeps a block hot until it is requested again.
+    tsl::robin_set<IR::LocationDescriptor> fastmem_recompiles;
     bool compile_sync = false;
     std::unique_ptr<CompileThread> compile_thread;
 };

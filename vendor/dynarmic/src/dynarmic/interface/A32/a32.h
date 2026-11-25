@@ -116,6 +116,14 @@ public:
     /// memory read or write callback during Run. Negative past the budget.
     std::int64_t TicksRemainingNow() const;
 
+    enum class FastmemFault { None, Retry, Unmapped, Capped, AlreadySlow };
+    bool FrondFastmemFaultPending() const;
+    // Finish a deferred fault after the memory access. A site with no mapping
+    // for the access, or too many transient faults, uses the split tables.
+    FastmemFault FrondFastmemFaultSlow(bool unmapped);
+    // Keep running through the page tables if the arena fails.
+    void FrondDisableFastmem();
+
     /**
      * Returns true if Jit::Run was called but hasn't returned yet.
      * i.e.: We're in a callback.

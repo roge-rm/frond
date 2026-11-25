@@ -146,6 +146,9 @@ if(FROND_DYNARMIC AND ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
     # PUBLIC: icache.h and icache_internal.h change with it.
     target_compile_definitions(frondcore PUBLIC FROND_DYNARMIC)
     target_link_libraries(frondcore PRIVATE dynarmic)
+    if(ANDROID_ABI STREQUAL "arm64-v8a")
+        target_link_libraries(frondcore PRIVATE android)
+    endif()
 endif()
 
 # The JIT differential test (tests/jit-differential.cpp) and benchmark-replay as command-line

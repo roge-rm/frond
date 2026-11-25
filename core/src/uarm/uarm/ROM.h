@@ -9,7 +9,9 @@
 
 struct ArmRom;
 
-struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, const uint32_t size);
+struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, uint32_t size, bool sharedCopy = false);
+// The bus and its ROM callbacks must already be quiesced.
+void romRelease(struct ArmRom *rom);
 
 void *romGetPeepholeBuffer(struct ArmRom *rom);
 

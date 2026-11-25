@@ -194,7 +194,7 @@ static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const
 }
 
 A32AddressSpace::A32AddressSpace(const A32::UserConfig& conf)
-        : AddressSpace(conf.code_cache_size)
+        : AddressSpace(conf.code_cache_size, conf.fastmem_pointer.has_value())
         , conf(conf) {
     EmitPrelude();
 }
@@ -231,10 +231,26 @@ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor, A32::Tr
 
 void A32AddressSpace::InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges) {
     std::lock_guard lock{code_mutex};  // waits for a block the compile thread is emitting
-    InvalidateBasicBlocks(block_ranges.InvalidateRanges(ranges));
+    const auto descriptors = block_ranges.InvalidateRanges(ranges);
+    for (const auto descriptor : descriptors) fastmem_recompiles.erase(descriptor);
+    InvalidateBasicBlocks(descriptors);
     if (compile_thread) {
         compile_thread->Invalidated(ranges);
     }
+}
+
+void A32AddressSpace::InvalidateFastmemBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors) {
+    std::lock_guard lock{code_mutex};
+    boost::icl::interval_set<u32> ranges;
+    for (const auto descriptor : descriptors) {
+        if (!Get(descriptor)) continue;  // The guest invalidated it during the run.
+        fastmem_recompiles.insert(descriptor);
+        const u32 pc = A32::LocationDescriptor{descriptor}.PC();
+        ranges.add(boost::icl::discrete_interval<u32>::closed(pc, pc));
+    }
+    // Keep the tracked guest code ranges until re-emission or guest invalidation.
+    InvalidateBasicBlocks(descriptors);
+    if (compile_thread && !ranges.empty()) compile_thread->Invalidated(ranges);
 }
 
 bool A32AddressSpace::HasCodeIn(u32 first, u32 last) {
@@ -255,6 +271,7 @@ void A32AddressSpace::ClearCacheLocked() {
 void A32AddressSpace::ClearCacheHeld() {
     ClearCache();
     block_ranges.ClearCache();
+    fastmem_recompiles.clear();
     if (compile_thread) {
         compile_thread->Cleared();
     }
@@ -278,13 +295,14 @@ CodePtr A32AddressSpace::GetOrEmitIfWanted(IR::LocationDescriptor descriptor) {
         return block_entry;
     }
     const A32::LocationDescriptor a32_location{descriptor};
-    if (!conf.callbacks->ShouldCompile(a32_location.PC(), a32_location.TFlag())) {
+    const bool fastmem_recompile = fastmem_recompiles.erase(descriptor) != 0;
+    if (!fastmem_recompile && !conf.callbacks->ShouldCompile(a32_location.PC(), a32_location.TFlag())) {
         if (compile_thread && compile_thread->AheadOn()) {
             compile_thread->QueueCold(descriptor, CompiledFn(), SnapshotFn());
         }
         return reinterpret_cast<CodePtr>(prelude_info.return_to_dispatcher);
     }
-    if (compile_thread) {
+    if (compile_thread && (!fastmem_recompile || compile_sync)) {
         if (CodePtr entry = CompileOffThread(descriptor)) {
             return entry;
         }
@@ -409,6 +427,9 @@ CodePtr A32AddressSpace::CompileOffThread(IR::LocationDescriptor descriptor) {
 
 // On the worker, or on the guest thread in sync mode (CompileHere).
 void A32AddressSpace::CompileJob(CompileThread::Job& job) {
+#ifdef __ANDROID__
+    if (conf.fastmem_pointer) ExceptionHandler::PrepareThreadSignalStack();
+#endif
     IR::Block ir_block = GenerateIR(job.location, job.snapshot.get());
     if (job.snapshot->overflow) {
         job.status = CompileThread::Status::Overflow;
@@ -525,9 +546,10 @@ void A32AddressSpace::EmitPrelude() {
         code.MOV(X19, X0);
         code.MOV(Xstate, X1);
         code.MOV(Xhalt, X2);
-        if (conf.frond_read_page_table && conf.frond_write_page_table && !conf.fastmem_pointer) {
+        if (conf.frond_read_page_table && conf.frond_write_page_table) {
             code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.frond_read_page_table));
-            code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.frond_write_page_table));
+            if (!conf.fastmem_pointer)
+                code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.frond_write_page_table));
         } else if (conf.page_table) {
             code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.page_table));
         }
@@ -580,9 +602,10 @@ void A32AddressSpace::EmitPrelude() {
         code.MOV(X19, X0);
         code.MOV(Xstate, X1);
         code.MOV(Xhalt, X2);
-        if (conf.frond_read_page_table && conf.frond_write_page_table && !conf.fastmem_pointer) {
+        if (conf.frond_read_page_table && conf.frond_write_page_table) {
             code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.frond_read_page_table));
-            code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.frond_write_page_table));
+            if (!conf.fastmem_pointer)
+                code.MOV(Xfastmem, mcl::bit_cast<u64>(conf.frond_write_page_table));
         } else if (conf.page_table) {
             code.MOV(Xpagetable, mcl::bit_cast<u64>(conf.page_table));
         }
@@ -746,7 +769,8 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .page_table_write_protect_bit = conf.page_table_write_protect_bit,
         .frond_cost_hint = conf.frond_cost_hint,
         .frond_cost_hint_on = conf.frond_cost_hint_on,
-        .frond_split_page_tables = conf.frond_read_page_table && conf.frond_write_page_table && !conf.fastmem_pointer,
+        .frond_split_page_tables = conf.frond_read_page_table && conf.frond_write_page_table,
+        .frond_split_write_table = conf.fastmem_pointer ? mcl::bit_cast<u64>(conf.frond_write_page_table) : 0,
         .silently_mirror_page_table = true,
         .absolute_offset_page_table = conf.absolute_offset_page_table,
         .detect_misaligned_access_via_page_table = conf.detect_misaligned_access_via_page_table,
@@ -754,6 +778,9 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
 
         .fastmem_pointer = conf.fastmem_pointer,
         .recompile_on_fastmem_failure = conf.recompile_on_fastmem_failure,
+        .frond_fastmem_enabled_offset = conf.frond_fastmem_defer_faults
+                                            ? std::optional<size_t>{offsetof(A32JitState, frond_fastmem_enabled)}
+                                            : std::nullopt,
         .fastmem_address_space_bits = 32,
         .silently_mirror_fastmem = true,
 

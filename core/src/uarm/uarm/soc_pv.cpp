@@ -83,7 +83,7 @@ SocPV::SocPV(uint32_t ramSize, void *romData, const uint32_t romSize, DisplayMod
 
     ram = ramInit(mem, this, RAM_BASE, ramSize, &bufferMemory, true);
     tinyRam = ramInit(mem, this, PV_TINYRAM_BASE, PV_TINYRAM_SIZE, &bufferTinyRam, false);
-    rom = romInit(mem, ROM_BASE, romData, romSize);
+    rom = romInit(mem, ROM_BASE, romData, romSize, true);
 
     void *peepholeBuffer = romGetPeepholeBuffer(rom);
 

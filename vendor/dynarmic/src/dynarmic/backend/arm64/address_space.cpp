@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <utility>
 
 #include <unistd.h>
 
@@ -65,13 +66,16 @@ void PerfMapRegister(IR::LocationDescriptor location, const EmittedBlockInfo& in
 }
 }  // namespace
 
-AddressSpace::AddressSpace(size_t code_cache_size)
+AddressSpace::AddressSpace(size_t code_cache_size, [[maybe_unused]] bool fastmem)
         : code_cache_size(code_cache_size)
         , mem(code_cache_size)
         , code(mem.ptr(), mem.ptr())
         , fastmem_manager(exception_handler) {
     ASSERT_MSG(code_cache_size <= 128 * 1024 * 1024, "code_cache_size > 128 MiB not currently supported");
 
+#ifdef __ANDROID__
+    if (!fastmem) return;
+#endif
     exception_handler.Register(mem, code_cache_size);
     exception_handler.SetFastmemCallback([this](u64 host_pc) {
         return FastmemCallback(host_pc);
@@ -465,6 +469,10 @@ void AddressSpace::RelinkForDescriptor(IR::LocationDescriptor target_descriptor,
     }
 }
 
+std::optional<DoNotFastmemMarker> AddressSpace::TakeFrondFastmemFault() {
+    return std::exchange(frond_fastmem_fault, std::nullopt);
+}
+
 FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
     {
         const auto host_ptr = mcl::bit_cast<CodePtr>(host_pc);
@@ -486,7 +494,9 @@ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
 
         const auto fc = patch_entry->second.fc;
 
-        if (patch_entry->second.recompile) {
+        if (patch_entry->second.defer) {
+            frond_fastmem_fault = patch_entry->second.marker;
+        } else if (patch_entry->second.recompile) {
             const auto marker = patch_entry->second.marker;
             fastmem_manager.MarkDoNotFastmem(marker);
             InvalidateBasicBlocks({std::get<0>(marker)}, entry_point);
@@ -496,9 +506,14 @@ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
     }
 
 fail:
+#ifdef __ANDROID__
+    // Leave unexpected JIT faults for Android's crash reporter as well.
+    return {0};
+#else
     fmt::print("dynarmic: Segfault happened within JITted code at host_pc = {:016x}\n", host_pc);
     fmt::print("Segfault wasn't at a fastmem patch location!\n");
     ASSERT_FALSE("segfault");
+#endif
 }
 
 }  // namespace Dynarmic::Backend::Arm64

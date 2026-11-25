@@ -274,6 +274,9 @@ struct UserConfig {
     /// Recompiled code will use the page_table if this is available, otherwise memory
     /// accesses will hit the memory callbacks.
     bool recompile_on_fastmem_failure = true;
+    // Frond A32/arm64: apply the page table alignment and cost checks. The signal
+    // handler records the fault for the memory callback to finish.
+    bool frond_fastmem_defer_faults = false;
 
     /// Determines if we should use the above fastmem_pointer for exclusive reads and
     /// writes. On x64, dynarmic currently relies on x64 cmpxchg semantics which may not

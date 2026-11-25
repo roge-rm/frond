@@ -573,6 +573,46 @@ test-jit-differential: $(OBJ_ROOT)/test-jit-differential
 	test -n "$(JIT_DIFF_ARGS)" || $(OBJ_ROOT)/test-jit-differential --seeds 40001:50001 --no-directed --hot 3 \
 		2>$(OBJ_ROOT)/jit-differential.err || { grep -v ' failed (pc=' $(OBJ_ROOT)/jit-differential.err | tail -5; exit 1; }
 
+# The JIT differential test on arm64, cross built in the frond-arm64-cross image and run under qemu-aarch64.
+# Work folder: $(OBJ_ROOT)/arm64-qemu, with a copy of core/ (see deb-arm64). JIT_DIFF_ARGS as for the native test.
+.PHONY: test-jit-differential-arm64-qemu
+test-jit-differential-arm64-qemu: export TEST_TIMEOUT = 7200
+test-jit-differential-arm64-qemu:
+	mkdir -p $(OBJ_ROOT)/arm64-qemu
+	python3 tools/copy-core.py $(abspath $(OBJ_ROOT))/arm64-qemu/source
+	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(ARM64_JOBS) -e BUILD_ONLY \
+		-e FROND_ARM64_FASTMEM_CHECKS -e FROND_JIT_FASTMEM -e FROND_JIT_FASTMEM_VERIFY -e FROND_JIT_STATS \
+		-v $(CURDIR):/src -v $(abspath $(OBJ_ROOT))/arm64-qemu:/work -v $(abspath $(OBJ_ROOT))/arm64-qemu/source:/src/core \
+		-w /src frond-arm64-cross tools/arm64/jit-differential.sh $(JIT_DIFF_ARGS)
+
+.PHONY: test-jit-fastmem-arm64-qemu
+test-jit-fastmem-arm64-qemu: export FROND_ARM64_FASTMEM_CHECKS = 1
+test-jit-fastmem-arm64-qemu: JIT_DIFF_ARGS = --seeds 1:1
+test-jit-fastmem-arm64-qemu: test-jit-differential-arm64-qemu
+
+# Run the Linux shared backing on devbox, even when the normal build uses ordinary memory.
+.PHONY: test-guest-memory
+ifeq ($(HOST_OS),linux)
+test: test-guest-memory
+test-guest-memory:
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_TEST_GUEST_MEMORY \
+		-Icore/src/uarm/uarm -Icore/src/common tests/guest-memory.cpp \
+		core/src/uarm/uarm/guest_memory.cpp core/src/uarm/uarm/memory_buffer.cpp -lpthread -o $(OBJ_ROOT)/test-guest-memory
+	$(OBJ_ROOT)/test-guest-memory
+endif
+
+.PHONY: test-jit-fastmem-arena
+ifeq ($(HOST_OS),linux)
+ifneq ($(filter x86_64 aarch64 arm64,$(HOST_ARCH)),)
+test: test-jit-fastmem-arena
+test-jit-fastmem-arena:
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_DYNARMIC \
+		-Icore/src/uarm/uarm tests/jit-fastmem-arena.cpp core/src/uarm/uarm/jit_fastmem_arena.cpp \
+		core/src/uarm/uarm/guest_memory.cpp -lpthread -o $(OBJ_ROOT)/test-jit-fastmem-arena
+	FROND_JIT_FASTMEM_VERIFY=1 $(OBJ_ROOT)/test-jit-fastmem-arena
+endif
+endif
+
 # The JIT compile thread's bookkeeping on its own, with asserts on.
 .PHONY: test-jit-compile-thread
 ifeq ($(FROND_FAST),1)

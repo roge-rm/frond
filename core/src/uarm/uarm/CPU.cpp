@@ -7272,14 +7272,20 @@ bool cpuArm920SetJit(ArmCpu *cpu, bool on) {
 
 bool cpuArm920JitOn(const ArmCpu *cpu) { return cpu->jitBlocks; }
 
-void cpuArm920DropJit(ArmCpu *cpu) {
-    if (!cpu->jit || !cpu->jitLoopOnly) return;
+void cpuDropJit(ArmCpu *cpu) {
+    if (!cpu || !cpu->jit) return;
     icacheSetInvalHook(cpu->ic, nullptr, nullptr);
+    icacheSetFetchWatch(cpu->ic, nullptr, nullptr);
     jitDestroy(cpu->jit);
     cpu->jit = nullptr;
     cpu->jitBlocks = cpu->jitLoopOnly = false;
+    cpuJitForgetCode(cpu);
     delete cpu->jitCode;
     cpu->jitCode = nullptr;
+}
+
+void cpuArm920DropJit(ArmCpu *cpu) {
+    if (cpu->jitLoopOnly) cpuDropJit(cpu);
 }
 
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *cpu) { return cpu->jit ? jitMaxUnchecked(cpu->jit) : 0; }
@@ -7355,6 +7361,7 @@ void cpuSetPollPeek(ArmCpu *, bool (*)(void *, uint32_t, uint32_t *), void *) {}
 bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}
+void cpuDropJit(ArmCpu *) {}
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *) { return 0; }
 unsigned cpuArm920JitPidTags(const ArmCpu *, uint64_t *restarts) {
     if (restarts) *restarts = 0;

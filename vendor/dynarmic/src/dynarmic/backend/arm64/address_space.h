@@ -26,7 +26,7 @@ namespace Dynarmic::Backend::Arm64 {
 
 class AddressSpace {
 public:
-    explicit AddressSpace(size_t code_cache_size);
+    AddressSpace(size_t code_cache_size, bool fastmem);
     virtual ~AddressSpace();
 
     virtual IR::Block GenerateIR(IR::LocationDescriptor) const = 0;
@@ -70,6 +70,12 @@ public:
     }
     void FillFastDispatch(IR::LocationDescriptor descriptor, CodePtr entry);
     void ClearFastDispatchTable();
+
+    bool HasFrondFastmemFault() const { return frond_fastmem_fault.has_value(); }
+    std::optional<DoNotFastmemMarker> TakeFrondFastmemFault();
+    bool ShouldFastmem(DoNotFastmemMarker marker) const { return fastmem_manager.ShouldFastmem(marker); }
+    bool MarkDoNotFastmem(DoNotFastmemMarker marker) { return fastmem_manager.MarkDoNotFastmem(marker); }
+    void DisableFrondFastmem() { fastmem_manager.Disable(); }
 
 protected:
     virtual EmitConfig GetEmitConfig() = 0;
@@ -115,6 +121,8 @@ protected:
 
     ExceptionHandler exception_handler;
     FastmemManager fastmem_manager;
+    // Set by the signal handler on the guest thread and consumed by the next memory callback.
+    std::optional<DoNotFastmemMarker> frond_fastmem_fault;
 
     // Empty slots point at the dispatcher's slow path, so even a false match is safe. Allocated
     // on its own: making AddressSpace 64 KB bigger changed the arm64 Fast results (cause not

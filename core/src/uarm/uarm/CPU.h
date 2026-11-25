@@ -410,6 +410,8 @@ bool cpuArm920JitOn(const ArmCpu*);
 // Frees the Fast blocks JIT and its compile thread: for a CPU that won't run again, or before a fork(), after
 // which cpuArm920SetJit makes a new one.
 void cpuArm920DropJit(ArmCpu*);
+// Stop the compile worker before releasing memory that backs the JIT.
+void cpuDropJit(ArmCpu*);
 // Most instructions a JIT run can pass its budget by, plus one.
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu*);
 // Fast blocks' FCSE PID tags in use and the restarts so far (jitPidTags), 0 without the JIT.

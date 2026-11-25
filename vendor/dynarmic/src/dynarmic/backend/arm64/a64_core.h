@@ -17,12 +17,18 @@ public:
     HaltReason Run(A64AddressSpace& process, A64JitState& thread_ctx, volatile u32* halt_reason) {
         const auto location_descriptor = thread_ctx.GetLocationDescriptor();
         const auto entry_point = process.GetOrEmit(location_descriptor);
+#ifdef __ANDROID__
+        ExceptionHandler::ScopedExecution signal_scope{process.exception_handler, process.conf.fastmem_pointer.has_value()};
+#endif
         return process.prelude_info.run_code(entry_point, &thread_ctx, halt_reason);
     }
 
     HaltReason Step(A64AddressSpace& process, A64JitState& thread_ctx, volatile u32* halt_reason) {
         const auto location_descriptor = A64::LocationDescriptor{thread_ctx.GetLocationDescriptor()}.SetSingleStepping(true);
         const auto entry_point = process.GetOrEmit(location_descriptor);
+#ifdef __ANDROID__
+        ExceptionHandler::ScopedExecution signal_scope{process.exception_handler, process.conf.fastmem_pointer.has_value()};
+#endif
         return process.prelude_info.step_code(entry_point, &thread_ctx, halt_reason);
     }
 };

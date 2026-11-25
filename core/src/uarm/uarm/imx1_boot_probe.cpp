@@ -350,11 +350,13 @@ bool timerCountAfter(const Imx1Bootstrap& board, uint32_t address, uint32_t size
 
 struct Probe {
     explicit Probe(const Imx1ProbeOptions& config)
-        : options(config), peripherals(config.aspPx1HighFromReset, config.aspUSampleKnown, config.aspUSample), cs4Capture(config.cs4Port0Input, config.cs4IndexedInputs),
+        : rom(GuestMemory::byteAllocator()), options(config),
+          peripherals(config.aspPx1HighFromReset, config.aspUSampleKnown, config.aspUSample, rom.get_allocator()),
+          cs4Capture(config.cs4Port0Input, config.cs4IndexedInputs),
           cs5Reset(config.graphicsProfile == Imx1GraphicsProfile::strict ? config.cs5ResetStatusInput : 0),
           cs5Configuration(config.graphicsProfile, config.graphicsVirtualA4SourceOver, config.graphicsVirtualPackedMono),
           graphicsMemory(config.graphicsProfile == Imx1GraphicsProfile::virtual5744Compatible8MiB ?
-                         new Imx1GraphicsMemory() : nullptr) {
+                         new Imx1GraphicsMemory(rom.get_allocator()) : nullptr) {
         if (config.aspPenInputs.contactKnown || config.aspPenInputs.normalKnown || config.aspPenInputs.referenceKnown)
             peripherals.replaceAspPenInputs(config.aspPenInputs);
         peripherals.setLcdcContrastOnly(config.lcdcContrastOnly);
@@ -368,7 +370,7 @@ struct Probe {
         if (config.graphicsRawMode1Known) graphics.setAcquisitionMode1Input(config.graphicsRawMode1);
         if (config.graphicsRawAxesKnown) graphics.setAcquisitionInput(config.graphicsRawFirst, config.graphicsRawSecond);
     }
-    std::vector<uint8_t> rom;
+    GuestMemory::Bytes rom;
     // MD5 of rom for the state identity, worked out when first needed.
     mutable bool romDigestKnown = false;
     mutable uint8_t romDigest[16]{};
@@ -4962,7 +4964,7 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (!finish(a)) return info;
 
     staged.board = std::make_unique<Imx1Bootstrap>(p.options.aspPx1HighFromReset, p.options.aspUSampleKnown,
-                                                   p.options.aspUSample);
+                                                   p.options.aspUSample, p.rom.get_allocator());
     configureBoard(*staged.board, p.options);
     if (!open("BOOT", Imx1Bootstrap::stateVersion, true, a)) return info;
     staged.board->state(a);
@@ -5057,7 +5059,7 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
         if (!finish(a)) return info;
     } else if (info.status != S::ok) return info;
     if (p.graphicsMemory) {
-        staged.graphicsMemory = std::make_unique<Imx1GraphicsMemory>();
+        staged.graphicsMemory = std::make_unique<Imx1GraphicsMemory>(p.rom.get_allocator());
         if (!open("GMEM", Imx1GraphicsMemory::stateVersion, true, a)) return info;
         staged.graphicsMemory->state(a);
         if (!finish(a)) return info;

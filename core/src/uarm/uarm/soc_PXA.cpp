@@ -140,7 +140,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
             e3WifiCompatible = digest == "e89a61e98807e5b1a2a61df4f761520b3cb93a2e13a55330833d637a50aefefa";
         }
     }
-    rom = romInit(mem, ROM_BASE, romData, romSize);
+    rom = romInit(mem, ROM_BASE, romData, romSize, true);
 
     void *peepholeBuffer = romGetPeepholeBuffer(rom);
 
@@ -152,7 +152,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     // host tools (install, launch, export) can call into Palm OS from the first app event.
     if (deviceType == DeviceType5::deviceTypeZire72) pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
     if (deviceType == deviceTypeTG50)
-        pacePatchInitTg50(pacePatch, ROM_BASE, romData, peepholeBuffer, romSize);
+        pacePatchInitTg50(pacePatch, ROM_BASE, romGetData(rom), peepholeBuffer, romSize);
     patch68kInit(deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && romInfo.NeedsNandPatch()
                      ? PATCH_68K_NVFS : 0);
 
@@ -1659,6 +1659,7 @@ void SocPXA::ReleaseKeyboard() {
 bool SocPXA::SetBluetooth(const std::string& path,std::string& error) {return deviceSetBluetooth(dev,path,error);}
 std::string SocPXA::BluetoothState() {return deviceBluetoothState(dev);}
 SocPXA::~SocPXA() {
+    cpuDropJit(cpu);
     EjectPalmWifi();
     checkpointLifetime.reset();
     deviceStopBluetooth(dev);

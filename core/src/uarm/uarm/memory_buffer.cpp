@@ -1,22 +1,24 @@
 #include "memory_buffer.h"
 
-#include <cstring>
+#include "guest_memory.h"
 
 bool memoryBufferAllocate(struct MemoryBuffer* memoryBuffer, size_t size) {
     if (size % MEMORY_BUFFER_GRANULARITY) return false;
 
     size_t pageCount = size / 1024;
 
-    memoryBuffer->size = pageCount * 1024;
-    memoryBuffer->buffer = reinterpret_cast<uint8_t*>(malloc(memoryBuffer->size));
-    memset(memoryBuffer->buffer, 0, memoryBuffer->size);
+    auto* buffer = static_cast<uint8_t*>(GuestMemory::allocateShared(size));
+    if (!buffer) buffer = static_cast<uint8_t*>(calloc(size, 1));
+    if (!buffer) return false;
 
-    size_t dirtyPageCount4 = pageCount / 32;
-    if (dirtyPageCount4 * 32 < pageCount) dirtyPageCount4++;
+    const size_t dirtyPagesSize = ((pageCount + 31) / 32) * sizeof(uint32_t);
+    auto* dirtyPages = static_cast<uint32_t*>(calloc(dirtyPagesSize, 1));
+    if (!dirtyPages) {
+        if (!GuestMemory::releaseShared(buffer)) free(buffer);
+        return false;
+    }
 
-    memoryBuffer->dirtyPagesSize = dirtyPageCount4 * 4;
-    memoryBuffer->dirtyPages = reinterpret_cast<uint32_t*>(malloc(memoryBuffer->dirtyPagesSize));
-    memset(memoryBuffer->dirtyPages, 0, memoryBuffer->dirtyPagesSize);
+    *memoryBuffer = {size, dirtyPagesSize, buffer, dirtyPages, false};
 
     return true;
 }
@@ -24,8 +26,9 @@ bool memoryBufferAllocate(struct MemoryBuffer* memoryBuffer, size_t size) {
 void memoryBufferRelease(struct MemoryBuffer* memoryBuffer) {
     if (memoryBuffer->isSubBuffer) return;
 
-    free(memoryBuffer->buffer);
+    if (!GuestMemory::releaseShared(memoryBuffer->buffer)) free(memoryBuffer->buffer);
     free(memoryBuffer->dirtyPages);
+    *memoryBuffer = {};
 }
 
 bool memoryBufferGetSubBuffer(struct MemoryBuffer* memoryBuffer, struct MemoryBuffer* subBuffer,

@@ -31,7 +31,7 @@ class StateWriter {
     StateWriter& DoBuffer16(uint16_t* data, size_t count) { return raw(data, count * 2); }
     StateWriter& DoBuffer32(uint32_t* data, size_t count) { return raw(data, count * 4); }
     // Elements are 1, 2, 4 or 8 byte integers.
-    template <class T> StateWriter& DoVector(std::vector<T>& v, uint64_t) {
+    template <class T, class Allocator> StateWriter& DoVector(std::vector<T, Allocator>& v, uint64_t) {
         uint64_t count = v.size();
         raw(&count, 8);
         return raw(v.data(), v.size() * sizeof(T));
@@ -77,7 +77,7 @@ class StateReader {
     StateReader& DoBuffer(void* target, size_t bytes) { return raw(target, bytes); }
     StateReader& DoBuffer16(uint16_t* target, size_t count) { return raw(target, count * 2); }
     StateReader& DoBuffer32(uint32_t* target, size_t count) { return raw(target, count * 4); }
-    template <class T> StateReader& DoVector(std::vector<T>& v, uint64_t maxCount) {
+    template <class T, class Allocator> StateReader& DoVector(std::vector<T, Allocator>& v, uint64_t maxCount) {
         uint64_t count = 0;
         raw(&count, 8);
         if (failure) return *this;

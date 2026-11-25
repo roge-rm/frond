@@ -59,6 +59,11 @@ SoC::SoC()
     systemState = createSystemState();
 }
 
+SoC::~SoC() {
+    romRelease(rom);
+    memoryBufferRelease(&bufferMemory);
+}
+
 void SoC::KeyDown(enum KeyId key) {
     if (key == keyIdPower) powerHeld = true;
     if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyDown(key));

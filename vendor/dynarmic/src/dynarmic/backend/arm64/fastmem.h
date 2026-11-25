@@ -5,7 +5,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
+#include <mutex>
 #include <tuple>
 
 #include <mcl/hash/xmrx.hpp>
@@ -29,6 +31,7 @@ struct FastmemPatchInfo {
     DoNotFastmemMarker marker;
     FakeCall fc;
     bool recompile;
+    bool defer;
 };
 
 class FastmemManager {
@@ -41,15 +44,22 @@ public:
     }
 
     bool ShouldFastmem(DoNotFastmemMarker marker) const {
+        if (disabled.load(std::memory_order_relaxed)) return false;
+        std::lock_guard lock{markers_mutex};
         return do_not_fastmem.count(marker) == 0;
     }
 
-    void MarkDoNotFastmem(DoNotFastmemMarker marker) {
-        do_not_fastmem.insert(marker);
+    bool MarkDoNotFastmem(DoNotFastmemMarker marker) {
+        std::lock_guard lock{markers_mutex};
+        return do_not_fastmem.insert(marker).second;
     }
+
+    void Disable() { disabled.store(true, std::memory_order_relaxed); }
 
 private:
     ExceptionHandler& exception_handler;
+    std::atomic<bool> disabled{false};
+    mutable std::mutex markers_mutex;
     tsl::robin_set<DoNotFastmemMarker, DoNotFastmemMarkerHash> do_not_fastmem;
 };
 

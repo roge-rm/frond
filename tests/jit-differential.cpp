@@ -3505,10 +3505,7 @@ int staleAhead() {
     Assembled a = assemble(c);
     const uint32_t A = kCode, B = kCode + 0x1000, S = kCode + 0x2000;  // separate pages
     auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
-    put(A, 0xe3a05000);       // mov r5, #0
-    put(A + 4, 0xe3560001);   // cmp r6, #1
-    put(A + 8, 0x0a0003fc);   // beq B
-    put(A + 12, 0xea0007fb);  // b S
+    put(A, 0xea0003fe);       // b B
     put(B, 0xe3a05001);       // mov r5, #1 (rewritten to mov r5, #2)
     put(B + 4, 0xea0003fd);   // b S
     put(S, kSpinArm);
@@ -3516,10 +3513,10 @@ int staleAhead() {
     a.thumb = false;
     c.cpsr = SVC | 0xc0;
     prepare(m, c, a);
-    auto runFrom = [&](uint32_t pc, uint32_t r6) {
-        cpuSetReg(m.cpu, 15, pc);
+    cpuDropTranslatedCode(m.cpu);
+    auto runFromA = [&] {
+        cpuSetReg(m.cpu, 15, A);
         cpuSetReg(m.cpu, 5, 9);
-        cpuSetReg(m.cpu, 6, r6);
         for (int i = 0; i < 100 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
             cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
         return cpuGetRegisters(m.cpu)[15] == S ? cpuGetRegExternal(m.cpu, 5) : 99u;
@@ -3529,13 +3526,19 @@ int staleAhead() {
         printf("FAIL %s: no compile counts\n", name);
         return -1;
     }
-    // A compiled and installed without B running; B compiled ahead meanwhile. A's other
-    // target (A + 12) runs, so once one more block is compiled ahead than used, it is B,
-    // kept ready.
+    // Let A compile with only enough guest time for its branch. B is its only ahead
+    // target, so a ready block can only be B and cannot have run yet.
     bool ready = false;
     uint64_t stale = 0, compiled = 0, used = 0;
     for (int i = 0; i < 2000 && !ready; ++i) {
-        runFrom(A, 0);
+        cpuSetReg(m.cpu, 15, A);
+        cpuSetReg(m.cpu, 5, 9);
+        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+        if (cpuGetRegisters(m.cpu)[15] != B || cpuGetRegExternal(m.cpu, 5) != 9) {
+            printf("FAIL %s: warm-up ran past its branch (pc %x, r5 %u)\n", name,
+                   cpuGetRegisters(m.cpu)[15], cpuGetRegExternal(m.cpu, 5));
+            return -1;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         cpuJitCompileCounts(m.cpu, &stale, &compiled, &used);
         ready = i >= 20 && (compiled - compiled0) > (used - used0);
@@ -3550,7 +3553,7 @@ int staleAhead() {
     memAccess(m.mem, B, 4, true, (void*)&word);
     uint32_t bad = 0, last = 0;
     for (int i = 0; i < 20; ++i) {
-        last = runFrom(A, 1);
+        last = runFromA();
         if (last != 2) bad++;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }

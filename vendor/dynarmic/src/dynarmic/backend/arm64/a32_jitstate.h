@@ -30,6 +30,7 @@ struct A32JitState {
     alignas(16) std::array<u32, 64> ext_regs{};
 
     u32 exclusive_state = 0;
+    bool frond_fastmem_enabled = true;
 
     u32 Cpsr() const;
     void SetCpsr(u32 cpsr);

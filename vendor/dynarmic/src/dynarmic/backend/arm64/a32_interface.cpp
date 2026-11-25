@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 
 #include <boost/icl/interval_set.hpp>
 #include <mcl/assert.hpp>
@@ -42,6 +43,10 @@ struct Jit::Impl final {
         HaltReason hr = core.Run(current_address_space, current_state, &halt_reason);
 
         PerformRequestedCacheInvalidation(hr);
+        if (!fastmem_blocks.empty()) {
+            current_address_space.InvalidateFastmemBlocks(fastmem_blocks);
+            fastmem_blocks.clear();
+        }
 
         return hr;
     }
@@ -58,6 +63,10 @@ struct Jit::Impl final {
         HaltReason hr = core.Step(current_address_space, current_state, &halt_reason);
 
         PerformRequestedCacheInvalidation(hr);
+        if (!fastmem_blocks.empty()) {
+            current_address_space.InvalidateFastmemBlocks(fastmem_blocks);
+            fastmem_blocks.clear();
+        }
 
         return hr;
     }
@@ -85,7 +94,36 @@ struct Jit::Impl final {
     }
 
     void Reset() {
+        const bool fastmem_enabled = current_state.frond_fastmem_enabled;
         current_state = {};
+        current_state.frond_fastmem_enabled = fastmem_enabled;
+    }
+
+    bool FrondFastmemFaultPending() const {
+        return current_address_space.HasFrondFastmemFault();
+    }
+
+    FastmemFault FrondFastmemFaultSlow(bool unmapped) {
+        const auto marker = current_address_space.TakeFrondFastmemFault();
+        if (!marker) return FastmemFault::None;
+        if (!current_address_space.ShouldFastmem(*marker)) return FastmemFault::AlreadySlow;
+
+        // RAM pages can be refilled after translation or write-protection changes.
+        constexpr unsigned fault_cap = 32;
+        if (!unmapped && ++fastmem_retries[*marker] < fault_cap) return FastmemFault::Retry;
+
+        fastmem_retries.erase(*marker);
+        current_address_space.MarkDoNotFastmem(*marker);
+        // Apply after the current run's normal exit, so a host fault does not cut the guest slice short.
+        fastmem_blocks.insert(std::get<0>(*marker));
+        return unmapped ? FastmemFault::Unmapped : FastmemFault::Capped;
+    }
+
+    void FrondDisableFastmem() {
+        if (!current_state.frond_fastmem_enabled) return;
+        current_state.frond_fastmem_enabled = false;
+        current_address_space.DisableFrondFastmem();
+        ClearCache();
     }
 
     void HaltExecution(HaltReason hr) {
@@ -164,7 +202,6 @@ private:
     void PerformRequestedCacheInvalidation(HaltReason hr) {
         if (Has(hr, HaltReason::CacheInvalidation)) {
             std::unique_lock lock{invalidation_mutex};
-
             ClearHalt(HaltReason::CacheInvalidation);
 
             if (invalidate_entire_cache) {
@@ -195,6 +232,8 @@ private:
     std::mutex invalidation_mutex;
     boost::icl::interval_set<u32> invalid_cache_ranges;
     bool invalidate_entire_cache = false;
+    tsl::robin_set<IR::LocationDescriptor> fastmem_blocks;
+    std::unordered_map<DoNotFastmemMarker, unsigned, DoNotFastmemMarkerHash> fastmem_retries;
 };
 
 Jit::Jit(UserConfig conf)
@@ -204,6 +243,18 @@ Jit::Jit(UserConfig conf)
 }
 
 Jit::~Jit() = default;
+
+bool Jit::FrondFastmemFaultPending() const {
+    return impl->FrondFastmemFaultPending();
+}
+
+Jit::FastmemFault Jit::FrondFastmemFaultSlow(bool unmapped) {
+    return impl->FrondFastmemFaultSlow(unmapped);
+}
+
+void Jit::FrondDisableFastmem() {
+    impl->FrondDisableFastmem();
+}
 
 HaltReason Jit::Run() {
     return impl->Run();

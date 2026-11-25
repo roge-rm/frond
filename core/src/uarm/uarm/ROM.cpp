@@ -8,12 +8,14 @@
 
 #include "CPEndian.h"
 #include "cputil.h"
+#include "guest_memory.h"
 #include "mem.h"
 
 struct ArmRom {
     uint32_t base, size;
     uint32_t *data;
     uint32_t *dataPeephole;
+    bool ownsData;
 };
 
 template <int size>
@@ -137,7 +139,7 @@ void *romResolveAddress(struct ArmRom *rom, uint32_t pa, uint32_t size) {
     return reinterpret_cast<uint8_t *>(rom->data) + (pa - rom->base);
 }
 
-struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, const uint32_t size) {
+struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, uint32_t size, bool sharedCopy) {
     struct ArmRom *rom = (struct ArmRom *)malloc(sizeof(*rom));
     if (!rom) ERR("cannot alloc ROM at 0x%08x", adr);
 
@@ -146,6 +148,13 @@ struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, const uint3
     rom->base = adr;
     rom->data = (uint32_t *)data;
     rom->size = size;
+    if (sharedCopy) {
+        if (void *copy = GuestMemory::allocateShared(size)) {
+            memcpy(copy, data, size);
+            rom->data = static_cast<uint32_t *>(copy);
+            rom->ownsData = true;
+        }
+    }
 
     rom->dataPeephole = reinterpret_cast<uint32_t *>(malloc(size));
     if (!rom->dataPeephole) ERR("failed to allocate shadow buffer for peephole optimizations");
@@ -156,6 +165,13 @@ struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, const uint3
         ERR("cannot add RAM at 0x%08x to MEM\n", adr);
 
     return rom;
+}
+
+void romRelease(struct ArmRom *rom) {
+    if (!rom) return;
+    if (rom->ownsData) GuestMemory::releaseShared(rom->data);
+    free(rom->dataPeephole);
+    free(rom);
 }
 
 void *romGetPeepholeBuffer(struct ArmRom *rom) { return rom->dataPeephole; }

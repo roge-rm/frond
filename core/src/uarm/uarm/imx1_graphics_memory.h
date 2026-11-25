@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <vector>
+#include "guest_memory.h"
 #include "imx1_cs5_configuration.h"
 
 class Imx1GraphicsMemory;
@@ -86,7 +87,8 @@ class Imx1GraphicsMemory {
         uint64_t generation = 0;
     };
     enum class Consumer : unsigned { legacy, scanout, upload, persistence, count };
-    Imx1GraphicsMemory() : bytes{std::vector<uint8_t>(internalBytes), std::vector<uint8_t>(externalBytes)} {}
+    explicit Imx1GraphicsMemory(GuestMemory::Allocator<uint8_t> allocator = {})
+        : bytes{GuestMemory::Bytes(internalBytes, allocator), GuestMemory::Bytes(externalBytes, allocator)} {}
     Imx1GraphicsMemory(const Imx1GraphicsMemory&) = delete;
     Imx1GraphicsMemory& operator=(const Imx1GraphicsMemory&) = delete;
     // A worker still attached finishes its jobs first.
@@ -335,7 +337,7 @@ class Imx1GraphicsMemory {
         }
         return cpuToGpu(address, gpuAddress) ? A::ok : A::unmapped;
     }
-    std::array<std::vector<uint8_t>, 2> bytes;
+    std::array<GuestMemory::Bytes, 2> bytes;
     Imx1GraphicsResidency* residency = nullptr;
     Imx1GraphicsFence* fence = nullptr;
     std::array<std::array<Dirty, 2>, unsigned(Consumer::count)> changes{};

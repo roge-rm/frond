@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "guest_memory.h"
 #include "imx1_aitc.h"
 #include "imx1_cgm.h"
 #include "imx1_gpio.h"
@@ -47,8 +48,10 @@ class Imx1DmaExternal {
 // Startup memory/register subset. External pin samples require an explicit input source.
 class Imx1Bootstrap {
    public:
-    explicit Imx1Bootstrap(bool aspPx1HighFromReset = false, bool aspUSampleKnown = false, uint16_t aspUSample = 0)
-        : asp(aspPx1HighFromReset, aspUSampleKnown, aspUSample) {}
+    explicit Imx1Bootstrap(bool aspPx1HighFromReset = false, bool aspUSampleKnown = false, uint16_t aspUSample = 0,
+                           GuestMemory::Allocator<uint8_t> allocator = {})
+        : asp(aspPx1HighFromReset, aspUSampleKnown, aspUSample), sram(0x20000, allocator),
+          sdram{Sdram(allocator), Sdram(allocator)} {}
     // Atomic execution-thread contact/sample replacement, with AITC preview.
     Imx1BootstrapAccess replaceAspPenInputs(const Imx1AspPenInputs& inputs, bool commit = true);
     bool aspPenWakePossible(const Imx1AspPenInputs& inputs) const;
@@ -464,7 +467,7 @@ class Imx1Bootstrap {
     }
     // A hash of SRAM and both SDRAM banks, carried on from h, for tests.
     uint64_t memoryHash(uint64_t h) const {
-        const auto add = [&](const std::vector<uint8_t>& bytes) {
+        const auto add = [&](const GuestMemory::Bytes& bytes) {
             for (uint8_t b : bytes) h = (h ^ b) * 0x100000001b3ull;
             h = (h ^ bytes.size()) * 0x100000001b3ull;
         };
@@ -600,7 +603,7 @@ class Imx1Bootstrap {
     uint32_t cpuClockNum = 1, cpuClockDen = 1;
     void advanceSystemOutput(uint64_t clocks, bool wholeWritePeriods = true);
     bool asynchronousUsed = false, mcuRetuneScenario = false;
-    std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
+    GuestMemory::Bytes sram;
     uint32_t rmcr = 0, pwmr = 0;
     bool lcdcContrastOnly = false;
     uint32_t contrastPhase = 0, perclk2Phase = 0;
@@ -650,7 +653,8 @@ class Imx1Bootstrap {
         bool controlKnown = false;
         bool precharged = false, modeSet = false;
         uint32_t refreshes = 0;
-        std::vector<uint8_t> ram;
+        explicit Sdram(GuestMemory::Allocator<uint8_t> allocator) : ram(allocator) {}
+        GuestMemory::Bytes ram;
     } sdram[2];
     Imx1Reset reset;
     Imx1BootstrapAccess sdramControl(unsigned bank, bool write, uint32_t& value);

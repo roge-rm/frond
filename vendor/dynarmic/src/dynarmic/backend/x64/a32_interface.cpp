@@ -526,6 +526,10 @@ Jit::Jit(UserConfig conf)
 
 Jit::~Jit() = default;
 
+bool Jit::FrondFastmemFaultPending() const { return false; }
+Jit::FastmemFault Jit::FrondFastmemFaultSlow(bool) { return FastmemFault::None; }
+void Jit::FrondDisableFastmem() {}
+
 HaltReason Jit::Run() {
     return impl->Run();
 }

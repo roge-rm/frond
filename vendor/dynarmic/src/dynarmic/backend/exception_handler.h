@@ -61,6 +61,22 @@ public:
 #    error "Invalid architecture"
 #endif
 
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+    static void PrepareThreadSignalStack();
+
+    class ScopedExecution final {
+    public:
+        ScopedExecution(const ExceptionHandler& handler, bool enabled);
+        ~ScopedExecution();
+        ScopedExecution(const ScopedExecution&) = delete;
+        ScopedExecution& operator=(const ScopedExecution&) = delete;
+
+    private:
+        void* previous = nullptr;
+        bool active = false;
+    };
+#endif
+
     bool SupportsFastmem() const noexcept;
     void SetFastmemCallback(std::function<FakeCall(u64)> cb);
 

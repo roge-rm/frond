@@ -15,10 +15,17 @@
 #    endif
 #endif
 
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+#    include <dlfcn.h>
+#    include <pthread.h>
+#endif
+
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <vector>
 
@@ -47,22 +54,62 @@ struct CodeBlockInfo {
     std::function<FakeCall(u64)> cb;
 };
 
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+pthread_key_t active_code_key;
+struct sigaction android_previous_segv;
+decltype(&sigaction) android_sigaction = &sigaction;
+
+class ThreadSignalStack {
+public:
+    ThreadSignalStack() {
+        if (sigaltstack(nullptr, &previous) != 0) {
+            fmt::print(stderr, "dynarmic: cannot query the thread signal stack\n");
+            return;
+        }
+        if (!(previous.ss_flags & SS_DISABLE)) return;
+
+        const size_t size = std::max<size_t>(SIGSTKSZ, 64 * 1024);
+        auto allocation = std::unique_ptr<char[]>(new (std::nothrow) char[size]);
+        stack_t stack{};
+        stack.ss_sp = allocation.get();
+        stack.ss_size = size;
+        if (!allocation || sigaltstack(&stack, nullptr) != 0) {
+            fmt::print(stderr, "dynarmic: cannot install the thread signal stack\n");
+            return;
+        }
+        memory = std::move(allocation);
+    }
+
+    ~ThreadSignalStack() {
+        if (memory && sigaltstack(&previous, nullptr) != 0)
+            memory.release();  // The kernel may still use it until the thread exits.
+    }
+
+private:
+    stack_t previous{};
+    std::unique_ptr<char[]> memory;
+};
+#endif
+
 class SigHandler {
 public:
     SigHandler();
     ~SigHandler();
 
+#if !(defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64))
     void AddCodeBlock(CodeBlockInfo info);
     void RemoveCodeBlock(u64 host_pc);
+#endif
 
     bool SupportsFastmem() const { return supports_fast_mem; }
 
 private:
+    bool supports_fast_mem = true;
+
+#if !(defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64))
     auto FindCodeBlockInfo(u64 host_pc) {
         return std::find_if(code_block_infos.begin(), code_block_infos.end(), [&](const auto& x) { return x.code_begin <= host_pc && x.code_end > host_pc; });
     }
-
-    bool supports_fast_mem = true;
 
     void* signal_stack_memory = nullptr;
 
@@ -71,6 +118,7 @@ private:
 
     struct sigaction old_sa_segv;
     struct sigaction old_sa_bus;
+#endif
 
     static void SigAction(int sig, siginfo_t* info, void* raw_context);
 };
@@ -86,6 +134,39 @@ void RegisterHandler() {
 }
 
 SigHandler::SigHandler() {
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+    if (pthread_key_create(&active_code_key, nullptr) != 0) {
+        supports_fast_mem = false;
+        return;
+    }
+
+    // app_process exports ART's sigaction wrapper. Use its user slot so ART's
+    // special handlers retain priority and debuggerd still sees unhandled faults.
+    if (void* executable = dlopen(nullptr, RTLD_NOW)) {
+        if (const auto wrapper = dlsym(executable, "sigaction"))
+            android_sigaction = reinterpret_cast<decltype(android_sigaction)>(wrapper);
+        dlclose(executable);
+    }
+
+    struct sigaction sa{};
+    sa.sa_sigaction = &SigHandler::SigAction;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+    if (android_sigaction(SIGSEGV, nullptr, &android_previous_segv) != 0) {
+        fmt::print(stderr, "dynarmic: cannot read the Android SIGSEGV handler\n");
+        supports_fast_mem = false;
+        return;
+    }
+    sa.sa_mask = android_previous_segv.sa_mask;
+    sa.sa_flags |= android_previous_segv.sa_flags & SA_NODEFER;
+    if (android_sigaction(SIGSEGV, &sa, nullptr) != 0) {
+        fmt::print(stderr, "dynarmic: cannot install the Android fastmem signal handler\n");
+        supports_fast_mem = false;
+    } else if (std::getenv("FROND_JIT_STATS")) {
+        Dl_info where{};
+        if (dladdr(reinterpret_cast<void*>(android_sigaction), &where) && where.dli_fname)
+            fmt::print(stderr, "dynarmic: Android fastmem sigaction from {}\n", where.dli_fname);
+    }
+#else
     const size_t signal_stack_size = std::max<size_t>(SIGSTKSZ, 2 * 1024 * 1024);
 
     signal_stack_memory = std::malloc(signal_stack_size);
@@ -117,12 +198,16 @@ SigHandler::SigHandler() {
         return;
     }
 #endif
+#endif
 }
 
 SigHandler::~SigHandler() {
+#if !(defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64))
     std::free(signal_stack_memory);
+#endif
 }
 
+#if !(defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64))
 void SigHandler::AddCodeBlock(CodeBlockInfo cbi) {
     std::lock_guard<std::mutex> guard(code_block_infos_mutex);
     if (auto iter = FindCodeBlockInfo(cbi.code_begin); iter != code_block_infos.end()) {
@@ -139,8 +224,29 @@ void SigHandler::RemoveCodeBlock(u64 host_pc) {
     }
     code_block_infos.erase(iter);
 }
+#endif
 
 void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+    const auto* code = static_cast<const CodeBlockInfo*>(pthread_getspecific(active_code_key));
+    auto& pc = static_cast<ucontext_t*>(raw_context)->uc_mcontext.pc;
+    if (info->si_code > 0 && code && code->code_begin <= pc && pc < code->code_end) {
+        if (const auto call = code->cb(pc); call.call_pc) {
+            pc = call.call_pc;
+            return;
+        }
+    }
+    const auto& old = android_previous_segv;
+    if (old.sa_handler == SIG_DFL) {
+        android_sigaction(sig, &old, nullptr);
+        if (info->si_code <= 0) raise(sig);
+    } else if (old.sa_handler != SIG_IGN) {
+        if (old.sa_flags & SA_SIGINFO)
+            old.sa_sigaction(sig, info, raw_context);
+        else
+            old.sa_handler(sig);
+    }
+#else
     ASSERT(sig == SIGSEGV || sig == SIGBUS);
 
 #ifndef MCL_ARCHITECTURE_RISCV
@@ -270,6 +376,7 @@ void SigHandler::SigAction(int sig, siginfo_t* info, void* raw_context) {
         return;
     }
     retry_sa->sa_handler(sig);
+#endif
 }
 
 }  // anonymous namespace
@@ -286,12 +393,22 @@ struct ExceptionHandler::Impl final {
         cbi.code_begin = code_begin;
         cbi.code_end = code_end;
         cbi.cb = cb;
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+        code = std::move(cbi);
+#else
         sig_handler->AddCodeBlock(cbi);
+#endif
     }
 
     ~Impl() {
+#if !(defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64))
         sig_handler->RemoveCodeBlock(code_begin);
+#endif
     }
+
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+    CodeBlockInfo code{};
+#endif
 
 private:
     u64 code_begin, code_end;
@@ -325,6 +442,23 @@ void ExceptionHandler::Register(RV64::CodeBlock& mem, std::size_t size) {
 bool ExceptionHandler::SupportsFastmem() const noexcept {
     return static_cast<bool>(impl) && sig_handler->SupportsFastmem();
 }
+
+#if defined(__ANDROID__) && defined(MCL_ARCHITECTURE_ARM64)
+void ExceptionHandler::PrepareThreadSignalStack() {
+    thread_local ThreadSignalStack stack;
+}
+
+ExceptionHandler::ScopedExecution::ScopedExecution(const ExceptionHandler& handler, bool enabled) {
+    if (!enabled || !handler.SupportsFastmem()) return;
+    PrepareThreadSignalStack();
+    previous = pthread_getspecific(active_code_key);
+    active = pthread_setspecific(active_code_key, &handler.impl->code) == 0;
+}
+
+ExceptionHandler::ScopedExecution::~ScopedExecution() {
+    if (active) pthread_setspecific(active_code_key, previous);
+}
+#endif
 
 void ExceptionHandler::SetFastmemCallback(std::function<FakeCall(u64)> cb) {
     impl->SetCallback(cb);

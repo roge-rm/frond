@@ -43,6 +43,7 @@ class SoC {
     NetworkSimulation networkSimulation;
     std::unique_ptr<LibertasCF> wirelessDevice;
     class InputCheckpoint;
+    ~SoC();
     virtual void SetAudioOutputFenced(bool) {}
     bool RestoringCheckpoint() const { return restoringCheckpoint; }
 

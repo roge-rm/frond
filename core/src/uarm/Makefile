@@ -75,6 +75,8 @@ SOURCE_CXX =		 					\
 	uarm/ROM.cpp						\
 	uarm/RAM.cpp						\
 	uarm/memory_buffer.cpp				\
+	uarm/guest_memory.cpp				\
+	uarm/jit_fastmem_arena.cpp				\
 	uarm/mem.cpp						\
 	uarm/syscall.cpp					\
 	uarm/sdcard.cpp						\
@@ -212,8 +214,8 @@ $(BUILDDIR_NATIVE)/uarm/jit_dynarmic.o: INCLUDE = -I$(FROND_DYNARMIC_SRC)/src \
 	-I$(FROND_DYNARMIC_SRC)/externals/mcl/include -I$(FROND_DYNARMIC_SRC)/externals/fmt/include $(BOOST_INCLUDE)
 endif
 
-# CPU.o and icache.o change with FROND_DYNARMIC, so switching it rebuilds them.
+# These objects change with FROND_DYNARMIC, so switching it rebuilds them.
 JIT_STAMP := $(BUILDDIR_NATIVE)/.jit-$(if $(FROND_DYNARMIC_SRC),on,off)
-$(BUILDDIR_NATIVE)/uarm/CPU.o $(BUILDDIR_NATIVE)/uarm/icache.o: $(JIT_STAMP)
+$(BUILDDIR_NATIVE)/uarm/CPU.o $(BUILDDIR_NATIVE)/uarm/icache.o $(BUILDDIR_NATIVE)/uarm/guest_memory.o: $(JIT_STAMP)
 $(JIT_STAMP):
 	mkdir -p $(BUILDDIR_NATIVE) && rm -f $(BUILDDIR_NATIVE)/.jit-* && touch $@

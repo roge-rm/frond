@@ -246,17 +246,8 @@ void EmitDetectMisalignedVAddr(oaknut::CodeGenerator& code, EmitContext& ctx, oa
     }
 }
 
-// Outputs Xscratch0 = page_table[addr >> page_bits]
-// May use Xscratch1 as scratch register
-// Address to read/write = [ret0 + ret1], ret0 is always Xscratch0 and ret1 is either Xaddr or Xscratch1
-// Trashes NZCV
-// write: the lookup is for a store, which goes to fallback for an entry with bit 0 set
-// when page_table_write_protect_bit is on (Frond).
-template<size_t bitsize, bool write = false>
-std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::XReg Xaddr, const SharedLabel& fallback) {
-    const size_t valid_page_index_bits = ctx.conf.page_table_address_space_bits - page_bits;
-    const size_t unused_top_bits = 64 - ctx.conf.page_table_address_space_bits;
-
+template<size_t bitsize, bool write>
+void EmitMemoryAccessChecks(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::XReg Xaddr, const SharedLabel& fallback) {
     EmitDetectMisalignedVAddr<bitsize>(code, ctx, Xaddr, fallback);
 
     // Frond: the data cache hint (A32::UserConfig::frond_cost_hint).
@@ -307,10 +298,26 @@ std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::Cod
         }
     }
 
+}
+
+template<size_t bitsize, bool write = false>
+std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::XReg Xaddr, const SharedLabel& fallback) {
+    const size_t valid_page_index_bits = ctx.conf.page_table_address_space_bits - page_bits;
+    const size_t unused_top_bits = 64 - ctx.conf.page_table_address_space_bits;
+
+    EmitMemoryAccessChecks<bitsize, write>(code, ctx, Xaddr, fallback);
     if (ctx.conf.frond_split_page_tables) {
-        // Frond: the load or store table's entry is the host page less the guest page, null for the callbacks.
+        // The table entry is the host page less the guest page, null for the callbacks.
+        oaknut::XReg table = Xpagetable;
+        if constexpr (write) {
+            table = Xfastmem;
+            if (ctx.conf.frond_split_write_table) {
+                code.MOV(Xscratch1, ctx.conf.frond_split_write_table);
+                table = Xscratch1;
+            }
+        }
         code.UBFX(Xscratch0, Xaddr, page_bits, valid_page_index_bits);
-        code.LDR(Xscratch0, write ? Xfastmem : Xpagetable, Xscratch0, LSL, 3);
+        code.LDR(Xscratch0, table, Xscratch0, LSL, 3);
         code.CBZ(Xscratch0, *fallback);
         return std::make_pair(Xscratch0, Xaddr);
     }
@@ -565,11 +572,14 @@ inline bool ShouldExt32(EmitContext& ctx) {
     return ctx.conf.fastmem_address_space_bits == 32 && ctx.conf.silently_mirror_fastmem;
 }
 
-// May use Xscratch0 as scratch register
-// Address to read/write = [ret0 + ret1], ret0 is always Xfastmem and ret1 is either Xaddr or Xscratch0
-// Trashes NZCV
-template<size_t bitsize>
+template<size_t bitsize, bool write = false>
 std::pair<oaknut::XReg, oaknut::XReg> FastmemEmitVAddrLookup(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::XReg Xaddr, const SharedLabel& fallback) {
+    if (ctx.conf.frond_fastmem_enabled_offset) {
+        // A failed remap can disable the arena from a callback in this block.
+        code.LDRB(Wscratch0, Xstate, *ctx.conf.frond_fastmem_enabled_offset);
+        code.CBZ(Wscratch0, *fallback);
+        EmitMemoryAccessChecks<bitsize, write>(code, ctx, Xaddr, fallback);
+    }
     if (ctx.conf.fastmem_address_space_bits == 64 || ShouldExt32(ctx)) {
         return std::make_pair(Xfastmem, Xaddr);
     }
@@ -614,6 +624,7 @@ void FastmemEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::In
                     .call_pc = mcl::bit_cast<u64>(code.xptr<void*>()),
                 },
                 .recompile = ctx.conf.recompile_on_fastmem_failure,
+                .defer = ctx.conf.frond_fastmem_enabled_offset.has_value(),
             });
 
         code.l(*fallback);
@@ -652,7 +663,7 @@ void FastmemEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::I
 
     SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
 
-    const auto [Xbase, Xoffset] = FastmemEmitVAddrLookup<bitsize>(code, ctx, Xaddr, fallback);
+    const auto [Xbase, Xoffset] = FastmemEmitVAddrLookup<bitsize, true>(code, ctx, Xaddr, fallback);
     const auto fastmem_location = EmitMemoryStr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered, ShouldExt32(ctx));
 
     ctx.deferred_emits.emplace_back([&code, &ctx, inst, marker, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end, fastmem_location] {
@@ -664,6 +675,7 @@ void FastmemEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::I
                     .call_pc = mcl::bit_cast<u64>(code.xptr<void*>()),
                 },
                 .recompile = ctx.conf.recompile_on_fastmem_failure,
+                .defer = ctx.conf.frond_fastmem_enabled_offset.has_value(),
             });
 
         code.l(*fallback);

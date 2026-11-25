@@ -139,8 +139,10 @@ struct EmitConfig {
     // Frond: the data cache hint (A32::UserConfig::frond_cost_hint, A32 only).
     const u32* frond_cost_hint = nullptr;
     const bool* frond_cost_hint_on = nullptr;
-    // Frond: separate absolute-offset tables for loads (in Xpagetable) and stores (in Xfastmem), A32 only.
+    // Frond: separate absolute-offset tables for loads and stores, A32 only.
     bool frond_split_page_tables = false;
+    // With an arena in Xfastmem, load the store table address where needed.
+    u64 frond_split_write_table = 0;
     bool silently_mirror_page_table;
     bool absolute_offset_page_table;
     u8 detect_misaligned_access_via_page_table;
@@ -149,6 +151,7 @@ struct EmitConfig {
     // Fastmem
     std::optional<u64> fastmem_pointer;
     bool recompile_on_fastmem_failure;
+    std::optional<size_t> frond_fastmem_enabled_offset = std::nullopt;
     size_t fastmem_address_space_bits;
     bool silently_mirror_fastmem;
 

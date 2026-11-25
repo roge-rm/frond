@@ -169,7 +169,8 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
 }
 
 S3c2442Machine::~S3c2442Machine() {
-    // Nothing runs on the CPU after this, and its RAM regions point into the buffer.
+    cpuDropJit(cpuCore);
+    // The CPU's RAM regions point into this buffer.
     if (ramMemory.buffer) memoryBufferRelease(&ramMemory);
 }
 
