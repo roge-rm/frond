@@ -68,6 +68,7 @@ struct Stats {
     // PID came back, compile-thread blocks installed under another PID than the one they were fetched under,
     // and suspended pages whose blocks at their MVA a later flush dropped.
     uint64_t suspends = 0, resumes = 0, otherPidInstalls = 0, suspendedMvaDrops = 0;
+    uint64_t guardExits = 0, guardAbsent = 0;
     // ARM920T Fast blocks: mapping checks that went through every code page (the rest took only the pages
     // of table lines that changed), the pages all checks walked, the changed lines and the most lines kept.
     uint64_t fullMapChecks = 0, mapPagesChecked = 0, tableLinesChanged = 0, tableLines = 0;
@@ -170,6 +171,8 @@ struct Stats {
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
                 (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
+        fprintf(stderr, "jit: guardExits %llu guardAbsent %llu\n",
+                (unsigned long long)guardExits, (unsigned long long)guardAbsent);
         fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu suspendedMvaDrops %llu\n",
                 (unsigned long long)suspends, (unsigned long long)resumes, (unsigned long long)otherPidInstalls,
                 (unsigned long long)suspendedMvaDrops);
@@ -234,6 +237,16 @@ struct Stats {
             fprintf(stderr, "jit: fault at %08x %llu\n", top[i].second, (unsigned long long)top[i].first);
     }
 } stats;
+
+// Tags ride in FPSCR bits that only VFP vector code reads, which the ARM920T has none of: Len (16-18) and
+// Stride (20-21). Neither reaches the host (MXCSR on x64; the arm64 prelude masks them out of FPCR). AHP,
+// rounding mode, FZ and DN stay 0, as they would reach the host's FP state.
+constexpr unsigned kPidTags = 32;
+constexpr unsigned kAbsentTag = kPidTags - 1;  // not handed out (it was the absent tag)
+constexpr uint32_t jitPrvTagFpscr(unsigned tag) { return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20); }
+static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x00370000);
+
+constexpr unsigned kGuardTags = (jitPrvTagFpscr(kPidTags - 1) >> 16) + 1;
 
 constexpr HaltReason kInterpret = HaltReason::UserDefined2;
 constexpr HaltReason kSlowPath = HaltReason::UserDefined3;
@@ -594,7 +607,7 @@ struct Env final : public A32::UserCallbacks {
         uint8_t *host;
         uint8_t *lines;  // RAM code flags for the page, null for ROM and unwatched pages
         uint32_t access;
-        bool suspended = false;  // in suspended[] until its PID runs again
+        bool suspended = false;  // kept behind its PID tag's page guard
         bool stale = false;  // suspended, and its blocks from before were read from another physical page
         bool noted = false;  // suspended, and code was noted from it since: blocks at its MVA may be live
         MmuCodeWalkMemo walk;  // the last mapping check's table words (CodePa)
@@ -609,28 +622,19 @@ struct Env final : public A32::UserCallbacks {
     std::unordered_map<uint8_t *, std::vector<uint32_t>> byHost;
     std::vector<uint32_t> unwatched;
     uint32_t mapGen = 0;
-    // ARM920T Fast blocks: code pages (MVAs) of another PID's slot whose mapping a TLB flush found moved, by
-    // slot. WinCE unmaps a process's slot while others run and maps it back the same before it runs again.
-    // The pages' blocks below 32 MB run under that PID's tag only, so they can't be reached until the PID
-    // is back; jitRun then keeps the pages mapped as before and drops the rest (Resume). A page may be
-    // listed more than once, or after it was dropped; its suspended flag says whether it still counts.
-    std::array<std::vector<uint32_t>, 128> suspended;
-    // The PID's slot still has suspended pages that aren't mapped yet: their VAs below 32 MB are guarded
-    // (the JIT's frond_page_guard), so their blocks leave at entry and the interpreter fetches the code
-    // (and takes the prefetch abort WinCE maps the slot back from). Guarded pages by VA page, and the
-    // pages set. absentRuns counts runs with pages left by slot, up to kAbsentRuns.
-    std::array<uint8_t, 0x2000> guard{};
-    std::vector<uint32_t> guarded;
-    std::array<uint16_t, 128> absentRuns{};
-    // CheckMappings' and Resume's lists, kept so a run doesn't allocate them.
-    std::vector<uint32_t> scratchMoved, scratchList, scratchLeft, scratchFilled, scratchFillMoved;
+    // Suspended FCSE code stays guarded under its PID tag until an entry or compile tries to use it.
+    static constexpr uint32_t guardEnd = 0x02000000;
+    static constexpr uint32_t guardPages = guardEnd >> 12;
+    std::vector<uint8_t> guard;
+    uint32_t guardExitPage = ~0u;
+    std::vector<uint32_t> scratchMoved, scratchFilled, scratchFillMoved;
     // ARM920T Fast blocks: a copy of each 64-byte line of page table words the code pages' walk memos read,
     // with the pages that read it, so a mapping check compares those lines and walks only the pages of lines
     // that changed, and the pages in recheck: new ones, suspended ones with code newly noted, and those whose
     // walk couldn't be remembered or was answered by a live TLB entry. A TTB change checks everything.
     // A line's pages may include pages that left or no longer read it; they go when it changes, and lines
     // with no pages left go every kSweepChecks checks.
-    // A page walked outside a check (Resume, NoteSuspended) against words other than a line's copy marks the
+    // A page walked outside a check (RevalidateGuard, NoteSuspended) against words other than a line's copy marks the
     // line dirty, so the next check takes its pages even if the words are back as copied by then.
     struct TableLine {
         const uint8_t *host;
@@ -641,6 +645,7 @@ struct Env final : public A32::UserCallbacks {
         std::vector<uint32_t> pages;
         // Whether a word walks read differs from the copy.
         bool Moved() const {
+            if (std::memcmp(host, copy, sizeof(copy)) == 0) return false;
             for (uint32_t m = words; m; m &= m - 1) {
                 const unsigned at = unsigned(__builtin_ctz(m)) * 4;
                 if (std::memcmp(host + at, copy + at, 4)) return true;
@@ -797,13 +802,13 @@ struct Env final : public A32::UserCallbacks {
 
     // New code from a suspended page (from 32 MB up, or another PID's below): if the page is mapped to
     // another physical page now, it's watched there, and the blocks from before (which can't run until
-    // Resume) are marked stale, so Resume drops them. The page stays in suspended[].
+    // RevalidateGuard) are marked stale so the guard drops them.
     std::unordered_map<uint32_t, CodePage>::iterator NoteSuspended(std::unordered_map<uint32_t, CodePage>::iterator it,
                                                                    uint32_t page) {
         uint32_t access;
         const uint32_t pa = CodePa(page, it->second, access);
         if (pa == ~0u || (pa == it->second.pa && access == it->second.access)) return it;
-        Forget(page);
+        Forget(page, false);
         it = NotePage(page);
         it->second.suspended = it->second.stale = true;
         return it;
@@ -815,9 +820,10 @@ struct Env final : public A32::UserCallbacks {
     }
 
     // Forgets a code page that holds no code now, so the next compile from it watches it again.
-    void Forget(uint32_t page) {
+    void Forget(uint32_t page, bool clearGuard = true) {
         const auto it = code.find(page);
         if (it == code.end()) return;
+        if (clearGuard && it->second.suspended) GuardByte(pidTags[page >> 13], page) = 0;
         const auto n = accessPages.find(it->second.access);
         if (!--n->second) accessPages.erase(n);
         if (fillWatch) fillWatch[page] &= ~watchBit;
@@ -901,7 +907,7 @@ struct Env final : public A32::UserCallbacks {
     // store puts there, with the old word still in place (null if not known). Such a store that keeps the
     // word, or puts an entry where a fault one was (WinCE maps a slot back that way), moves no code page's
     // mapping: a page whose walk reads a fault entry there was dropped or suspended by the check after the
-    // store that put it there, and Resume and NoteSuspended walk it again. A fill through the new entry
+    // store that put it there, and RevalidateGuard and NoteSuspended walk it again. A fill through the new entry
     // (TakeFills) is for such a page too, or for code compiled from it since, which has that mapping.
     void TableWordsWritten(uint32_t pa, uint32_t offset, uint32_t size, const void *data) {
         for (uint32_t line = offset >> 6; line <= (offset + size - 1) >> 6; line++) {
@@ -945,7 +951,7 @@ struct Env final : public A32::UserCallbacks {
 
     // One page's mapping check: a page whose mapping moved is listed in moved, to be dropped. ARM920T Fast
     // blocks: a page of another PID's slot (with a tag) is suspended instead, dropping only blocks run at its
-    // MVA, which any PID can reach. Suspended pages wait for Resume; one with code noted since (compiled at its
+    // MVA, which any PID can reach. Suspended pages wait at their guard; one with code noted since (compiled at its
     // MVA, by another PID or the owner on a guarded page) drops the blocks at its MVA again when it moves.
     void CheckPage(uint32_t page, CodePage &c, std::vector<uint32_t> &moved) {
         stats.mapPagesChecked++;
@@ -962,9 +968,8 @@ struct Env final : public A32::UserCallbacks {
         const uint32_t slot = page >> 13;
         if (arm920 && !lineBound && pidTags && slot && slot != cpuGetPid(cpu) >> 25 && pidTags[slot]) {
             stats.suspends++;
-            c.suspended = true;
+            Suspend(page, c);
             c.noted = false;
-            suspended[slot].push_back(page);
             if (jit->HasCodeIn(page << 12, 4096)) jit->InvalidateCacheRange(page << 12, 4096);
             return;
         }
@@ -1020,7 +1025,7 @@ struct Env final : public A32::UserCallbacks {
         std::vector<uint32_t> &pages = scratchFilled;
         pages.clear();
         const auto take = [&](uint32_t page, CodePage &c) {
-            if (c.suspended && !c.noted) return;  // Resume walks it before its code can run
+            if (c.suspended && !c.noted) return;  // The guard rechecks it before its code can run
             // An entry a flush took again since answers nothing, and one with the mapping the code came from
             // changes nothing.
             if (!cpuJitTlbLive(cpu, page << 12)) return;
@@ -1114,7 +1119,7 @@ struct Env final : public A32::UserCallbacks {
         for (uint32_t page : pages) {
             const auto c = code.find(page);
             if (c == code.end()) continue;
-            // Resume walks a suspended page again before its code can run (a walk off its line's copy marks
+            // RevalidateGuard walks a suspended page again before its code can run (a walk off its line's copy marks
             // the line dirty), and one with code noted is in recheck.
             if (c->second.suspended && !c->second.noted) continue;
             check(page, c->second);
@@ -1122,54 +1127,50 @@ struct Env final : public A32::UserCallbacks {
         return true;
     }
 
-    // Before running under the PID of slot: its suspended pages mapped as when they were noted keep their
-    // code, pages mapped elsewhere are dropped, and pages not mapped stay suspended (the run goes under the
-    // guard) for up to kAbsentRuns runs, then are dropped too. True if any stay.
-    static constexpr uint16_t kAbsentRuns = 4096;
-    bool Resume(uint32_t slot) {
-        std::vector<uint32_t> &list = scratchList, &left = scratchLeft;
-        list.clear();
-        left.clear();
-        list.swap(suspended[slot]);
-        const bool last = ++absentRuns[slot] > kAbsentRuns;
-        for (uint32_t page : list) {
-            const auto c = code.find(page);
-            if (c == code.end() || !c->second.suspended) continue;
-            uint32_t access;
-            const uint32_t pa = CodePa(page, c->second, access);
-            if (!c->second.stale && pa == c->second.pa && access == c->second.access) {
-                stats.resumes++;
-                c->second.suspended = false;
-                continue;
-            }
-            if (pa == ~0u && !last && !c->second.stale) {
-                left.push_back(page);
-                continue;
-            }
-            c->second.suspended = false;
+    uint8_t &GuardByte(uint8_t pidTag, uint32_t page) {
+        const uint32_t index = jitPrvTagFpscr(pidTag) >> 16;
+        return guard[index * guardPages + (page & (guardPages - 1))];
+    }
+
+    bool Guarded(uint32_t pc) {
+        return !guard.empty() && tag && pc < guardEnd && GuardByte(tag, pc >> 12);
+    }
+
+    void Suspend(uint32_t page, CodePage &c) {
+        c.suspended = true;
+        GuardByte(pidTags[page >> 13], page) = 1;
+    }
+
+    // Called after the JIT returns. An absent mapping stays guarded so the guest can fault it in.
+    bool RevalidateGuard(uint32_t vaPage) {
+        const uint32_t page = CodePageOf(vaPage << 12);
+        const auto it = code.find(page);
+        if (it == code.end() || !it->second.suspended) {
+            GuardByte(tag, vaPage) = 0;
+            return true;
+        }
+        CodePage &c = it->second;
+        uint32_t access;
+        const uint32_t pa = CodePa(page, c, access);
+        if (!c.stale && pa == ~0u) {
+            stats.guardAbsent++;
+            return false;
+        }
+        if (!c.stale && pa == c.pa && access == c.access) {
+            c.suspended = false;
+            GuardByte(tag, vaPage) = 0;
+            stats.resumes++;
+        } else {
             stats.mapChanged++;
             Drop(page);
         }
-        if (left.empty()) {
-            absentRuns[slot] = 0;
-            return false;
-        }
-        suspended[slot].swap(left);
         return true;
     }
 
-    // Guards the VAs below 32 MB of slot's suspended pages (none for slot 0), for a run under its PID.
-    void Guard(uint32_t slot) {
-        for (uint32_t p : guarded) guard[p] = 0;
-        guarded.clear();
-        if (!slot) return;
-        for (uint32_t page : suspended[slot]) {
-            const uint32_t p = page & 0x1fff;
-            if (!guard[p]) {
-                guard[p] = 1;
-                guarded.push_back(p);
-            }
-        }
+    void FrondPageGuardExit(A32::VAddr pageAddress) override {
+        stats.guardExits++;
+        guardExitPage = pageAddress >> 12;
+        jit->HaltExecution(kCold);
     }
 
     void DropUnwatched(uint32_t first, uint32_t last) {
@@ -1207,9 +1208,7 @@ struct Env final : public A32::UserCallbacks {
         byHost.clear();
         byPa.clear();
         unwatched.clear();
-        for (auto &list : suspended) list.clear();
-        absentRuns.fill(0);
-        Guard(0);
+        std::fill(guard.begin(), guard.end(), 0);
         tableLines.clear();
         tableLineAt.clear();
         recheck.clear();
@@ -1343,9 +1342,8 @@ struct Env final : public A32::UserCallbacks {
     uint32_t hot = 1;
 
     bool ShouldCompile(A32::VAddr pc, bool thumb) override {
-        if (pc < 0x02000000u && guard[pc >> 12]) {
-            stats.cold++;
-            jit->HaltExecution(kCold);
+        if (Guarded(pc)) {
+            FrondPageGuardExit(pc);
             return false;
         }
         if (hot <= 1) return true;
@@ -1391,17 +1389,19 @@ struct Env final : public A32::UserCallbacks {
         T v{};
         stats.reads++;
         stats.NoteCallback(va, false);
-        // A device page: no page to fill.
-        bool ok;
-        if (const int io = cpuJitIoRead(cpu, va, sizeof(T), &v, &ok, gen)) {
-            if (!ok) {
-                AccessFailed(va, sizeof(T), false, 10);
-                return 0;
+        // ARM920T device accesses go through the lean path.
+        if (!arm920) {
+            bool ok;
+            if (const int io = cpuJitIoRead(cpu, va, sizeof(T), &v, &ok, gen)) {
+                if (!ok) {
+                    AccessFailed(va, sizeof(T), false, 10);
+                    return 0;
+                }
+                if (io == 2) GenChanged(cpuJitPageGen(cpu));
+                AfterIo();
+                if (memoryCost) Charged();
+                return v;
             }
-            if (io == 2) GenChanged(cpuJitPageGen(cpu));
-            AfterIo();
-            if (memoryCost) Charged();
-            return v;
         }
         // The ARM920T's lean path refuses without setting fsr: that's an exit, not a guest abort.
         uint_fast8_t fsr = 0;
@@ -1456,16 +1456,18 @@ struct Env final : public A32::UserCallbacks {
                 }
             }
         }
-        bool ok;
-        if (const int io = cpuJitIoWrite(cpu, va, sizeof(T), &v, &ok, gen)) {
-            if (!ok) {
-                AccessFailed(va, sizeof(T), true, 10);
+        if (!arm920) {
+            bool ok;
+            if (const int io = cpuJitIoWrite(cpu, va, sizeof(T), &v, &ok, gen)) {
+                if (!ok) {
+                    AccessFailed(va, sizeof(T), true, 10);
+                    return;
+                }
+                if (io == 2) GenChanged(cpuJitPageGen(cpu));
+                AfterIo();
+                if (memoryCost) Charged();
                 return;
             }
-            if (io == 2) GenChanged(cpuJitPageGen(cpu));
-            AfterIo();
-            if (memoryCost) Charged();
-            return;
         }
         uint_fast8_t fsr = 0;
         if (!cpuJitWrite(cpu, va, sizeof(T), &v, &fsr)) {
@@ -1587,7 +1589,7 @@ struct Env final : public A32::UserCallbacks {
     // else isn't compiled ahead.
     std::unique_ptr<A32::CodeSnapshot> SnapshotCodeAhead(A32::VAddr pc, bool thumb, bool whole) override {
         // A guarded page can't be fetched now.
-        if (pc < 0x02000000u && guard[pc >> 12]) return nullptr;
+        if (Guarded(pc)) return nullptr;
         cpuJitMemoryOnly(cpu, true);
         auto s = SnapshotCode(pc, thumb, whole);
         cpuJitMemoryOnly(cpu, false);
@@ -1599,7 +1601,7 @@ struct Env final : public A32::UserCallbacks {
     // the block is dropped. Otherwise they are noted as code, as MemoryReadCode does.
     // A word of a block fetched under another PID below 32 MB, whose MVA isn't mapped now (WinCE unmaps a
     // slot while other processes run): read at the physical page it was fetched from, if the page is
-    // still watched there or not watched at all. Resume then keeps the block only if the slot maps back
+    // still watched there or not watched at all. Its guard keeps the block only if the slot maps back
     // the same.
     bool FetchUnmapped(const Snapshot &s, uint32_t va, uint32_t mva, uint32_t *w) {
         const auto *m = s.MapOf(va);
@@ -1641,8 +1643,7 @@ struct Env final : public A32::UserCallbacks {
                     uint32_t access;
                     if (m && CodePa(mva >> 12, access) == ~0u) {
                         auto it = NotePage(mva >> 12, m->pa, m->access);
-                        it->second.suspended = true;
-                        suspended[mva >> 25].push_back(mva >> 12);
+                        Suspend(mva >> 12, it->second);
                     }
                 }
                 NoteCodeAt(mva >> 12, mva & 0xfffu);
@@ -2171,13 +2172,7 @@ struct FrondJit {
     std::unique_ptr<uint8_t[]> fillWatch;
 };
 
-// Tags ride in FPSCR bits that only VFP vector code reads, which the ARM920T has none of: Len (16-18) and
-// Stride (20-21). Neither reaches the host (MXCSR on x64; the arm64 prelude masks them out of FPCR). AHP,
-// rounding mode, FZ and DN stay 0, as they would reach the host's FP state.
-constexpr unsigned kPidTags = 32;
-constexpr unsigned kAbsentTag = kPidTags - 1;  // not handed out (it was the absent tag)
-constexpr uint32_t jitPrvTagFpscr(unsigned tag) { return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20); }
-static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x00370000);
+
 
 
 const FrondJitAbort &jitLastAbort(const FrondJit *j) { return j->abort; }
@@ -2320,8 +2315,9 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
         e.watchBit = privileged ? 2 : 1;
         const uint32_t *ring;
         e.seenFills = cpuJitWatchedFills(j->cpu, &ring);
+        e.guard.resize(kGuardTags * Env::guardPages);
         conf.frond_page_guard = e.guard.data();
-        conf.frond_page_guard_end = 0x02000000u;
+        conf.frond_page_guard_end = Env::guardEnd;
         conf.frond_page_guard_fpscr = jitPrvTagFpscr(kPidTags - 1);  // tag 0 (PID 0) runs are never guarded
     }
     // Unaligned accesses go through the callbacks, which fault on them.
@@ -2599,7 +2595,7 @@ static void jitPrvSetTag(Env &e, A32::Jit &jit, uint8_t tag) {
 
 // Runs the JIT for the CPU's current privilege level. A privilege change in generated code
 // ends the run as if the budget ran out, and the next run goes to the other level.
-uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop) {
+static uint32_t jitPrvRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop, bool &retry) {
     const bool privileged = cpuJitPrivileged(j->cpu);
     Level *l = j->level[privileged].get();
     if (!l) l = jitPrvMakeLevel(j, privileged);
@@ -2622,12 +2618,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         e.CheckMappings();
     }
     e.CheckGen();  // a check may have marked new table words' pages (cpuJitWatchTableWord)
-    if (e.arm920) {
-        const uint32_t slot = cpuGetPid(j->cpu) >> 25;
-        const bool left = !e.suspended[slot].empty() && e.Resume(slot);
-        e.Guard(left ? slot : 0);
-        jitPrvSetTag(e, jit, tag);
-    }
+    if (e.arm920) jitPrvSetTag(e, jit, tag);
     if (!j->remaskPa.empty() || !j->remaskHost.empty()) jitPrvRemask(j);
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));
     jit.SetCpsr(cpsr);
@@ -2644,6 +2635,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     e.ran = 0;
     e.undo = 0;
     e.dataAbort.set = false;
+    e.guardExitPage = ~0u;
     j->running = &e;
     const HaltReason hr = jit.Run();
     j->running = nullptr;
@@ -2679,10 +2671,23 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         stop = FROND_JIT_INTERPRET;
     else if (Has(hr, kSlowPath))
         stop = FROND_JIT_HALT;
-    else if (Has(hr, kCold))
-        stop = FROND_JIT_COLD;
-    else
+    else if (Has(hr, kCold)) {
+        const bool revalidated = e.guardExitPage != ~0u && e.RevalidateGuard(e.guardExitPage);
+        // Charge completed instructions before retrying. An entry exit can retry here.
+        retry = revalidated && !j->lastInstructions;
+        stop = revalidated ? FROND_JIT_BUDGET : FROND_JIT_COLD;
+    } else
         stop = FROND_JIT_BUDGET;
+    return clocks;
+}
+
+uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop) {
+    bool retry;
+    uint32_t clocks;
+    do {
+        retry = false;
+        clocks = jitPrvRun(j, regs, cpsr, cycles, stop, retry);
+    } while (retry);
     return clocks;
 }
 

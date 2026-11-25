@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -121,6 +122,9 @@ struct UserCallbacks : public TranslateCallbacks {
     /// The interpreter must execute exactly num_instructions starting from PC.
     virtual void InterpreterFallback(VAddr pc, size_t num_instructions) = 0;
 
+    // The block stopped before running any instructions on a guarded code page.
+    virtual void FrondPageGuardExit(VAddr /*page_address*/) {}
+
     // This callback is called whenever a SVC instruction is executed.
     virtual void CallSVC(std::uint32_t swi) = 0;
 
@@ -209,13 +213,18 @@ struct UserConfig {
     /// the run at the next branch instead of when the cycles run out.
     bool check_halt_on_link = false;
 
-    /// Frond: a byte per 4 KiB page below frond_page_guard_end. A block whose code starts or ends on a page
-    /// whose byte is non-zero leaves at its entry through InterpreterFallback at its PC, having run
-    /// nothing, so blocks on pages that can't be fetched for now stay compiled. Only blocks whose
-    /// location's FPSCR has one of the frond_page_guard_fpscr bits set check it. x64 and arm64.
+    /// Frond: one byte per 4 KiB page below frond_page_guard_end, per FPSCR tag.
+    /// Blocks touching a guarded page exit before running and report that page.
     const std::uint8_t* frond_page_guard = nullptr;
     std::uint32_t frond_page_guard_end = 0;
     std::uint32_t frond_page_guard_fpscr = 0;
+
+    const std::uint8_t* FrondPageGuard(std::uint32_t fpscr) const {
+        const auto tag = fpscr & frond_page_guard_fpscr;
+        if (!frond_page_guard || !tag)
+            return nullptr;
+        return frond_page_guard + (tag >> std::countr_zero(frond_page_guard_fpscr)) * (frond_page_guard_end >> 12);
+    }
 
     /// Frond: when non-zero, a block holds at most this many instructions and every block
     /// link checks the cycles left (LinkBlockFast as well as LinkBlock), so a run goes at

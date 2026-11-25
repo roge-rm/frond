@@ -65,14 +65,20 @@ struct ArmMmu *mmuInit(struct ArmMem *mem, bool xscaleMode) {
 
 bool mmuIsOn(struct ArmMmu *mmu) { return mmu->transTablPA != MMU_DISABLED_TTP; }
 
+static inline bool tableWordInRam(const ArmMemRegion& ram, uint32_t addr) {
+    return addr >= ram.pa && addr < ram.ub && ram.ub - addr >= sizeof(uint32_t);
+}
+
 // checkRead false skips the permission check for reads (inspection). access, if given, gets
 // adr's domain << 2 | AP, and uniform whether the rest of its 4K page has the same AP.
+template <bool memoizeSubpage = false>
 static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uint32_t adr,
                                                          bool priviledged, bool write, bool inspect = false,
                                                          bool checkRead = true, uint8_t *access = nullptr,
                                                          bool *uniformP = nullptr, MmuCodeWalkMemo *memo = nullptr,
                                                          const uint8_t *(*host)(void *, uint32_t) = nullptr,
-                                                         void *hostCtx = nullptr) {
+                                                         void *hostCtx = nullptr,
+                                                         SubpageWriteMemo *subpage = nullptr) {
     bool c = false, b = false, x = false;
     bool section = false, coarse = true, pxa_tex_page = false;
     uint32_t va, paPage = 0, sz, t, pa;
@@ -82,6 +88,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
     uint8_t fsr;
     MMUTranslateResult result;
 
+    unsigned subpageWords = 0;
     const auto readTable = [&](uint32_t pa, uint32_t* dest) {
         const bool ok = (!inspect || memIsBufferRange(mmu->mem,pa,4,false)) &&
                         memAccess<4,false>(mmu->mem,pa,dest);
@@ -95,6 +102,16 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
                 memo->value[memo->n++] = v;
             } else {
                 memo->n = 0xff;
+            }
+        }
+        if constexpr (memoizeSubpage) {
+            if (subpage) {
+                if (ok && tableWordInRam(mmu->mem->regions[REGION_RAM], pa)) {
+                    subpage->tableAddress[subpageWords] = pa;
+                    subpage->tableWord[subpageWords++] = *dest;
+                } else {
+                    subpage = nullptr;
+                }
             }
         }
         return ok;
@@ -289,18 +306,54 @@ translated:
         *uniformP = uniform;
     }
 
-    if (write || checkRead) {
-        fsr = checkPermissions(mmu, ap, dom, section, priviledged, write);
-        if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
-    }
-
     result = pa;
-
     if (c) result |= (1ull << 62);
     if (b) result |= (1ull << 61);
     if (x) result |= (1ull << 60);
 
+    if constexpr (memoizeSubpage) {
+        if (subpage && sz == 1024 && subpageWords == 2) {
+            subpage->ttb = mmu->transTablPA;
+            subpage->subpage = va;
+            subpage->base = result & ~1023ull;
+            subpage->ap = ap;
+            subpage->domain = dom;
+            subpage->valid = true;
+        }
+    }
+
+    if (write || checkRead) {
+        fsr = checkPermissions(mmu, ap, dom, section, priviledged, write);
+        if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
+    }
     return result;
+}
+
+[[gnu::noinline]] static MMUTranslateResult walkSubpageWrite(ArmMmu* mmu, uint32_t addr, bool privileged,
+                                                             SubpageWriteMemo& memo) {
+    SubpageWriteMemo walked{};
+    const auto result = translateAndCache<true>(mmu, addr, privileged, true, false, true, nullptr, nullptr,
+                                                nullptr, nullptr, nullptr, &walked);
+    if (walked.valid) memo = walked;
+    return result;
+}
+
+// Called on a miss in the guest TLB. A 1 KiB mapping is never installed in that TLB.
+MMUTranslateResult mmuTranslateArm920SubpageWrite(ArmMmu* mmu, uint32_t addr, bool privileged) {
+    auto& memo = mmu->subpageWrites[(addr >> 10) & 3];
+    if (memo.valid && memo.subpage == (addr & ~1023u) && memo.ttb == mmu->transTablPA) {
+        const auto& ram = mmu->mem->regions[REGION_RAM];
+        const auto matches = [&](unsigned i) {
+            if (!tableWordInRam(ram, memo.tableAddress[i])) return false;
+            uint32_t word;
+            return ramAccessInline<4, false>(ram.uD, memo.tableAddress[i], &word) && word == memo.tableWord[i];
+        };
+        if (matches(0) && matches(1)) {
+            const uint8_t fsr = checkPermissions(mmu, memo.ap, memo.domain, false, privileged, true);
+            return fsr ? TRANSLATE_RESULT_FAULT(fsr) : memo.base | (addr & 1023);
+        }
+    }
+    return walkSubpageWrite(mmu, addr, privileged, memo);
 }
 
 MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviledged, bool write) {

@@ -17,6 +17,15 @@ struct TlbEntry {
     uint32_t x : 1;  // XScale X bit, for the data cache model
 };
 
+// ARM920T Fast writes to 1 KiB mappings. Check both descriptor words on every hit.
+struct SubpageWriteMemo {
+    uint32_t ttb, subpage;
+    uint32_t tableAddress[2], tableWord[2];
+    MMUTranslateResult base;
+    uint8_t ap, domain;
+    bool valid;
+};
+
 struct ArmMmu {
     struct ArmMem *mem;
     uint32_t transTablPA;
@@ -49,6 +58,7 @@ struct ArmMmu {
     // before checks it again (the I-cache's fetch key). Not saved.
     void (*permChanged)(void *ctx);
     void *permChangedCtx;
+    SubpageWriteMemo subpageWrites[4];
 
     template <typename T>
     void DoSaveLoad(T &chunkHelper);
@@ -89,10 +99,12 @@ static inline uint8_t checkPermissions(struct ArmMmu *mmu, uint_fast8_t ap, uint
     return (section ? 0x0D : 0x0F) | (domain << 4);  // section or subpage permission fault
 }
 
+MMUTranslateResult mmuTranslateArm920SubpageWrite(ArmMmu* mmu, uint32_t addr, bool privileged);
+
 // Match mmuTranslate's cached translations and share its permission check.
-// Misses keep the authoritative page walk. No new translation state. Data accesses (data
+// Misses keep the authoritative page walk, with a descriptor memo for ARM920T Fast writes. Data accesses (data
 // true) with the MMU off go through the stale D-cache window while it's open.
-template <bool write, bool data = false>
+template <bool write, bool data = false, bool subpageWrite = false>
 static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t addr,
                                                         bool privileged) {
     if (mmu->transTablPA == MMU_DISABLED_TTP) {
@@ -101,8 +113,13 @@ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t 
         return addr;
     }
     const auto& entry = mmu->tlb[addr >> 12];
-    if (entry.gen != mmu->gen)
+    if (entry.gen != mmu->gen) {
+        if constexpr (subpageWrite) {
+            static_assert(write);
+            return mmuTranslateArm920SubpageWrite(mmu, addr, privileged);
+        }
         return mmuTranslate(mmu, addr, privileged, write);
+    }
     const auto fsr = checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, write);
     if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);
     return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62) | (uint64_t(entry.b) << 61) | (uint64_t(entry.x) << 60);

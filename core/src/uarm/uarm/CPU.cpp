@@ -1415,7 +1415,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     struct ArmMmu *mmu = cpu->memorySystem.mmu;
     // The FCSE: the MMU sees the MVA. The host TLB stays keyed by VA, as cpuSetPid flushes it on a PID change.
     const uint32_t mva = cpuPrvMva(cpu, va);
-    const MMUTranslateResult r = mmuTranslateCached<write>(mmu, mva, privileged);
+    const MMUTranslateResult r = mmuTranslateCached<write, false, write>(mmu, mva, privileged);
     bool counted = false;
     uint8_t *page = MMU_TRANSLATE_RESULT_OK(r) && cpu->leanPage
                         ? cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, write, &counted)

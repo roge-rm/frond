@@ -14,6 +14,7 @@
 #include "dynarmic/backend/arm64/reg_alloc.h"
 #include "dynarmic/backend/arm64/verbose_debugging_output.h"
 #include "dynarmic/frontend/A32/a32_location_descriptor.h"
+#include "dynarmic/interface/A32/config.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/microinstruction.h"
 #include "dynarmic/ir/opcodes.h"
@@ -209,25 +210,24 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     ebi.entry_point = code.xptr<CodePtr>();
 
     // Frond: the page guard (A32::UserConfig::frond_page_guard), before anything runs.
-    if (conf.frond_page_guard && (A32::LocationDescriptor{block.Location()}.FPSCR().Value() & conf.frond_page_guard_fpscr)) {
+    const auto* guard_config = conf.frond_page_guard_config;
+    const auto* guard = guard_config
+                          ? guard_config->FrondPageGuard(A32::LocationDescriptor{block.Location()}.FPSCR().Value())
+                          : nullptr;
+    if (guard) {
         const u32 first = A32::LocationDescriptor{block.Location()}.PC();
         const u32 last = A32::LocationDescriptor{block.EndLocation()}.PC() - 1;
-        SharedLabel guarded;
-        for (u32 page = first >> 12; page <= last >> 12 && page < (conf.frond_page_guard_end >> 12); page++) {
-            if (!guarded) {
-                guarded = GenSharedLabel();
-            }
-            code.MOV(Xscratch0, reinterpret_cast<u64>(conf.frond_page_guard + page));
+        for (u32 page = first >> 12; page <= last >> 12 && page < (guard_config->frond_page_guard_end >> 12); page++) {
+            const auto guarded = GenSharedLabel();
+            code.MOV(Xscratch0, reinterpret_cast<u64>(guard + page));
             code.LDRB(Wscratch0, Xscratch0);
             code.CBNZ(Wscratch0, *guarded);
-        }
-        if (guarded) {
-            ctx.deferred_emits.emplace_back([&code, &ctx, guarded, first] {
+            ctx.deferred_emits.emplace_back([&code, &ctx, guarded, first, page] {
                 code.l(*guarded);
                 code.MOV(W1, first);
                 code.STR(W1, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
-                code.MOV(X2, 1);
-                EmitRelocation(code, ctx, LinkTarget::InterpreterFallback);
+                code.MOV(W1, page << 12);
+                EmitRelocation(code, ctx, LinkTarget::FrondPageGuardExit);
                 EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
             });
         }

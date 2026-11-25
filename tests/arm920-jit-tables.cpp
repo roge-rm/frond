@@ -121,6 +121,133 @@ struct Machine {
         cpuSetReg(cpu, 13, 0xd0300000 + (l2 - ttb) + 4);
     }
 };
+
+void enableJit(Machine& machine) {
+    auto leanPage = [](void* context, uint32_t pa, bool, bool* counted) -> uint8_t* {
+        *counted = true;
+        return pa < ramSize ? static_cast<Machine*>(context)->bytes + (pa & ~0xfffu) : nullptr;
+    };
+    cpuArm920SetLean(machine.cpu, leanPage, [](uint32_t, const uint32_t*, uint32_t, uint32_t) { return true; },
+                    &machine);
+    assert(cpuArm920SetJit(machine.cpu, true));
+    cpuArm920LeanReset(machine.cpu);
+}
+
+void testSuspendedSlot() {
+    constexpr uint32_t slot = 0x02000000, otherSlot = 0x04000000;
+    constexpr uint32_t slotTable = l2 + 0x400, slotPte = slotTable + 8;
+    constexpr uint32_t original = 0x102ff2, replacement = 0x202ff2;
+    constexpr uint32_t entry = 0x1ffc, kernel = 0xc0000400, park = 0xc0000440;
+    Machine exact;
+    Machine fast;
+    for (auto* machine : {&exact, &fast}) {
+        machine->setup();
+        machine->word(ttb + (slot >> 20) * 4, slotTable | 0x11);
+        machine->word(ttb + (0xd0200000 >> 20) * 4, 0x100c12);
+        machine->word(slotTable + 4, pageA);
+        machine->word(slotPte, original);
+        machine->word(0x101ffc, 0xe2822001);  // ADD r2, r2, #1
+        machine->word(0x102000, 0xe2822c01);  // ADD r2, r2, #0x100
+        machine->word(0x102004, movPc(8));
+        machine->word(0x202000, 0xe2822801);  // ADD r2, r2, #0x10000
+        machine->word(0x202004, movPc(8));
+        machine->word(0x400, mcr(13, 0));
+        machine->word(0x404, str(0, 13));
+        machine->word(0x408, tlbFlush);
+        machine->word(0x40c, icacheInvalidate);
+        machine->word(0x410, ldr(1, 10));
+        machine->word(0x414, str(0, 11));
+        machine->word(0x440, loop);
+        cpuSetReg(machine->cpu, 8, park);
+        cpuSetReg(machine->cpu, 10, slot + 0x2000);
+        cpuSetReg(machine->cpu, 11, 0xd0202000);
+        cpuSetReg(machine->cpu, 13, 0xd0300000 + slotPte - ttb);
+    }
+    enableJit(fast);
+
+    auto step = [&](uint32_t pc, uint32_t value = 0) {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 0, value);
+            cpuSetReg(machine->cpu, 15, pc);
+            machine->step();
+        }
+    };
+    auto run = [&](uint32_t pc, int expectedStop) {
+        cpuSetReg(exact.cpu, 15, pc);
+        cpuSetReg(fast.cpu, 15, pc);
+        uint32_t ran = 0;
+        int stop = arm920JitExit;
+        cpuArm920RunJit(fast.cpu, 16, &stop, 16, &ran);
+        assert(stop == expectedStop);
+        assert((expectedStop == arm920JitBudget) == (ran != 0));
+        for (uint32_t i = 0; i < ran; ++i) exact.step();
+        for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
+    };
+    auto suspend = [&] {
+        step(kernel, otherSlot);
+        step(kernel + 4);
+        step(kernel + 8);
+        step(kernel + 12);
+        run(park, arm920JitBudget);
+    };
+
+    // Use the high FPSCR tag bits for the slot whose page will be guarded.
+    for (uint32_t pid = 3; pid < 10; ++pid) {
+        step(kernel, pid * slot);
+        run(park, arm920JitBudget);
+    }
+    step(kernel, slot);
+    run(entry, arm920JitBudget);
+    assert(fast.reg(2) == 0x101);
+
+    // The block starts on a mapped page and crosses into a suspended page.
+    suspend();
+    step(kernel, slot);
+    run(entry, arm920JitCold);
+    step(kernel + 4, original);
+    run(entry, arm920JitBudget);
+    assert(fast.reg(2) == 0x202);
+
+    // The guest fills the old translation through the MVA while running a different PID.
+    suspend();
+    step(kernel + 4, original);
+    step(kernel + 16);
+    run(slot + 0x2000, arm920JitBudget);
+    step(kernel + 4, replacement);
+    step(kernel, slot);
+    run(entry, arm920JitBudget);
+    assert(fast.reg(2) == 0x403);
+
+    // Once the guest flushes it, the replacement mapping takes effect.
+    step(kernel + 8);
+    step(kernel + 12);
+    run(entry, arm920JitBudget);
+    assert(fast.reg(2) == 0x10404);
+
+    // An entry with no compiled block revalidates the guarded page before compiling it.
+    suspend();
+    step(kernel + 4, original);
+    step(kernel, slot);
+    run(0x2000, arm920JitBudget);
+    assert(fast.reg(2) == 0x10504);
+
+    // A physical alias write invalidates the suspended block before the mapping comes back.
+    suspend();
+    constexpr uint32_t changedAdd = 0xe2822002;  // ADD r2, r2, #2
+    for (auto* machine : {&exact, &fast}) {
+        cpuSetReg(machine->cpu, 0, changedAdd);
+        cpuSetReg(machine->cpu, 15, kernel + 20);
+    }
+    exact.step();
+    uint32_t blNext;
+    uint64_t bus;
+    assert(cpuArm920RunLeanFor(fast.cpu, 1, 1, &blNext, &bus) == 1);
+    step(kernel + 4, original);
+    step(kernel, slot);
+    run(0x2000, arm920JitBudget);
+    assert(fast.reg(2) == 0x10506);
+}
+
 }
 
 int main() {
@@ -139,13 +266,7 @@ int main() {
     Machine fast;
     fast.setup();
 
-    auto leanPage = [](void* context, uint32_t pa, bool, bool* counted) -> uint8_t* {
-        *counted = true;
-        return pa < ramSize ? static_cast<Machine*>(context)->bytes + (pa & ~0xfffu) : nullptr;
-    };
-    cpuArm920SetLean(fast.cpu, leanPage, [](uint32_t, const uint32_t*, uint32_t, uint32_t) { return true; }, &fast);
-    assert(cpuArm920SetJit(fast.cpu, true));
-    cpuArm920LeanReset(fast.cpu);
+    enableJit(fast);
     uint64_t translated = 0;
     // Runs exactly count instructions in Fast: blocks with a budget they can't pass, then the interpreter for
     // what they leave (the CP15 writes). The lean path is left out so the code after each edit runs translated.
@@ -175,6 +296,7 @@ int main() {
     }
     assert(exact.reg(2) == 40 + 0x10000 + 1 + 0x100);
     assert(translated > 0);
+    testSuspendedSlot();
     std::printf("Fast: %llu of the instructions in translated blocks\n", (unsigned long long)translated);
-    std::printf("PASS: ARM920T table edits under translated code\n");
+    std::printf("PASS: ARM920T table edits and suspended FCSE code\n");
 }
