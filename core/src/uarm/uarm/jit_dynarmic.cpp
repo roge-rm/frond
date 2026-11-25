@@ -21,6 +21,10 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+#include <boost/container/small_vector.hpp>
+#endif
+
 #include "CPU.h"
 #include "MMU.h"
 #include "pxa270_WMMX.h"
@@ -406,11 +410,20 @@ TickModel jitPrvTickModel(ArmCpu *cpu) {
     return m;
 }
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+// Most snapshots fit inline and avoid repeated small allocations on the guest thread.
+template<typename T, size_t N>
+using SnapshotVector = boost::container::small_vector<T, N>;
+#else
+template<typename T, size_t N>
+using SnapshotVector = std::vector<T>;
+#endif
+
 struct Snapshot final : public A32::CodeSnapshot {
     uint32_t base = 0;  // the word holding the first instruction
-    std::vector<uint32_t> words;
-    std::vector<uint8_t> fetched, read;  // per word
-    std::vector<std::pair<uint32_t, bool>> plain;  // each instruction in order, and its check
+    SnapshotVector<uint32_t, 16> words;
+    SnapshotVector<uint8_t, 16> fetched, read;  // per word
+    SnapshotVector<std::pair<uint32_t, bool>, 24> plain;  // each instruction in order, and its check
     std::vector<uint32_t> marked;  // access pcs among them
     uint32_t splitAt = ~0u;  // the marked pc the snapshot stopped before (startBlocks), which ends the block
     size_t next = 0;
@@ -1078,6 +1091,12 @@ struct Env final : public A32::UserCallbacks {
         ClearPages();
         jit->ClearCache();
         std::fill(heat.begin(), heat.end(), Heat{});
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (!contextHeat.empty()) {
+            std::fill(contextHeat.begin(), contextHeat.end(), ContextHeat{});
+            heatTtb = cpuJitTtb(cpu);
+        }
+#endif
         code.clear();
         accessPages.clear();
         permContext = cpuJitPermContext(cpu);
@@ -1207,6 +1226,15 @@ struct Env final : public A32::UserCallbacks {
     static constexpr unsigned kHeatBits = 14;
     std::vector<Heat> heat = std::vector<Heat>(size_t(1) << kHeatBits);
     uint32_t hot = 1;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    struct ContextHeat {
+        uint64_t key = 0;
+        uint32_t count = 0;
+    };
+    std::vector<ContextHeat> contextHeat;
+    uint32_t heatTtb = 0;
+    bool chooseContextHeat = false;
+#endif
 
     bool ShouldCompile(A32::VAddr pc, bool thumb) override {
         if (pc < 0x02000000u && guard[pc >> 12]) {
@@ -1215,10 +1243,21 @@ struct Env final : public A32::UserCallbacks {
             return false;
         }
         if (hot <= 1) return true;
-        const uint32_t key = pc | uint32_t(thumb);  // PC is even
-        Heat &h = heat[(key * 0x9e3779b1u) >> (32 - kHeatBits)];
-        if (h.key != key) h = Heat{key, 0};
-        if (++h.count >= hot) return true;
+        const uint32_t pcKey = pc | uint32_t(thumb);  // PC is even
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (!contextHeat.empty()) {
+            const uint64_t key = (uint64_t(heatTtb) << 32) | pcKey;
+            const uint32_t hash = (pcKey ^ (heatTtb >> 14)) * 0x9e3779b1u;
+            ContextHeat &h = contextHeat[hash >> (32 - kHeatBits)];
+            if (h.key != key) h = ContextHeat{key, 0};
+            if (++h.count >= hot) return true;
+        } else
+#endif
+        {
+            Heat &h = heat[(pcKey * 0x9e3779b1u) >> (32 - kHeatBits)];
+            if (h.key != pcKey) h = Heat{pcKey, 0};
+            if (++h.count >= hot) return true;
+        }
         stats.cold++;
         jit->HaltExecution(kCold);
         return false;
@@ -1434,7 +1473,8 @@ struct Env final : public A32::UserCallbacks {
         stats.reuseEvicted += slot.occupied;
         ++stats.reuseSaved;
         slot = ReuseProbe{s.ttb, s.firstPc, s.permissionTag, s.thumb, true,
-                          s.words, s.read, s.fetched, s.plain};
+                          {s.words.begin(), s.words.end()}, {s.read.begin(), s.read.end()},
+                          {s.fetched.begin(), s.fetched.end()}, {s.plain.begin(), s.plain.end()}};
     }
 
     std::unique_ptr<A32::CodeSnapshot> SnapshotCode(A32::VAddr pc, bool thumb, bool whole) override {
@@ -2204,6 +2244,14 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     e.pidTags = j->pidTags;
     e.privileged = privileged;
     e.hot = j->hot;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    static const bool pxaUserContextHeat = [] {
+        const char *value = std::getenv("FROND_PXA270_TTB_HEAT");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    e.chooseContextHeat = pxaUserContextHeat && !privileged &&
+                          j->mode == A32::Jit::CompileThread::On;
+#endif
     A32::UserConfig conf;
     conf.callbacks = &e;
     e.arm920 = cpuGetModel(j->cpu) == ArmCpuModel::arm920t;
@@ -2511,6 +2559,17 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     Level *l = j->level[privileged].get();
     if (!l) l = jitPrvMakeLevel(j, privileged);
     Env &e = l->env;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    if (e.chooseContextHeat) {
+        e.chooseContextHeat = false;
+        // The PXA270 coprocessor is attached after the JIT is created.
+        if (cpuJitWmmx(j->cpu)) {
+            e.hot = 16;
+            e.contextHeat.resize(size_t(1) << Env::kHeatBits);
+            e.heatTtb = cpuJitTtb(j->cpu);
+        }
+    }
+#endif
     A32::Jit &jit = *l->jit;
     if (e.resetState) {
         e.resetState = false;
@@ -2526,6 +2585,9 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     e.CheckGen();
     if (const uint32_t g = cpuJitMapGen(e.cpu); g != e.mapGen) {
         e.mapGen = g;
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (!e.contextHeat.empty()) e.heatTtb = cpuJitTtb(e.cpu);
+#endif
         if (!e.code.empty()) e.CheckMappings();
     }
     if (e.arm920) {

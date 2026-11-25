@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #if defined(__SSE2__)
 #include <emmintrin.h>
 #elif defined(__aarch64__)
@@ -117,11 +118,47 @@ struct DataCacheState {
 
 constexpr uint32_t kLineValid = 1u << 31, kLineDirtyHigh = 1u << 30, kLineDirtyLow = 1u << 29;
 constexpr uint32_t kLineAddressMask = (1u << 27) - 1;
+
+// Each bucket holds the ways that can match a tag within one set. Hits still check the full tag.
+// Derived from valid lines after a load and kept outside saved state.
+struct CacheWayIndex {
+    static constexpr unsigned kBuckets = 1024;
+    uint64_t candidates[kBuckets];
+
+    static constexpr unsigned bucket(const CacheGeometry& g, uint32_t line, unsigned set) {
+        const uint32_t tag = (line & kLineAddressMask) >> g.setBits;
+        const uint32_t folded = tag ^ (tag >> 5) ^ (tag >> 11);
+        return ((folded << g.setBits) | set) & (kBuckets - 1);
+    }
+
+    void insert(const CacheGeometry& g, uint32_t line, unsigned set, unsigned way) {
+        candidates[bucket(g, line, set)] |= uint64_t{1} << way;
+    }
+
+    void remove(const CacheGeometry& g, uint32_t line, unsigned set, unsigned way) {
+        candidates[bucket(g, line, set)] &= ~(uint64_t{1} << way);
+    }
+
+    void rebuild(const DataCacheState& s, Core core) {
+        *this = {};
+        const CacheGeometry& g = cacheGeometry(core);
+        for (unsigned set = 0; set < 1u << g.setBits; ++set) {
+            for (unsigned way = 0; way < g.ways; ++way) {
+                const uint32_t line = s.line[set * g.ways + way];
+                if (line & kLineValid) insert(g, line, set, way);
+            }
+        }
+    }
+};
 // Version 1 (no write buffer slots, a single coalescing block where bufferNext is) and version 2.
 constexpr size_t kDataCacheSaveBytesV1 = DataCacheState::kLines * 4 + 32 + 4 + 4 + 8;
 constexpr size_t kDataCacheSaveBytes = kDataCacheSaveBytesV1 + kWriteBufferSlots * (4 + 8);
 
-inline void dataCacheReset(DataCacheState& s, Core core) {
+template <typename Directory = std::nullptr_t>
+inline void dataCacheReset(DataCacheState& s, Core core, Directory index = nullptr) {
+    if constexpr (std::is_pointer_v<Directory>) {
+        if (index) *index = {};
+    }
     for (uint32_t& l : s.line) l = 0;
     // XScale: every set's pointer at way 31 after reset; ARM920T: the victim counter at 0.
     for (uint8_t& v : s.victim) v = core == Core::arm920t ? 0 : 31;
@@ -141,10 +178,27 @@ namespace detail {
 inline unsigned dirtyHalves(uint32_t l) { return ((l & kLineDirtyLow) ? 1 : 0) + ((l & kLineDirtyHigh) ? 1 : 0); }
 
 // The way holding va's line in its set, or -1.
-inline int findWay(const DataCacheState& s, const CacheGeometry& g, uint32_t va) {
+inline int findIndexedWay(const CacheWayIndex& index, const CacheGeometry& g, const uint32_t* base,
+                          unsigned set, uint32_t va) {
+    const uint32_t line = va >> 5;
+    const uint32_t wanted = line | kLineValid;
+    uint64_t candidates = index.candidates[CacheWayIndex::bucket(g, line, set)];
+    while (candidates) {
+        const unsigned way = __builtin_ctzll(candidates);
+        if ((base[way] & (kLineAddressMask | kLineValid)) == wanted) return int(way);
+        candidates &= candidates - 1;
+    }
+    return -1;
+}
+
+template <typename Directory = std::nullptr_t>
+inline int findWay(const DataCacheState& s, const CacheGeometry& g, uint32_t va, Directory index = nullptr) {
     const uint32_t tag = (va >> 5) | kLineValid;
     const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
     const uint32_t* base = s.line + set * g.ways;
+    if constexpr (std::is_pointer_v<Directory>) {
+        if (index) return findIndexedWay(*index, g, base, set, va);
+    }
     // Four ways at a time (ways is a multiple of 4); a set holds at most one match.
 #if defined(__SSE2__)
     const __m128i m = _mm_set1_epi32(int(kLineValid | kLineAddressMask)), t = _mm_set1_epi32(int(tag));
@@ -171,7 +225,9 @@ inline int findWay(const DataCacheState& s, const CacheGeometry& g, uint32_t va)
 }
 
 // Takes the next victim of va's set, writes it back if dirty and puts va's line there, clean.
-inline uint32_t& allocate(DataCacheState& s, const CacheGeometry& g, uint32_t va, bool roundRobin, CacheEvents& e) {
+template <typename Directory>
+inline uint32_t& allocate(DataCacheState& s, const CacheGeometry& g, uint32_t va, bool roundRobin, CacheEvents& e,
+                          Directory index) {
     const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
     unsigned way;
     if (g.sharedVictim) {
@@ -190,8 +246,14 @@ inline uint32_t& allocate(DataCacheState& s, const CacheGeometry& g, uint32_t va
     if (l & kLineValid) {
         e.writebacks = uint8_t(e.writebacks + dirtyHalves(l));
         e.evicted = l;
+        if constexpr (std::is_pointer_v<Directory>) {
+            if (index) index->remove(g, l, set, way);
+        }
     }
-    l = ((va >> 5) & kLineAddressMask) | kLineValid;
+    l = (va >> 5) | kLineValid;
+    if constexpr (std::is_pointer_v<Directory>) {
+        if (index) index->insert(g, l, set, way);
+    }
     return l;
 }
 
@@ -212,8 +274,9 @@ inline void bufferStore(DataCacheState& s, Core core, uint32_t va, uint64_t now,
 // One load or store at va (any size up to 8, never crossing a line) at core clock now (the cycle count at
 // the access, charges so far included, as cacheStall takes it). roundRobin is the ARM920T's RR bit (the
 // XScale is always round-robin).
+template <typename Directory = std::nullptr_t>
 inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Policy p, bool store, uint64_t now,
-                                   bool roundRobin = true, uint8_t* hint = nullptr) {
+                                   bool roundRobin = true, uint8_t* hint = nullptr, Directory index = nullptr) {
     CacheEvents e;
     if (!policyCached(p)) {
         if (!store) e.uncachedLoads = 1;
@@ -226,7 +289,7 @@ inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Po
     uint32_t* base = s.line + set * g.ways;
     const unsigned previous = hint ? hint[set] & (g.ways - 1) : 0;
     const int way = hint && (base[previous] & (kLineValid | kLineAddressMask)) == ((va >> 5) | kLineValid)
-                        ? int(previous) : detail::findWay(s, g, va);
+                        ? int(previous) : detail::findWay(s, g, va, index);
     const uint32_t dirty = (va & 16) ? kLineDirtyHigh : kLineDirtyLow;
     if (way >= 0) {
         if (hint) hint[set] = uint8_t(way);
@@ -238,13 +301,13 @@ inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Po
         return e;
     }
     if (!store) {
-        auto& line = detail::allocate(s, g, va, roundRobin, e);
+        auto& line = detail::allocate(s, g, va, roundRobin, e, index);
         if (hint) hint[set] = uint8_t(&line - base);
         e.fills = 1;
         return e;
     }
     if (p == Policy::writeBackAllocate) {
-        uint32_t& l = detail::allocate(s, g, va, roundRobin, e);
+        uint32_t& l = detail::allocate(s, g, va, roundRobin, e, index);
         if (hint) hint[set] = uint8_t(&l - base);
         l |= dirty;
         e.fills = 1;
@@ -257,32 +320,47 @@ inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Po
 // dataCacheAccess with the way each set hit last looked at first (hint, one byte per set, any start
 // values). Gives the same events and state as dataCacheAccess: a set never holds two valid lines with one
 // address, so the hinted way is the one the full search would find.
+template <typename Directory = std::nullptr_t>
 inline CacheEvents dataCacheAccessHinted(DataCacheState& s, Core core, uint32_t va, Policy p, bool store,
-                                         uint64_t now, uint8_t* hint, bool roundRobin = true) {
-    return dataCacheAccess(s, core, va, p, store, now, roundRobin, hint);
+                                         uint64_t now, uint8_t* hint, bool roundRobin = true, Directory index = nullptr) {
+    return dataCacheAccess(s, core, va, p, store, now, roundRobin, hint, index);
 }
 
 // Cache maintenance (CP15 c7). Each returns the dirty halves it wrote back.
-inline void dataCacheInvalidateAll(DataCacheState& s) {
+template <typename Directory = std::nullptr_t>
+inline void dataCacheInvalidateAll(DataCacheState& s, Directory index = nullptr) {
     for (uint32_t& l : s.line) l = 0;  // dirty data is dropped, as the hardware does
+    if constexpr (std::is_pointer_v<Directory>) {
+        if (index) *index = {};
+    }
 }
 
-inline CacheEvents dataCacheLineOp(DataCacheState& s, Core core, uint32_t va, bool clean, bool invalidate) {
+template <typename Directory = std::nullptr_t>
+inline CacheEvents dataCacheLineOp(DataCacheState& s, Core core, uint32_t va, bool clean, bool invalidate,
+                                   Directory index = nullptr) {
     CacheEvents e;
     const CacheGeometry& g = cacheGeometry(core);
-    const int way = detail::findWay(s, g, va);
+    const int way = detail::findWay(s, g, va, index);
     if (way < 0) return e;
-    uint32_t& l = s.line[((va >> 5) & ((1u << g.setBits) - 1)) * g.ways + unsigned(way)];
+    const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
+    uint32_t& l = s.line[set * g.ways + unsigned(way)];
     if (clean) {
         e.writebacks = uint8_t(detail::dirtyHalves(l));
         l &= ~(kLineDirtyLow | kLineDirtyHigh);
     }
-    if (invalidate) l = 0;
+    if (invalidate) {
+        if constexpr (std::is_pointer_v<Directory>) {
+            if (index) index->remove(g, l, set, unsigned(way));
+        }
+        l = 0;
+    }
     return e;
 }
 
 // ARM920T clean or clean and invalidate by index: way in bits 31:26, segment in bits 7:5.
-inline CacheEvents dataCacheIndexOp(DataCacheState& s, Core core, uint32_t index, bool clean, bool invalidate) {
+template <typename Directory = std::nullptr_t>
+inline CacheEvents dataCacheIndexOp(DataCacheState& s, Core core, uint32_t index, bool clean, bool invalidate,
+                                    Directory ways = nullptr) {
     CacheEvents e;
     const CacheGeometry& g = cacheGeometry(core);
     const unsigned set = (index >> 5) & ((1u << g.setBits) - 1), way = (index >> 26) % g.ways;
@@ -291,17 +369,23 @@ inline CacheEvents dataCacheIndexOp(DataCacheState& s, Core core, uint32_t index
         e.writebacks = uint8_t(detail::dirtyHalves(l));
         l &= ~(kLineDirtyLow | kLineDirtyHigh);
     }
-    if (invalidate) l = 0;
+    if (invalidate) {
+        if constexpr (std::is_pointer_v<Directory>) {
+            if (ways && (l & kLineValid)) ways->remove(g, l, set, way);
+        }
+        l = 0;
+    }
     return e;
 }
 
 // XScale line allocate (MCR p15, 0, Rd, c7, c2, 5): takes a line for va without a fill, writing the
 // victim back. The global clean routine (manual example 6-2) runs this over 1024 lines.
-inline CacheEvents dataCacheAllocateLine(DataCacheState& s, Core core, uint32_t va) {
+template <typename Directory = std::nullptr_t>
+inline CacheEvents dataCacheAllocateLine(DataCacheState& s, Core core, uint32_t va, Directory index = nullptr) {
     CacheEvents e;
     const CacheGeometry& g = cacheGeometry(core);
-    if (detail::findWay(s, g, va) >= 0) return e;
-    detail::allocate(s, g, va, true, e);
+    if (detail::findWay(s, g, va, index) >= 0) return e;
+    detail::allocate(s, g, va, true, e, index);
     return e;
 }
 

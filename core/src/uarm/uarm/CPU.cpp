@@ -254,6 +254,9 @@ struct ArmCpu {
     uint32_t regionCharge[cost::regionCount][2];
     cost::CacheCosts cacheCosts[3];
     cost::DataCacheState dcache;
+#if defined(__x86_64__) && defined(__linux__) && !defined(__ANDROID__)
+    cost::CacheWayIndex dcacheIndex;
+#endif
     uint8_t dcacheHint[32];  // the way each set hit last, looked at first; not saved
     // Fast's data cache hint, checked by generated loads and stores before the page table
     // (A32::UserConfig::frond_cost_hint), always a subset of dcache: load[VA[14:5]] is va & ~31 when that
@@ -281,6 +284,8 @@ struct ArmCpu {
 
     struct ArmCoprocessor coproc[16];  // coprocessors
     struct Pxa270wmmx *wmmx;            // iWMMXt on coprocessors 0 and 1, or null
+
+    bool pxa270IrqMask;  // check IRQ and FIQ against their respective CPSR masks
 
     // various other cpu config options
     uint32_t vectorBase;  // address of vector base
@@ -560,7 +565,8 @@ static FORCE_INLINE void cpuPrvHintDrop(struct ArmCpu *cpu, uint32_t line, bool 
         const uint32_t i = (line >> 5) & 1023;
         if (h.load[i] == line) h.load[i] = ((i + 1) & 1023) << 5;
     }
-    for (uint32_t half = line; half < line + 32; half += 16) {
+    for (uint32_t offset = 0; offset < 32; offset += 16) {
+        const uint32_t half = line + offset;
         const uint32_t i = (half >> 4) & 2047;
         if (h.store[i] == half) h.store[i] = ((i + 1) & 2047) << 4;
     }
@@ -580,6 +586,14 @@ static FORCE_INLINE void cpuPrvHintNote(struct ArmCpu *cpu, cost::Core core, uin
     if (p < cost::Policy::writeBack) return;
     if (l & cost::kLineDirtyLow) cpu->jitHint.store[(line >> 4) & 2047] = line;
     if (l & cost::kLineDirtyHigh) cpu->jitHint.store[((line + 16) >> 4) & 2047] = line + 16;
+}
+
+static FORCE_INLINE auto cpuPrvCacheIndex([[maybe_unused]] struct ArmCpu* cpu) {
+#if defined(__x86_64__) && defined(__linux__) && !defined(__ANDROID__)
+    return cost::Core(cpu->costCore) == cost::Core::pxa27x ? &cpu->dcacheIndex : nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 static FORCE_INLINE uint32_t cpuPrvEvictedLine(uint32_t l) { return (l & cost::kLineAddressMask) << 5; }
@@ -622,7 +636,8 @@ static __attribute__((noinline)) void cpuPrvCostAccess(struct ArmCpu *cpu, uint3
 #ifdef FROND_DYNARMIC
         if (cpu->costInJitRun) now += jitRanNow(cpu->jit);
 #endif
-        const cost::CacheEvents e = cost::dataCacheAccessHinted(cpu->dcache, core, va, p, write, now, cpu->dcacheHint);
+        const cost::CacheEvents e = cost::dataCacheAccessHinted(cpu->dcache, core, va, p, write, now, cpu->dcacheHint,
+                                                                 true, cpuPrvCacheIndex(cpu));
         if (cpu->costJitHint) {
             if (e.evicted) cpuPrvHintDrop(cpu, cpuPrvEvictedLine(e.evicted), true);
             if (cost::policyCached(p)) cpuPrvHintNote(cpu, core, va, p);
@@ -769,10 +784,9 @@ static FORCE_INLINE struct ArmBankedRegs *cpuPrvModeToBankedRegsPtr(struct ArmCp
 
 template <int kind = ARM_KIND_ANY>
 static void cpuUpdateSlowPath(struct ArmCpu *cpu) {
-    // The ARM920T stops for an interrupt it can take; the other cores for any event while F
-    // is clear, as they always have, so their timing stays.
-    if (cpuPrvArm920<kind>(cpu) ? (cpu->waitingFiqs && !cpu->F) || (cpu->waitingIrqs && !cpu->I)
-                                           : cpu->waitingEventsTotal && !cpu->F) {
+    const bool separateMasks = cpuPrvArm920<kind>(cpu) || cpu->pxa270IrqMask;
+    if (separateMasks ? (cpu->waitingFiqs && !cpu->F) || (cpu->waitingIrqs && !cpu->I)
+                      : cpu->waitingEventsTotal && !cpu->F) {
         cpuSetSlowPath(cpu, SLOW_PATH_REASON_EVENTS);
     } else {
         cpuClearSlowPath(cpu, SLOW_PATH_REASON_EVENTS);
@@ -1836,14 +1850,18 @@ static void cpuPrvSetCostMemory(struct ArmCpu *cpu) {
     cpu->costJitHint = hint;
 }
 
+static void cpuPrvResetDataCache(struct ArmCpu* cpu) {
+    cost::dataCacheReset(cpu->dcache, cost::Core(cpu->costCore), cpuPrvCacheIndex(cpu));
+    std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+}
+
 void cpuSetJitMemoryCost(struct ArmCpu *cpu, bool on) {
     cpu->costJitMemory = on;
     const bool was = cpu->costMemory;
     cpuPrvSetCostMemory(cpu);
     if (cpu->costMemory && !was) {
         // The model wasn't kept while off: it starts empty.
-        cost::dataCacheReset(cpu->dcache, cost::Core(cpu->costCore));
-        std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+        cpuPrvResetDataCache(cpu);
         cpuCostHintClear(cpu);
     }
 }
@@ -1858,8 +1876,7 @@ void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
     cpu->paceCost = on ? cost::paceOpCost(cost::Core(core)) : 20;
     icacheSetCost(cpu->ic, on, core);
     cpuPrvSetCostMemory(cpu);
-    cost::dataCacheReset(cpu->dcache, cost::Core(core));
-    std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+    cpuPrvResetDataCache(cpu);
     cpuCostHintClear(cpu);
     cpu->costClock = 0;
     cpu->jitHint.pending = 0;
@@ -1869,12 +1886,13 @@ void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
 void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va) {
     if (!cpu->costMemory) return;
     const cost::Core core = cost::Core(cpu->costCore);
+    auto index = cpuPrvCacheIndex(cpu);
     cost::CacheEvents e;
-    if ((crm == 7 || crm == 6) && op2 == 0) cost::dataCacheInvalidateAll(cpu->dcache);
-    else if (crm == 6 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, false, true);
-    else if (crm == 10 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, true, false);
-    else if (crm == 14 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, true, true);
-    else if (crm == 2 && op2 == 5) e = cost::dataCacheAllocateLine(cpu->dcache, core, va);
+    if ((crm == 7 || crm == 6) && op2 == 0) cost::dataCacheInvalidateAll(cpu->dcache, index);
+    else if (crm == 6 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, false, true, index);
+    else if (crm == 10 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, true, false, index);
+    else if (crm == 14 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, true, true, index);
+    else if (crm == 2 && op2 == 5) e = cost::dataCacheAllocateLine(cpu->dcache, core, va, index);
     else if (crm == 10 && op2 == 4) cost::dataCacheDrain(cpu->dcache);
     else return;
     // The hint drops what the model lost: every line, the line, its dirty halves or the replaced line.
@@ -1912,8 +1930,7 @@ void cpuCostSave(const struct ArmCpu *cpu, T &savestate) {
 // A session without the section starts with an empty cache: the first accesses miss.
 template <typename T>
 void cpuCostLoad(struct ArmCpu *cpu, T &loader) {
-    cost::dataCacheReset(cpu->dcache, cost::Core(cpu->costCore));
-    std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+    cpuPrvResetDataCache(cpu);
     cpuCostHintClear(cpu);  // refilled from the loaded model by the accesses that follow
     cpu->costClock = 0;
     cpu->jitHint.pending = 0;
@@ -1930,6 +1947,9 @@ void cpuCostLoad(struct ArmCpu *cpu, T &loader) {
         return;
     }
     cost::dataCacheLoadBytes(cpu->dcache, bytes, version);
+#if defined(__x86_64__) && defined(__linux__) && !defined(__ANDROID__)
+    if (auto* index = cpuPrvCacheIndex(cpu)) index->rebuild(cpu->dcache, cost::Core(cpu->costCore));
+#endif
     cpu->costClock = clock;
 }
 
@@ -7338,8 +7358,9 @@ bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
         return true;
     }
     if (cpu->waitingIrqs && !cpu->I) {
+        const uint32_t fiqMask = cpu->pxa270IrqMask && cpu->F ? ARM_SR_F : 0;
         cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_IRQ, cpu->regs[REG_NO_PC] + 4,
-                        ARM_SR_MODE_IRQ | ARM_SR_I);
+                        ARM_SR_MODE_IRQ | ARM_SR_I | fiqMask);
         return true;
     }
     return false;
@@ -7522,7 +7543,12 @@ void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) {
     cpu->CPAR = cpar;
 }
 
-void cpuSetWmmx(struct ArmCpu *cpu, struct Pxa270wmmx *wmmx) { cpu->wmmx = wmmx; }
+void cpuSetWmmx(struct ArmCpu *cpu, struct Pxa270wmmx *wmmx) {
+    cpu->wmmx = wmmx;
+    const char *mask = getenv("FROND_PXA270_IRQ_MASK");
+    cpu->pxa270IrqMask = wmmx && mask && !strcmp(mask, "1");
+    cpuUpdateSlowPath(cpu);
+}
 
 void cpuArm920EnableWait(ArmCpu* cpu) { cpu->arm920WaitEnabled = true; }
 bool cpuArm920BeginWait(ArmCpu* cpu) {

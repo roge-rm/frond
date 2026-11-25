@@ -22,7 +22,7 @@ public:
 
     HaltReason Step(A32AddressSpace& process, A32JitState& thread_ctx, volatile u32* halt_reason) {
         const auto location_descriptor = A32::LocationDescriptor{thread_ctx.GetLocationDescriptor()}.SetSingleStepping(true);
-        const auto entry_point = process.GetOrEmit(location_descriptor);
+        const auto entry_point = process.GetOrEmitInPlace(location_descriptor);
         return process.prelude_info.step_code(entry_point, &thread_ctx, halt_reason);
     }
 };

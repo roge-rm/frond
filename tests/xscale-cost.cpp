@@ -86,6 +86,53 @@ static void mixHash(uint64_t &hash, uint32_t v) {
     }
 }
 
+static void cacheDirectoryTest() {
+    constexpr Core core = Core::pxa27x;
+    constexpr uint32_t first = 0x00400000, second = 0x00408400, absent = 0x00410800;
+    constexpr const CacheGeometry& geometry = cacheGeometry(core);
+    static_assert(CacheWayIndex::bucket(geometry, first >> 5, 0) ==
+                  CacheWayIndex::bucket(geometry, second >> 5, 0));
+    static_assert(CacheWayIndex::bucket(geometry, first >> 5, 0) ==
+                  CacheWayIndex::bucket(geometry, absent >> 5, 0));
+    DataCacheState s{};
+    CacheWayIndex index{};
+    uint8_t hint[32]{};
+    const auto access = [&](uint32_t va, bool store) {
+        return dataCacheAccessHinted(s, core, va, Policy::writeBack, store, 0, hint, true, &index);
+    };
+
+    dataCacheReset(s, core, &index);
+    expectEvents(access(first, false), ev(1, 0, 0, 0, 0, 0), "directory first fill");
+    expectEvents(access(second, false), ev(1, 0, 0, 0, 0, 0), "directory colliding fill");
+    expectEvents(access(first + 16, true), ev(0, 0, 0, 0, 0, 1), "directory colliding store hit");
+    expectEvents(access(second, true), ev(0, 0, 0, 0, 0, 1), "directory second store hit");
+    expectEvents(dataCacheLineOp(s, core, absent, true, true, &index), ev(0, 0, 0, 0, 0, 0),
+                 "directory missing collision is not invalidated");
+
+    uint8_t saved[kDataCacheSaveBytes];
+    dataCacheSaveBytes(s, saved);
+    for (unsigned version : {1u, 2u}) {
+        dataCacheReset(s, core, &index);
+        dataCacheLoadBytes(s, saved, version);
+        index.rebuild(s, core);
+        expectEvents(dataCacheLineOp(s, core, first, true, true, &index), ev(0, 1, 0, 0, 0, 0),
+                     "directory reload restores first dirty tag");
+        expectEvents(dataCacheLineOp(s, core, first, true, false, &index), ev(0, 0, 0, 0, 0, 0),
+                     "directory line invalidation removes the tag");
+        expectEvents(dataCacheLineOp(s, core, second, true, false, &index), ev(0, 1, 0, 0, 0, 0),
+                     "directory line invalidation keeps the colliding tag");
+    }
+
+    CacheEvents victim;
+    for (unsigned i = 0; i < geometry.ways; ++i)
+        victim = dataCacheAllocateLine(s, core, 0x00800000u + (i << 10), &index);
+    const uint32_t evicted = victim.evicted & kLineAddressMask;
+    expect(evicted == (second >> 5), "directory replacement retains victim order", evicted, second >> 5);
+    expectEvents(access(second, false), ev(1, 0, 0, 0, 0, 0), "directory evicted line misses");
+    dataCacheInvalidateAll(s, &index);
+    expectEvents(access(second, false), ev(1, 0, 0, 0, 0, 0), "directory full invalidation");
+}
+
 static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
     const Core x = Core::pxa27x, a = Core::arm920t;
     static DataCacheState s, t;
@@ -320,6 +367,7 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
 }
 
 int main() {
+    cacheDirectoryTest();
     const Core cores[] = {Core::pxa25x, Core::pxa27x, Core::arm920t};
 
     // Every class has a cost in every table, and every class is reached by some word on some core: a

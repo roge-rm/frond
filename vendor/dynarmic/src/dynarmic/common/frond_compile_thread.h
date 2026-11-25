@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <cstdlib>
 #include <condition_variable>
 #include <cstdint>
@@ -355,6 +356,13 @@ public:
     // request takes a whole snapshot.
     std::vector<std::unique_ptr<Job>> TakeDone() {
         std::vector<std::unique_ptr<Job>> jobs;
+        TakeDone(jobs);
+        return jobs;
+    }
+
+    // An empty buffer from the previous drain keeps its storage when passed to the worker.
+    void TakeDone(std::vector<std::unique_ptr<Job>>& jobs) {
+        assert(jobs.empty());
         {
             std::lock_guard lock{mutex};
             jobs.swap(done);
@@ -396,7 +404,6 @@ public:
         if (pending.empty()) {
             inval_log.clear();
         }
-        return jobs;
     }
 
     // A Done job may be installed: same cache generation and none of its code invalidated

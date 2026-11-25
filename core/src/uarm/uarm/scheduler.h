@@ -34,6 +34,7 @@ class Scheduler {
     uint64_t CyclesToNextUpdate(uint64_t cyclesPerSecond);
 
     void Advance(uint64_t cycles, uint64_t cyclesPerSecond);
+    uint64_t ElapsedNsec(uint64_t cycles, uint64_t cyclesPerSecond) const;
 
     uint64_t GetTime() const;
     bool TaskPeriodIs(uint32_t type, uint64_t period) const { return tasks[type].period == period; }
@@ -58,7 +59,7 @@ class Scheduler {
    private:
     static constexpr int32_t SCHEDULER_TASK_MAX = SCHEDULER_TASK_AUX_3;
     static constexpr int32_t SCHEDULER_TASK_NONE = 0xff;
-    static constexpr uint32_t SAVESTATE_VERSION = 0;
+    static constexpr uint32_t SAVESTATE_VERSION = 1;
 
     struct Task {
         uint32_t batchedTicks{0};
@@ -70,6 +71,8 @@ class Scheduler {
 
    private:
     void UpdateNextUpdate();
+    uint64_t PhaseAtRate(uint64_t rate) const;
+    uint64_t ConvertCycles(uint64_t cycles, uint64_t rate, uint64_t& remainder) const;
 
    private:
     T& dispatchDelegate;
@@ -79,6 +82,8 @@ class Scheduler {
     uint32_t* queue{&queueBuffer[1]};
 
     uint64_t accTime{0};
+    // The part of a nanosecond left after Advance, in units of 1 / phaseRate.
+    uint64_t phase{0}, phaseRate{0};
     uint64_t nextUpdate{1_sec};
 };
 
@@ -196,14 +201,43 @@ uint64_t Scheduler<T>::CyclesToNextUpdate(uint64_t cyclesPerSecond) {
     // a 128-bit divide is a library call on arm64. Same result either way.
     uint64_t product;
     if (!__builtin_mul_overflow(nextUpdate - accTime, cyclesPerSecond, &product))
-        return product / 1_sec + 1;
-    const __uint128_t requested = __uint128_t(nextUpdate - accTime) * cyclesPerSecond / 1_sec + 1;
+        return (product - PhaseAtRate(cyclesPerSecond)) / 1_sec + 1;
+    const __uint128_t requested = (__uint128_t(nextUpdate - accTime) * cyclesPerSecond - PhaseAtRate(cyclesPerSecond)) / 1_sec + 1;
     return requested > UINT64_MAX ? UINT64_MAX : uint64_t(requested);
 }
 
 template <typename T>
+uint64_t Scheduler<T>::PhaseAtRate(uint64_t rate) const {
+    if (phaseRate == rate || !phase) return phase;
+    return uint64_t(__uint128_t(phase) * rate / phaseRate);
+}
+
+template <typename T>
+uint64_t Scheduler<T>::ConvertCycles(uint64_t cycles, uint64_t rate, uint64_t& remainder) const {
+    const uint64_t carry = PhaseAtRate(rate);
+    uint64_t numerator;
+    if (!__builtin_mul_overflow(cycles, 1_sec, &numerator) &&
+        !__builtin_add_overflow(numerator, carry, &numerator)) {
+        remainder = numerator % rate;
+        return numerator / rate;
+    }
+    const __uint128_t wide = __uint128_t(cycles) * 1_sec + carry;
+    remainder = uint64_t(wide % rate);
+    return uint64_t(wide / rate);
+}
+
+template <typename T>
+uint64_t Scheduler<T>::ElapsedNsec(uint64_t cycles, uint64_t cyclesPerSecond) const {
+    uint64_t unused;
+    return cycles && cyclesPerSecond ? ConvertCycles(cycles, cyclesPerSecond, unused) : 0;
+}
+
+template <typename T>
 void Scheduler<T>::Advance(uint64_t cycles, uint64_t cyclesPerSecond) {
-    accTime += ((cycles * 1_sec) / cyclesPerSecond);
+    if (cycles && cyclesPerSecond) {
+        accTime += ConvertCycles(cycles, cyclesPerSecond, phase);
+        phaseRate = cyclesPerSecond;
+    }
     if (accTime < nextUpdate) return;
 
     while (true) {
@@ -249,15 +283,25 @@ void Scheduler<T>::Save(U& savestate) {
 
     SaveChunkHelper helper(*chunk);
     DoSaveLoad(helper);
+    helper.Do64(phase).Do64(phaseRate);
 }
 
 template <typename T>
 void Scheduler<T>::Load(SavestateLoader<ChunkType>& loader) {
-    Chunk* chunk = loader.GetChunkOrFail(ChunkType::scheduler, SAVESTATE_VERSION, "scheduler");
+    uint32_t version;
+    Chunk* chunk = loader.GetChunkOrFail(ChunkType::scheduler, SAVESTATE_VERSION, "scheduler", version);
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
     DoSaveLoad(helper);
+    phase = phaseRate = 0;
+    if (version >= 1) {
+        helper.Do64(phase).Do64(phaseRate);
+        if (phase && phase >= phaseRate) {
+            loader.NotifyError();
+            return;
+        }
+    }
 
     UpdateNextUpdate();
 }

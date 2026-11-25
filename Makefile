@@ -801,8 +801,8 @@ test-net-wifi-router: prepare $(COMMON_NET_LIB) $(COMMON_LIB)
 	$(OBJ_ROOT)/test-net-wifi-router
 
 .PHONY: test-scheduler
-test-scheduler: prepare
-	$(CXX) -std=c++17 -O2 -Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common tests/scheduler-order.cpp -o $(OBJ_ROOT)/test-scheduler-order
+test-scheduler: prepare $(COMMON_LIB)
+	$(CXX) -std=c++17 -O2 -Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common tests/scheduler-order.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-scheduler-order
 	$(OBJ_ROOT)/test-scheduler-order
 
 .PHONY: test-device-controls

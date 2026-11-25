@@ -52,6 +52,8 @@ public:
 protected:
     friend class A32Core;
 
+    CodePtr GetOrEmitInPlace(IR::LocationDescriptor descriptor);
+
     s64 ticks_now = 0;
 
     void EmitPrelude();
@@ -76,6 +78,11 @@ protected:
 
     // The code space and block maps are shared with the compile thread under code_mutex.
     std::mutex code_mutex;
+#ifdef __ANDROID__
+    std::vector<std::unique_ptr<CompileThread::Job>> install_jobs;
+#endif
+    // The guest can skip the capacity lock when the last emission left enough room.
+    std::atomic<size_t> code_space_remaining{0};
     bool compile_sync = false;
     std::unique_ptr<CompileThread> compile_thread;
 };
