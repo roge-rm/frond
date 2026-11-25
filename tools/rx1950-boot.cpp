@@ -389,7 +389,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S [X]", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "power" (sleep, backlight and LEDs), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S [X]", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "power" (sleep, backlight and LEDs), "intclog N", "hard-reset" (store erased from the MBR's block, then power on), "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -575,6 +575,13 @@ int main(int argc, char** argv) {
             int status = 0;
             waitpid(child, &status, 0);
             std::printf("checkpoint resumed\n");
+        } else if (c == "hard-reset") {
+            // As SocS3C2442::HardReset: the user store erased from the MBR's first FAT block, then power on.
+            const size_t mbr = size_t(21) * S3cNand::pagesPerBlock * S3cNand::pageSize;
+            const uint32_t block = machine->nand.flash.size() >= mbr + S3cNand::pageSize ? rx1950UserStoreBlockFromPage(&machine->nand.flash[mbr]) : rx1950UserStoreBlock;
+            if (!machine->nand.eraseBlocks(block, S3cNand::blocks - block)) { std::printf("error: erase failed\n"); continue; }
+            std::printf("hard-reset: erased blocks %u to %u\n", block, S3cNand::blocks - 1);
+            machine->powerOnReset();
         } else if (c == "nand") {
             unsigned reread = 0;
             for (const auto& [row, n] : nandRows) reread += n > 1;

@@ -120,6 +120,7 @@ class FirmwareDialog : public QDialog {
     QLineEdit *nor, *nand;
     QLabel* norLabel{nullptr};
     QLabel* nandLabel{nullptr};
+    QCheckBox* anyFirmware{nullptr};
     frondFirmware::Device stored{frondFirmware::Device::automatic};
 };
 

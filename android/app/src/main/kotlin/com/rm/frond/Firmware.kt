@@ -11,8 +11,12 @@ object Firmware {
     fun folder(context: Context, device: Device) = File(File(context.filesDir, "firmware"), device.id)
     fun nor(context: Context, device: Device) = File(folder(context, device), "nor.bin")
     fun nand(context: Context, device: Device) = File(folder(context, device), "nand.bin")
+    // Present when the firmware was imported with "Allow other firmware" on; launches then pass --any-firmware.
+    fun anyFirmwareMarker(context: Context, device: Device) = File(folder(context, device), "any-firmware")
+    fun storedAnyFirmware(context: Context, device: Device) = device.rx1950 && anyFirmwareMarker(context, device).isFile
 
-    // The rx1950's files are checked by SHA-256 at import only; here by size, and the core checks their CRC-32 at start.
+    // The rx1950's files are checked by SHA-256 at import only (HP's size alone with other firmware allowed);
+    // here by size, and the core checks their CRC-32 at start.
     fun ready(context: Context, device: Device): Boolean {
         val nor = nor(context, device)
         val nand = nand(context, device)
@@ -77,19 +81,24 @@ object Firmware {
 
     const val RX1950_OS_MISSING = "Choose the OS image (CEOS.nbf) for the HP iPAQ rx1950."
     const val RX1950_OS_UNUSABLE = "The OS image isn't a usable .nbf (512-byte sectors with SectorInfo). Choose CEOS.nbf or another OS .nbf."
+    const val RX1950_ANY_SIZE = "The NOR image must be a 264,794-byte CEBL.nbf."
+    const val RX1950_ANY_NO_NOR = "Choose a NOR image (CEBL.nbf). There's no earlier one to reuse."
     const val RX1950_OS_WARNING = "This OS image isn't HP's tested CEOS.nbf, so it may not boot."
 
     // The warning for the rx1950's stored OS image when it isn't HP's, or null. Hashes 67 MB, so off the main thread.
-    fun importWarning(context: Context, device: Device): String? =
-        if (device.rx1950 && rx1950Os(nand(context, device)) == Rx1950Os.OTHER) RX1950_OS_WARNING else null
+    fun importWarning(context: Context, device: Device, anyFirmware: Boolean = false): String? =
+        if (!anyFirmware && device.rx1950 && rx1950Os(nand(context, device)) == Rx1950Os.OTHER) RX1950_OS_WARNING else null
 
     // The rx1950 takes HP's WM5 ROM 1.01.00 ENG CEBL.nbf as the NOR and an OS .nbf as the NAND, HP's CEOS.nbf
     // or another that lays out the same. An OS image picked as the NOR is caught before the NAND is asked for.
     // cebl and hp are for tests, which have no firmware.
-    internal fun checkRx1950(nor: File, nand: File?, cebl: KnownFile = RX1950_CEBL, hp: KnownFile = RX1950_CEOS): String? {
-        if (nor.length() != cebl.bytes && rx1950Os(nor, hp) != Rx1950Os.UNUSABLE) return RX1950_SWAPPED
+    // With anyFirmware on, a NOR of HP's size is enough.
+    internal fun checkRx1950(nor: File, nand: File?, cebl: KnownFile = RX1950_CEBL, hp: KnownFile = RX1950_CEOS,
+                             anyFirmware: Boolean = false): String? {
+        if (!anyFirmware && nor.length() != cebl.bytes && rx1950Os(nor, hp) != Rx1950Os.UNUSABLE) return RX1950_SWAPPED
         if (nand == null) return RX1950_OS_MISSING
-        if (!matches(nor, cebl)) return "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."
+        if (anyFirmware && nor.length() != cebl.bytes) return RX1950_ANY_SIZE
+        if (!anyFirmware && !matches(nor, cebl)) return "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."
         if (rx1950Os(nand, hp) == Rx1950Os.UNUSABLE) return RX1950_OS_UNUSABLE
         return null
     }
@@ -313,13 +322,14 @@ object Firmware {
     private const val PICK_LIMIT = 32L shl 20
     internal fun pickLimit(device: Device?) = if (device?.rx1950 == true) maxOf(PICK_LIMIT, RX1950_NBF_MAX) else PICK_LIMIT
     // The message for a picked file over pickLimit: the rx1950's NOR is CEBL.nbf, other devices can't be told.
-    internal fun tooBig(device: Device?) =
-        if (device?.rx1950 == true) "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG." else NOT_DETECTED
+    internal fun tooBig(device: Device?, anyFirmware: Boolean = false) =
+        if (device?.rx1950 == true && anyFirmware) RX1950_ANY_SIZE
+        else if (device?.rx1950 == true) "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG." else NOT_DETECTED
 
     // Copies a picked NOR into picked(). Returns an error message or null. Runs off the main thread.
     // For the Zodiac (or when `device` is not chosen yet) Tapwave's Zodiac 1.1 update, the zip or the PRC, is
     // swapped for the ROM it holds; any other file is kept as it is.
-    fun pick(context: Context, uri: Uri, device: Device? = null): String? {
+    fun pick(context: Context, uri: Uri, device: Device? = null, anyFirmware: Boolean = false): String? {
         val to = picked(context)
         to.parentFile?.mkdirs()
         try {
@@ -335,7 +345,7 @@ object Firmware {
                         total += n
                         if (total > limit) {
                             to.delete()
-                            return tooBig(device)
+                            return tooBig(device, anyFirmware)
                         }
                         o.write(buffer, 0, n)
                     }
@@ -367,10 +377,10 @@ object Firmware {
 
     // The same checks as desktop/FirmwareInput.h: the header names this device and the sizes fit.
     // Returns a message to show, or null when the files are fine. nand is null when none was chosen.
-    fun check(device: Device, nor: File, nand: File?): String? {
+    fun check(device: Device, nor: File, nand: File?, anyFirmware: Boolean = false): String? {
         if (device.runs68k) return checkRom68k(device, nor, nand)
         if (!nor.canRead()) return "Couldn't read the NOR image."
-        if (device.rx1950) return checkRx1950(nor, nand)
+        if (device.rx1950) return checkRx1950(nor, nand, anyFirmware = anyFirmware)
         val rom = try { inspectRom68k(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
         if (rom.device != null) return "This is a ${rom.device.label} ROM. Choose ${rom.device.label}."
         val header = try { header(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
@@ -469,32 +479,42 @@ object Firmware {
     // Puts the picked NOR (see pick) and NAND into app storage. Checks them first and keeps the old
     // ones on any error. Returns an error message, or null when the new firmware is in place. Runs off
     // the main thread.
-    fun import(context: Context, device: Device, nandUri: Uri?): String? = synchronized(lock) {
-        return importLocked(context, device, picked(context), nandUri)
+    // With anyFirmware on for the rx1950 and no NOR chosen (norChosen false), the stored one stays.
+    // A NOR that was chosen but failed to load blocks the import.
+    fun import(context: Context, device: Device, nandUri: Uri?, anyFirmware: Boolean = false, norChosen: Boolean? = null): String? = synchronized(lock) {
+        return importLocked(context, device, picked(context), nandUri, anyFirmware && device.rx1950, norChosen)
     }
 
-    private fun importLocked(context: Context, device: Device, pickedNor: File, nandUri: Uri?): String? {
+    private fun importLocked(context: Context, device: Device, pickedNor: File, nandUri: Uri?, anyFirmware: Boolean = false, norChosen: Boolean? = null): String? {
         val folder = folder(context, device)
         folder.mkdirs()
         recover(listOf(nor(context, device), nand(context, device)))
         val newNor = File(folder, "nor.bin.new")
         val newNand = File(folder, "nand.bin.new")
         try {
-            if (!pickedNor.isFile) return "Couldn't read the NOR image."
+            val keepNor = anyFirmware && !(norChosen ?: pickedNor.isFile)
+            if (keepNor && !nor(context, device).isFile) return RX1950_ANY_NO_NOR
+            if (!keepNor && !pickedNor.isFile) return "Couldn't read the NOR image."
             // A copy, so the pick stays for another try after an error.
-            if (!copyFile(pickedNor, newNor)) return "Couldn't read the NOR image."
+            if (!keepNor && !copyFile(pickedNor, newNor)) return "Couldn't read the NOR image."
             if (nandUri != null && !copy(context, nandUri, newNand)) return "Couldn't read the NAND image."
-            check(device, newNor, if (nandUri != null) newNand else null)?.let { return it }
+            check(device, if (keepNor) nor(context, device) else newNor, if (nandUri != null) newNand else null, anyFirmware)?.let { return it }
             // The old pair moves to *.old first, so a failed rename puts it back and never leaves
             // a NOR from one pair with the NAND from the other.
-            val pairs = listOfNotNull(newNor to nor(context, device), if (nandUri != null) newNand to nand(context, device) else null)
+            val pairs = listOfNotNull(if (keepNor) null else newNor to nor(context, device), if (nandUri != null) newNand to nand(context, device) else null)
             // A device whose NAND is optional loses the old one when the new firmware has none.
             val dropped = if (nandUri == null && !device.nandRequired) nand(context, device).takeIf { it.exists() } else null
+            // The marker goes first, so a failed write stops the import before any file changes.
+            val marker = anyFirmwareMarker(context, device)
+            val hadMarker = marker.exists()
+            fun setMarker(on: Boolean) = if (on) (marker.exists() || runCatching { marker.createNewFile() }.getOrDefault(false)) else (marker.delete() || !marker.exists())
+            if (!setMarker(anyFirmware)) { setMarker(hadMarker); return "Couldn't save the firmware." }
             val moved = mutableListOf<File>()
             val placed = mutableListOf<File>()
             fun undo(): String {
                 placed.forEach { it.delete() }
                 moved.forEach { File(it.path + ".old").renameTo(it) }
+                setMarker(hadMarker)
                 return "Couldn't save the firmware."
             }
             for (target in pairs.map { it.second } + listOfNotNull(dropped)) {

@@ -384,6 +384,7 @@ open class FrondActivity : SDLActivity() {
             arguments += device.coreFlags
             arguments += nor
             if (File(nand).isFile) arguments += listOf("--nand", nand)
+            if (extras?.getString(EXTRA_NOR) == null && Firmware.storedAnyFirmware(this, device)) arguments += "--any-firmware"
             // A new machine runs in its own folder, where cards above 128 MB live until the first save.
             if (!device.runs68k) session?.let { File(it).parentFile }?.takeIf { (it.isDirectory || it.mkdirs()) && it.canonicalFile != Sessions.folder(this).canonicalFile }?.let {
                 arguments += listOf("--work-folder", it.path)

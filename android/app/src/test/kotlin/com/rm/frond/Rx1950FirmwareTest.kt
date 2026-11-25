@@ -83,6 +83,20 @@ class Rx1950FirmwareTest {
         assertEquals("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.tooBig(rx1950))
     }
 
+    // Allow other firmware: HP's size is enough, and the off checks stay as they were.
+    @Test fun otherFirmwareTakesHpsSize() {
+        val other = sized(Firmware.RX1950_CEBL.bytes)
+        val wrong = sized(Firmware.RX1950_CEBL.bytes - 1)
+        val ceos = sized(Firmware.RX1950_CEOS.bytes)
+        assertNull(Firmware.check(rx1950, other, ceos, true))
+        assertEquals(Firmware.RX1950_ANY_SIZE, Firmware.check(rx1950, wrong, ceos, true))
+        assertEquals("The NOR image must be a 264,794-byte CEBL.nbf.", Firmware.RX1950_ANY_SIZE)
+        assertEquals(Firmware.RX1950_OS_MISSING, Firmware.check(rx1950, other, null, true))
+        assertEquals(Firmware.RX1950_ANY_SIZE, Firmware.tooBig(rx1950, true))
+        // Off: the same file fails as before.
+        assertEquals("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.check(rx1950, other, ceos))
+    }
+
     @Test fun sha256MatchesByContent() {
         val f = tmp.newFile().also { it.writeText("abc") }
         val abc = Firmware.KnownFile("abc", 3L, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")

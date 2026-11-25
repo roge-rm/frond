@@ -140,8 +140,8 @@ inline QString rx1950OsUnusable() {
 }
 inline QString rx1950OsWarning() { return QStringLiteral("This OS image isn't HP's tested CEOS.nbf, so it may not boot."); }
 // A warning for an OS image that isn't HP's, or nothing.
-inline QString importWarning(Device device, const QString& nandPath) {
-    if (device == Device::automatic || profile(device).board != DeviceBoard5::s3c2442Rx1950 || nandPath.isEmpty()) return {};
+inline QString importWarning(Device device, const QString& nandPath, bool anyFirmware = false) {
+    if (anyFirmware || device == Device::automatic || profile(device).board != DeviceBoard5::s3c2442Rx1950 || nandPath.isEmpty()) return {};
     return rx1950OsImage(nandPath) == Rx1950Os::other ? rx1950OsWarning() : QString();
 }
 
@@ -203,7 +203,13 @@ inline QString validateRom68k(Device device, QFile& rom, const QString& nandPath
 
 // Readability, geometry and which device the NOR header names; no boot claim.
 // A chosen device is never swapped for another one. 'resolved' gets the device to start.
-inline QString validateFiles(Device chosen, const QString& norPath, const QString& nandPath, Device* resolved = nullptr) {
+// With anyFirmware on, the rx1950 takes any NOR of HP's size, and an empty one reuses storedNorPath.
+inline QString validateFiles(Device chosen, const QString& norPicked, const QString& nandPath, Device* resolved = nullptr,
+                             bool anyFirmware = false, const QString& storedNorPath = {}) {
+    const bool anyRx1950 = anyFirmware && chosen != Device::automatic && profile(chosen).board == DeviceBoard5::s3c2442Rx1950;
+    if (anyRx1950 && norPicked.isEmpty() && !QFileInfo(storedNorPath).isFile())
+        return QStringLiteral("Choose a NOR image (CEBL.nbf). There's no earlier one to reuse.");
+    const QString norPath = anyRx1950 && norPicked.isEmpty() ? storedNorPath : norPicked;
     QFile nor(norPath);
     if (!QFileInfo(norPath).isFile() || !nor.open(QIODevice::ReadOnly))
         return QStringLiteral("Choose a readable NOR firmware file.");
@@ -219,7 +225,9 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
     }
     if (profile(device).board == DeviceBoard5::s3c2442Rx1950) {
         if (nandPath.isEmpty()) return rx1950OsMissing();
-        if (!firmwareFileMatches(norPath, rx1950Cebl5))
+        if (anyFirmware && QFileInfo(norPath).size() != qint64(rx1950Cebl5.bytes))
+            return QStringLiteral("The NOR image must be a 264,794-byte CEBL.nbf.");
+        if (!anyFirmware && !firmwareFileMatches(norPath, rx1950Cebl5))
             return QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.");
         if (rx1950OsImage(nandPath) == Rx1950Os::unusable) return rx1950OsUnusable();
         if (resolved) *resolved = device;

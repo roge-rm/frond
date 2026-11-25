@@ -21,7 +21,18 @@ struct Rx1950NandOptions {
 // The first physical block of the user store (the FAT partition's FILESYS region): 21 reserved blocks, then the
 // MSFLSH50 XIP region (233 blocks) and READONLY region (1518 blocks), R0. The guest writes nothing below it.
 // A hard reset erases from here to the end.
+// This is HP's WM5 value, the fallback when logical sector 0 holds no usable partition table.
 constexpr uint32_t rx1950UserStoreBlock = 21 + 233 + 1518;
+
+// The user store's first block from logical sector 0 (512 bytes, the MBR): the first FAT partition (type 04,
+// 06, 0b or 0c) start sector / 32 + 21 reserved blocks. rx1950UserStoreBlock when there's no 0x55aa signature
+// or no such partition. WM5 gives 1772, a WM6.1 image 1775.
+// A start that isn't on a 32-sector block boundary rounds up.
+uint32_t rx1950UserStoreBlockFromMbr(const uint8_t* sector0);
+
+// The same from the raw page at physical block 21 page 0 (512 data bytes, then the spare): it counts as the
+// MBR only when its SectorInfo logical sector (spare bytes 0 to 3) is 0, else the fallback.
+uint32_t rx1950UserStoreBlockFromPage(const uint8_t* page);
 
 bool rx1950NandImage(const uint8_t* eboot, size_t ebootSize, const uint8_t* nbf, size_t nbfSize,
                      std::vector<uint8_t>& flash, std::string& error, const Rx1950NandOptions& options = {});
