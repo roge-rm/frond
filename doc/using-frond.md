@@ -140,18 +140,21 @@ Click or tap the buttons under the screen and the silkscreen areas. Click and ho
 
 Keys, with the infrared keyboard detached (attached, they go to the Palm's keyboard driver instead, see [Infrared keyboard](#infrared-keyboard)):
 
-| Key | T\|X | E2 / E3 | Zire 72 | TG50 | 68k Palms |
-|---|---|---|---|---|---|
-| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | scroll rocker (up and down) |
-| F1 | Home | Calendar | Calendar | Date Book | Date Book |
-| F2 | Calendar | Contacts | Contacts | Address | Address |
-| F3 | Contacts | Tasks | Music | To Do | To Do List |
-| F4 | Web | Note Pad | Camera | Memo Pad | Memo Pad |
-| F5 | | | Voice button (hold to record) | Voice button | |
-| F6 | | | | Home | |
-| Escape | Power | E2: Power | Power | Power | Power |
+| Key | T\|X | E2 / E3 | Zire 72 | TG50 | Zodiac | 68k Palms |
+|---|---|---|---|---|---|---|
+| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | pushes the stick, Enter presses its centre | scroll rocker (up and down) |
+| F1 | Home | Calendar | Calendar | Date Book | Action 1 (bottom) | Date Book |
+| F2 | Calendar | Contacts | Contacts | Address | Action 2 (right) | Address |
+| F3 | Contacts | Tasks | Music | To Do | Action 3 (left) | To Do List |
+| F4 | Web | Note Pad | Camera | Memo Pad | Action 4 (top) | Memo Pad |
+| F5 | | | Voice button (hold to record) | Voice button | | |
+| F6 | | | | Home | Home | |
+| F7 | | | | | Function | |
+| F8, F9 | | | | | Left and right triggers | |
+| F10 | | | | | Stick centre | |
+| Escape | Power | E2: Power | Power | Power | | Power |
 
-On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
+On the Zodiac, F1 to F4 are the Action buttons and Enter and F10 press the stick's centre. On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
 
 **Game controller** (TG50, in the Machine menu on Linux and the corner menu on Android) plugs Sony's CLIÉ game controller into the connector or takes it out while the machine runs. It's drawn in place of the keyboard, and after Rotate its grips sit either side of the upright screen. The TG50's own driver runs it. It's saved for each machine; a session loaded later brings its own state. It's greyed while serial, infrared or USB has the connector. While it's in, the arrows are its arrows, Z and X are A and B, A and S are X and Y, Q is Home, W is Menu and H moves the Hold slide, and these keys no longer type. A game controller works it too: the d-pad or left stick, A, B, X and Y, Start for Home, Back for Menu and the right shoulder button for Hold. On Android, a game controller's d-pad, A, B, X, Y, Start (Home), Select (Menu) and R3 (Hold) press the CLIÉ controller's buttons while it's in, and the CLIÉ's own Home and Menu while it's out, and Settings → Controller → Set controls lists them for the TG50.
 
