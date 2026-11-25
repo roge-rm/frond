@@ -1115,10 +1115,33 @@ void SocIMX1::SetTraceHooks(const std::vector<uint32_t>& pcs) {
     ApplyCodeHooks();
 }
 
+// The stick filter's facts are in soc_IMX1.h.
+bool SocIMX1::SetDirectStick(bool on) {
+    if (on && !directStick.searched) {
+        directStick.searched = true;
+        directStick.known = RomHas(zodiacStickFilter, zodiacStickFilterCode, sizeof zodiacStickFilterCode) &&
+                            RomHas(zodiacStickWeights, zodiacStickWeightsData, sizeof zodiacStickWeightsData);
+        if (!directStick.known) std::cerr << "zodiac: this ROM's stick filter isn't one Frond knows; direct stick off" << std::endl;
+    }
+    directStick.wanted = on && directStick.known;
+    if (machine) ApplyCodeHooks();
+    return directStick.wanted;
+}
+
+// At 20095e2a: every slot gets the raw axes and neither counts as moved, so the filter returns them as they are.
+void SocIMX1::DirectStickHook(const uint32_t (&r)[16]) {
+    const uint32_t x[3] = {r[0], r[0], r[0]}, y[3] = {r[1], r[1], r[1]};
+    if (!WriteGuest(r[4], x, sizeof x) || !WriteGuest(r[4] + 12, y, sizeof y) || !SetGuestRegister(2, 0) ||
+        !SetGuestRegister(3, 0))
+        return;
+    ++directStick.samples;
+}
+
 void SocIMX1::ApplyCodeHooks() {
     std::vector<uint32_t> pcs = traceHooks;
     if (BluetoothHooksOn())
         pcs.insert(pcs.end(), std::begin(zodiacBluetoothHooks), std::end(zodiacBluetoothHooks));
+    if (DirectStickOn()) pcs.push_back(zodiacStickFilterHook);
     if (music.on) {
         if (pcs.size() + zodiac_music::callCount > imx1MachineMaximumCodeHooks) {
             // The music hooks all go in or none do.
@@ -1159,6 +1182,7 @@ void SocIMX1::CodeHookHit() {
         }
         std::cout << std::endl;
     }
+    if (pc == zodiacStickFilterHook && DirectStickOn()) DirectStickHook(r);
     // The music hooks only read, so the call runs on, and Bluetooth's may still take it.
     if (music.on) MusicHook(pc, r);
     if (BluetoothHooksOn() && BluetoothHook(pc, r)) return;

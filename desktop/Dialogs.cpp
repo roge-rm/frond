@@ -401,6 +401,12 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     engineRow->addWidget(engineLabel);
     engineRow->addWidget(engine, 1);
     speedLayout->addLayout(engineRow);
+    directStick = new QCheckBox(tr("Direct stick"), speedBox);
+    directStick->setObjectName("directStick");
+    directStick->setChecked(prefs.directStick);
+    speedLayout->addWidget(directStick);
+    connect(engine, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this] { directStick->setEnabled(engine->currentData().toBool()); });
     layout->addWidget(speedBox);
     peripherals = new QGroupBox(tr("Connections"), this);
     auto* peripheralsLayout = new QGridLayout(peripherals);
@@ -563,6 +569,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     prefs.jogLandscape = frondSessions::JogLandscape(jogLandscape->currentData().toInt());
     prefs.fastEngine = engine->currentData().toBool();
+    prefs.directStick = directStick->isChecked();
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
     frondSessions::setSpeed(&prefs, speed->currentData().toString());
@@ -658,6 +665,8 @@ void MachineSettings::setDevice(Device device) {
         const QSignalBlocker blocked(engine);
         engine->setCurrentIndex(frondFirmware::fastByDefault(device) ? 1 : 0);
     }
+    directStick->setVisible(device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac);
+    directStick->setEnabled(engine->currentData().toBool());
     speedGroup->setVisible(true);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);

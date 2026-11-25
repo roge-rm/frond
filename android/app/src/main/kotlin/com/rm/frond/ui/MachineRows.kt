@@ -167,6 +167,14 @@ fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (M
     MachineChoiceRow("Engine", settings.engine, Engine.entries, { it.label }, listStyle) { onChange(settings.copy(engine = it)) }
 }
 
+// Zodiac only; the core uses it in Fast only, so it's greyed in Exact.
+@Composable
+fun MachineDirectStickRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineSwitchRow("Direct stick", settings.directStick, listStyle, enabled = settings.engine == Engine.FAST) {
+        onChange(settings.copy(directStick = it))
+    }
+}
+
 // The LCD contrast, 0 to 100. The change is saved when the slider is let go.
 @Composable
 fun MachineContrastRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {

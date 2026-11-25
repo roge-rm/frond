@@ -5,6 +5,7 @@ import android.view.KeyEvent
 import java.nio.file.Files
 import com.rm.frond.ZodiacPad.Event.Axis
 import com.rm.frond.ZodiacPad.Event.Button
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -40,6 +41,23 @@ class ZodiacTest {
         assertFalse("--no-sound" in MachineSettings.defaults(zodiac).arguments(soundSupported = zodiac.sound))
         val lowLatency = MachineSettings(fastAudio = true).audioArguments(zodiac.lowLatencyAudio, 256) { true }
         assertFalse("--fast-audio" in lowLatency || "--low-latency-queue" in lowLatency)
+    }
+
+    @Test fun directStickIsOnAndGoesToTheCoreInFastOnly() {
+        for (model in listOf(zodiac1, zodiac)) {
+            val fresh = MachineSettings.defaults(model)
+            assertTrue(fresh.directStick)
+            assertEquals(listOf("--direct-stick"), fresh.directStickArguments())
+            assertEquals(emptyList<String>(), fresh.copy(engine = Engine.EXACT).directStickArguments())
+            assertEquals(emptyList<String>(), fresh.copy(directStick = false).directStickArguments())
+        }
+        // Settings saved before it read as on; off is saved and read back, on isn't written.
+        val old = JSONObject().put("engine", "fast")
+        assertTrue(MachineSettings.from(old).directStick)
+        assertFalse(MachineSettings().json().has("directStick"))
+        val off = MachineSettings(engine = Engine.FAST, directStick = false)
+        assertFalse(MachineSettings.from(JSONObject(off.json().toString())).directStick)
+        assertFalse("--direct-stick" in off.arguments())
     }
 
     @Test fun choosingAnotherDeviceKeepsAChosenEngine() {

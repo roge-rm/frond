@@ -2373,24 +2373,35 @@ for line in s.makefile('rb'):
             auto* device = dialog.findChild<QComboBox*>("device");
             auto* engine = dialog.machineSettings->engine;
             const auto pick = [&](const char* id) { device->setCurrentIndex(device->findData(QString(id))); };
+            auto* directStick = dialog.machineSettings->directStick;
             pick("tapwave-zodiac-2");
             QVERIFY(engine->isEnabled() && engine->currentData().toBool() && dialog.machineSettings->values().fastEngine);
+            // Direct stick: Zodiac only, on by default, greyed in Exact.
+            QVERIFY(!directStick->isHidden() && directStick->isEnabled() && directStick->isChecked());
             pick("palm-e2");
-            QVERIFY(!engine->currentData().toBool());
+            QVERIFY(!engine->currentData().toBool() && directStick->isHidden());
             pick("tapwave-zodiac-2");
-            QVERIFY(engine->currentData().toBool());
+            QVERIFY(engine->currentData().toBool() && !directStick->isHidden() && directStick->isEnabled());
             // Exact chosen by hand stays when the device changes.
             engine->setCurrentIndex(engine->findData(false));
             emit engine->activated(engine->currentIndex());
+            QVERIFY(!directStick->isEnabled());
             pick("palm-e2"); pick("tapwave-zodiac-2");
             QVERIFY(!engine->currentData().toBool() && !dialog.machineSettings->values().fastEngine);
+            QVERIFY(!directStick->isEnabled() && dialog.machineSettings->values().directStick);
+            engine->setCurrentIndex(engine->findData(true));
+            QVERIFY(directStick->isEnabled());
+            directStick->setChecked(false);
+            QVERIFY(!dialog.machineSettings->values().directStick);
         }
         {
             MachineSettingsDialog dialog(zodiac, fresh);
             QVERIFY(dialog.controls->engine->isEnabled() && !dialog.controls->values().fastEngine);
-            auto fast = fresh; fast.fastEngine = true;
+            QVERIFY(!dialog.controls->directStick->isEnabled() && dialog.controls->directStick->isChecked());
+            auto fast = fresh; fast.fastEngine = true; fast.directStick = false;
             MachineSettingsDialog fastDialog(zodiac, fast);
-            QVERIFY(fastDialog.controls->values().fastEngine);
+            QVERIFY(fastDialog.controls->values().fastEngine && !fastDialog.controls->values().directStick);
+            QVERIFY(fastDialog.controls->directStick->isEnabled() && !fastDialog.controls->directStick->isChecked());
         }
     }
     void zodiacCradle() {

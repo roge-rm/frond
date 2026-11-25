@@ -123,6 +123,8 @@ struct Preferences {
     bool showMips{false};
     // Zodiac: rumble on game controllers, or a tag in the window without one.
     bool rumble{true};
+    // Zodiac in Fast: the ROM takes each stick sample as it is (the core's --direct-stick).
+    bool directStick{true};
     // CLIÉ: the game controller attached. Unset (gamepadSet false) leaves the session's state at start.
     bool gamepad{false}, gamepadSet{false};
     // CLIÉ with the game controller: the jog controls in landscape.
@@ -147,6 +149,10 @@ inline QStringList musicArguments(const Preferences& prefs) {
     if (prefs.musicOutput == QLatin1String("soundfont") && !prefs.soundFont.isEmpty()) return {"--music-soundfont", prefs.soundFont};
     if (prefs.musicOutput == QLatin1String("midi") && !prefs.midiOutPort.isEmpty()) return {"--music-midi-out", prefs.midiOutPort};
     return {};
+}
+// Direct stick for the core: only with the Fast engine, where the core uses it. The caller checks for a Zodiac.
+inline QStringList directStickArguments(const Preferences& prefs) {
+    return prefs.fastEngine && prefs.directStick ? QStringList{QStringLiteral("--direct-stick")} : QStringList{};
 }
 // The speed setting as the core names it: original, 1.5x..8x or uncapped.
 inline QString speedName(const Preferences& prefs) {
@@ -201,6 +207,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     result->batteryCharging = object.value("batteryCharging").toBool(true);
     result->headphonesIn = object.value("headphonesIn").toBool(false);
     result->rumble = object.value("rumble").toBool(true);
+    result->directStick = object.value("directStick").toBool(true);
     if (const auto music = object.value("musicOutput").toString(); music == "soundfont" || music == "midi") result->musicOutput = music;
     result->soundFont = object.value("soundFont").toString();
     result->midiOutPort = object.value("midiOutPort").toString();
@@ -240,6 +247,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     if (!prefs.batteryCharging) object.insert("batteryCharging", false);
     if (prefs.headphonesIn) object.insert("headphonesIn", true);
     if (!prefs.rumble) object.insert("rumble", false);
+    if (!prefs.directStick) object.insert("directStick", false);
     if (prefs.musicOutput != "fm") object.insert("musicOutput", prefs.musicOutput);
     if (!prefs.soundFont.isEmpty()) object.insert("soundFont", prefs.soundFont);
     if (!prefs.midiOutPort.isEmpty()) object.insert("midiOutPort", prefs.midiOutPort);

@@ -54,6 +54,8 @@ class MachineSettings : public QWidget {
     QLabel* jogLandscapeLabel;
     // Never shown for 68k devices.
     QComboBox* engine;
+    // Zodiac only, used in Fast only.
+    QCheckBox* directStick;
     // 68k devices only.
     QSlider* contrast;
     QComboBox* speed;

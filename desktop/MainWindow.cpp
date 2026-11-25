@@ -2850,7 +2850,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     appActiveUnsent = QGuiApplication::applicationState() == Qt::ApplicationActive ? "on" : "off";
     if (runningPreferences.controllerMapSet && !runningPreferences.controllerMap.isEmpty())
         arguments << "--controller-map" << runningPreferences.controllerMap;
-    if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac) arguments << frondSessions::musicArguments(runningPreferences);
+    if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac)
+        arguments << frondSessions::musicArguments(runningPreferences) << frondSessions::directStickArguments(runningPreferences);
     // Nothing is known about this machine yet; the core's answer to battery-state sets it right.
     batteryKnown = batterySupported = false;
     batteryChargingSupported = true;

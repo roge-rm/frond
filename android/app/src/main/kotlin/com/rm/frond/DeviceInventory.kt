@@ -1520,6 +1520,7 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = false,
         hotSyncButton = true,
+        voiceKey = false,
         pendingUsb = "",
         colourLcd = false,
         os = "palm-os",

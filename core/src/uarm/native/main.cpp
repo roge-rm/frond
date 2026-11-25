@@ -144,6 +144,7 @@ struct Options {
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
+    bool directStick;        // --direct-stick
     optional<string> controllerMap;  // --controller-map
     bool headphonesIn;       // --headphones-in
     BatteryPower battery{};  // --battery
@@ -819,6 +820,7 @@ bool gFastEngineMissing = false;
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << deviceProfile5(deviceType)->displayName << ": the Fast engine is not available here, running Exact" << endl;
+            if (options.directStick) static_cast<SocIMX1*>(soc)->SetDirectStick(true);
             // With a SoundFont or a MIDI out taking the events, the hooks don't print them.
             if (options.musicHooks || options.musicSoundFont || options.musicMidiOut)
                 static_cast<SocIMX1*>(soc)->SetMusicHooks(true, !options.musicSoundFont && !options.musicMidiOut);
@@ -2158,6 +2160,11 @@ int main(int argc, char** argv) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--direct-stick")
+        .help("Zodiac, Fast engine only: the ROM takes each stick sample as it is, without its filter")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--no-sound", "-q")
         .help("start with audio off")
         .default_value(false)
@@ -2428,6 +2435,7 @@ int main(int argc, char** argv) {
                        .fastEngine = program.get("--engine") == "fast",
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),
+                       .directStick = program.get<bool>("--direct-stick"),
                        .controllerMap = program.present("--controller-map"),
                        .headphonesIn = program.get<bool>("--headphones-in"),
                        .anyFirmware = program.get<bool>("--any-firmware")};

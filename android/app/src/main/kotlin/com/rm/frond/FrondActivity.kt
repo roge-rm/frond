@@ -405,6 +405,7 @@ open class FrondActivity : SDLActivity() {
         arguments += listOf("--battery", battery.launchSpec())
         if (launchDevice().zodiac) {
             arguments += machineSettings.musicArguments(File(machineSettings.soundFont).isFile, midiOutId)
+            arguments += machineSettings.directStickArguments()
         }
         arguments += listOf("--window-background", BACKGROUND_HEX)
         // The core turns the Zodiac's view with its OS only when the app turns with it too.
