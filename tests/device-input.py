@@ -117,7 +117,7 @@ class DeviceInputTest(unittest.TestCase):
                           'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-iiie', 'palm-iiixe', 'palm-v', 'palm-vx',
                           'palm-m100', 'palm-m105', 'palm-m125', 'palm-m500', 'ibm-workpad-c500',
                           'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520',
-                          'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'sony-clie-t415',
+                          'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'tapwave-zodiac-1', 'sony-clie-t415',
                           'hp-ipaq-210', 'hp-ipaq-rx1950', 'hp-ipaq-h4350'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
@@ -132,8 +132,11 @@ class DeviceInputTest(unittest.TestCase):
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
-        self.assertEqual(data['profiles'][24]['status'], 'experimental-desktop')
-        self.assertEqual([p['status'] for p in data['profiles'][25:]], ['reserved', 'experimental-desktop', 'reserved'])
+        by_name = {p['name']: p for p in data['profiles']}
+        self.assertEqual(by_name['sony-clie-t415']['status'], 'experimental-desktop')
+        self.assertEqual(by_name['hp-ipaq-210']['status'], 'reserved')
+        self.assertEqual(by_name['hp-ipaq-rx1950']['status'], 'experimental-desktop')
+        self.assertEqual(by_name['hp-ipaq-h4350']['status'], 'reserved')
         colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}
         self.assertEqual(colour, {'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520'})
 

@@ -260,6 +260,9 @@ void run(SocIMX1& soc, int slices = 4) { for (int i = 0; i < slices; ++i) soc.Ru
 
 void buttonsFromReset() {
     const auto o = zodiacMachineOptions(nullptr);
+    const auto first = zodiacMachineOptions(nullptr, deviceTypeZodiac1);
+    assert(o.ramMiB == 128 && first.ramMiB == 32);
+    assert((o.gpioDInput ^ first.gpioDInput) == (1u << 6) && (first.gpioDInput & (1u << 6)));
     // Every button pin reads high, released, from reset, and nothing is scheduled to change them.
     assert(o.gpioAInputMaskedKnown && (o.gpioAInput & 0x780) == 0x780 && o.gpioDInputKnown && (o.gpioDInput & 0x7780) == 0x7780);
     // The cradle line D22 reads high too, off the cradle.

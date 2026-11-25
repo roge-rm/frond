@@ -21,14 +21,14 @@
 #include "zodiac_music.h"
 #include "zodiac_panel.h"
 
-// The Tapwave Zodiac 2 in the normal runtime. It runs the guarded i.MX1 machine (imx1_boot_probe.h)
+// The Tapwave Zodiac in the normal runtime. It runs the guarded i.MX1 machine (imx1_boot_probe.h)
 // and nothing else: no PACE or guest calls, and input reaches the ROM as pen samples, pin levels and
 // stick values. One per process, as the machine is.
 
 // The machine's options. Every button is released from reset: the pins read high, A7 to A10 and
 // D7 to D10 and D12 to D14. The other levels are the bring-up's. A saved state only loads into a
 // machine made with these, or with imx1StateAllowBootInputs when only the button levels differ.
-Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom);
+Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom, DeviceType5 device = deviceTypeZodiac2);
 
 // How long a hard reset holds power, in ms of guest time. ROM facts: right after reset the boot ROM (20003948)
 // makes A7, A10 and D12 inputs, waits, then reads Home (A7), power (A10) and Function (D12) in that order, low
@@ -51,7 +51,7 @@ inline constexpr uint32_t zodiacBluetoothHooks[] = {0x200f778c, 0x200f77c8, 0x20
 class SocIMX1 : public SoC {
    public:
     // nullptr with the reason in error when the ROM can't run.
-    static SocIMX1* Create(const uint8_t* rom, size_t size, std::string& error);
+    static SocIMX1* Create(const uint8_t* rom, size_t size, std::string& error, DeviceType5 device = deviceTypeZodiac2);
 
     void Reset() override;
     // A reset through RESET_IN with power held from it on for zodiacHardResetHoldMs of guest time.
@@ -124,7 +124,7 @@ class SocIMX1 : public SoC {
     bool FrameQuarterTurn() const override { return true; }
     unsigned GuestOrientation() override;
     Attention GuestAttention() override;
-    DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
+    DeviceType5 GetDeviceType() override { return device; }
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}
     bool LcdEnabled() override;
@@ -293,7 +293,8 @@ class SocIMX1 : public SoC {
     std::function<void()> CapturePeripheralInput() override;
 
    private:
-    SocIMX1() = default;
+    explicit SocIMX1(DeviceType5 type);
+    const DeviceType5 device;
     void PumpInput();
     void StateChanged();
     // Runs until the pc stop or for ticks of guest time. True on the stop.

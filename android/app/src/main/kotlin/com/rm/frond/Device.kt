@@ -132,7 +132,7 @@ data class Device internal constructor(
     val networkSupported: Boolean get() = network || palmWifiCard
     val networkWifiOnly: Boolean get() = wifiOnlyNetwork || (palmWifiCard && !network)
     val headphonesSupported: Boolean get() = pxaPalm
-    val sdWriteProtection: Boolean get() = pxaPalm || id == "tapwave-zodiac-2"
+    val sdWriteProtection: Boolean get() = pxaPalm || zodiac
     // A 68k device's slots take linked card files through frond-68k's sd-, sd2- and ms- commands (SdCard, Cards).
     val linkedCards: Boolean get() = runs68k && storageSlots.isNotEmpty()
     // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
@@ -158,7 +158,7 @@ data class Device internal constructor(
     val appNames: List<String> get() = appNamesText.split('|')
     // The Tapwave Zodiac: a landscape screen, an engine of its own that runs best on Fast, and an
     // analogue stick and triggers that a controller drives through the core's own mapping.
-    val zodiac: Boolean get() = id == ZODIAC_ID
+    val zodiac: Boolean get() = cohort == "zodiac-nor"
     // The HP iPAQ rx1950 (Windows Mobile 5): HP's CEBL.nbf as the NOR and CEOS.nbf as the NAND.
     val rx1950: Boolean get() = id == RX1950_ID
     // New machines of the Zodiac, rx1950, T|X and Zire 72 start on Fast; they fall behind Original speed on Exact.

@@ -1289,6 +1289,11 @@ test-zodiac-bluetooth: $(OBJ_ROOT)/test-zodiac-bluetooth
 
 # The Zodiac hands each frame to the window when the next slice is due, from a short cold boot of ZODIAC_ROM.
 # Skipped without it.
+.PHONY: test-zodiac-1-boot
+# The same 1.1 firmware boots both Zodiac models with their own RAM and saved device name.
+test-zodiac-1-boot: out/frond
+	ZODIAC_ROM="$(ZODIAC_ROM)" python3 tests/zodiac-1-boot.py
+
 .PHONY: test-zodiac-frame-handoff
 test-zodiac-frame-handoff: out/frond
 	ZODIAC_ROM="$(ZODIAC_ROM)" python3 tests/zodiac-frame-handoff.py

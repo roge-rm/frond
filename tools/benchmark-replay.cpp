@@ -292,8 +292,8 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     if (mkdir(output.c_str(),0700)) throw std::runtime_error("output must be a new directory in an existing parent");
     cpuSetFastEngine(false);
     std::string why;
-    std::unique_ptr<SocIMX1> soc(SocIMX1::Create(rom.data(),rom.size(),why));
-    if (!soc) throw std::runtime_error("Tapwave Zodiac 2: "+why);
+    std::unique_ptr<SocIMX1> soc(SocIMX1::Create(rom.data(),rom.size(),why,device));
+    if (!soc) throw std::runtime_error(std::string(deviceProfile5(device)->displayName)+": "+why);
     const char* jit=std::getenv("FROND_JIT");
     const bool fast=jit && std::string(jit)=="1";
     if (fast && !soc->SetFastEngine(true)) throw std::runtime_error("the Zodiac's Fast engine isn't available");

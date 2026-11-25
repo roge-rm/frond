@@ -54,7 +54,7 @@ int main() {
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
-                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.board == DeviceBoard5::ez328 ||
+                p.deviceType == deviceTypeTG50 || deviceTypeIsZodiac5(p.deviceType) || p.board == DeviceBoard5::ez328 ||
                 p.deviceType == deviceTypeFrankenE2 || p.board == DeviceBoard5::vz328 || p.deviceType == deviceTypeRx1950));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
@@ -65,7 +65,7 @@ int main() {
                 : p.deviceType == deviceTypeTG50 ? ram == (16u << 20)
                 : p.board == DeviceBoard5::ez328 ? ram == p.minRam
                 : vzPalm(p) ? ram == p.minRam
-                : p.deviceType == deviceTypeZodiac2 ? ram == (128u << 20)
+                : deviceTypeIsZodiac5(p.deviceType) ? ram == p.minRam
                 : p.deviceType == deviceTypeDana ? ram == (8u << 20)
                 : p.deviceType == deviceTypeDanaWireless ? ram == (16u << 20)
                 : p.deviceType == deviceTypeRx1950 ? ram == (32u << 20)
@@ -106,15 +106,17 @@ int main() {
                 return true;
             });
         };
-        assert(inspect().profile == &p && inspect().hasHeader && inspect().validLayout);
+        const auto* detected = p.deviceType == deviceTypeZodiac1 ? deviceProfile5(deviceTypeZodiac2) : &p;
+        assert(inspect().profile == detected && inspect().hasHeader && inspect().validLayout);
+        assert(deviceProfileTakesArmRom5(p.deviceType, detected->deviceType));
         if (p.norLayout == DeviceNorLayout5::smallAndBigCards) {
             nor[p.bigCardOffset + 0x84] ^= 1;
-            assert(inspect().profile == &p && !inspect().validLayout);
+            assert(inspect().profile == detected && !inspect().validLayout);
         }
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 25 && names.size() == 28 && types.size() == 26);
+    assert(desktopCount == 26 && names.size() == 29 && types.size() == 27);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -122,7 +124,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 26, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, int(deviceTypeZodiac1) + 1, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -684,6 +686,14 @@ static void zodiac2() {
            c.bluetooth && c.sound && !c.microphone && !c.backgroundPanel);
     assert(p->norSize == 0x7d0000 && !p->nandSize && !p->requiresExplicitNand);
     assert(p->minRam == (128u << 20) && p->maxRam == p->minRam);
+    const auto* first = deviceProfileNamed5("tapwave-zodiac-1");
+    assert(first && first->deviceType == deviceTypeZodiac1 && first->minRam == (32u << 20));
+    assert(first->maxRam == first->minRam && first->board == p->board && first->art == p->art);
+    assert(deviceProfileCardSlotCount5(*first) == 2 && deviceProfileSdWriteProtection5(first->deviceType));
+    assert(!deviceConfigurationSupportsRamSize(first->deviceType, p->minRam));
+    assert(deviceProfileTakesArmRom5(first->deviceType, p->deviceType));
+    assert(!deviceProfileTakesArmRom5(first->deviceType, deviceTypeTX));
+    assert(!deviceProfileTakesArmRom5(first->deviceType, deviceTypeInvalid));
     assert(!deviceProfileSdSizeValid5(p->deviceType, 512));
     const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
     assert(display.width == 480 && display.height == 320 && !display.graffitiHeight && display.density == 144);

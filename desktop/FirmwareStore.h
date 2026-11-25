@@ -23,7 +23,7 @@ inline QString storedNand(const QString& root, Device device) {
 
 // The Zodiac's NOR can also be picked as Tapwave's Zodiac 1.1 update (the zip or the PRC), which holds the ROM.
 inline bool takesZodiacUpdate(Device device) {
-    return device == Device::automatic || profile(device).board == DeviceBoard5::imx1Zodiac;
+    return device == Device::automatic || isZodiac(device);
 }
 
 // The file to use as the NOR: the ROM made from a Zodiac update into 'scratch', or 'path' itself for anything

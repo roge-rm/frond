@@ -181,18 +181,22 @@ std::string RomInfo5::ReadString(size_t offset, uint8_t maxLen, bool& error) con
     return str;
 }
 
-std::ostream& operator<<(std::ostream& stream, RomInfo5& info) {
-    if (!info.IsValid()) {
+std::ostream& RomInfo5::Print(std::ostream& stream, DeviceType5 device) const {
+    if (!IsValid()) {
         stream << "invalid ROM" << std::endl;
         return stream;
     }
 
-    stream << "device: " << describeDeviceType(info.GetDeviceType()) << std::endl
-           << "card name: " << info.GetCardName() << std::endl
-           << "ROM version: " << info.GetRomName() << std::endl
-           << "manufacturer: " << info.GetManufacturer() << std::endl
-           << "HAL ID: " << formatMultichar(info.GetHalId()) << std::endl
-           << "company ID: " << formatMultichar(info.GetCompanyId()) << std::endl;
+    stream << "device: " << describeDeviceType(device) << std::endl
+           << "card name: " << GetCardName() << std::endl
+           << "ROM version: " << GetRomName() << std::endl
+           << "manufacturer: " << GetManufacturer() << std::endl
+           << "HAL ID: " << formatMultichar(GetHalId()) << std::endl
+           << "company ID: " << formatMultichar(GetCompanyId()) << std::endl;
 
     return stream;
+}
+
+std::ostream& operator<<(std::ostream& stream, RomInfo5& info) {
+    return info.Print(stream, info.GetDeviceType());
 }

@@ -16,6 +16,7 @@
 #include <iostream>
 
 #include "device_configuration.h"
+#include "device_profile5.h"
 #include "imx1_bootstrap.h"
 #include "pace.h"
 #include "HostUartPort.h"
@@ -36,6 +37,8 @@ namespace {
     // D22 is the cradle's HotSync button, low while pressed (ROM key scan 20084af4 sets keyBitCradle on D22
     // low with the cradle attached; the sleep path arms it as a low level wake interrupt), so it idles high.
     constexpr uint32_t cradlePinD = 0x00400000;
+    // The boot loader selects a single 32 MiB SDRAM bank when D6 is high.
+    constexpr uint32_t zodiac1RamPinD = 1u << 6;
     // B14, the charger input: the DAL's dock status (ROM 20089990) reads it low as external power and
     // charging. zodiacMachineOptions starts it low; ApplyBattery sets it high off the charger.
     constexpr uint32_t chargerPinB = 0x00004000;
@@ -126,13 +129,15 @@ static_assert(zodiacControlFor(keyIdHome) == int(Imx1ZodiacControl::home) && zod
               zodiacControlFor(keyIdFunction) == int(Imx1ZodiacControl::function) && zodiacControlFor(keyIdBluetooth) == int(Imx1ZodiacControl::bluetooth) &&
               zodiacControlFor(keyIdHard1) == int(Imx1ZodiacControl::actionDown));
 
-Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom) {
+Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom, DeviceType5 device) {
     Imx1ProbeOptions o;
     o.bootstrapPeripherals = true; o.assumeMpllSettled = true; o.assumeSpllSettled = true;
     o.assumeI2cSingleMaster = true; o.i2cBus = eeprom; o.aspPx1HighFromReset = true;
     o.gpioBInputKnown = true; o.gpioBInput = 0x08100000;
     o.gpioDInputKnown = true; o.gpioDInput = buttonPinsD | cradlePinD;
-    o.ramMiB = 128; o.cs4Port0InputKnown = true; o.cs4Port0Input = 0;
+    if (device == deviceTypeZodiac1) o.gpioDInput |= zodiac1RamPinD;
+    o.ramMiB = deviceProfile5(device)->minRam >> 20;
+    o.cs4Port0InputKnown = true; o.cs4Port0Input = 0;
     o.rtcInitialTimeKnown = true; o.rtcInitialTime = {1, 12, 34, 56};
     o.aspUSampleKnown = true; o.aspUSample = 0x9b00;
     o.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB;
@@ -280,6 +285,8 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     }
 };
 
+SocIMX1::SocIMX1(DeviceType5 type) : device(type) {}
+
 SocIMX1::~SocIMX1() {
     inputTrace::clearGuestClock(machine);
     paceReleaseExternalMemory(this);
@@ -310,18 +317,22 @@ void SocIMX1::ApplyUartLines() {
     if (infraredPort) infraredPort->Replaced();
 }
 
-SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error) {
+SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error, DeviceType5 device) {
+    if (!deviceTypeIsZodiac5(device)) {
+        error = "this device is not a Tapwave Zodiac";
+        return nullptr;
+    }
     Imx1I2cReadWindow::Image image{};
     if (size > UINT32_MAX || !zodiacEepromIdentity(romData, size, image)) {
         error = "this Zodiac ROM keeps its identity data in a layout Frond doesn't know";
         return nullptr;
     }
-    std::unique_ptr<SocIMX1> soc(new SocIMX1());
+    std::unique_ptr<SocIMX1> soc(new SocIMX1(device));
     soc->rom.assign(romData, romData + size);
     soc->eeprom = std::make_unique<Imx1I2cReadWindow>(image);
     Imx1ProbeResult failure{};
     soc->machine = imx1MachineCreate(soc->rom.data(), uint32_t(size), Imx1ProbeEntry::physicalFlash, false,
-                                     zodiacMachineOptions(soc->eeprom.get()), nullptr, nullptr, &failure);
+                                     zodiacMachineOptions(soc->eeprom.get(), device), nullptr, nullptr, &failure);
     if (!soc->machine) {
         error = std::string("the i.MX1 machine could not be made: ") + imx1ProbeStopName(failure.stop);
         return nullptr;
@@ -342,8 +353,9 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     soc->syscallDispatch = initSyscallDispatch(soc.get());
     soc->pcm.machine = soc->machine;
     imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
-    soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
-    soc->ramSize = 128u << 20;
+    const auto* profile = deviceProfile5(device);
+    soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(device, profile->defaultDisplay);
+    soc->ramSize = profile->minRam;
     soc->ApplyBattery();
     soc->StateChanged();
     soc->ApplyUartLines();
