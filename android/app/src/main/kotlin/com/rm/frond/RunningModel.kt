@@ -482,7 +482,10 @@ class RunningModel(
             val result = withContext(Dispatchers.IO) {
                 InstallBatch.run(uris, { displayName(it) ?: "A file" }, { n, total ->
                     if (total > 1) activity.runOnUiThread { busy = "Installing $n of $total" }
-                }) { last = d.install(it, if (device.installsToCard) displayName(it) ?: "file" else null) }
+                }) {
+                    last = d.install(it, if (device.installsToCard) displayName(it) ?: "file" else null,
+                        copyOnly = device.installsToCard && uris.size > 1)
+                }
             }
             busy = null
             val summary = result.summary()
@@ -534,6 +537,62 @@ class RunningModel(
                 }
             }
             appsNote = note
+        }
+    }
+
+    var installedPrograms by mutableStateOf<List<String>>(emptyList())
+        private set
+    var installedProgramsNote by mutableStateOf<String?>("Installed programs haven’t been read")
+        private set
+    var readingInstalledPrograms by mutableStateOf(false)
+        private set
+
+    fun refreshInstalledPrograms() {
+        val control = link ?: return
+        if (!device.rx1950 || readingInstalledPrograms || waitingForGdb || busy != null) return
+        readingInstalledPrograms = true
+        installedProgramsNote = null
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { control.request("winmo-apps", timeoutSeconds = 10) }
+            if (!reply.ok) acceptInstalledPrograms(false, reply.message)
+        }
+    }
+
+    fun acceptInstalledPrograms(ok: Boolean, message: String) {
+        if (!readingInstalledPrograms) return
+        readingInstalledPrograms = false
+        if (!ok) {
+            installedProgramsNote = message
+            return
+        }
+        try {
+            val parser = android.util.Xml.newPullParser()
+            parser.setInput(message.reader())
+            val names = mutableSetOf<String>()
+            var uninstall = false
+            var found = false
+            while (true) {
+                when (parser.nextToken()) {
+                    org.xmlpull.v1.XmlPullParser.END_DOCUMENT -> break
+                    org.xmlpull.v1.XmlPullParser.DOCDECL -> error("Unexpected document declaration")
+                    org.xmlpull.v1.XmlPullParser.START_TAG -> {
+                        val type = parser.getAttributeValue(null, "type")
+                        when (parser.depth) {
+                            1 -> require(parser.name == "wap-provisioningdoc")
+                            2 -> {
+                                uninstall = parser.name == "characteristic" && type == "UnInstall"
+                                found = found || uninstall
+                            }
+                            3 -> if (uninstall && parser.name == "characteristic" && !type.isNullOrEmpty()) names.add(type)
+                        }
+                    }
+                }
+            }
+            require(found)
+            installedPrograms = names.sortedWith(String.CASE_INSENSITIVE_ORDER)
+            installedProgramsNote = if (names.isEmpty()) "No installed programs" else null
+        } catch (e: Exception) {
+            installedProgramsNote = "Windows Mobile returned an invalid program list."
         }
     }
 
@@ -1106,6 +1165,12 @@ class RunningModel(
     fun hardReset(saveFirst: Boolean) = device(if (saveFirst) "Saving" else "Resetting", "Couldn't hard reset", true) { l ->
         runHardReset(FrondActivity.running?.session, saveFirst, onSaved = { FrondActivity.running?.savedMachine() }) { command, argument ->
             l.request(command, argument, timeoutSeconds = if (command == "save") 120 else 30)
+        }.also { error ->
+            if (error == null && device.rx1950) activity.runOnUiThread {
+                installedPrograms = emptyList()
+                readingInstalledPrograms = false
+                installedProgramsNote = "Installed programs haven’t been read"
+            }
         }
     }
 

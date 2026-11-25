@@ -146,6 +146,7 @@ class DesktopControl {
     // The save when the launcher went away failed; the core exits non-zero.
     bool SaveFailed() const { return saveFailed; }
     bool poll(commands::Context& ctx) {
+        finishApplicationList(ctx);
         // No request is taken while a save writes in the background: it answers when it's done,
         // and everything after it, a quit or a card change too, waits behind it.
         if (pendingSave) {
@@ -161,7 +162,7 @@ class DesktopControl {
             case DesktopChannel::Poll::idle: break;
             case DesktopChannel::Poll::request: {
                 const auto& command = request.command;
-                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || (command == "sync-start" && request.argument == "network") || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
+                const bool work = command == "guest-ready" || command == "save" || (command == "install" || command == "install-copy") || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || (command == "sync-start" && request.argument == "network") || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
                 if (work) {
                     // Host calls only drop capture for their length; the user's choice stays and capture comes back.
                     if (ctx.microphone) ctx.microphone->Suspend();
@@ -304,6 +305,19 @@ class DesktopControl {
         return state == "off" && !ctx.serialError.empty() ? "off " + ctx.serialError : state;
     }
     struct Reply { bool ok{false}; std::string code{"failed"}, message; };
+    void finishApplicationList(commands::Context& ctx) {
+        if (!applicationListPending) return;
+        const auto job = applicationList.lock();
+        if (job && job->Running()) return;
+        applicationListPending = false;
+        applicationList.reset();
+        if (!job) event("winmo-apps-error", "The Windows Mobile connection closed.");
+        else if (!job->ApplicationError().empty()) event("winmo-apps-error", job->ApplicationError());
+        else event("winmo-apps", job->Applications());
+        if (ctx.usb->RouteGeneration() != applicationListUsbGeneration) return;
+        if (applicationListCable) ctx.usb->Stop();
+        else if (auto* device = dynamic_cast<SocS3C2442*>(ctx.soc)) device->StopActiveSync();
+    }
     // A save request: the snapshot and any card or NAND journal here on the emulation thread, then
     // the .frond compressed and written on saveJob while the guest runs. True when the reply waits
     // for that write; false with `result` set when the save failed before it.
@@ -551,11 +565,13 @@ class DesktopControl {
         }
         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
-        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+        const bool fileCommand = command == "save" || (command == "install" || command == "install-copy") || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && !frondPosix::IsAbsolutePath(path)) return {false, "argument", "An absolute file path is required."};
         if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && !path.empty()) return {false, "argument", "This command takes no argument."};
-        if (command == "install" && ctx.soc->InstallsToCard()) {
-            const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path);
+        if (command == "install-copy" && !ctx.soc->InstallsToCard())
+            return {false, "unsupported", "Install to SD is unavailable for this device."};
+        if ((command == "install" || command == "install-copy") && ctx.soc->InstallsToCard()) {
+            const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path, command == "install");
             return {result.ok, result.code, result.message};
         }
         // A board with no guest calls takes none of the commands that need them.
@@ -688,10 +704,25 @@ class DesktopControl {
             manager.Configure(options);
             return {true, "sync", SyncState()};
         }
+        if (command == "winmo-apps") {
+            auto* device = dynamic_cast<SocS3C2442*>(ctx.soc);
+            if (!device || !ctx.usb) return {false, "unsupported", "Installed programs are unavailable for this device."};
+            if (applicationListPending || device->ActiveSyncRunning())
+                return {false, "busy", "An ActiveSync connection is already open."};
+            if (device->PowerSleeping()) return {false, "asleep", "Windows Mobile is asleep."};
+            applicationListCable = !ctx.usb->Host();
+            std::string error;
+            if (!ctx.usb->StartCable(ctx.soc, error)) return {false, "usb", error};
+            applicationListUsbGeneration = ctx.usb->RouteGeneration();
+            applicationList = device->StartActiveSync(true);
+            applicationListPending = true;
+            return {true, "pending", {}};
+        }
         if (command == "activesync-start") {
             auto* device = dynamic_cast<SocS3C2442*>(ctx.soc);
             if (!device || !ctx.usb) return {false, "unsupported", "ActiveSync is unavailable for this device."};
-            if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
+            if (device->ActiveSyncRunning() ||
+                frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
                 return {false, "busy", "An ActiveSync is already running."};
             if (path == "serial" || (path.empty() && frondSync::ConfiguredActiveSyncUsesSerial())) {
                 if (!ctx.serial || !ctx.serialPort) return {false, "unsupported", "Serial ActiveSync is unavailable."};
@@ -1315,6 +1346,9 @@ class DesktopControl {
         return {true, "done", "Done."};
     }
     DesktopChannel channel;
+    std::weak_ptr<frondSync::ActiveSyncSession> applicationList;
+    uint64_t applicationListUsbGeneration{0};
+    bool applicationListPending{false}, applicationListCable{false};
     bool sound, quit{false}, saveFailed{false};
     std::string saveOnLoss;
 };

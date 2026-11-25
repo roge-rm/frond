@@ -107,10 +107,14 @@ class SocS3C2442 : public SoC {
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
     bool SetUsbCable(bool attached);
-    void StartActiveSync();
+    std::shared_ptr<frondSync::ActiveSyncSession> StartActiveSync(bool listApplications = false);
+    bool ActiveSyncRunning() const;
+    void StopActiveSync();
     bool StartSerialActiveSync();
     bool StopSerialActiveSync();
     bool UsbCableAttached() const { return machine->usbVbus(); }
+    // The earliest guest time the cable may go in again after it went out (0: any time).
+    uint64_t UsbPlugReadyAt() const;
     bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
     // The desktop behind the USB cable's RNDIS link (UsbHostBridge's ethernet hooks, a DesktopLink): made at the
     // first poll, dropped at a reset or load, left alone while the network is frozen for a checkpoint.

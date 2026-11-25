@@ -76,7 +76,7 @@ Under Applications (the Linux panel or the Android sheet):
 
 Close Palm dialogs first if an install or export can't get through.
 
-On the rx1950 **Install…** copies files onto the SD card's top folder, so it needs a card in the slot. Windows Mobile sees the card go out and come back. To install a CAB, open Storage Card in File Explorer and tap it. The application list, Launch, Export, Other… and Export all… are greyed. Use Files under Storage to copy files off the card.
+On the rx1950 **Install…** copies files to the top folder of the SD card. With one CAB selected, Windows Mobile opens its installer when the card goes back in. Accept the publisher prompt on the emulated screen and finish the install there. If the installer does not open, or you picked several files, open Storage Card in File Explorer and tap the CAB. In Applications, **Refresh** reads the installed programs over ActiveSync. Use Files under Storage to copy files off the card.
 
 ### FrondBench
 

@@ -106,10 +106,9 @@ data class Device internal constructor(
     val storageSlots: List<StorageSlot> = emptyList(),
     val vibrate: Boolean = false,
 ) {
-    // Applications and Hard reset are Palm OS guest services; a Windows CE device has its own or greys them out.
+    // Palm OS device profiles use the core’s Palm guest services.
     val palmOs: Boolean get() = os == "palm-os"
-    // Windows CE: Install copies the file onto the SD card, where the guest's File Explorer opens it (wceload for a
-    // CAB), and Hard reset is a clean boot. The application list stays greyed. The rx1950 only so far.
+    // Windows CE installs through the SD card.
     val installsToCard: Boolean get() = rx1950
     val hardResetWorks: Boolean get() = palmOs || rx1950
     // The USB link is a network (RNDIS): on or off, with no endpoint.

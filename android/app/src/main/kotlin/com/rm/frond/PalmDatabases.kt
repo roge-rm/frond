@@ -28,15 +28,16 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
 
     // Installs a picked .prc or .pdb and returns the core's result, e.g. "Application installed.". name is the
     // file's own name for a device that installs onto its SD card, where the name is kept.
-    fun install(uri: Uri, name: String? = null): String = install(name) { context.contentResolver.openInputStream(uri) }
+    fun install(uri: Uri, name: String? = null, copyOnly: Boolean = false): String =
+        install(name, copyOnly) { context.contentResolver.openInputStream(uri) }
 
     // The same from any stream, like a file in a picked folder.
-    fun install(name: String? = null, open: () -> java.io.InputStream?): String {
+    fun install(name: String? = null, copyOnly: Boolean = false, open: () -> java.io.InputStream?): String {
         folder.mkdirs()
         val copy = File(folder, name?.let { cardName(it) } ?: "install.pdb")
         try {
             copyIn(open, copy)
-            return run("install", copy.path).message
+            return run(if (copyOnly) "install-copy" else "install", copy.path).message
         } finally {
             copy.delete()
         }

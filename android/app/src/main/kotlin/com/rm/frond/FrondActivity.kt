@@ -270,6 +270,9 @@ open class FrondActivity : SDLActivity() {
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
             if (name == "sync") runOnUiThread { syncState(state) }
+            if (name == "winmo-apps" || name == "winmo-apps-error") runOnUiThread {
+                menuModel?.acceptInstalledPrograms(name == "winmo-apps", state)
+            }
             if (name == "serial" || name == "usb") runOnUiThread { menuModel?.acceptSyncRoute(name, state) }
             if (name == "microphone") {
                 Log.i(TAG, "microphone: $state")
