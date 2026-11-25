@@ -2851,6 +2851,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     // Nothing is known about this machine yet; the core's answer to battery-state sets it right.
     batteryKnown = batterySupported = false;
     batteryChargingSupported = true;
+    // The core starts, or reopens a saved machine, with the host's level now, not the default until the first read.
+    if (runningPreferences.batteryMode == "host") hostBattery = frondBattery::readHost();
     batterySent = batterySpec();
     arguments << "--battery" << batterySent;
     if (runningPreferences.headphonesIn && deviceProfileHasPalmBoardInputs5(int(runningDevice)))

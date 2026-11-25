@@ -167,6 +167,9 @@ class SoC {
     virtual bool HardResetSupported() const { return true; }
     // The rx1950 was made with a CEBL of any firmware; its session records that (MachineSession.h).
     virtual bool AnyFirmware() const { return false; }
+    // A saved session opened again: a board whose RTC is kept in the state and runs on guest time gets the host's
+    // local time. Boards that read the host's clock live (PXA, PV) have nothing to set.
+    virtual void SetClockToHost() {}
     // Install copies the file onto the SD card for the guest's own tools (Windows CE, frondNative::installToSdCard).
     virtual bool InstallsToCard() const { return false; }
     void KeyDown(enum KeyId key);

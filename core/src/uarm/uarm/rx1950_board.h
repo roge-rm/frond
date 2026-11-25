@@ -4,8 +4,10 @@
 // The HP iPAQ rx1950's keys and touch panel as the S3C2442 sees them (doc R0 "Key GPIOs": keybddr, the
 // OAL and Linux mach-rx1950.c agree on the pins).
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 
 #include "s3c2442_blocks.h"
 
@@ -51,6 +53,13 @@ inline void rx1950LoaderPins(S3cGpio& gpio) {
 // (wYear = BCDYEAR + 1950, nk 0x8004abb0) and BCDDAY as day of week + 1 (Sunday 1); the other fields are BCD.
 constexpr uint8_t rx1950RtcYear(unsigned year) { return uint8_t(year - 1950); }
 constexpr S3cRtc::Time rx1950RtcStart{rx1950RtcYear(2006), 1, 1, 1, 12, 0, 0};
+
+// A calendar time (std::tm, local time as WM5 keeps the RTC) as the rx1950's RTC fields. A session that's
+// opened again gets the host's time this way (SocS3C2442::SetClockToHost).
+inline S3cRtc::Time rx1950RtcTime(const std::tm& t) {
+    return {rx1950RtcYear(unsigned(t.tm_year + 1900)), uint8_t(t.tm_mon + 1), uint8_t(t.tm_mday), uint8_t(t.tm_wday + 1),
+            uint8_t(t.tm_hour), uint8_t(t.tm_min), uint8_t(std::min(t.tm_sec, 59))};
+}
 
 // The SD slot (SDHC_SC2410.dll's registry and code): card detect on GPF5 (EINT5), low with a card in; write
 // protect on GPH8, which the driver reads as protected when high (as Linux's mach-rx1950.c does).

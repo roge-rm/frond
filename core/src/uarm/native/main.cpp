@@ -925,6 +925,8 @@ bool gFastEngineMissing = false;
             cerr << "failed to restore savestate" << endl;
             return false;
         }
+        // A saved machine opened again takes the host's clock. Runs on guest time keep the saved one so they repeat.
+        if (savestate.size && savestate.data && !options.emulatedTime) soc->SetClockToHost();
         // A swapped slot is ejected now and its card goes in later, in the guest loop below. The
         // stick's detect line drops here, after the restore, so a guest asleep at the save wakes
         // on it as on a hot eject.

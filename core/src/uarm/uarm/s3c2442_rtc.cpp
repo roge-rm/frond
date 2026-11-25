@@ -23,14 +23,18 @@ void S3cRtc::reset(const Time& start) {
     rtcrst = 0;
     for (auto& a : alarm) a = 0;
     alarm[3] = alarm[4] = 1;  // ALMDATE and ALMMON start at 1
-    bcd[sec] = toBcd(start.second);
-    bcd[min] = toBcd(start.minute);
-    bcd[hour] = toBcd(start.hour);
-    bcd[date] = toBcd(start.date);
-    bcd[day] = start.day;
-    bcd[mon] = toBcd(start.month);
-    bcd[year] = start.year;
+    setTime(start);
     secondPhase = tickPhase = 0;
+}
+
+void S3cRtc::setTime(const Time& time) {
+    bcd[sec] = toBcd(time.second);
+    bcd[min] = toBcd(time.minute);
+    bcd[hour] = toBcd(time.hour);
+    bcd[date] = toBcd(time.date);
+    bcd[day] = time.day;
+    bcd[mon] = toBcd(time.month);
+    bcd[year] = time.year;
 }
 
 // Byte registers at word offsets (little endian), read and written whole.

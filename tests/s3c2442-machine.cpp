@@ -587,6 +587,82 @@ static void vbusLoadTests() {
     assert(!b->usbVbus() && (b->gpio.input[S3cGpio::g] & (1u << 5)));
 }
 
+// USB_INT_REG's SUSPEND_INT (bit 0) and the INT_USBD line, with suspend and reset interrupts on as WM5's driver
+// has them while a host is attached.
+static bool suspended(S3c2442Machine& m) {
+    uint32_t v = 0;
+    assert(m.usbDevice.read(0x158, v) == S3cAccess::ok);
+    const bool on = v & 1;
+    assert(m.usbDevice.irq() == on);
+    if (on) assert(m.intc.srcpnd & (1u << s3cIrq::usbd));
+    return on;
+}
+
+// A state saved with the cable in, opened again without one: the bus goes quiet and the guest sees suspend.
+// Nothing is raised where there was no cable, and the cable going in raises nothing either.
+static void cableRestoreTests() {
+    auto a = make({loop});
+    assert(a->usbDevice.write(0x16c, 0x05) == S3cAccess::ok);
+    a->setUsbVbus(true);
+    assert(!suspended(*a));
+    std::vector<uint8_t> state;
+    std::string why;
+    assert(a->saveState(state, why));
+    auto b = make({loop});
+    assert(b->loadState(state.data(), state.size(), why));
+    assert(!suspended(*b));
+    assert(b->usbVbusOffAt() == UINT64_MAX);
+    b->setUsbVbus(false);
+    assert(suspended(*b) && b->usbVbusOffAt() == b->nanoseconds());
+    // Reopened with the cable still in: no suspend.
+    auto c = make({loop});
+    assert(c->loadState(state.data(), state.size(), why));
+    c->setUsbVbus(true);
+    assert(!suspended(*c));
+    // A machine that never had the cable, then the cable in and out live.
+    auto d = make({loop});
+    assert(d->usbDevice.write(0x16c, 0x05) == S3cAccess::ok);
+    d->setUsbVbus(false);
+    assert(!suspended(*d) && d->usbVbusOffAt() == UINT64_MAX);
+    d->setUsbVbus(true);
+    assert(!suspended(*d));
+    d->setUsbVbus(false);
+    assert(suspended(*d));
+}
+
+// The RTC opened again takes a set time in its registers (BCD, WM5's year from 1950, day of week + 1) and goes on
+// counting from it; the alarm and tick settings are kept.
+static void rtcRestoreTests() {
+    auto a = make({loop});
+    a->rtc.ticnt = 0x85;
+    a->rtc.alarm[2] = 0x07;
+    std::vector<uint8_t> state;
+    std::string why;
+    assert(a->saveState(state, why));
+    auto b = make({loop});
+    assert(b->loadState(state.data(), state.size(), why));
+    std::tm t{};
+    t.tm_year = 2026 - 1900;
+    t.tm_mon = 10;
+    t.tm_mday = 25;
+    t.tm_wday = 3;
+    t.tm_hour = 7;
+    t.tm_min = 41;
+    t.tm_sec = 59;
+    b->rtc.setTime(rx1950RtcTime(t));
+    uint32_t v = 0;
+    const uint32_t want[7] = {0x59, 0x41, 0x07, 0x25, 4, 0x11, 76};
+    for (unsigned i = 0; i < 7; ++i) {
+        assert(b->rtc.read(0x70 + 4 * i, v) == S3cAccess::ok);
+        if (v != want[i]) std::fprintf(stderr, "rtc register %u: %x, wanted %x\n", i, v, want[i]);
+        assert(v == want[i]);
+    }
+    assert(b->rtc.ticnt == 0x85 && b->rtc.alarm[2] == 0x07);
+    b->rtc.advance(32768, b->intc);
+    assert(b->rtc.read(0x70, v) == S3cAccess::ok && v == 0x00);
+    assert(b->rtc.read(0x74, v) == S3cAccess::ok && v == 0x42);
+}
+
 // UART bit rates from the FCLK/n clock WM5 picks, and a byte from the far end raising the receive interrupt.
 static void uartTests() {
     auto m = make(stores({{0x50000004, 0x4fc5}, {0x50000028, 15}, {0x50008000, 0x43}, {0x50008004, 0x8fc5},
@@ -802,6 +878,8 @@ int main() {
     powerOnResetTests();
     usbNotifyTests();
     vbusLoadTests();
+    cableRestoreTests();
+    rtcRestoreTests();
     uartTests();
     sdTests();
     audioTests();

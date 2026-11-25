@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 
 #include "CPCrc.h"
@@ -513,6 +514,14 @@ bool SocS3C2442::SetUsbCable(bool attached) {
     return true;
 }
 
+// ASSUMPTION "rx1950 cable out time": WM5's cable thread (sc2440usbfn.dll 0x176a50c) turns the pull-up off when
+// VBUS goes, waits 500 ms and looks again. With VBUS back by then it never turns the pull-up on again, so the
+// cable stays out a second, as when a session saved with it in is opened with it in.
+uint64_t SocS3C2442::UsbPlugReadyAt() const {
+    const uint64_t off = machine->usbVbusOffAt();
+    return off <= machine->nanoseconds() ? off + 1000000000 : 0;
+}
+
 void SocS3C2442::TickUsbHost(uint64_t t) {
     if (!usbHostHooks.tick || UsbHostIoPaused()) return;
     if (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= t) usbHostHooks.tick(usbHostHooks.context, t);
@@ -943,6 +952,17 @@ bool SocS3C2442::SetBattery(const BatteryPower& value) {
     battery = value;
     if (machine) rx1950ApplyBattery(*machine, battery);
     return true;
+}
+
+void SocS3C2442::SetClockToHost() {
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    if (localtime_s(&local, &now)) return;
+#else
+    if (!localtime_r(&now, &local)) return;
+#endif
+    machine->rtc.setTime(rx1950RtcTime(local));
 }
 
 // The charge and notification LED, stepped by the board's blinker in guest time. No vibrate motor.
