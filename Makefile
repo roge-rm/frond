@@ -3335,3 +3335,59 @@ test-sony-ma2-fm:
 	$(CXX) -std=c++17 -O2 -Icore/src/common/audio \
 		tests/sony-ma2-fm.cpp core/src/common/audio/SonyMa2Fm.cpp -o $(OBJ_ROOT)/test-sony-ma2-fm
 	$(OBJ_ROOT)/test-sony-ma2-fm
+
+# Fuzz targets (clang and libFuzzer), one per parser of outside data; harnesses in tests/fuzz/.
+# make fuzz builds them all in FUZZ_ROOT with seed corpora from tests/fuzz/seeds.cpp;
+# make fuzz-run FUZZ_TIME=120 (after make fuzz) runs each for that many seconds (FUZZ_ONLY picks some), logs and
+# crashes to FUZZ_OUT; FUZZ_FLAGS adds libFuzzer options. The core's common library is built again with the
+# sanitizers in FUZZ_ROOT; after changing FUZZ_CFLAGS delete FUZZ_ROOT/core and FUZZ_ROOT/link.
+FUZZ_TARGETS := hayes-modem ppp-server irda-phone netsync-wakeup hotsync-link hotsync-session dlp activesync-connect rapi \
+	wbxml airsync-http link-wire link-mux link-pairing link-handshake \
+	palm-db pim-record installer session-file rom-info gunzip zip rx1950-nand sync-profile
+FUZZ_CC ?= $(or $(shell command -v clang-19 2>/dev/null),clang)
+FUZZ_CXX ?= $(or $(shell command -v clang++-19 2>/dev/null),clang++)
+FUZZ_ROOT = $(OBJ_ROOT)/fuzz
+FUZZ_OUT ?= build/fuzzing
+FUZZ_TIME ?= 120
+# miniz reads unaligned on purpose (MINIZ_USE_UNALIGNED_LOADS_AND_STORES) and offsets null pointers by
+# zero, so those two checks are off; ASan still catches real out of bounds access.
+FUZZ_SANITIZE = -fsanitize=address,undefined -fno-sanitize=alignment,pointer-overflow -fno-sanitize-recover=undefined
+FUZZ_CFLAGS = -O1 -g -fno-omit-frame-pointer $(FUZZ_SANITIZE) -fsanitize=fuzzer-no-link
+FUZZ_INCLUDE = -Itests/fuzz -Icore/src/common -Icore/src/common/sync -Ilink -Icore/src/uarm/uarm
+FUZZ_COMMON_LIB = $(FUZZ_ROOT)/core/common/libcommon.a
+FUZZ_LINK_LIB = $(FUZZ_ROOT)/link/libfrondlink.a
+FUZZ_LIBS = $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB) -lpthread -ldl -lm
+FUZZ_EXTRA_rx1950-nand = core/src/uarm/uarm/rx1950_nand_image.cpp core/src/uarm/uarm/s3c2442_nand.cpp
+
+.PHONY: fuzz fuzz-run $(FUZZ_COMMON_LIB)
+fuzz: $(FUZZ_TARGETS:%=$(FUZZ_ROOT)/fuzz-%) $(FUZZ_ROOT)/.seeds
+
+$(FUZZ_COMMON_LIB):
+	$(MAKE) -C core/src/common FROND_CORE_OBJ=$(abspath $(FUZZ_ROOT))/core CC_NATIVE=$(FUZZ_CC) CXX_NATIVE=$(FUZZ_CXX) \
+		CFLAGS_NATIVE="$(FUZZ_CFLAGS)" bin
+
+$(FUZZ_LINK_LIB): $(LINK_SOURCES) $(wildcard link/*.h)
+	mkdir -p $(FUZZ_ROOT)/link
+	$(FUZZ_CC) -std=c99 $(FUZZ_CFLAGS) -c link/monocypher/monocypher.c -o $(FUZZ_ROOT)/link/monocypher.o
+	for f in $(LINK_SOURCES); do $(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) -c $$f -o $(FUZZ_ROOT)/link/$$(basename $$f .cpp).o || exit 1; done
+	ar rcs $@.new $(patsubst link/%.cpp,$(FUZZ_ROOT)/link/%.o,$(LINK_SOURCES)) $(FUZZ_ROOT)/link/monocypher.o
+	mv -f $@.new $@
+
+$(FUZZ_ROOT)/fuzz-%: tests/fuzz/%.cpp $(wildcard tests/fuzz/*.h) $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
+	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) -fsanitize=fuzzer $(FUZZ_INCLUDE) $< $(FUZZ_EXTRA_$*) $(FUZZ_LIBS) -o $@
+
+# Seeds are written again on each build; the runs keep their own corpus in FUZZ_OUT.
+$(FUZZ_ROOT)/.seeds: tests/fuzz/seeds.cpp $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
+	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) $(FUZZ_INCLUDE) $< $(FUZZ_LIBS) -o $(FUZZ_ROOT)/fuzz-seeds
+	ASAN_OPTIONS=detect_leaks=0 $(FUZZ_ROOT)/fuzz-seeds $(FUZZ_ROOT)/seeds
+	touch $@
+
+fuzz-run:
+	umask 077 && mkdir -p $(FUZZ_OUT)/scratch && chmod 700 $(FUZZ_OUT) && ulimit -c 0 && \
+	for t in $(or $(FUZZ_ONLY),$(FUZZ_TARGETS)); do \
+		mkdir -p $(FUZZ_OUT)/corpus/$$t $(FUZZ_OUT)/crashes/$$t; \
+		FROND_FUZZ_SCRATCH=$(abspath $(FUZZ_OUT))/scratch $(FUZZ_ROOT)/fuzz-$$t -max_total_time=$(FUZZ_TIME) \
+			-artifact_prefix=$(FUZZ_OUT)/crashes/$$t/ -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 $(FUZZ_FLAGS) \
+			$(FUZZ_OUT)/corpus/$$t $(FUZZ_ROOT)/seeds/$$t > $(FUZZ_OUT)/$$t-$(FUZZ_TIME)s.log 2>&1; \
+		echo "$$t: exit $$? $$(grep -m1 -o 'SUMMARY: .*' $(FUZZ_OUT)/$$t-$(FUZZ_TIME)s.log)"; \
+	done
