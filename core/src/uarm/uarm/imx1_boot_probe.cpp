@@ -4064,6 +4064,7 @@ Imx1MachineAudio imx1MachineAudio(const Imx1Machine* machine) {
     a.gpioDInUse = board.gpioRegister(3, 8);
     a.gpioDData = board.gpioRegister(3, 7);
     a.gpioDOutputSelect = board.gpioRegister(3, 2);
+    a.lcdcPwmr = board.lcdcContrastControl();
     return a;
 }
 

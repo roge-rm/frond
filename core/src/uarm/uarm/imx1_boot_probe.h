@@ -356,6 +356,7 @@ void imx1MachineEnableYmf768(Imx1Machine*);
 struct Imx1MachineAudio {
     uint64_t rateNumerator = 0, rateDenominator = 0;
     uint32_t gpioDDirection = 0, gpioDInUse = 0, gpioDData = 0, gpioDOutputSelect = 0;
+    uint32_t lcdcPwmr = 0;
 };
 Imx1MachineAudio imx1MachineAudio(const Imx1Machine*);
 Imx1MachineBoundedRun imx1MachineRunBounded(Imx1Machine*, const Imx1MachineBounds&);

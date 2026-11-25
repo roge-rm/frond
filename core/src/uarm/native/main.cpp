@@ -1153,7 +1153,9 @@ bool gFastEngineMissing = false;
                 musicSynth->setClock(&musicClock);
                 musicSynth->setSongDelay(zodiac_music::dalTickNs);
                 musicSynth->start();
-                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                audioDriver.SetMixer([synth = musicSynth.get(), sink = &zodiacMusic->PcmSink()](
+                                         int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                    synth->setDeviceGain(sink->gain.load(std::memory_order_relaxed));
                     synth->mix(frames, count, span, GuestAudioClock::steadyNs());
                 });
             }

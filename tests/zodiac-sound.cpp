@@ -3,7 +3,8 @@
 // D25 amplifier line as the gain, with the PWM (the power LED) left out of it on the charger and on battery;
 // the host stage's slot pairing, averaging, scaling and gain ramp; and ZodiacPcmSink, what SocIMX1 runs: the
 // same host frames from Exact and Fast, on the charger and off it, through stream start, an LED change and the
-// amplifier going off and on, its gating on PCM output and suspend, and its restart.
+// amplifier going off and on, its gating on PCM output and suspend, and its restart; the volume from the LCDC's
+// contrast PWM (PWMR) as the ROM's volume update writes it.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -30,7 +31,8 @@ struct Guest {
     static constexpr uint32_t waitLoops = 150000;
     std::vector<uint32_t> code;
     std::vector<std::pair<size_t, uint32_t>> literals;
-    explicit Guest(bool d25, bool scripted = false) {
+    // pwmr: written to the LCDC's PWMR before port D when not 0, as the ROM's volume update does (2009f450).
+    explicit Guest(bool d25, bool scripted = false, uint32_t pwmr = 0) {
         constexpr uint32_t ssi = 0x218000, dma = 0x209000, ch = 0x209300, pwm = 0x208000, portD = 0x21c300;
         for (uint32_t i = 0; i < 16; ++i)
             store(0x300000 + i * 4, scripted ? 0x40004000u : 0x01000100u * (i + 1) + 0x80008000u * (i & 1));
@@ -50,6 +52,7 @@ struct Guest {
         code.push_back(0xe3110901);  // tst r1, #0x4000
         store(pwm, 0x8010, eq); store(pwm + 8, 0x80, eq); store(pwm + 4, 0x33, eq);
         store(pwm, 0x10010, ne); store(pwm, 0, ne);
+        if (pwmr) { store(0x205034, 0); store(0x20502c, pwmr); store(0x205034, 2); }
         // D24, D27 high, D23 and D26 low, D25 as given; all five GPIO outputs from the data register.
         data((1u << 24) | (1u << 27) | (d25 ? 1u << 25 : 0));
         store(portD + 8, 0x00ffc000); store(portD + 0x20, 0x0f800000); store(portD, 0x0f800000);
@@ -98,9 +101,10 @@ struct Capture {
 
 // Fast is the machine's Fast engine, as SocIMX1's Fast setting turns on.
 // B14 reads low on the charger and high on battery, as SocIMX1's battery setting leaves it.
-static Imx1Machine* create(const Guest& g, bool fast, bool charging = true) {
+static Imx1Machine* create(const Guest& g, bool fast, bool charging = true, bool contrast = false) {
     Imx1ProbeOptions o{};
     o.bootstrapPeripherals = true;
+    o.lcdcContrastOnly = contrast;
     o.gpioBInputKnown = true; o.gpioBInput = charging ? 0 : 0x4000;
     auto* m = imx1MachineCreate(g.rom(), g.size(), Imx1ProbeEntry::physicalFlash, false, o);
     assert(m);
@@ -207,6 +211,39 @@ static int16_t right(uint32_t f) { return int16_t(uint16_t(f >> 16)); }
 static void settle(ZodiacAudioOutput& o) {
     Frames dropped;
     for (uint32_t i = 0; i < 2 * ZodiacAudioOutput::rampFrames; ++i) { o.word(0, 0, collect, &dropped); o.word(0, 1, collect, &dropped); }
+}
+
+// The volume: PWMR's pulse width through zodiacVolumeGain, 0.2 dB a count from the full level at 0 to off at
+// 0xff, as the guest writes it in Exact and Fast, and gated by D25 like the rest.
+static void volumeRegister() {
+    assert(zodiacVolumeGain(0) == 65536 && zodiacVolumeGain(0x100) == 65536 && !zodiacVolumeGain(0xff));
+    for (uint32_t pw = 1; pw < 255; ++pw) assert(zodiacVolumeGain(pw) < zodiacVolumeGain(pw - 1) && zodiacVolumeGain(pw));
+    // 100 counts are 20 dB, a tenth; the speaker's lowest step (0xa8) 33.6 dB down; the headphones' (0xee) 47.6.
+    assert(zodiacVolumeGain(100) >= 6552 && zodiacVolumeGain(100) <= 6556);
+    assert(zodiacVolumeGain(0xa8) >= 1368 && zodiacVolumeGain(0xa8) <= 1370);
+    assert(zodiacVolumeGain(0xee) >= 272 && zodiacVolumeGain(0xee) <= 274);
+    for (uint32_t pw : {0x5ffu, 0x5a8u, 0x553u, 0x500u, 0x54au})
+        for (bool d25 : {true, false}) {
+            const Guest guest(d25, false, pw);
+            for (unsigned fast = 0; fast < 2; ++fast) {
+                auto* m = create(guest, fast, true, true);
+                run(m, 50000);
+                const auto a = imx1MachineAudio(m);
+                assert(a.lcdcPwmr == pw);
+                assert(zodiacAudioGain(a) == (d25 ? zodiacVolumeGain(pw & 0xff) : 0u));
+                imx1MachineStop(m);
+            }
+        }
+    // The host stage scales by it: a constant at the speaker's default step (0x4a, 14.8 dB down).
+    Frames out, dropped;
+    ZodiacAudioOutput o;
+    o.setRate(44100, 1);
+    o.setGain(zodiacVolumeGain(0x4a));
+    for (uint32_t i = 0; i < 2 * ZodiacAudioOutput::rampFrames; ++i) { o.word(0, 0, collect, &dropped); o.word(0, 1, collect, &dropped); }
+    o.word(uint16_t(Guest::constant), 0, collect, &out); o.word(uint16_t(Guest::constant), 1, collect, &out);
+    assert(out.size() == 1);
+    const int expected = int(int64_t(Guest::constant) * zodiacVolumeGain(0x4a) / 65536);
+    assert(left(out[0]) == expected && right(out[0]) == expected && expected > 2900 && expected < 3000);
 }
 
 static void hostStage() {
@@ -412,7 +449,8 @@ int main() {
     gainRamp();
     sinkGating();
     volumeAndAmplifier();
+    volumeRegister();
     sinkStream();
     machineStream();
-    std::puts("PASS: Zodiac PCM words Exact and Fast alike, frame rate, saved mid-stream, D25 amplifier on the charger and on battery, host stage, gain ramp, the sink's gating, restart and Exact == Fast host frames");
+    std::puts("PASS: Zodiac PCM words Exact and Fast alike, frame rate, saved mid-stream, D25 amplifier on the charger and on battery, host stage, gain ramp, the sink's gating, restart and Exact == Fast host frames, PWMR volume");
 }

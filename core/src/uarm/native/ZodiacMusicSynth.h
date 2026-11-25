@@ -138,6 +138,9 @@ class ZodiacMusicSynth {
         held_.store(held, std::memory_order_relaxed);
         clock_->hold(held);
     }
+    // Any thread: the device's output gain (16.16, 65536 full), the speaker volume and amplifier the guest's own
+    // sound goes through. mix ramps to it over a step.
+    void setDeviceGain(uint32_t gain16) { deviceGain_.store(gain16, std::memory_order_relaxed); }
 
     // The clock to run, shared with the MIDI out; it must outlive the synth. Before any mix.
     void setClock(GuestAudioClock* clock) { clock_ = clock ? clock : &ownClock_; }
@@ -178,7 +181,7 @@ class ZodiacMusicSynth {
             } else {
                 frameClock(cueBudget, eventBudget);
             }
-            tsf_render_short(font_, stereo + at * 2, int(n), 1);
+            render(stereo + at * 2, n);
             at += n;
             frame_ += n;
         }
@@ -244,6 +247,27 @@ class ZodiacMusicSynth {
                     tsf_set_volume(font_, float(b[5] | (b[6] << 7)) / 16383.0f * dbToGain(gainDb));
                 break;
         }
+    }
+
+    // n frames (at most step) of the SoundFont added into stereo, saturating, through the device gain. At full gain
+    // it is TinySoundFont's own mix.
+    void render(int16_t* stereo, size_t n) {
+        const uint32_t target = deviceGain_.load(std::memory_order_relaxed);
+        if (target == 65536 && renderGain_ == 65536) {
+            tsf_render_short(font_, stereo, int(n), 1);
+            return;
+        }
+        int16_t part[step * 2];
+        tsf_render_short(font_, part, int(n), 0);
+        const int64_t from = renderGain_, change = int64_t(target) - from;
+        for (size_t i = 0; i < n; ++i) {
+            const int64_t gain = from + change * int64_t(i + 1) / int64_t(n);
+            for (size_t c = 0; c < 2; ++c) {
+                const int64_t v = stereo[i * 2 + c] + part[i * 2 + c] * gain / 65536;
+                stereo[i * 2 + c] = int16_t(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
+            }
+        }
+        renderGain_ = target;
     }
 
     uint64_t framesMixed() const { return frame_; }
@@ -313,6 +337,8 @@ class ZodiacMusicSynth {
     zodiac_music::Player player_;
     const zodiac_music::Sink sink_;
     std::atomic<bool> held_{false};
+    std::atomic<uint32_t> deviceGain_{65536};
+    uint32_t renderGain_ = 65536;  // audio thread
     uint64_t frame_ = 0;
     // Device frames over every mix, held or not, and the one the current step starts at (for the monitor).
     uint64_t devicePos_ = 0, deviceFrame_ = 0;

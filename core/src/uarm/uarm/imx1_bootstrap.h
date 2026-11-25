@@ -148,6 +148,8 @@ class Imx1Bootstrap {
     uint32_t gpioRegister(unsigned port, unsigned index) const { return gpio.registerValue(port, index); }
     void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
     uint32_t lcdcContrastPhase() const { return contrastPhase; }
+    // LCDC PWMR (0x0020502c) as last written: on the Zodiac its contrast output sets the speaker volume.
+    uint32_t lcdcContrastControl() const { return pwmr; }
     bool setRtcInitialTime(Imx1RtcTime time) { SourceChange change(*this); syncReference(); return rtc.initialise(time); }
     bool forwardRtc(uint64_t seconds) { SourceChange change(*this); syncReference(); return rtc.forwardSeconds(seconds); }
     void setI2cScenario(bool enabled) { SourceChange change(*this); i2c.setSingleMasterScenario(enabled); }
