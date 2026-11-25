@@ -58,20 +58,22 @@ fun FirmwareScreen(model: HomeModel) {
     var choosing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    // Only the rx1950 has it: any NOR of HP's size, and the stored NOR may stay.
+    var anyFirmware by remember { mutableStateOf(false) }
     val device = chosen ?: detected
 
     DisposableEffect(Unit) { onDispose { Firmware.picked(context).delete() } }
 
     // Copies the NOR for `forDevice` (the Zodiac update is unpacked only for the Zodiac or when detecting), so
     // it runs again on the chosen file when the device changes.
-    fun loadNor(uri: Uri, forDevice: Device?) {
+    fun loadNor(uri: Uri, forDevice: Device?, any: Boolean = anyFirmware) {
         nor = null
         detected = null
         error = null
         busy = true
         scope.launch {
             val (failed, found) = withContext(Dispatchers.IO) {
-                val e = Firmware.pick(context, uri, forDevice)
+                val e = Firmware.pick(context, uri, forDevice, any && forDevice?.rx1950 == true)
                 e to if (e == null) Firmware.detect(Firmware.picked(context)) else null
             }
             busy = false
@@ -151,6 +153,11 @@ fun FirmwareScreen(model: HomeModel) {
                 trailingContent = { TextButton(onClick = { pickNor.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Choose") } },
             )
             // A device with no NAND, like the Zire 72 or the IIIx, doesn't show the row.
+            if (device?.rx1950 == true) MachineSwitchRow("Allow other firmware", anyFirmware, listStyle = true, enabled = !busy) {
+                anyFirmware = it
+                error = null
+                norUri?.let { uri -> loadNor(uri, chosen, it) }
+            }
             if (device?.hasNand != false) ListItem(
                 headlineContent = { Text(if (device?.rx1950 == true) "OS image (CEOS.nbf)" else if (device?.nandRequired == false) "NAND image (optional)" else "NAND image") },
                 supportingContent = { Text(name(nand) ?: "Not chosen", maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -160,7 +167,7 @@ fun FirmwareScreen(model: HomeModel) {
                 Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
             Button(
-                enabled = !busy && nor != null && device != null && (nand != null || !device.nandRequired),
+                enabled = !busy && device != null && (nor != null || (anyFirmware && device.rx1950 && Firmware.nor(context, device).isFile)) && (nand != null || !device.nandRequired),
                 shape = MaterialTheme.shapes.small,
                 onClick = {
                     val d = device ?: return@Button
@@ -168,8 +175,9 @@ fun FirmwareScreen(model: HomeModel) {
                     error = null
                     scope.launch {
                         val (result, warning) = withContext(Dispatchers.IO) {
-                            val r = Firmware.import(context, d, nand.takeIf { d.hasNand })
-                            r to if (r == null) Firmware.importWarning(context, d) else null
+                            val any = anyFirmware && d.rx1950
+                            val r = Firmware.import(context, d, nand.takeIf { d.hasNand }, any)
+                            r to if (r == null) Firmware.importWarning(context, d, any) else null
                         }
                         busy = false
                         model.reload()
