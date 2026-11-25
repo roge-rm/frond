@@ -660,7 +660,7 @@ struct CardStateCheck {
             for(const auto& d:pair.dropped) if(d.first==id && d.second==key) return true;
             return false;
         };
-        if (sd && (pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
+        if ((sd && pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
             (pair.card[1] && (!second.IsBlockInRange(pair.card[1]->backing->Size()/512) || !second.IsProtocol(pair.card[1]->protocol))))
             loader.NotifyError();
         // One SPI card per slot: 0x1d0 for the first, 0x201 for the Dana's second.

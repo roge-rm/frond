@@ -60,7 +60,8 @@ class Lcd68k {
     bool Update() {
         on = gSession->IsPowerOn() && EmHAL::CopyLCDFrame(frame, true) &&
              (frame.scaleX == 1 || frame.scaleX == 2) && (frame.scaleY == 1 || frame.scaleY == 2) &&
-             frame.lineWidth * frame.scaleX == width && frame.lines * frame.scaleY == height &&
+             uint64_t(frame.lineWidth) * frame.scaleX == unsigned(width) &&
+             uint64_t(frame.lines) * frame.scaleY == unsigned(height) &&
              (frame.bpp == 1 || frame.bpp == 2 || frame.bpp == 4 || frame.bpp == 24) &&
              (uint64_t(frame.margin) + frame.lineWidth) * (frame.bpp == 24 ? 32 : frame.bpp) <=
                  uint64_t(frame.bytesPerLine) * 8 &&

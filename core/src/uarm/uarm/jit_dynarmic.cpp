@@ -610,11 +610,11 @@ struct Env final : public A32::UserCallbacks {
         bool suspended = false;  // kept behind its PID tag's page guard
         bool stale = false;  // suspended, and its blocks from before were read from another physical page
         bool noted = false;  // suspended, and code was noted from it since: blocks at its MVA may be live
-        MmuCodeWalkMemo walk;  // the last mapping check's table words (CodePa)
+        MmuCodeWalkMemo walk{};  // the last mapping check's table words (CodePa)
         uint32_t watched = 0;  // walk.walks when its table words were last watched
         uint32_t stamp = 0;  // the watched mapping check that last took it
         bool rechecking = false;  // in recheck
-        std::array<TableLine *, 10> walkLines;  // the line of each of walk's words, once watched
+        std::array<TableLine *, 10> walkLines{};  // the line of each of walk's words, once watched
     };
     std::unordered_map<uint32_t, uint32_t> accessPages;  // code pages by access
     uint64_t permContext = ~0ull;

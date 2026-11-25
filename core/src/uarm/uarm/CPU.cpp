@@ -1534,7 +1534,12 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         return true;
     }
     if constexpr (arm920 && armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 4) {
-        if (unlikely(cpu->leanRun)) return cpuPrvLeanMemOp<size, write>(cpu, buf, vaddr, priviledged);
+        if (unlikely(cpu->leanRun)) {
+            const bool ok = cpuPrvLeanMemOp<size, write>(cpu, buf, vaddr, priviledged);
+            // A lean exit retries the instruction without reporting a fault.
+            if (!ok && fsrP) *fsrP = 0;
+            return ok;
+        }
     }
 
     if constexpr (size > 1) {
@@ -3212,7 +3217,7 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
     // so DA and DB start at the bottom of the block; it matters for which words a transfer across a page
     // edge takes before the abort.
     constexpr bool up = mode & ARM_MODE_4_INC;
-    constexpr bool before = up ? (mode & ARM_MODE_4_BFR) : !(mode & ARM_MODE_4_BFR);
+    constexpr bool before = ((mode & ARM_MODE_4_BFR) != 0) == up;
     const uint32_t bottom = origBaseRegVal - 4 * uint32_t(__builtin_popcount(regsList));
     if (!up) ea = bottom;
 
@@ -5103,7 +5108,9 @@ FORCE_INLINE static void cpuPrvCyclePace(struct ArmCpu *cpu) {
     PaceDebugState before;
     if (diagnose) before = paceDebugState();
     const auto status = paceExecute();
-    if (cpu->debugStub) gdbStubPaceInstructionCompleted(cpu->debugStub, instructionPc, status);
+    if (cpu->debugStub) {
+        gdbStubPaceInstructionCompleted(cpu->debugStub, instructionPc, status);
+    }
     switch (status) {
         case pace_status_ok:
             return;
@@ -5172,7 +5179,9 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
     CycleProgress progress(cpu, &cycleAcc);
 
     while (cycleAcc < cycles) {
-        if (cpu->debugStub) gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
+        if (cpu->debugStub) {
+            gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
+        }
         cpuPrvCyclePace(cpu);
         cycleAcc += cpu->paceCost;
 
@@ -5360,7 +5369,9 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
         cpuPrvDecompressExecFn(decoded)(cpu, translatedInstr);
 
         cpuPrvTakeCharge(cpu, acc, cycleAcc);
-        if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
+        if constexpr (debug) {
+            gdbStubInstructionExecuted(cpu->debugStub);
+        }
 
         if constexpr (injected) {
             if (cpu->regs[REG_NO_PC] == INJECTED_CALL_LR_MAGIC)
@@ -5442,7 +5453,9 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
         cpuPrvDecompressExecFn(decoded)(cpu, instr);
 
         cpuPrvTakeCharge(cpu, acc, cycleAcc);
-        if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
+        if constexpr (debug) {
+            gdbStubInstructionExecuted(cpu->debugStub);
+        }
 
         if constexpr (injected) {
             if (cpu->regs[REG_NO_PC] == INJECTED_CALL_LR_MAGIC)

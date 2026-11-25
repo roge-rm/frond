@@ -181,7 +181,7 @@ inline void guestFrame(const uint32_t* pixels, size_t count) {
     if (i == count) return;
     s.frameArmed = false;
     s.publishArmed = true;
-    lineLocked("gframe", true, "pixel %zu", i);
+    lineLocked("gframe", true, "pixel %llu", static_cast<unsigned long long>(i));
 }
 
 // Guest thread: a frame handed to the SDL thread.

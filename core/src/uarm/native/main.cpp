@@ -144,7 +144,7 @@ struct Options {
     bool disableRumble;      // --no-rumble
     optional<string> controllerMap;  // --controller-map
     bool headphonesIn;       // --headphones-in
-    BatteryPower battery;    // --battery
+    BatteryPower battery{};  // --battery
     bool anyFirmware;        // --any-firmware: any rx1950 CEBL; recorded in the session
 };
 

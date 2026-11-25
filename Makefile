@@ -1868,9 +1868,11 @@ count-check: benchmark-replay
 # Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
 # Its source, with Frond's changes, is in vendor/dynarmic. Ninja runs every time so edits there
 # are rebuilt; the stamp only moves when libdynarmic.a changed. A build folder configured from
-# another source path is wiped first.
+# another source path is wiped first. Native CMake on Windows records a drive-letter path.
 $(OBJ_ROOT)/dynarmic/.built: FORCE
-	grep -qx 'CMAKE_HOME_DIRECTORY:INTERNAL=$(abspath $(DYNARMIC_SRC))' $(OBJ_ROOT)/dynarmic/CMakeCache.txt 2>/dev/null || rm -rf $(OBJ_ROOT)/dynarmic
+	source_dir='$(abspath $(DYNARMIC_SRC))'; \
+	$(if $(filter windows,$(HOST_OS)),source_dir=$$(cygpath -am "$$source_dir") &&) \
+	{ grep -Fqx "CMAKE_HOME_DIRECTORY:INTERNAL=$$source_dir" "$(OBJ_ROOT)/dynarmic/CMakeCache.txt" 2>/dev/null || rm -rf "$(OBJ_ROOT)/dynarmic"; }
 	[ -f $(OBJ_ROOT)/dynarmic/build.ninja ] || cmake -S $(DYNARMIC_SRC) -B $(OBJ_ROOT)/dynarmic -G Ninja -DCMAKE_BUILD_TYPE=Release \
 		-DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
 		-DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF $(DYNARMIC_CMAKE_ARGS)

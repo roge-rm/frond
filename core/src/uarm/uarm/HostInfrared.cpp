@@ -81,7 +81,8 @@ struct HostInfrared::Impl {
             if(!count)break;
             std::copy_n(transmit.begin(),count,data);
             const size_t sent=link.SendForPeer(data,count,transmitPeer);if(!sent)break;
-            for(size_t i=0;i<sent;++i)transmit.pop_front();budget-=sent;
+            for(size_t i=0;i<sent;++i)transmit.pop_front();
+            budget-=sent;
         }
     }
     static uint_fast16_t Read(void* context) {

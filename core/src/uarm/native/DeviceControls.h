@@ -963,7 +963,7 @@ struct DanaKeyArt {
     const char* second;
     DanaKeyMark mark;
     // Lighter cap colour of the top row.
-    bool topRow;
+    bool topRow = false;
 };
 struct DanaKeyboardArt {
     int width, height;
