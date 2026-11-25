@@ -1,6 +1,7 @@
 #ifndef FROND_INPUT_TRACE_H
 #define FROND_INPUT_TRACE_H
 
+#include <algorithm>
 #include <chrono>
 #include <cstdarg>
 #include <cstdint>
@@ -15,7 +16,9 @@
 // Stages: host (the event reaches the SDL filter), take (the guest thread hands it to the SoC), apply (the
 // machine's pin, pen or stick changes), read (the first guest read that sees it), gframe (the first guest
 // frame whose pixels differ from the frame at apply), publish (that frame handed to the SDL thread),
-// present (SDL_RenderPresent returned with it). One press is followed at a time; a new apply starts over.
+// present (SDL_RenderPresent returned with it), adc (every stick sample the guest takes), change (every
+// guest frame that differs from the one before, with the pixels changed). One press, or the stick's return
+// to rest, is followed at a time; a new apply starts over.
 // Off unless the variable is set; every hook is one test of `on`. Nothing here changes the machine.
 namespace inputTrace {
 
@@ -28,10 +31,10 @@ struct State {
     bool readArmed = false;
     unsigned readPort = 0;
     uint32_t readMask = 0, readLevel = 0;
-    bool penArmed = false, stickArmed = false;
+    bool penArmed = false, stickArmed = false, stickRest = false;
     uint32_t stickWant[2] = {0, 0};
     bool frameArmed = false, publishArmed = false, presentArmed = false;
-    std::vector<uint32_t> baseline;
+    std::vector<uint32_t> baseline, previous;  // previous: the last guest frame, for change lines
 };
 
 inline State& state() {
@@ -128,14 +131,16 @@ inline void applyPen(bool down, int x, int y, const uint32_t* frame, size_t pixe
     s.readArmed = s.stickArmed = false;
     startFollow(frame, pixels);
 }
-// The first step away from rest starts a follow; later steps only log.
+// The first step away from rest starts a follow, and so does the return to rest; other steps only log.
 inline void applyStick(int x, int y, bool fromRest, const uint32_t* frame, size_t pixels) {
     if (!on) return;
     std::lock_guard<std::mutex> lock(state().mutex);
     State& s = state();
     lineLocked("apply", true, "stick %d %d", x, y);
-    if (!fromRest || (x == 0 && y == 0)) return;
+    const bool toRest = x == 0 && y == 0;
+    if (fromRest == toRest) return;
     s.stickArmed = true;
+    s.stickRest = toRest;
     s.stickWant[0] = uint32_t(512 - x);
     s.stickWant[1] = uint32_t(512 + y);
     s.readArmed = s.penArmed = false;
@@ -165,7 +170,8 @@ inline void stickSampled(uint32_t first, uint32_t second) {
     if (!on) return;
     std::lock_guard<std::mutex> lock(state().mutex);
     State& s = state();
-    if (!s.stickArmed || (first == 512 && second == 512)) return;
+    lineLocked("adc", true, "%u %u", first, second);
+    if (!s.stickArmed || (first == 512 && second == 512) != s.stickRest) return;
     s.stickArmed = false;
     lineLocked("read", true, "stick-adc %u %u", first, second);
 }
@@ -175,6 +181,12 @@ inline void guestFrame(const uint32_t* pixels, size_t count) {
     if (!on) return;
     std::lock_guard<std::mutex> lock(state().mutex);
     State& s = state();
+    if (s.previous.size() != count || !std::equal(pixels, pixels + count, s.previous.begin())) {
+        size_t changed = 0;
+        if (s.previous.size() == count) for (size_t j = 0; j < count; ++j) changed += pixels[j] != s.previous[j];
+        s.previous.assign(pixels, pixels + count);
+        lineLocked("change", true, "%zu", changed);
+    }
     if (!s.frameArmed || count != s.baseline.size()) return;
     size_t i = 0;
     while (i < count && pixels[i] == s.baseline[i]) ++i;
