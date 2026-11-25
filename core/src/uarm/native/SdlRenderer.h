@@ -41,6 +41,10 @@ class SdlRenderer {
     void ClearWindow();
     void DrawSidebar(const DeviceControlProfile& controls, int screenWidth, int screenHeight, DeviceKeyMask buttons,
                      DeviceStick stick, bool changed);
+    // Sets the target the device is drawn on (deviceTexture, or the window) and its scale.
+    void DrawOnDevice();
+    // Copies deviceTexture into its place in the window, presents, and goes back to drawing on the device.
+    void Present();
 
    private:
     SDL_Window* window{nullptr};
@@ -54,6 +58,12 @@ class SdlRenderer {
     SDL_Texture* sidebarTexture{nullptr};
     int sidebarWidth{0}, sidebarHeight{0};
     bool sidebarPainted{false};
+    // A fitted window draws the device on this texture at its output size and copies it to devicePlace,
+    // in output pixels. The fitted layout doesn't rely on a viewport, as SDL3 (under sdl2-compat) scales
+    // the viewport's origin by the render scale and SDL2 doesn't.
+    SDL_Texture* deviceTexture{nullptr};
+    SDL_Rect devicePlace{};
+    float deviceScaleX{1}, deviceScaleY{1};
 
     bool frameTextureValid{false};
     bool lcdEnabled{true};
