@@ -4,9 +4,9 @@ import android.content.Context
 
 // The device picker's groups and Recent list. The group names and order come from deviceProfiles5.
 object DevicePicker {
-    // The groups with their devices, oldest release first (the inventory order breaks a tie).
+    // The groups with their devices, oldest release first (the Zodiac 2 follows the Zodiac 1, the inventory order breaks any other tie).
     fun groups(devices: List<Device> = Device.shown): List<Pair<String, List<Device>>> =
-        deviceGroups.map { name -> name to devices.filter { it.group == name }.sortedBy { it.released } }
+        deviceGroups.map { name -> name to devices.filter { it.group == name }.sortedWith(compareBy({ it.released }, { it.id == "tapwave-zodiac-2" })) }
             .filter { it.second.isNotEmpty() }
 
     const val RECENT_MAX = 3

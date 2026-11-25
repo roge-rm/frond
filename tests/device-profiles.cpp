@@ -1127,6 +1127,7 @@ static void pickerGroups() {
     }
     assert(used == known);
     // The Zodiac 1 comes before the Zodiac 2, and the E3 is Frond's patched E2.
-    assert(deviceProfileNamed5("tapwave-zodiac-1")->released < deviceProfileNamed5("tapwave-zodiac-2")->released);
+    assert(deviceProfileNamed5("tapwave-zodiac-1")->released == deviceProfileNamed5("tapwave-zodiac-2")->released);
+    assert(deviceProfilePickerRank5(deviceTypeZodiac1) < deviceProfilePickerRank5(deviceTypeZodiac2));
     assert(deviceProfileNamed5("palm-e2-franken")->released == deviceProfileNamed5("palm-e2")->released);
 }
