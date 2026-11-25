@@ -98,7 +98,7 @@ static FORCE_INLINE bool icachePrvArm920Fetch(struct icache* ic, uint32_t va, un
         }
         pa = MMU_TRANSLATE_RESULT_PA(r);
         cacheable = !mmuIsOn(mmu) || MMU_TRANSLATE_RESULT_CACHEABLE(r);
-        memo.valid = mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[va >> 12].revision == mmu->revision;
+        memo.valid = mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[va >> 12].gen == mmu->gen;
         if (memo.valid) memo = {va >> 12, pa >> 12, mmu->tlbWrites, ic->permGen, mmu->transTablPA, privileged, cacheable, true};
     }
     const bool cached = ic->arm920Enabled && !ic->arm920LeanWord && cacheable;

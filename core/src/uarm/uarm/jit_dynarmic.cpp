@@ -60,6 +60,18 @@ struct Stats {
     // (unwatched pages only) or lost fetch permission, and how often the mappings were checked.
     uint64_t codePages = 0, unwatched = 0, pagesWritten = 0, mapChecks = 0, mapChanged = 0, unwatchedDropped = 0;
     uint64_t fetchDropped = 0;
+    // ARM920T: code pages of another PID's slot a flush found moved, those found mapped as before when the
+    // PID came back, compile-thread blocks installed under another PID than the one they were fetched under,
+    // and suspended pages whose blocks at their MVA a later flush dropped.
+    uint64_t suspends = 0, resumes = 0, otherPidInstalls = 0, suspendedMvaDrops = 0;
+    // ARM920T Fast blocks: mapping checks that went through every code page (the rest took only the pages
+    // of table lines that changed), the pages all checks walked, the changed lines and the most lines kept.
+    uint64_t fullMapChecks = 0, mapPagesChecked = 0, tableLinesChanged = 0, tableLines = 0;
+    // Fills of code pages the MMU didn't list (all live pages scanned), code pages taken for those and listed
+    // fills, pages they dropped outside a check, and filled pages whose entry is the mapping their code has.
+    uint64_t tlbLiveScans = 0, fillRechecks = 0, fillDrops = 0, fillSame = 0;
+    uint64_t tableMoves = 0;  // mapping checks run with no flush, for table words that changed
+    uint64_t tableFaultFills = 0;  // stores of an entry over a fault one in a walked table word (no check)
     std::unordered_map<uint32_t, uint64_t> interpPc;
     // Instruction at each interpreted PC (Thumb: the halfword), and the guest PC current
     // at each whole-cache invalidation with the word there.
@@ -137,6 +149,17 @@ struct Stats {
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
                 (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
+        fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu suspendedMvaDrops %llu\n",
+                (unsigned long long)suspends, (unsigned long long)resumes, (unsigned long long)otherPidInstalls,
+                (unsigned long long)suspendedMvaDrops);
+        fprintf(stderr,
+                "jit: fullMapChecks %llu mapPagesChecked %llu tableLinesChanged %llu tableLines %llu tlbLiveScans %llu "
+                "fillRechecks %llu fillDrops %llu fillSame %llu tableMoves %llu tableFaultFills %llu\n",
+                (unsigned long long)fullMapChecks, (unsigned long long)mapPagesChecked,
+                (unsigned long long)tableLinesChanged, (unsigned long long)tableLines,
+                (unsigned long long)tlbLiveScans, (unsigned long long)fillRechecks, (unsigned long long)fillDrops,
+                (unsigned long long)fillSame, (unsigned long long)tableMoves,
+                (unsigned long long)tableFaultFills);
         fprintf(stderr,
                 "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
                 "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
@@ -226,6 +249,55 @@ constexpr std::size_t kPsrCoprocessor = 8;
 
 thread_local uint32_t cp15Pc = ~0u, cp15Rd = 0, cp15Word = 0;
 
+// ARM920T access pcs (cpuArm920SetJitAccessPcs) that start their block: the block before one links to it, so
+// only finished blocks' ticks come before its access. The slot is cleared again so a marked access that went to a
+// host page, or none, leaves nothing set for a later read at another pc: by the marked block's second
+// instruction, and by every other block as it starts, for a marked block that ended right after its access (a
+// capped or single-step block, a load to pc, a line bound). clearPending: the clear is still to come in this
+// block. The entry clear for a conditional block runs when the condition passes.
+thread_local bool clearPending = false;
+
+inline void ClearAccessPc(A32::IREmitter &ir) {
+    ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(0));
+}
+
+// Before the code read. startBlocks: the access pcs start their blocks (cpuArm920JitAccessPcsStartBlocks).
+bool AccessPcSplit(bool startBlocks, bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
+    const bool start = pc == A32::LocationDescriptor{ir.block.Location()}.PC();
+    if (start) {
+        clearPending = startBlocks;
+    } else if (std::exchange(clearPending, false)) {
+        ClearAccessPc(ir);
+    }
+    if (startsBlock && !start) {
+        ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
+        return false;
+    }
+    return true;
+}
+
+// Not an instruction IsConditionPassed sees with a condition: ARM's cond field, Thumb's IT blocks and B<c> (T1).
+// word is the aligned word holding the instruction.
+inline bool Unconditional(bool thumb, uint32_t word, A32::VAddr pc, const A32::IREmitter &ir) {
+    if (!thumb) return word >> 28 == 14;
+    const uint32_t half = (pc & 2) ? word >> 16 : word & 0xffff;
+    return !ir.current_location.IT().IsInITBlock() && !((half & 0xf000) == 0xd000 && (half & 0x0e00) != 0x0e00);
+}
+
+// After a code read that goes to the JIT. A marked pc's value goes to cpuJitAccessPcSlot before the instruction
+// (psr slot, opc1 3). One that starts its block is only noted unconditional, as a failed one would leave the slot
+// set when the block is skipped.
+void NoteAccessPc(bool thumb, uint32_t word, bool marked, bool startsBlock, A32::VAddr pc, A32::IREmitter &ir) {
+    const bool note = marked && (!startsBlock || Unconditional(thumb, word, pc, ir));
+    if (clearPending && !note && pc == A32::LocationDescriptor{ir.block.Location()}.PC()) {
+        ClearAccessPc(ir);
+        clearPending = false;
+    }
+    if (!note) return;
+    ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
+    clearPending = startsBlock;
+}
+
 // PreCodeReadHook's work: the instruction at pc goes to the JIT if plain(pc, word) says
 // so (word gets the aligned word holding it); a p15 c3 access ends its block after it.
 template <typename Plain>
@@ -279,16 +351,18 @@ bool EndsBlock(uint32_t w, uint32_t pc, bool thumb) {
 // table's cost when the condition passed, 1 when it failed. On PXA a tick is a core clock. On the
 // ARM920T a tick holds the clocks above bit 32 and the instructions below (a Thumb pair counts 2,
 // as the board steps each half), since its board counts both; budgets there are clocks << 32, so a
-// run still stops once its clocks reach the budget.
+// run still stops once its clocks reach the budget. With no cost model there a Thumb pair is 2 clocks
+// too, so clocks are instructions and a budget can be given in instructions.
 struct TickModel {
     bool on = false;
     uint8_t core = 0;
     unsigned shift = 0;
 
     uint64_t Ticks(bool thumb, uint32_t instruction) const {
-        const uint64_t c = on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : 1;
-        if (!shift) return c;
-        return (c << shift) | (thumb && instruction > 0xffff ? 2 : 1);
+        const uint64_t n = thumb && instruction > 0xffff ? 2 : 1;
+        if (!shift) return on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : 1;
+        const uint64_t c = on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : n;
+        return (c << shift) | n;
     }
     uint64_t Failed() const { return shift ? (uint64_t(1) << shift) | 1 : 1; }
 };
@@ -308,9 +382,22 @@ struct Snapshot final : public A32::CodeSnapshot {
     std::vector<uint8_t> fetched, read;  // per word
     std::vector<std::pair<uint32_t, bool>> plain;  // each instruction in order, and its check
     std::vector<uint32_t> marked;  // access pcs among them
+    uint32_t splitAt = ~0u;  // the marked pc the snapshot stopped before (startBlocks), which ends the block
     size_t next = 0;
     bool arm920 = false;
+    bool startBlocks = false;  // cpuJitAccessPcsStartBlocks when fetched: a marked pc only ever starts the block
     uint32_t pid = 0;  // ARM920T: the FCSE PID the words were fetched under
+    // ARM920T, fetched under a PID below 32 MB: each VA page's physical page and access then, for a check
+    // at install when another PID runs and the slot isn't mapped (Env::CodeUnchanged).
+    struct PageMap {
+        uint32_t page, pa, access;
+    };
+    std::vector<PageMap> maps;
+    const PageMap *MapOf(uint32_t va) const {
+        for (const auto &m : maps)
+            if (m.page == va >> 12) return &m;
+        return nullptr;
+    }
     TickModel model;
 
     std::uint64_t GetTicksForCode(bool thumb, A32::VAddr, std::uint32_t instruction) override {
@@ -331,6 +418,9 @@ struct Snapshot final : public A32::CodeSnapshot {
 
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
         if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
+        const bool isMarked = pc == splitAt || std::find(marked.begin(), marked.end(), pc) != marked.end();
+        if (!AccessPcSplit(startBlocks, isMarked && startBlocks, pc, ir)) return false;
+        uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             while (next < plain.size() && plain[next].first != at) next++;
             if (next == plain.size()) {
@@ -339,10 +429,10 @@ struct Snapshot final : public A32::CodeSnapshot {
             }
             const uint32_t i = (at - base) >> 2;
             w = words[i];
+            word = w;
             return plain[next].second;
         });
-        if (ok && std::find(marked.begin(), marked.end(), pc) != marked.end())
-            ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
+        if (ok) NoteAccessPc(thumb, word, isMarked, isMarked && startBlocks, pc, ir);
         return ok;
     }
 };
@@ -376,6 +466,11 @@ struct Env final : public A32::UserCallbacks {
     // kept by MVA. pidTags is the FrondJit's tag by PID >> 25, 0 for none yet; tag the one this JIT has now.
     const uint8_t *pidTags = nullptr;
     uint8_t tag = 0;
+    // ARM920T Fast blocks: the FrondJit's code page map for the MMU's fill watch (cpuJitSetFillWatch), with this
+    // level's bit in it set for each page in code, and the watched fill count this level has taken (TakeFills).
+    uint8_t *fillWatch = nullptr;
+    uint8_t watchBit = 0;
+    uint32_t seenFills = 0;
 
     // Page table entries with bit 0 set are read-only (the fork's page_table_write_protect_bit):
     // stores to them come to the callbacks. A RAM page is filled read-only and made writable
@@ -435,11 +530,20 @@ struct Env final : public A32::UserCallbacks {
     // has its domain and AP (access). When the domains, S or R change, the code of every
     // page that can't be fetched now is dropped, and fetching it again takes the prefetch
     // abort. Each Env only runs at its own privilege, so that isn't part of the context.
+    struct TableLine;
     struct CodePage {
         uint32_t pa;  // physical page, or ~0u when the page tables had no mapping
         uint8_t *host;
         uint8_t *lines;  // RAM code flags for the page, null for ROM and unwatched pages
         uint32_t access;
+        bool suspended = false;  // in suspended[] until its PID runs again
+        bool stale = false;  // suspended, and its blocks from before were read from another physical page
+        bool noted = false;  // suspended, and code was noted from it since: blocks at its MVA may be live
+        MmuCodeWalkMemo walk;  // the last mapping check's table words (CodePa)
+        uint32_t watched = 0;  // walk.walks when its table words were last watched
+        uint32_t stamp = 0;  // the watched mapping check that last took it
+        bool rechecking = false;  // in recheck
+        std::array<TableLine *, 10> walkLines;  // the line of each of walk's words, once watched
     };
     std::unordered_map<uint32_t, uint32_t> accessPages;  // code pages by access
     uint64_t permContext = ~0ull;
@@ -447,6 +551,51 @@ struct Env final : public A32::UserCallbacks {
     std::unordered_map<uint8_t *, std::vector<uint32_t>> byHost;
     std::vector<uint32_t> unwatched;
     uint32_t mapGen = 0;
+    // ARM920T Fast blocks: code pages (MVAs) of another PID's slot whose mapping a TLB flush found moved, by
+    // slot. WinCE unmaps a process's slot while others run and maps it back the same before it runs again.
+    // The pages' blocks below 32 MB run under that PID's tag only, so they can't be reached until the PID
+    // is back; jitRun then keeps the pages mapped as before and drops the rest (Resume). A page may be
+    // listed more than once, or after it was dropped; its suspended flag says whether it still counts.
+    std::array<std::vector<uint32_t>, 128> suspended;
+    // The PID's slot still has suspended pages that aren't mapped yet: their VAs below 32 MB are guarded
+    // (the JIT's frond_page_guard), so their blocks leave at entry and the interpreter fetches the code
+    // (and takes the prefetch abort WinCE maps the slot back from). Guarded pages by VA page, and the
+    // pages set. absentRuns counts runs with pages left by slot, up to kAbsentRuns.
+    std::array<uint8_t, 0x2000> guard{};
+    std::vector<uint32_t> guarded;
+    std::array<uint16_t, 128> absentRuns{};
+    // CheckMappings' and Resume's lists, kept so a run doesn't allocate them.
+    std::vector<uint32_t> scratchMoved, scratchList, scratchLeft, scratchFilled, scratchFillMoved;
+    // ARM920T Fast blocks: a copy of each 64-byte line of page table words the code pages' walk memos read,
+    // with the pages that read it, so a mapping check compares those lines and walks only the pages of lines
+    // that changed, and the pages in recheck: new ones, suspended ones with code newly noted, and those whose
+    // walk couldn't be remembered or was answered by a live TLB entry. A TTB change checks everything.
+    // A line's pages may include pages that left or no longer read it; they go when it changes, and lines
+    // with no pages left go every kSweepChecks checks.
+    // A page walked outside a check (Resume, NoteSuspended) against words other than a line's copy marks the
+    // line dirty, so the next check takes its pages even if the words are back as copied by then.
+    struct TableLine {
+        const uint8_t *host;
+        uint32_t pa;  // pa >> 6
+        bool dirty = false;
+        uint16_t words = 0;  // the words walks read, a bit per word; only these count as a change
+        uint8_t copy[64];
+        std::vector<uint32_t> pages;
+        // Whether a word walks read differs from the copy.
+        bool Moved() const {
+            for (uint32_t m = words; m; m &= m - 1) {
+                const unsigned at = unsigned(__builtin_ctz(m)) * 4;
+                if (std::memcmp(host + at, copy + at, 4)) return true;
+            }
+            return false;
+        }
+    };
+    static constexpr uint32_t kSweepChecks = 4096;
+    bool watchTables = false, checking = false, tablesWritten = false;
+    uint32_t checkedTtb = ~0u, checkStamp = 0;
+    std::vector<std::unique_ptr<TableLine>> tableLines;
+    std::unordered_map<uint32_t, TableLine *> tableLineAt;  // by pa >> 6
+    std::vector<uint32_t> recheck, scratchRecheck, scratchCheck;
 
     // The page dynarmic keeps code by (the run's VA) for a code page here (an MVA), and the code page of a VA.
     // An MVA page past 32 MB whose PID has a tag may also have blocks at its VA below 32 MB under that tag.
@@ -461,11 +610,92 @@ struct Env final : public A32::UserCallbacks {
         uint32_t pa;
         return cpuJitCodePa(cpu, page << 12, &pa, &access) ? pa >> 12 : ~0u;
     }
+    // The same for a noted page, through its walk memo: most flushes leave the tables a page uses alone.
+    // With the table lines watched, a new walk's lines are copied, and a page the memo can't vouch for until
+    // the next check goes to recheck.
+    uint32_t CodePa(uint32_t page, CodePage &c, uint32_t &access) {
+        uint32_t pa;
+        const uint32_t r = cpuJitCodePaMemo(cpu, page << 12, &pa, &access, &c.walk) ? pa >> 12 : ~0u;
+        if (watchTables) {
+            if (c.walk.walks != c.watched) WatchWalk(page, c);
+            if (c.walk.tlb || !c.walk.n) {
+                Recheck(page, c);
+            } else if (!checking) {
+                for (uint8_t i = 0; i < c.walk.n; i++) {
+                    uint32_t v;
+                    std::memcpy(&v, c.walkLines[i]->copy + (c.walk.pa[i] & 60), 4);
+                    if (v != c.walk.value[i]) c.walkLines[i]->dirty = true;
+                }
+            }
+        }
+        return r;
+    }
 
-    void NoteCode(uint32_t va) {
-        const uint32_t page = CodePageOf(va);
+    void Recheck(uint32_t page, CodePage &c) {
+        if (c.rechecking) return;
+        c.rechecking = true;
+        recheck.push_back(page);
+    }
+
+    // The memo's words are in RAM or ROM host pages (cpuPrvTableWord), so a word's whole 64-byte line is too.
+    void WatchWalk(uint32_t page, CodePage &c) {
+        c.watched = c.walk.walks;
+        for (uint8_t i = 0; i < c.walk.n; i++) {
+            const uint32_t key = c.walk.pa[i] >> 6;
+            auto [at, added] = tableLineAt.try_emplace(key, nullptr);
+            if (added) {
+                TableLine &l = *tableLines.emplace_back(std::make_unique<TableLine>());
+                l.host = c.walk.word[i] - (c.walk.pa[i] & 63);
+                l.pa = key;
+                std::memcpy(l.copy, l.host, 64);
+                at->second = &l;
+            }
+            TableLine &l = *at->second;
+            c.walkLines[i] = &l;
+            const unsigned word = (c.walk.pa[i] & 63) >> 2;
+            if (!(l.words & (1u << word))) {
+                // No page read this word before, so its copy only has to hold what this walk read.
+                l.words |= uint16_t(1u << word);
+                std::memcpy(l.copy + word * 4, &c.walk.value[i], 4);
+                cpuJitWatchTableWord(cpu, (l.pa << 6) | (word << 2));
+            }
+            if (std::find(l.pages.begin(), l.pages.end(), page) == l.pages.end()) l.pages.push_back(page);
+        }
+    }
+
+    // A line with pages left may be in their walkLines (WatchWalk), so only empty ones go.
+    void SweepTableLines() {
+        std::erase_if(tableLines, [&](std::unique_ptr<TableLine> &l) {
+            std::erase_if(l->pages, [&](uint32_t page) {
+                const auto c = code.find(page);
+                return c == code.end() || !WalkUses(c->second, l->pa);
+            });
+            if (!l->pages.empty()) return false;
+            tableLineAt.erase(l->pa);
+            return true;
+        });
+        stats.tableLines = std::max<uint64_t>(stats.tableLines, tableLines.size());
+    }
+
+    // Whether the page's walk memo read a word in line (pa >> 6).
+    static bool WalkUses(const CodePage &c, uint32_t line) {
+        for (uint8_t i = 0; i < c.walk.n; i++)
+            if (c.walk.pa[i] >> 6 == line) return true;
+        return false;
+    }
+
+    void NoteCode(uint32_t va) { NoteCodeAt(CodePageOf(va), va & 0xfffu); }
+
+    // va: an address in the code page (an MVA page on the ARM920T) at the code's offset.
+    void NoteCodeAt(uint32_t page, uint32_t va) {
         auto it = code.find(page);
         if (it == code.end()) it = NotePage(page);
+        else if (it->second.suspended) it = NoteSuspended(it, page);
+        // A suspended page with code noted is checked again at flushes, the next one included.
+        if (it->second.suspended && !it->second.noted) {
+            it->second.noted = true;
+            if (watchTables) Recheck(page, it->second);
+        }
         // Fast blocks: the CPU keeps the 64-byte lines by physical page; a store to one drops the page's code.
         if (arm920 && !lineBound && it->second.host) cpuJitNoteArm920Code(cpu, (it->second.pa << 12) | (va & 0xfffu));
         uint8_t *lines = it->second.lines;
@@ -481,11 +711,17 @@ struct Env final : public A32::UserCallbacks {
     std::unordered_map<uint32_t, CodePage>::iterator NotePage(uint32_t page) {
         uint32_t access;
         const uint32_t pa = CodePa(page, access);
+        return NotePage(page, pa, access);
+    }
+
+    std::unordered_map<uint32_t, CodePage>::iterator NotePage(uint32_t page, uint32_t pa, uint32_t access) {
         uint8_t *lines = nullptr;
         uint8_t *host = pa == ~0u ? nullptr : cpuJitWatchCode(cpu, pa << 12, &lines);
         const auto it = code.emplace(page, CodePage{pa, host, lines, access}).first;
+        if (fillWatch) fillWatch[page] |= watchBit;
         accessPages[access]++;
         stats.codePages++;
+        if (watchTables) Recheck(page, it->second);
         if (arm920 && !lineBound && host) {
             // A newly watched RAM page may have dropped the lean TLB; empty the page table now, as code
             // can run straight on after this compile. The probe's single-step mode (lineBound) has no lean
@@ -501,6 +737,20 @@ struct Env final : public A32::UserCallbacks {
         return it;
     }
 
+    // New code from a suspended page (from 32 MB up, or another PID's below): if the page is mapped to
+    // another physical page now, it's watched there, and the blocks from before (which can't run until
+    // Resume) are marked stale, so Resume drops them. The page stays in suspended[].
+    std::unordered_map<uint32_t, CodePage>::iterator NoteSuspended(std::unordered_map<uint32_t, CodePage>::iterator it,
+                                                                   uint32_t page) {
+        uint32_t access;
+        const uint32_t pa = CodePa(page, it->second, access);
+        if (pa == ~0u || (pa == it->second.pa && access == it->second.access)) return it;
+        Forget(page);
+        it = NotePage(page);
+        it->second.suspended = it->second.stale = true;
+        return it;
+    }
+
     void Drop(uint32_t page) {
         PcPages(page, [&](uint32_t p) { jit->InvalidateCacheRange(p << 12, 4096); });
         Forget(page);
@@ -512,6 +762,7 @@ struct Env final : public A32::UserCallbacks {
         if (it == code.end()) return;
         const auto n = accessPages.find(it->second.access);
         if (!--n->second) accessPages.erase(n);
+        if (fillWatch) fillWatch[page] &= ~watchBit;
         code.erase(it);
     }
 
@@ -558,7 +809,8 @@ struct Env final : public A32::UserCallbacks {
     }
 
     // known: this level holds code from the page. True if the store dropped any.
-    bool CodeWrittenPa(uint32_t pa, uint32_t offset, uint32_t size) {
+    bool CodeWrittenPa(uint32_t pa, uint32_t offset, uint32_t size, const void *data) {
+        if (watchTables) TableWordsWritten(pa, offset, size, data);
         const auto it = byPa.find(pa);
         return it != byPa.end() && RangeWritten(it->second, offset, size, true, pa, nullptr);
     }
@@ -581,6 +833,37 @@ struct Env final : public A32::UserCallbacks {
     }
     void CodeWordsPa(uint32_t pa, uint64_t *words) {
         if (const auto it = byPa.find(pa); it != byPa.end()) CodeWords(it->second, true, pa, nullptr, words);
+        // The table words walks read stay watched too.
+        for (const auto &l : tableLines)
+            if (l->pa >> 6 == pa) words[(l->pa & 63) >> 2] |= uint64_t(l->words) << ((l->pa & 3) * 16);
+    }
+
+    // A store to [offset, offset + size) of physical page pa hit a word marked in the CPU's code map: the table
+    // lines there with words walks read are dirty, for the next mapping check. data is what an aligned word
+    // store puts there, with the old word still in place (null if not known). Such a store that keeps the
+    // word, or puts an entry where a fault one was (WinCE maps a slot back that way), moves no code page's
+    // mapping: a page whose walk reads a fault entry there was dropped or suspended by the check after the
+    // store that put it there, and Resume and NoteSuspended walk it again. A fill through the new entry
+    // (TakeFills) is for such a page too, or for code compiled from it since, which has that mapping.
+    void TableWordsWritten(uint32_t pa, uint32_t offset, uint32_t size, const void *data) {
+        for (uint32_t line = offset >> 6; line <= (offset + size - 1) >> 6; line++) {
+            const auto it = tableLineAt.find((pa << 6) | line);
+            if (it == tableLineAt.end() || !it->second->words) continue;
+            TableLine &l = *it->second;
+            if (data && size == 4 && !(offset & 3) && !l.dirty) {
+                if (!(l.words & (1u << ((offset & 63) >> 2)))) continue;
+                uint32_t old, now;
+                std::memcpy(&old, l.host + (offset & 63), 4);
+                std::memcpy(&now, data, 4);
+                if (old == now) continue;
+                if (!(old & 3)) {
+                    stats.tableFaultFills++;
+                    continue;
+                }
+            }
+            l.dirty = true;
+            tablesWritten = true;
+        }
     }
     void CodeWordsHost(uint8_t *host, uint64_t *words) {
         if (const auto it = byHost.find(host); it != byHost.end()) CodeWords(it->second, false, 0, host, words);
@@ -602,17 +885,232 @@ struct Env final : public A32::UserCallbacks {
         byHost.erase(it);
     }
 
-    // After a TLB flush, drop the code of every page whose mapping moved.
+    // One page's mapping check: a page whose mapping moved is listed in moved, to be dropped. ARM920T Fast
+    // blocks: a page of another PID's slot (with a tag) is suspended instead, dropping only blocks run at its
+    // MVA, which any PID can reach. Suspended pages wait for Resume; one with code noted since (compiled at its
+    // MVA, by another PID or the owner on a guarded page) drops the blocks at its MVA again when it moves.
+    void CheckPage(uint32_t page, CodePage &c, std::vector<uint32_t> &moved) {
+        stats.mapPagesChecked++;
+        uint32_t access;
+        if (CodePa(page, c, access) == c.pa && access == c.access) return;
+        if (c.suspended) {
+            c.noted = false;
+            if (jit->HasCodeIn(page << 12, 4096)) {
+                stats.suspendedMvaDrops++;
+                jit->InvalidateCacheRange(page << 12, 4096);
+            }
+            return;
+        }
+        const uint32_t slot = page >> 13;
+        if (arm920 && !lineBound && pidTags && slot && slot != cpuGetPid(cpu) >> 25 && pidTags[slot]) {
+            stats.suspends++;
+            c.suspended = true;
+            c.noted = false;
+            suspended[slot].push_back(page);
+            if (jit->HasCodeIn(page << 12, 4096)) jit->InvalidateCacheRange(page << 12, 4096);
+            return;
+        }
+        moved.push_back(page);
+    }
+
+    // After a TLB flush, or a change to the table words code pages' walks read (TablesMoved), drop the code
+    // of every page whose mapping moved (CheckPage).
     void CheckMappings() {
         stats.mapChecks++;
-        std::vector<uint32_t> moved;
-        for (const auto &[page, c] : code) {
-            uint32_t access;
-            if (CodePa(page, access) != c.pa || access != c.access) moved.push_back(page);
+        std::vector<uint32_t> &moved = scratchMoved;
+        moved.clear();
+        const auto check = [&](uint32_t page, CodePage &c) { CheckPage(page, c, moved); };
+        // A watched check brings the copies of changed lines up to date before walking any page; a full one
+        // leaves them, so its walks mark lines that differ dirty.
+        checking = true;
+        const bool watched = CheckWatched(check);
+        checking = false;
+        if (!watched) {
+            stats.fullMapChecks++;
+            for (uint32_t page : recheck)
+                if (const auto c = code.find(page); c != code.end()) c->second.rechecking = false;
+            recheck.clear();
+            for (auto &[page, c] : code) {
+                if (c.suspended && !c.noted) continue;
+                check(page, c);
+            }
         }
         for (uint32_t page : moved) {
             stats.mapChanged++;
             Drop(page);
+        }
+    }
+
+    // ARM920T Fast blocks: whether a store hit a table word a code page's walk read since the last mapping
+    // check (TableWordsWritten). A guest may edit a table word with no flush when the TLB holds no entry for
+    // it, and fetches then walk the new word; jitRun checks the mappings before the next run when this says so.
+    bool TablesMoved() const { return tablesWritten; }
+
+    // TLB entries the MMU made live for code pages (cpuJitWatchedFills) since this level last looked: a fetch
+    // goes by those first, so each of its pages is checked again now. In a check (inCheck) the pages go to
+    // recheck; otherwise they are checked here, before the next block runs (moved pages are dropped, so a
+    // run in progress stops after its current block). More fills than the MMU kept a list of take every code
+    // page a live entry answers.
+    void TakeFills(bool inCheck) {
+        const uint32_t *ring;
+        const uint32_t n = cpuJitWatchedFills(cpu, &ring), count = n - seenFills;
+        if (!count) return;
+        seenFills = n;
+        // With no store to a walked table word since the last mapping check, a fill walked the words that
+        // check saw, so it holds the mapping each code page has.
+        if (!tablesWritten) return;
+        std::vector<uint32_t> &pages = scratchFilled;
+        pages.clear();
+        const auto take = [&](uint32_t page, CodePage &c) {
+            if (c.suspended && !c.noted) return;  // Resume walks it before its code can run
+            // An entry a flush took again since answers nothing, and one with the mapping the code came from
+            // changes nothing.
+            if (!cpuJitTlbLive(cpu, page << 12)) return;
+            uint32_t pa, access;
+            if (cpuJitCodePa(cpu, page << 12, &pa, &access) && pa >> 12 == c.pa && access == c.access) {
+                stats.fillSame++;
+                return;
+            }
+            stats.fillRechecks++;
+            if (inCheck) Recheck(page, c);
+            else pages.push_back(page);
+        };
+        if (count > 8) {
+            stats.tlbLiveScans++;
+            for (auto &[page, c] : code)
+                if (!c.rechecking && cpuJitTlbLive(cpu, page << 12)) take(page, c);
+        } else {
+            for (uint32_t i = n - count; i != n; i++) {
+                const uint32_t first = ring[i & 7] & 0xfffff, last = first + (ring[i & 7] >> 20);
+                for (uint32_t page = first; page <= last; page++)
+                    if (fillWatch[page] & watchBit)
+                        if (const auto c = code.find(page); c != code.end() && !c->second.rechecking)
+                            take(page, c->second);
+            }
+        }
+        if (inCheck || pages.empty()) return;
+        std::vector<uint32_t> &moved = scratchFillMoved;
+        moved.clear();
+        for (uint32_t page : pages)
+            if (const auto c = code.find(page); c != code.end()) CheckPage(page, c->second, moved);
+        for (uint32_t page : moved) {
+            stats.mapChanged++;
+            stats.fillDrops++;
+            Drop(page);
+        }
+    }
+
+    // The watched mapping check: only the pages of table lines that changed, and recheck. False when
+    // everything has to be checked instead (MMU off, the first check or a TTB change).
+    template <typename F>
+    bool CheckWatched(F &check) {
+        watchTables = arm920 && !lineBound;
+        if (!watchTables) return false;
+        const uint32_t ttb = cpuJitTtb(cpu);
+        if (ttb != checkedTtb || ttb == MMU_DISABLED_TTP) {
+            checkedTtb = ttb;
+            const uint32_t *ring;
+            seenFills = cpuJitWatchedFills(cpu, &ring);  // the full check walks every page
+            tablesWritten = false;
+            return false;
+        }
+        // The TLB answers a code fetch before the tables, and its entries can differ from them (a table word
+        // edited and put back with no flush in between, or entries kept over a TTB write). Pages filled since
+        // the last look go to recheck, which keeps them while the TLB answers.
+        TakeFills(true);
+        tablesWritten = false;
+        if (++checkStamp == 0) {
+            for (auto &[page, c] : code) c.stamp = 0;
+            checkStamp = 1;
+        }
+        if (checkStamp % kSweepChecks == 0) SweepTableLines();
+        std::vector<uint32_t> &pages = scratchCheck;
+        pages.clear();
+        for (const auto &line : tableLines) {
+            TableLine &l = *line;
+            if (!l.dirty && !l.Moved()) continue;
+            std::memcpy(l.copy, l.host, 64);
+            l.dirty = false;
+            stats.tableLinesChanged++;
+            std::erase_if(l.pages, [&](uint32_t page) {
+                const auto c = code.find(page);
+                if (c == code.end() || !WalkUses(c->second, l.pa)) return true;
+                if (c->second.stamp != checkStamp) {
+                    c->second.stamp = checkStamp;
+                    pages.push_back(page);
+                }
+                return false;
+            });
+        }
+        std::vector<uint32_t> &again = scratchRecheck;
+        again.clear();
+        again.swap(recheck);
+        for (uint32_t page : again) {
+            const auto c = code.find(page);
+            if (c == code.end()) continue;
+            c->second.rechecking = false;
+            if (c->second.stamp == checkStamp) continue;
+            c->second.stamp = checkStamp;
+            pages.push_back(page);
+        }
+        for (uint32_t page : pages) {
+            const auto c = code.find(page);
+            if (c == code.end()) continue;
+            // Resume walks a suspended page again before its code can run (a walk off its line's copy marks
+            // the line dirty), and one with code noted is in recheck.
+            if (c->second.suspended && !c->second.noted) continue;
+            check(page, c->second);
+        }
+        return true;
+    }
+
+    // Before running under the PID of slot: its suspended pages mapped as when they were noted keep their
+    // code, pages mapped elsewhere are dropped, and pages not mapped stay suspended (the run goes under the
+    // guard) for up to kAbsentRuns runs, then are dropped too. True if any stay.
+    static constexpr uint16_t kAbsentRuns = 4096;
+    bool Resume(uint32_t slot) {
+        std::vector<uint32_t> &list = scratchList, &left = scratchLeft;
+        list.clear();
+        left.clear();
+        list.swap(suspended[slot]);
+        const bool last = ++absentRuns[slot] > kAbsentRuns;
+        for (uint32_t page : list) {
+            const auto c = code.find(page);
+            if (c == code.end() || !c->second.suspended) continue;
+            uint32_t access;
+            const uint32_t pa = CodePa(page, c->second, access);
+            if (!c->second.stale && pa == c->second.pa && access == c->second.access) {
+                stats.resumes++;
+                c->second.suspended = false;
+                continue;
+            }
+            if (pa == ~0u && !last && !c->second.stale) {
+                left.push_back(page);
+                continue;
+            }
+            c->second.suspended = false;
+            stats.mapChanged++;
+            Drop(page);
+        }
+        if (left.empty()) {
+            absentRuns[slot] = 0;
+            return false;
+        }
+        suspended[slot].swap(left);
+        return true;
+    }
+
+    // Guards the VAs below 32 MB of slot's suspended pages (none for slot 0), for a run under its PID.
+    void Guard(uint32_t slot) {
+        for (uint32_t p : guarded) guard[p] = 0;
+        guarded.clear();
+        if (!slot) return;
+        for (uint32_t page : suspended[slot]) {
+            const uint32_t p = page & 0x1fff;
+            if (!guard[p]) {
+                guard[p] = 1;
+                guarded.push_back(p);
+            }
         }
     }
 
@@ -643,12 +1141,21 @@ struct Env final : public A32::UserCallbacks {
         ClearPages();
         jit->ClearCache();
         std::fill(heat.begin(), heat.end(), Heat{});
+        if (fillWatch)
+            for (const auto &[page, c] : code) fillWatch[page] &= ~watchBit;
         code.clear();
         accessPages.clear();
         permContext = cpuJitPermContext(cpu);
         byHost.clear();
         byPa.clear();
         unwatched.clear();
+        for (auto &list : suspended) list.clear();
+        absentRuns.fill(0);
+        Guard(0);
+        tableLines.clear();
+        tableLineAt.clear();
+        recheck.clear();
+        checkedTtb = ~0u;
         cpuJitForgetCode(cpu);
         gen = ~0ull;
         mapGen = cpuJitMapGen(cpu);
@@ -729,6 +1236,11 @@ struct Env final : public A32::UserCallbacks {
         if (g != gen) GenChanged(g);
     }
 
+    // After a callback access through the MMU, which may have filled a code page's TLB entry.
+    void AfterFill() {
+        if (fillWatch) TakeFills(false);
+    }
+
     [[gnu::noinline]] void GenChanged(uint64_t g) {
         const uint32_t d = cpuJitGetDomain(cpu);
         if (gen == ~0ull || (g >> 32) != (gen >> 32))
@@ -767,6 +1279,11 @@ struct Env final : public A32::UserCallbacks {
     uint32_t hot = 1;
 
     bool ShouldCompile(A32::VAddr pc, bool thumb) override {
+        if (pc < 0x02000000u && guard[pc >> 12]) {
+            stats.cold++;
+            jit->HaltExecution(kCold);
+            return false;
+        }
         if (hot <= 1) return true;
         const uint32_t key = pc | uint32_t(thumb);  // PC is even
         Heat &h = heat[(key * 0x9e3779b1u) >> (32 - kHeatBits)];
@@ -830,6 +1347,7 @@ struct Env final : public A32::UserCallbacks {
         }
         // Only aligned reads land here for pages the table could hold; fill it.
         CheckGen();
+        AfterFill();
         if (memoryCost) {
             AfterIo();
             Charged();
@@ -863,6 +1381,7 @@ struct Env final : public A32::UserCallbacks {
                         return;
                     }
                     CheckGen();
+                    AfterFill();
                     AfterIo();
                     if (memoryCost) Charged();
                     return;
@@ -892,6 +1411,7 @@ struct Env final : public A32::UserCallbacks {
         // A RAM page the guest may store to in this mode: map it writable. Unaligned stores
         // also land here for pages that already are.
         CheckGen();
+        AfterFill();
         if (memoryCost) {
             Charged();
             if (!hinted) {
@@ -926,14 +1446,18 @@ struct Env final : public A32::UserCallbacks {
             ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
             return false;
         }
+        const bool marked = arm920 && cpuJitAccessPcMarked(cpu, pc);
+        const bool startBlocks = arm920 && cpuJitAccessPcsStartBlocks(cpu);
+        const bool startsBlock = marked && startBlocks;
+        if (!AccessPcSplit(startBlocks, startsBlock, pc, ir)) return false;
+        uint32_t word = 0;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             const bool plain = cpuJitFetch(cpu, at & ~3u, &w) && cpuJitPlain(cpu, at, w, thumb);
             if (plain && pc == A32::LocationDescriptor{ir.block.Location()}.PC()) blocks++;
+            word = w;
             return plain;
         });
-        // An access pc: its value goes to cpuJitAccessPcSlot before the instruction (psr slot, opc1 3).
-        if (ok && arm920 && cpuJitAccessPcMarked(cpu, pc))
-            ir.CoprocSendOneWord(kPsrCoprocessor, false, 3, A32::CoprocReg::C0, A32::CoprocReg::C0, 0, ir.Imm32(pc));
+        if (ok) NoteAccessPc(thumb, word, marked, startsBlock, pc, ir);
         return ok;
     }
 
@@ -945,14 +1469,21 @@ struct Env final : public A32::UserCallbacks {
     std::unique_ptr<A32::CodeSnapshot> SnapshotCode(A32::VAddr pc, bool thumb, bool whole) override {
         auto s = std::make_unique<Snapshot>();
         s->arm920 = arm920;
+        s->startBlocks = arm920 && cpuJitAccessPcsStartBlocks(cpu);
         s->pid = arm920 ? cpuGetPid(cpu) : 0;
         s->model = model;
         s->base = pc & ~3u;
+        const bool mapped = arm920 && pidTags && s->pid && pc < 0x02000000u;
         auto word = [&](uint32_t va) {
             const uint32_t i = (va - s->base) >> 2;
             while (s->words.size() <= i) {
                 uint32_t w = 0;
-                const bool ok = cpuJitFetch(cpu, s->base + uint32_t(s->words.size()) * 4, &w);
+                const uint32_t at = s->base + uint32_t(s->words.size()) * 4;
+                const bool ok = cpuJitFetch(cpu, at, &w);
+                if (ok && mapped && at < 0x02000000u && !s->MapOf(at)) {
+                    uint32_t access;
+                    s->maps.push_back({at >> 12, CodePa(CodePageOf(at), access), access});
+                }
                 s->words.push_back(w);
                 s->fetched.push_back(ok);
                 s->read.push_back(0);
@@ -965,9 +1496,15 @@ struct Env final : public A32::UserCallbacks {
             const uint32_t i = word(at);
             const uint32_t w = s->words[i];
             const bool plain = s->fetched[i] && cpuJitPlain(cpu, at, w, thumb);
+            // A marked pc that starts its block ends the snapshot before it unless it's the first.
+            const bool marked = arm920 && cpuJitAccessPcMarked(cpu, at);
+            if (marked && s->startBlocks && at != pc) {
+                s->splitAt = at;
+                break;
+            }
             s->plain.push_back({at, plain});
             if (!plain) break;
-            if (arm920 && cpuJitAccessPcMarked(cpu, at)) s->marked.push_back(at);
+            if (marked) s->marked.push_back(at);
             uint32_t size = 4;
             if (thumb) {
                 const uint32_t h = (at & 2) ? w >> 16 : w & 0xffff;
@@ -985,6 +1522,8 @@ struct Env final : public A32::UserCallbacks {
     // Ahead of need: as SnapshotCode, reading only RAM and ROM. Code that reaches anything
     // else isn't compiled ahead.
     std::unique_ptr<A32::CodeSnapshot> SnapshotCodeAhead(A32::VAddr pc, bool thumb, bool whole) override {
+        // A guarded page can't be fetched now.
+        if (pc < 0x02000000u && guard[pc >> 12]) return nullptr;
         cpuJitMemoryOnly(cpu, true);
         auto s = SnapshotCode(pc, thumb, whole);
         cpuJitMemoryOnly(cpu, false);
@@ -994,19 +1533,59 @@ struct Env final : public A32::UserCallbacks {
 
     // The words translation read are fetched again; if any changed (or no longer fetch),
     // the block is dropped. Otherwise they are noted as code, as MemoryReadCode does.
+    // A word of a block fetched under another PID below 32 MB, whose MVA isn't mapped now (WinCE unmaps a
+    // slot while other processes run): read at the physical page it was fetched from, if the page is
+    // still watched there or not watched at all. Resume then keeps the block only if the slot maps back
+    // the same.
+    bool FetchUnmapped(const Snapshot &s, uint32_t va, uint32_t mva, uint32_t *w) {
+        const auto *m = s.MapOf(va);
+        if (!m || m->pa == ~0u) return false;
+        uint32_t access;
+        if (CodePa(mva >> 12, access) != ~0u) return false;
+        if (const auto c = code.find(mva >> 12); c != code.end() && (c->second.pa != m->pa || c->second.access != m->access))
+            return false;
+        return cpuJitFetchPa(cpu, (m->pa << 12) | (va & 0xfffu), w);
+    }
+
     bool CodeUnchanged(A32::CodeSnapshot &snapshot) override {
         auto &s = static_cast<Snapshot &>(snapshot);
-        // Fetched under another PID: words below 32 MB would be another address space's. Code from 32 MB up
-        // reads the same under every PID; its block keeps the tag it was compiled under.
-        if (arm920 && s.pid != cpuGetPid(cpu) && s.base < 0x02000000u) return false;
+        // Fetched under another PID below 32 MB: the words are checked again at their MVA, which reads the
+        // same under every PID. The block keeps the tag it was queued under, that PID's, so it only runs
+        // there. PID 0's slot 0 has no MVA of its own. Code from 32 MB up reads the same under every PID.
+        const bool otherPid = arm920 && s.pid != cpuGetPid(cpu) && s.base < 0x02000000u;
+        if (otherPid && !s.pid) return false;
         for (size_t i = 0; i < s.words.size(); i++) {
             if (!s.read[i]) continue;
             uint32_t w = 0;
-            const bool ok = cpuJitFetch(cpu, s.base + uint32_t(i) * 4, &w);
+            const uint32_t va = s.base + uint32_t(i) * 4;
+            const bool inSlot = otherPid && va < 0x02000000u;
+            const uint32_t mva = va | s.pid;
+            bool ok = inSlot ? cpuJitFetchMva(cpu, mva, &w) : cpuJitFetch(cpu, va, &w);
+            if (!ok && inSlot && s.fetched[i]) ok = FetchUnmapped(s, va, mva, &w);
             if (ok != bool(s.fetched[i]) || (ok && w != s.words[i])) return false;
         }
-        for (size_t i = 0; i < s.words.size(); i++)
-            if (s.read[i]) NoteCode(s.base + uint32_t(i) * 4);
+        if (otherPid) stats.otherPidInstalls++;
+        for (size_t i = 0; i < s.words.size(); i++) {
+            if (!s.read[i]) continue;
+            const uint32_t va = s.base + uint32_t(i) * 4;
+            if (otherPid && va < 0x02000000u) {
+                const uint32_t mva = va | s.pid;
+                if (!code.count(mva >> 12)) {
+                    // Only FetchUnmapped passes a page that isn't mapped now: watch it at the snapshot's
+                    // physical page, suspended until its PID runs again.
+                    const auto *m = s.MapOf(va);
+                    uint32_t access;
+                    if (m && CodePa(mva >> 12, access) == ~0u) {
+                        auto it = NotePage(mva >> 12, m->pa, m->access);
+                        it->second.suspended = true;
+                        suspended[mva >> 25].push_back(mva >> 12);
+                    }
+                }
+                NoteCodeAt(mva >> 12, mva & 0xfffu);
+            } else {
+                NoteCode(va);
+            }
+        }
         return true;
     }
 
@@ -1500,12 +2079,15 @@ struct FrondJit {
     uint8_t pidTags[128] = {};
     uint8_t nextTag = 1;
     uint64_t tagRestarts = 0;
+    // ARM920T Fast blocks: the code pages of both levels by MVA page (Env::fillWatch), for the MMU's fill watch.
+    std::unique_ptr<uint8_t[]> fillWatch;
 };
 
 // Tags ride in FPSCR bits that only VFP vector code reads, which the ARM920T has none of: Len (16-18) and
 // Stride (20-21). Neither reaches the host (MXCSR on x64; the arm64 prelude masks them out of FPCR). AHP,
 // rounding mode, FZ and DN stay 0, as they would reach the host's FP state.
 constexpr unsigned kPidTags = 32;
+constexpr unsigned kAbsentTag = kPidTags - 1;  // not handed out (it was the absent tag)
 constexpr uint32_t jitPrvTagFpscr(unsigned tag) { return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20); }
 static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x00370000);
 
@@ -1625,6 +2207,19 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     conf.check_halt_on_link = true;
     conf.check_halt_on_memory_access = true;
     conf.max_unchecked_instructions = j->maxUnchecked;
+    if (e.arm920 && !e.lineBound) {
+        if (!j->fillWatch) {
+            j->fillWatch = std::make_unique<uint8_t[]>(size_t(1) << 20);
+            cpuJitSetFillWatch(j->cpu, j->fillWatch.get());
+        }
+        e.fillWatch = j->fillWatch.get();
+        e.watchBit = privileged ? 2 : 1;
+        const uint32_t *ring;
+        e.seenFills = cpuJitWatchedFills(j->cpu, &ring);
+        conf.frond_page_guard = e.guard.data();
+        conf.frond_page_guard_end = 0x02000000u;
+        conf.frond_page_guard_fpscr = jitPrvTagFpscr(kPidTags - 1);  // tag 0 (PID 0) runs are never guarded
+    }
     // Unaligned accesses go through the callbacks, which fault on them.
     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
     conf.only_detect_misalignment_via_page_table_on_page_boundary = false;
@@ -1676,6 +2271,7 @@ FrondJit *jitCreate(ArmCpu *cpu, bool singleStep) {
 }
 
 void jitDestroy(FrondJit *j) {
+    if (j->fillWatch) cpuJitSetFillWatch(j->cpu, nullptr);
     if (stats.on) {
         std::lock_guard<std::mutex> lock(stats.jitsMutex);
         for (auto &l : j->level) {
@@ -1698,6 +2294,13 @@ uint32_t jitRanNow(const FrondJit *j) {
     if (!e) return 0;
     const int64_t ran = (int64_t(e->budget) - e->jit->TicksRemainingNow()) >> e->model.shift;
     return ran <= 0 ? 0 : uint32_t(std::min<int64_t>(ran, UINT32_MAX));
+}
+
+uint32_t jitRanInstructionsNow(const FrondJit *j) {
+    const Env *e = j->running;
+    if (!e || !e->model.shift) return jitRanNow(j);
+    const int64_t ran = int64_t(e->budget) - e->jit->TicksRemainingNow();
+    return ran <= 0 ? 0 : uint32_t(ran);
 }
 
 void jitExecutionCounts(const FrondJit *j, uint64_t *blocks, uint64_t *instructions) {
@@ -1810,9 +2413,9 @@ bool jitCodeWritten(FrondJit *j, uint8_t *hostPage, uint32_t offset, uint32_t si
     return known;
 }
 
-void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size) {
+void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size, const void *data) {
     bool dropped = false;
-    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWrittenPa(pa >> 12, pa & 0xfffu, size); });
+    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWrittenPa(pa >> 12, pa & 0xfffu, size, data); });
     if (dropped && std::find(j->remaskPa.begin(), j->remaskPa.end(), pa >> 12) == j->remaskPa.end())
         j->remaskPa.push_back(pa >> 12);
 }
@@ -1865,14 +2468,14 @@ void jitWriteProtectPage(FrondJit *j, uint8_t *hostPage) {
     jitPrvEach(j, [&](Env &e) { e.ProtectHost(hostPage); });
 }
 
-// ARM920T Fast blocks: the tag for the CPU's PID into the JIT's FPSCR, so its blocks are found and linked
-// only under that PID. The PID only changes between runs (MCR c13 isn't a p15 slot word). Once every tag is
-// taken, both levels drop their code and tags start over.
-static void jitPrvSetTag(FrondJit *j, Env &e, A32::Jit &jit) {
+// ARM920T Fast blocks: the tag for the CPU's PID, so its blocks are found and linked only under that PID.
+// The PID only changes between runs (MCR c13 isn't a p15 slot word). Once every tag is taken, both levels
+// drop their code and tags start over.
+static uint8_t jitPrvPidTag(FrondJit *j) {
     const uint32_t index = cpuGetPid(j->cpu) >> 25;
     uint8_t tag = j->pidTags[index];
     if (index && !tag) {
-        if (j->nextTag == kPidTags) {
+        if (j->nextTag == kAbsentTag) {
             std::fill(std::begin(j->pidTags), std::end(j->pidTags), 0);
             j->nextTag = 1;
             j->tagRestarts++;
@@ -1880,6 +2483,11 @@ static void jitPrvSetTag(FrondJit *j, Env &e, A32::Jit &jit) {
         }
         tag = j->pidTags[index] = j->nextTag++;
     }
+    return tag;
+}
+
+// The tag into the JIT's FPSCR.
+static void jitPrvSetTag(Env &e, A32::Jit &jit, uint8_t tag) {
     if (tag == e.tag) return;
     e.tag = tag;
     jit.SetFpscr(jitPrvTagFpscr(tag));
@@ -1899,11 +2507,22 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         jit.ClearCache();  // Reset drops the pending cache clear's halt flag
         e.tag = 0;  // Reset sets FPSCR to 0
     }
-    if (e.arm920) jitPrvSetTag(j, e, jit);
+    const uint8_t tag = e.arm920 ? jitPrvPidTag(j) : 0;
     e.CheckGen();
+    e.AfterFill();
     if (const uint32_t g = cpuJitMapGen(e.cpu); g != e.mapGen) {
         e.mapGen = g;
         if (!e.code.empty()) e.CheckMappings();
+    } else if (e.watchTables && e.TablesMoved()) {
+        stats.tableMoves++;
+        e.CheckMappings();
+    }
+    e.CheckGen();  // a check may have marked new table words' pages (cpuJitWatchTableWord)
+    if (e.arm920) {
+        const uint32_t slot = cpuGetPid(j->cpu) >> 25;
+        const bool left = !e.suspended[slot].empty() && e.Resume(slot);
+        e.Guard(left ? slot : 0);
+        jitPrvSetTag(e, jit, tag);
     }
     if (!j->remaskPa.empty() || !j->remaskHost.empty()) jitPrvRemask(j);
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));

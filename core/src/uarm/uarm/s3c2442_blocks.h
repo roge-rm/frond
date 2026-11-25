@@ -564,6 +564,23 @@ class S3cLcd {
     // the controller is off or set to something not decoded.
     bool frame(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint32_t>& pixels,
                unsigned& width, unsigned& height, std::string& why) const;
+    // What frame() decodes, without the pixels: the size, where each line starts and the pixel format.
+    struct Layout {
+        unsigned width, height;
+        uint32_t start, stride, lineBytes;
+        bool bpp24, frm565, bpp24bl, bswp, hwswp;
+        bool operator==(const Layout& o) const {
+            return width == o.width && height == o.height && start == o.start && stride == o.stride &&
+                   lineBytes == o.lineBytes && bpp24 == o.bpp24 && frm565 == o.frm565 && bpp24bl == o.bpp24bl &&
+                   bswp == o.bswp && hwswp == o.hwswp;
+        }
+        bool operator!=(const Layout& o) const { return !(*this == o); }
+        uint32_t lineAddress(unsigned y) const { return start + y * stride; }
+    };
+    // False, with why, where frame() would fail before reading memory.
+    bool layout(Layout& out, std::string& why) const;
+    // One line of lineBytes in the layout's format to width pixels, 0xRRGGBB, or with abgr 0xffBBGGRR.
+    static void convertLine(const Layout& layout, const uint8_t* line, uint32_t* out, bool abgr);
     // The frame's physical start, from LCDSADDR1.
     uint32_t frameAddress() const { return (saddr[0] & 0x3fffffff) << 1; }
 
@@ -578,6 +595,33 @@ class S3cLcd {
 
    private:
     void interrupts(S3cIntc& intc);
+};
+
+// The frame handed to the frontend, 0xffBBGGRR, width x height, kept from one scan to the next. scan()
+// converts only the lines whose bytes changed since they were last converted (all of them after a layout
+// change) and adds the rows whose pixels changed to the dirty range; without a layout of that size, or with a
+// line outside SDRAM, the frame is black. The dirty range collects until take() hands it out with reset().
+struct S3cLcdView {
+    std::vector<uint32_t> pixels, row;
+    // Each line's bytes as last converted into pixels, in layout; empty when pixels aren't from them.
+    std::vector<uint8_t> source;
+    S3cLcd::Layout layout{};
+    unsigned width = 0, height = 0;
+    uint32_t dirtyFirst = UINT32_MAX, dirtyLast = 0;  // none when dirtyFirst > dirtyLast
+    bool pending = false;
+
+    // span: the host bytes of SDRAM at a physical address, or null. lcd null: the LCD is off.
+    void scan(unsigned width, unsigned height, const S3cLcd::Layout* lcd,
+              const std::function<const uint8_t*(uint32_t, size_t)>& span);
+    void dirty(unsigned y);
+    void all();
+    // The frame and its dirty rows (0 to 0 when only pending), or null when nothing changed.
+    uint32_t* take(uint32_t& first, uint32_t& last);
+    void reset() {
+        pending = false;
+        dirtyFirst = UINT32_MAX;
+        dirtyLast = 0;
+    }
 };
 
 #endif

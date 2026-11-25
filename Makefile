@@ -1304,6 +1304,16 @@ $(OBJ_ROOT)/test-arm920-fcse: out/frond tests/arm920-fcse.cpp
 test-arm920-fcse: $(OBJ_ROOT)/test-arm920-fcse
 	$(OBJ_ROOT)/test-arm920-fcse
 
+# The ARM920T in Fast against Exact when page table entries change under translated code, with and without a flush.
+.PHONY: test-arm920-jit-tables
+test: test-arm920-jit-tables
+$(OBJ_ROOT)/test-arm920-jit-tables: out/frond tests/arm920-jit-tables.cpp
+	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/arm920-jit-tables-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/arm920-jit-tables.cpp @$(OBJ_ROOT)/arm920-jit-tables-core.rsp $(COMMON_LIB) $(CPU_TEST_LDLIBS) -o $@
+test-arm920-jit-tables: $(OBJ_ROOT)/test-arm920-jit-tables
+	$(OBJ_ROOT)/test-arm920-jit-tables
+
 # Every option, command, environment variable, tool and target in the sources is in the developer reference.
 .PHONY: check-docs
 check-docs: prepare

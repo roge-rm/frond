@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -114,6 +116,14 @@ CodePtr AddressSpace::GetOrEmit(IR::LocationDescriptor descriptor) {
 }
 
 void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors) {
+    InvalidateBasicBlocks(descriptors, nullptr);
+}
+
+// Frond: a dropped block also leaves block_infos, reverse_block_entries and every target's
+// block_references set, so later installs and drops only relink live blocks. Its code stays
+// in the cache until ClearCache. keep_info is a block still running (a fastmem fault inside
+// it): it keeps its block_infos and reverse entries so a later fault in the same run is found.
+void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>& descriptors, CodePtr keep_info) {
     UnprotectCodeMemory();
 
     for (const auto& descriptor : descriptors) {
@@ -127,12 +137,30 @@ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescri
         if (iter == block_entries.end()) {
             continue;
         }
+        const CodePtr entry_point = iter->second;
 
         // Unlink before removal because InvalidateBasicBlocks can be called within a fastmem callback,
         // and the currently executing block may have references to itself which need to be unlinked.
         RelinkForDescriptor(descriptor, nullptr);
 
         block_entries.erase(iter);
+
+        // The callers of this descriptor stay in block_references[descriptor]: they are live
+        // and link to the next block emitted for it.
+        if (const auto info_iter = block_infos.find(entry_point); info_iter != block_infos.end()) {
+            for (const auto& [target_descriptor, list] : info_iter->second.block_relocations) {
+                if (auto ref_iter = block_references.find(target_descriptor); ref_iter != block_references.end()) {
+                    ref_iter.value().erase(entry_point);
+                    if (ref_iter->second.empty()) {
+                        block_references.erase(ref_iter);
+                    }
+                }
+            }
+            if (entry_point != keep_info) {
+                block_infos.erase(info_iter);
+                reverse_block_entries.erase(entry_point);
+            }
+        }
     }
 
     ProtectCodeMemory();
@@ -186,6 +214,9 @@ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
     ASSERT(block_infos.insert({block_info.entry_point, block_info}).second);
 
     Link(block_info);
+    for (const auto& [target_descriptor, list] : block_info.block_relocations) {
+        block_references[target_descriptor].insert(block_info.entry_point);
+    }
     RelinkForDescriptor(block.Location(), block_info.entry_point);
 
     mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
@@ -370,8 +401,8 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
         }
     }
 
+    // Install registers a compile-thread block in block_references; Emit does it for its own.
     for (auto [target_descriptor, list] : block_info.block_relocations) {
-        block_references[target_descriptor].insert(block_info.entry_point);
         LinkBlockLinks(block_info.entry_point, Get(target_descriptor), list);
     }
 }
@@ -405,17 +436,32 @@ void AddressSpace::LinkBlockLinks(const CodePtr entry_point, const CodePtr targe
     }
 }
 
+// Only the patched instructions are written, so only their span is cleaned and invalidated.
 void AddressSpace::RelinkForDescriptor(IR::LocationDescriptor target_descriptor, CodePtr target_ptr) {
-    for (auto code_ptr : block_references[target_descriptor]) {
-        if (auto block_iter = block_infos.find(code_ptr); block_iter != block_infos.end()) {
-            const EmittedBlockInfo& block_info = block_iter->second;
-
-            if (auto relocation_iter = block_info.block_relocations.find(target_descriptor); relocation_iter != block_info.block_relocations.end()) {
-                LinkBlockLinks(block_info.entry_point, target_ptr, relocation_iter->second);
-            }
-
-            mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
+    const auto ref_iter = block_references.find(target_descriptor);
+    if (ref_iter == block_references.end()) {
+        return;
+    }
+    for (auto code_ptr : ref_iter->second) {
+        const auto block_iter = block_infos.find(code_ptr);
+        if (block_iter == block_infos.end()) {
+            continue;
         }
+        const EmittedBlockInfo& block_info = block_iter->second;
+        const auto relocation_iter = block_info.block_relocations.find(target_descriptor);
+        if (relocation_iter == block_info.block_relocations.end() || relocation_iter->second.empty()) {
+            continue;
+        }
+        LinkBlockLinks(block_info.entry_point, target_ptr, relocation_iter->second);
+
+        // A Branch is one instruction, a MoveToScratch1 (ADRL) two.
+        std::ptrdiff_t first = PTRDIFF_MAX;
+        std::ptrdiff_t last = 0;
+        for (const auto& relocation : relocation_iter->second) {
+            first = std::min(first, relocation.code_offset);
+            last = std::max(last, relocation.code_offset + 8);
+        }
+        mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point + first), static_cast<size_t>(last - first));
     }
 }
 
@@ -443,7 +489,7 @@ FakeCall AddressSpace::FastmemCallback(u64 host_pc) {
         if (patch_entry->second.recompile) {
             const auto marker = patch_entry->second.marker;
             fastmem_manager.MarkDoNotFastmem(marker);
-            InvalidateBasicBlocks({std::get<0>(marker)});
+            InvalidateBasicBlocks({std::get<0>(marker)}, entry_point);
         }
 
         return fc;

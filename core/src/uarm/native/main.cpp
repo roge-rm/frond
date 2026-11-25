@@ -960,6 +960,8 @@ bool gFastEngineMissing = false;
             mainLoop.SetSpeed(speed, deviceProfileOriginalHz5(deviceType));
         }
         mainLoop.SetEmulatedTime(options.emulatedTime);
+        // The rx1950 idles between UI bursts that can run past real time; up to a second of lag is made up then.
+        if (dynamic_cast<SocS3C2442*>(soc)) mainLoop.SetCatchUpUsec(1000000);
 
         Rotation rotation = Rotation::portrait_0;
         // The view turns with the guest OS's orientation (the Zodiac, unless --view-turn window). The
@@ -1669,11 +1671,12 @@ bool gFastEngineMissing = false;
                         uint64_t fmSamples = 0, fmSounding = 0;
                         zodiac->FmSamples(fmSamples, fmSounding);
                         zodiacSpeed->Fm(fmSamples, fmSounding);
-                        sampled = zodiacSpeed->Sample(now, status.retired, status.time.ticks);
+                        sampled = zodiacSpeed->Sample(now, status.retired, status.time.ticks, mainLoop.DroppedUsec());
                     } else {
                         auto& machine = rx1950Soc->Machine();
                         sampled = zodiacSpeed->Sample(now, machine.retired(),
-                                                      uint64_t(__uint128_t(machine.nanoseconds()) * 32768 / 1000000000));
+                                                      uint64_t(__uint128_t(machine.nanoseconds()) * 32768 / 1000000000),
+                                                      mainLoop.DroppedUsec());
                     }
                     if (sampled) {
                         commandContext.speedIps = zodiacSpeed->Ips();

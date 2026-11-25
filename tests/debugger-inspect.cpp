@@ -38,7 +38,7 @@ int main() {
     };
     put(0x4000, 0xc02);
     assert(MMU_TRANSLATE_RESULT_OK(inspect(0x100)));
-    assert(mmu->tlb[0].revision != mmu->revision);
+    assert(mmu->tlb[0].gen != mmu->gen);
     put(0x4000, 0x40008001);  // Device-backed second-level table.
     assert(!MMU_TRANSLATE_RESULT_OK(inspect(0)));
     put(0x4000, 0x8001);

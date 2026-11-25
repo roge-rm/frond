@@ -34,7 +34,19 @@ MMUTranslateResult mmuTranslateInspect(ArmMmu*, uint32_t, bool write);
 // Moves on with every TLB flush, which every mapping change (TTB, MMU on or off, TLB
 // maintenance, reset, load) goes through.
 uint32_t mmuFlushCount(const struct ArmMmu *mmu);
+// Whether a live TLB entry answers va (MMU on).
+bool mmuTlbLive(const struct ArmMmu *mmu, uint32_t va);
+// The JIT's code pages, a byte per 4 KB MVA page (null for none): a walk that makes the TLB entries of a page
+// whose byte is set live is counted. mmuWatchedFills gives the count and, in *pages, the last 8 of those
+// fills by count & 7, each as its first page | (pages - 1) << 20; a count that moved on by more than 8 lost
+// some (a state load moves it on by 9).
+void mmuSetFillWatch(struct ArmMmu *mmu, const uint8_t *pages);
+uint32_t mmuWatchedFills(const struct ArmMmu *mmu, const uint32_t **pages);
 MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged, bool write);
+// A 4 KB page the TLB doesn't hold (a small page with a different AP for each 1 KB subpage): whether every
+// subpage allows the access and maps to the same physical 4 KB page with the same C and B. Walks the tables
+// without caching anything.
+bool mmuPageWhollyAllowed(ArmMmu*, uint32_t va, bool privileged, bool write);
 
 // The translation of a code address for the JIT's code map (as mmuTranslateInspect), and in
 // access its 4K page's domain and the AP of each 1K subpage, for mmuAccessReadable:
@@ -42,6 +54,24 @@ MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged,
 // has no mapping. MMU_ACCESS_ANY with the MMU off.
 #define MMU_ACCESS_ANY 0x10000u
 MMUTranslateResult mmuTranslateCodeAccess(ArmMmu*, uint32_t va, uint32_t* access);
+// The page table words mmuTranslateCodeAccessMemo's last walk for a page read, by host and physical address,
+// with their values and what the walk gave. The walk depends on the TTB and those words alone. walks counts
+// the walks recorded; tlb says the last call was answered by a live TLB entry, without the memo.
+struct MmuCodeWalkMemo {
+    uint32_t ttb = 0, access = 0;
+    MMUTranslateResult result = 0;
+    uint32_t walks = 0;
+    uint8_t n = 0;  // words held, 0 for none
+    bool tlb = false;
+    const uint8_t* word[10];
+    uint32_t value[10];
+    uint32_t pa[10];
+};
+// mmuTranslateCodeAccess with the same results: a live TLB entry answers as there; otherwise memo's result
+// while the TTB and every word it holds are as recorded, or else a walk, recorded in memo when host gives
+// the host address of every table word it read (null for one that isn't plain memory).
+MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu*, uint32_t va, uint32_t* access, MmuCodeWalkMemo* memo,
+                                              const uint8_t* (*host)(void*, uint32_t pa), void* ctx);
 // Whether reads of every mapped subpage of a page with that access are allowed now in
 // this mode.
 bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged);

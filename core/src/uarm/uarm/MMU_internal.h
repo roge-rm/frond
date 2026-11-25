@@ -5,10 +5,10 @@
 #include "cputil.h"
 #define TLB_SIZE (1 << 20)
 
+// Live while gen matches the MMU's gen.
 struct TlbEntry {
+    uint32_t gen;
     uint32_t pa : 20;
-
-    uint32_t revision : 4;
     uint32_t ap : 2;
     uint32_t domain : 4;
     uint32_t c : 1;
@@ -26,6 +26,9 @@ struct ArmMmu {
     uint32_t domainCfg;
 
     struct TlbEntry tlb[TLB_SIZE];
+    // gen moves on with every flush; only a wrap (2^32 flushes) clears the entries.
+    uint32_t gen;
+    // Cycles 1-15 with every flush as the saved and diagnostic TLB revision; the entries don't use it.
     uint16_t revision;
     // XScale only: dcOn is the C bit as last written (it doesn't read back from c1),
     // staleOn the stale D-cache window, staleTtb the page tables in use when it opened.
@@ -36,6 +39,12 @@ struct ArmMmu {
     // Moves on at every write to tlb (fills, flushes, loads), so a copy of an entry taken at one count is still the
     // entry while the count holds. Not saved.
     uint32_t tlbWrites;
+    // The JIT's code pages (mmuSetFillWatch): a byte per 4 KB MVA page, null for none. Each fill that makes the
+    // entry of a page whose byte is set live counts in watchedFills, and the last 8 such fills are kept in
+    // watchedFillPage (by count & 7) as the first page | (pages - 1) << 20. Not saved.
+    const uint8_t *fillWatch;
+    uint32_t watchedFills;
+    uint32_t watchedFillPage[8];
     // Called when the TLB, domains, S or R change, so anything that checked a permission
     // before checks it again (the I-cache's fetch key). Not saved.
     void (*permChanged)(void *ctx);
@@ -92,7 +101,7 @@ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t 
         return addr;
     }
     const auto& entry = mmu->tlb[addr >> 12];
-    if (entry.revision != mmu->revision)
+    if (entry.gen != mmu->gen)
         return mmuTranslate(mmu, addr, privileged, write);
     const auto fsr = checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, write);
     if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);

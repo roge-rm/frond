@@ -141,8 +141,11 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
         if (pa >= sdramBase && uint64_t(pa) + size <= uint64_t(sdramBase) + bank6Size) {
             const uint32_t at = (pa - sdramBase) % this->options.ramBytes;
             if (at + size > this->options.ramBytes) return false;
-            if (write) std::memcpy(ramBuffer + at, &value, size);
-            else {
+            if (write) {
+                std::memcpy(ramBuffer + at, &value, size);
+                // Fast: drops translated and decoded code the write lands on, as a CPU store does.
+                if (fastOn) cpuArm920LeanStoredBytes(cpuCore, sdramBase + at, size);
+            } else {
                 value = 0;
                 std::memcpy(&value, ramBuffer + at, size);
             }
@@ -521,10 +524,16 @@ void S3c2442Machine::setStylus(bool down, uint16_t x, uint16_t y) {
     updateLines();
 }
 
+const uint8_t* S3c2442Machine::sdramSpan(uint32_t pa, size_t n) const {
+    if (pa < sdramBase || uint64_t(pa) + n > uint64_t(sdramBase) + options.ramBytes) return nullptr;
+    return ramBuffer + (pa - sdramBase);
+}
+
 bool S3c2442Machine::screen(std::vector<uint32_t>& pixels, unsigned& width, unsigned& height, std::string& why) const {
     auto memory = [&](uint32_t pa, void* out, size_t n) {
-        if (pa < sdramBase || uint64_t(pa) + n > uint64_t(sdramBase) + options.ramBytes) return false;
-        std::memcpy(out, ramBuffer + (pa - sdramBase), n);
+        const uint8_t* at = sdramSpan(pa, n);
+        if (!at) return false;
+        std::memcpy(out, at, n);
         return true;
     };
     return lcd.frame(memory, pixels, width, height, why);
@@ -577,7 +586,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
 }
 
 // CPU cycles until the next timer, watchdog, frame or RTC event, UINT64_MAX with none due.
-uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
+uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly, bool fast) const {
     const uint64_t cpuHz = this->cpuHz();
     uint64_t best = UINT64_MAX;
     auto consider = [&](uint64_t ticks, uint64_t hz, uint64_t rest) {
@@ -595,10 +604,11 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     if (hostNextNs != UINT64_MAX && hostService)
         consider(hostNextNs <= elapsedNs ? 0 : hostNextNs - elapsedNs, 1000000000, nsRest);
     if (!wakeOnly) {
-        consider(std::min({pwm.ticksToEvent(), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
+        const uint32_t timers = fast ? (~intc.intmsk >> s3cIrq::timer0) & 0x1f : 0x1f;
+        consider(std::min({pwm.ticksToEvent(timers), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
         consider(rtc.ticksToEvent(), 32768, rtcRest);
-        return std::min(best, audioCyclesToEvent(false));
+        return std::min(best, audioCyclesToEvent(false, fast));
     }
     auto open = [&](unsigned source) { return !(intc.intmsk & (1u << source)); };
     const uint32_t timers = (~intc.intmsk >> s3cIrq::timer0) & 0x1f;
@@ -833,20 +843,26 @@ void S3c2442Machine::pumpAudioDma() {
     }
 }
 
-uint64_t S3c2442Machine::audioCyclesToEvent(bool wakeOnly) const {
+uint64_t S3c2442Machine::audioCyclesToEvent(bool wakeOnly, bool frameBoundary) const {
     if (!iis.enabled() || !(clock.clkcon & iisClock)) return UINT64_MAX;
     uint64_t frames = UINT64_MAX;
     auto check = [&](S3cDmaRequest request, bool moving) {
         if (!moving) return;
         const int ch = dma.channelFor(request);
-        if (ch < 0 || !dma.interruptAtEnd(unsigned(ch)) || !dma.unitBytes(unsigned(ch))) return;
+        if (ch < 0 || !dma.unitBytes(unsigned(ch))) return;
+        if (frameBoundary) {
+            // A Fast span defers clock advancement. DMA can touch RAM on each frame.
+            frames = 1;
+            return;
+        }
+        if (!dma.interruptAtEnd(unsigned(ch))) return;
         if (wakeOnly && (intc.intmsk & (1u << (s3cIrq::dma0 + unsigned(ch))))) return;
         // A frame moves four bytes through the FIFO, which the DMA keeps topped up.
         const uint64_t f = (uint64_t(dma.remaining(unsigned(ch))) * dma.transferBytes(unsigned(ch)) + 3) / 4;
         frames = std::min(frames, std::max<uint64_t>(f, 1));
     };
-    check(S3cDmaRequest::iisOut, iis.transmitting() && iis.txDmaOn());
-    check(S3cDmaRequest::iisIn, iis.receiving() && iis.rxDmaOn());
+    check(S3cDmaRequest::iisOut, iis.txDmaOn() && (frameBoundary || iis.transmitting()));
+    check(S3cDmaRequest::iisIn, iis.rxDmaOn() && (frameBoundary || iis.receiving()));
     const uint64_t hz = iisMasterHz();
     if (frames == UINT64_MAX || !hz) return UINT64_MAX;
     // Cycles c with (c * hz + iisRest) / (cpuHz * divider) >= frames.
@@ -1056,7 +1072,7 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             continue;
         }
         const bool fast = fastOn && history.empty();
-        uint64_t n = history.empty() ? std::min<uint64_t>({fast ? fastSpan : batch, cyclesToEvent(), target - used}) : 1;
+        uint64_t n = history.empty() ? std::min<uint64_t>({fast ? fastSpan : batch, cyclesToEvent(false, fast), target - used}) : 1;
         if (irqHeld) {
             if (retiredCount >= irqHeldUntil) {
                 irqHeld = false;
@@ -1118,30 +1134,33 @@ void S3c2442Machine::runFast(uint64_t n) {
     sfrAccessed = false;
     while (left && stopped.stop == S3c2442Stop::running && !watchdog.resetRequested && !clock.idle() &&
            !cpuArm920Waiting(cpuCore)) {
-        // A run passes its clock budget by a block at most (slack), and a Thumb BL pair is one clock but two
-        // instructions, so it gets half of what's left less a block.
-        if (leanCount == UINT32_MAX && !blPending && left / 2 > slack && cpuArm920JitCanRun(cpuCore)) {
+        // With no cost model a run's clocks are its instructions (a Thumb BL pair is 2), and it passes its budget
+        // by a block at most (slack instructions, 2 clocks for a pair), so it gets what's left less two blocks.
+        if (leanCount == UINT32_MAX && !blPending && left > 2 * uint64_t(slack) && cpuArm920JitCanRun(cpuCore)) {
             int stop = arm920JitExit;
             uint32_t instructions = 0;
-            const uint32_t budget = uint32_t(std::min<uint64_t>(left / 2 - slack + 1, UINT32_MAX / 2));
+            const uint32_t budget = uint32_t(std::min<uint64_t>(left - 2 * uint64_t(slack) + 1, UINT32_MAX / 2));
+            leanAdvanced = 0;
             cpuArm920RunJit(cpuCore, budget, &stop, budget, &instructions);
             if (instructions) {
                 retiredCount += instructions;
                 jitRetiredCount += instructions;
-                advance(instructions);
+                fastOwed += instructions - std::min(instructions, leanAdvanced);
                 left -= std::min<uint64_t>(left, instructions);
                 if (stop == arm920JitBudget || stop == arm920JitHalt) continue;
             }
             // Stopped at a WTCNT read: a delay loop's passes go at once where they can.
             if (stop == arm920JitExit && left > slack) {
+                settleFast();
                 if (const uint64_t skipped = skipDelay(left)) {
                     left -= skipped;
                     continue;
                 }
             }
             // Code not compiled yet, a run that keeps stopping straight away or one stopped at a read the lean
-            // path takes (WTCNT) goes to the lean path a while.
-            leanCount = stop == arm920JitCold || instructions < 4 ? 32 : stop == arm920JitExit ? 16 : 1;
+            // path takes (WTCNT) goes to the lean path a while. 512 after cold code: shorter spans bounce between
+            // the two paths (on the Galaxy Tab 32 ran 65M instructions a second, 512 81M).
+            leanCount = stop == arm920JitCold || instructions < 4 ? 512 : stop == arm920JitExit ? 16 : 1;
             continue;
         }
         if (!blPending) {
@@ -1154,7 +1173,7 @@ void S3c2442Machine::runFast(uint64_t n) {
             if (ran) {
                 retiredCount += ran;
                 leanRetiredCount += ran;
-                advance(ran - std::min(ran, leanAdvanced));
+                fastOwed += ran - std::min(ran, leanAdvanced);
                 left -= std::min<uint64_t>(left, ran);
                 blPending = blNext != ~0u;
                 if (ran == count) continue;
@@ -1163,88 +1182,116 @@ void S3c2442Machine::runFast(uint64_t n) {
         }
         // A BL suffix after a lean prefix, or an instruction neither the JIT nor the lean path runs.
         blPending = false;
+        settleFast();
         const uint32_t ran = step(1);
         stepRetiredCount += ran;
         left -= std::min<uint64_t>(left, ran ? ran : 1);
         if (sfrAccessed) break;
     }
+    settleFast();
 }
 
-// Fast: the WTCNT delay loops the rx1950's software busy-waits in. Each pass reads WTCNT (counting down) and
-// compares; the branch back is taken while the wait isn't over:
+// Fast: the busy-waits the rx1950's software polls a register in, where each pass reads it, tests and branches
+// back while the wait isn't over:
 // - eboot at 8c09b9e4 and 8c09ba58: ldr r3, [r2, #8]; cmp r3, r4; bhs head (until WTCNT is below r4).
-// - wavedev.dll at 017979c0, 1 ms on every WAV_IOControl: ldr r3, [r6, #8]; sub r3, r5, r3; mov r3, r3, lsl #16;
-//   cmp r0, r3, lsr #16; bhs head (until the 16-bit start r5 - WTCNT is above r0).
-// At the load, with its base on WTCNT, the passes that stay in the loop within left go at once as the lean path
-// would run them: one cycle an instruction, each read seeing the count at its own instruction, and the
-// registers and flags as the last of them leaves them. Passes from the first WTCNT reload on aren't taken, so
+// - The microsecond delay of wavedev.dll (017979c0, 1 ms on every WAV_IOControl) and other drivers (017150bc,
+//   018f5880, with lr, r1 and r2): ldr t, [b, #8]; sub t, s, t; mov t, t, lsl #16; cmp l, t, lsr #16; bhs head
+//   (until the 16-bit start s - WTCNT is above l).
+// - The touch driver's wait for a conversion at 01711890: ldr t, [b]; tst t, #0x8000; beq head with b on ADCCON
+//   (until ECFLG). ADCCON only changes at a write or the conversion's end, an event, so in a span every pass
+//   reads the same.
+// At the load, with its base on the register, the passes that stay in the loop within left go at once as the
+// lean path would run them: one cycle an instruction, each read seeing the register at its own instruction, and
+// the registers and flags as the last of them leaves them. Passes from the first WTCNT reload on aren't taken, so
 // the passes that stay are a run from the first. Returns the instructions passed.
 uint64_t S3c2442Machine::skipDelay(uint64_t left) {
-    struct Loop {
-        uint32_t code[5];
-        unsigned count, base;
-    };
-    static const Loop loops[] = {
-        {{0xe5923008, 0xe1530004, 0x2afffffc}, 3, 2},
-        {{0xe5963008, 0xe0453003, 0xe1a03803, 0xe1500823, 0x2afffffa}, 5, 6},
-    };
     uint32_t* r = cpuGetRegisters(cpuCore);
     if (!delaySkip || cpuIsThumb(cpuCore) || !cpuArm920JitCanRun(cpuCore)) return 0;
     const uint32_t head = r[15];
-    uint32_t word, pa;
-    if (!cpuArm920PeekWord(cpuCore, head, &word, &pa)) return 0;
-    const Loop* l = nullptr;
-    for (const Loop& c : loops)
-        if (word == c.code[0]) l = &c;
-    if (!l) return 0;
-    for (unsigned i = 1; i < l->count; ++i)
-        if (!cpuArm920PeekWord(cpuCore, head + 4 * i, &word, &pa) || word != l->code[i]) return 0;
-    const uint32_t va = r[l->base] + 8;
-    if ((va & 3) || !cpuArm920PeekWord(cpuCore, va, nullptr, &pa) || pa != 0x53000008) return 0;
-    const uint64_t hz = cpuHz(), pclk = clock.pclk(), pass = l->count, most = left / pass;
-    if (!hz || !pclk || most < 2) return 0;
-    const bool eboot = l->count == 3;
-    // The count pass k reads, k passes after this one, as advance() would bring the watchdog there.
-    auto countAt = [&](uint64_t k, uint32_t& v) {
-        return watchdog.countAfter(uint64_t((__uint128_t(k * pass) * pclk + pclkRest) / hz), v);
+    uint32_t code[5], pa;
+    auto fetch = [&](unsigned n) {
+        for (unsigned i = 0; i < n; ++i)
+            if (!cpuArm920PeekWord(cpuCore, head + 4 * i, &code[i], &pa)) return false;
+        return true;
     };
-    uint32_t first;
-    if (!countAt(0, first)) return 0;
-    const uint32_t start = (r[5] - first) & 0xffff;
-    // Whether pass k stays in the loop; false too from a reload or a 16-bit wrap of start - WTCNT on.
-    auto stays = [&](uint64_t k) {
-        uint32_t v;
-        if (!countAt(k, v)) return false;
-        if (eboot) return v >= r[4];
-        return start + (first - v) <= 0xffff && r[0] >= ((r[5] - v) & 0xffff);
-    };
-    if (!stays(0)) return 0;
-    // The first pass that leaves, or most when they all stay.
-    uint64_t lo = 1, hi = most;
-    while (lo < hi) {
-        const uint64_t mid = lo + (hi - lo) / 2;
-        if (stays(mid)) lo = mid + 1;
-        else hi = mid;
-    }
-    const uint64_t passes = lo;
-    uint32_t v = 0;
-    countAt(passes - 1, v);
-    uint32_t a, b;
-    if (eboot) {
-        r[3] = v;
-        a = v;
-        b = r[4];
+    enum { eboot, delay, adcWait } kind;
+    unsigned t, b, sReg = 0, lReg = 0, pass;
+    if (!fetch(3)) return 0;
+    t = (code[0] >> 12) & 15;
+    b = (code[0] >> 16) & 15;
+    if (code[0] == 0xe5923008 && code[1] == 0xe1530004 && code[2] == 0x2afffffc) {
+        kind = eboot;
+        pass = 3;
+    } else if ((code[0] & 0xfff00fff) == 0xe5900000 && code[1] == (0xe3100902 | t << 16) && code[2] == 0x0afffffc) {
+        kind = adcWait;
+        pass = 3;
+    } else if ((code[0] & 0xfff00fff) == 0xe5900008 && fetch(5) && (code[1] & 0xfff0ffff) == (0xe0400000 | t << 12 | t) &&
+               code[2] == (0xe1a00800 | t << 12 | t) && (code[3] & 0xfff0ffff) == (0xe1500820 | t) && code[4] == 0x2afffffa) {
+        kind = delay;
+        pass = 5;
+        sReg = (code[1] >> 16) & 15;
+        lReg = (code[3] >> 16) & 15;
+        if (sReg == t || lReg == t || sReg == 15 || lReg == 15) return 0;
     } else {
-        r[3] = (r[5] - v) << 16;
-        a = r[0];
-        b = r[3] >> 16;
+        return 0;
     }
-    const uint32_t diff = a - b;
-    const uint32_t nzcv = (diff & 0x80000000u) | (diff ? 0 : 0x40000000u) | (a >= b ? 0x20000000u : 0) |
-                          ((((a ^ b) & (a ^ diff)) >> 31) << 28);
+    if (t == 15 || b == 15 || t == b) return 0;
+    const uint32_t va = r[b] + (kind == adcWait ? 0 : 8);
+    if ((va & 3) || !cpuArm920PeekWord(cpuCore, va, nullptr, &pa) || pa != (kind == adcWait ? 0x58000000u : 0x53000008u))
+        return 0;
+    const uint64_t hz = cpuHz(), pclk = clock.pclk(), most = left / pass;
+    if (!hz || !pclk || most < 2) return 0;
+    uint64_t passes;
+    uint32_t a, c, nzcv;
+    if (kind == adcWait) {
+        uint32_t v;
+        if (adc.read(0, v) != S3cAccess::ok || (v & 0x8000)) return 0;
+        passes = most;
+        r[t] = v;
+        // tst with a rotated immediate: Z, N and C (bit 31 of 0x8000) clear but Z set, V kept.
+        nzcv = 0x40000000u | (cpuGetRegExternal(cpuCore, ARM_REG_NUM_CPSR) & 0x10000000u);
+    } else {
+        // The count pass k reads, k passes after this one, as advance() would bring the watchdog there.
+        auto countAt = [&](uint64_t k, uint32_t& v) {
+            return watchdog.countAfter(uint64_t((__uint128_t(k * pass) * pclk + pclkRest) / hz), v);
+        };
+        uint32_t first;
+        if (!countAt(0, first)) return 0;
+        const uint32_t start = (r[sReg] - first) & 0xffff;
+        // Whether pass k stays in the loop; false too from a reload or a 16-bit wrap of start - WTCNT on.
+        auto stays = [&](uint64_t k) {
+            uint32_t v;
+            if (!countAt(k, v)) return false;
+            if (kind == eboot) return v >= r[4];
+            return start + (first - v) <= 0xffff && r[lReg] >= ((r[sReg] - v) & 0xffff);
+        };
+        if (!stays(0)) return 0;
+        // The first pass that leaves, or most when they all stay.
+        uint64_t lo = 1, hi = most;
+        while (lo < hi) {
+            const uint64_t mid = lo + (hi - lo) / 2;
+            if (stays(mid)) lo = mid + 1;
+            else hi = mid;
+        }
+        passes = lo;
+        uint32_t v = 0;
+        countAt(passes - 1, v);
+        if (kind == eboot) {
+            r[3] = v;
+            a = v;
+            c = r[4];
+        } else {
+            r[t] = (r[sReg] - v) << 16;
+            a = r[lReg];
+            c = r[t] >> 16;
+        }
+        const uint32_t diff = a - c;
+        nzcv = (diff & 0x80000000u) | (diff ? 0 : 0x40000000u) | (a >= c ? 0x20000000u : 0) |
+               ((((a ^ c) & (a ^ diff)) >> 31) << 28);
+    }
     cpuSetReg(cpuCore, ARM_REG_NUM_CPSR, (cpuGetRegExternal(cpuCore, ARM_REG_NUM_CPSR) & 0x0fffffffu) | nzcv);
     // The last instruction run was the branch back.
-    cpuSetCurInstrPC(cpuCore, head + 4 * (l->count - 1));
+    cpuSetCurInstrPC(cpuCore, head + 4 * (pass - 1));
     const uint64_t n = passes * pass;
     retiredCount += n;
     ++delaySkipCount;
@@ -1253,11 +1300,17 @@ uint64_t S3c2442Machine::skipDelay(uint64_t left) {
     return n;
 }
 
+// PWM reads translated code answers (leanRead), as marked access pcs that start their block.
+static constexpr uint32_t tickReadPcs[] = {
+    0x8004aef4, 0x8004aef8,  // WM5 kernel tick count: its TCNTO4 and TCNTB4 loads
+};
+
 bool S3c2442Machine::setFastEngine(bool fast) {
     if (fast == fastOn) return true;
     cpuArm920SetLean(cpuCore, fast ? leanPage : nullptr, fast ? leanGuard : nullptr, this);
     cpuArm920SetLeanRead(cpuCore, fast ? leanRead : nullptr);
     cpuArm920SetLeanWrite(cpuCore, fast ? leanWrite : nullptr);
+    cpuArm920SetJitAccessPcs(cpuCore, tickReadPcs, sizeof tickReadPcs / sizeof tickReadPcs[0], true);
     if (fast && !cpuArm920SetJit(cpuCore, true)) {
         cpuArm920SetLean(cpuCore, nullptr, nullptr, this);
         return false;
@@ -1269,12 +1322,13 @@ bool S3c2442Machine::setFastEngine(bool fast) {
     return true;
 }
 
-// SDRAM (bank 6, repeating) and the steppingstone (bank 0, repeating): plain memory with no time and no side
-// effect, which the Fast engine reads and writes from host memory.
+// SDRAM (bank 6, repeating) and the steppingstone's 4 KB at 0: plain memory with no time and no side effect,
+// which the Fast engine reads and writes from host memory. The rest of bank 0 goes through the bus, whose
+// mirroring of the steppingstone is an assumption (mmio), so page table walks never memoise it.
 uint8_t* S3c2442Machine::leanPage(void* context, uint32_t pa, bool, bool* counted) {
     auto& m = *static_cast<S3c2442Machine*>(context);
     *counted = true;
-    if (pa < 0x08000000) return m.steppingstone;
+    if (pa < 0x08000000) return pa < sizeof m.steppingstone ? m.steppingstone : nullptr;
     // The RAM regions create() maps: up to 4 copies of the SDRAM.
     const uint32_t mapped = std::min<uint32_t>(4, bank6Size / m.options.ramBytes) * m.options.ramBytes;
     if (pa >= sdramBase && pa - sdramBase < mapped) return m.ramBuffer + ((pa - sdramBase) & (m.options.ramBytes - 1) & ~0xfffu);
@@ -1282,10 +1336,12 @@ uint8_t* S3c2442Machine::leanPage(void* context, uint32_t pa, bool, bool* counte
 }
 
 // SFR accesses Fast takes without ending its run, as they change nothing but the block's own state: WTCNT
-// reads, which the OS's delay loops poll, and the NAND controller, which has no timing and raises no interrupt.
-// For WTCNT the machine's time is first brought up to the reading instruction, as the interpreter does
+// reads, which the OS's delay loops poll, PWM timer reads (the kernel's tick count reads TCNTB4 and TCNTO4),
+// and the NAND controller, which has no timing and raises no interrupt.
+// For the timers the machine's time is first brought up to the reading instruction, as the interpreter does
 // (mmio); with no event due in the span that changes nothing else. Translated code leaves WTCNT to the lean
-// path, as its ran counts clocks, not instructions.
+// path (skipDelay takes its delay loops at the run's exit), and PWM reads too, as its ran counts clocks, except
+// at a tick read pc (tickReadPcs): that starts its block, so the run's instructions so far are exact there.
 bool S3c2442Machine::leanRead(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t, bool,
                               uint32_t* value, uint32_t* cost) {
     auto& m = *static_cast<S3c2442Machine*>(context);
@@ -1300,12 +1356,19 @@ bool S3c2442Machine::leanRead(void* context, uint32_t pa, uint32_t size, uint32_
             if (m.nand.read(pa & 0x3c, 4, got) != S3cAccess::ok) return false;
             *value = size == 4 ? got : (got >> ((pa & 3) * 8)) & ((1u << (8 * size)) - 1);
         }
-    } else if (pa == 0x53000008 && size == 4 && !cpuArm920LeanInJit(m.cpuCore)) {
+    } else if ((pa == 0x53000008 || (pa >= 0x51000000 && pa <= 0x51000040)) && size == 4 && !(pa & 3)) {
+        if (cpuArm920LeanInJit(m.cpuCore)) {
+            // pc is only set at a marked pc (cpuArm920SetJitAccessPcs).
+            if (pa == 0x53000008 || !pc) return false;
+            ran = cpuArm920JitInstructionsNow(m.cpuCore);
+        }
+        m.settleFast();
         if (ran > m.leanAdvanced) {
             m.advance(ran - m.leanAdvanced);
             m.leanAdvanced = ran;
         }
-        if (m.watchdog.read(8, *value) != S3cAccess::ok) return false;
+        if ((pa == 0x53000008 ? m.watchdog.read(8, *value) : m.pwm.read(pa & 0x7f, *value)) != S3cAccess::ok)
+            return false;
     } else {
         return false;
     }

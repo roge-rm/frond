@@ -380,6 +380,9 @@ struct ArmCpu {
     // before the current instruction.
     bool leanRun, leanExit;
     uint32_t leanBlNext;
+    // The last page mmuPageWhollyAllowed refused for the lean path's host TLB fill: VA page, privilege and
+    // write in the low bits, the host TLB gen above.
+    uint64_t leanWholeRefused;
     Arm920LeanPage leanPage;
     Arm920LeanGuard leanGuard;
     void* leanContext;
@@ -406,6 +409,7 @@ struct ArmCpu {
     uint32_t jitAccessPcCount;
     // Fast blocks: an SWI returning to this address ends the JIT run at the vector (cpuArm920SetJitSwiHalt), 0 for none.
     uint32_t jitSwiHalt;
+    bool jitAccessPcsStartBlocks;  // each access pc starts its block (cpuArm920SetJitAccessPcs)
     // Fast: code hooks (cpuArm920SetCodeHooks). The lean path and translated code stop before these pcs and leave
     // them to the step. Host only, never saved.
     uint32_t codeHooks[ARM920_MAX_CODE_HOOKS];
@@ -1255,7 +1259,7 @@ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint
                                             bool privileged, uint8_t info) {
     const struct ArmMmu *mmu = cpu->memorySystem.mmu;
     if (mmu->transTablPA != MMU_DISABLED_TTP) {
-        if (mmu->tlb[va >> 12].revision != mmu->revision) return;
+        if (mmu->tlb[va >> 12].gen != mmu->gen) return;
     } else if (mmu->staleOn) {
         return;  // the stale D-cache window: every access goes through mmuStaleTranslate
     }
@@ -1300,7 +1304,7 @@ static __attribute__((noinline)) void cpuPrvJitFill(struct ArmCpu *cpu, uint32_t
                                                    bool privileged, uint8_t info) {
     const struct ArmMmu *mmu = cpu->memorySystem.mmu;
     if (mmu->transTablPA != MMU_DISABLED_TTP) {
-        if (mmu->tlb[va >> 12].revision != mmu->revision) return;
+        if (mmu->tlb[va >> 12].gen != mmu->gen) return;
     } else if (mmu->staleOn) {
         return;
     }
@@ -1363,11 +1367,12 @@ static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
 // store overlaps, in the virtual pages translated from pa. Decoded code isn't tied to the physical pages
 // it came from, so a store to any of its lines drops it all. A store to other lines of those pages drops
 // nothing.
-static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size) {
+// data: the bytes being stored, before the page holds them (null if it already does or they aren't known).
+static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size, const void *data = nullptr) {
 #ifdef FROND_DYNARMIC
     // The word marks stay until jitRun works them out again from the blocks left.
     if (cpu->jitCode && unlikely(cpu->jitCode->page(pa)) && cpu->jitCode->hitWords(pa, size))
-        jitCodeWrittenPa(cpu->jit, pa, size);
+        jitCodeWrittenPa(cpu->jit, pa, size, data);
 #endif
     if (!cpu->leanCode || likely(!cpu->leanCode->page(pa)) || !cpu->leanCode->hit(pa, size)) return;
     cpu->leanCode->clear();
@@ -1390,6 +1395,15 @@ static uint32_t cpuPrvJitRanUncharged(const ArmCpu *cpu) {
     return ran > cpu->jitCharged ? ran - cpu->jitCharged : 0;
 }
 #endif
+
+static bool cpuPrvLeanWholePage(struct ArmCpu *cpu, uint32_t va, uint32_t mva, bool privileged, bool write) {
+    const uint64_t key = (va & ~0xfffu) | (privileged ? 2u : 0u) | (write ? 1u : 0u) |
+                         (uint64_t(cpu->mem->hostTlb.gen) << 32);
+    if (cpu->leanWholeRefused == key) return false;
+    if (mmuPageWhollyAllowed(cpu->memorySystem.mmu, mva, privileged, write)) return true;
+    cpu->leanWholeRefused = key;
+    return false;
+}
 
 template <int size, bool write>
 static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, void *buf, uint32_t va,
@@ -1447,7 +1461,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
                 // The next stores to this page from generated code skip the translation (cpuJitLeanDeviceWrite),
                 // while the MMU TLB entry it came from holds.
                 if (cpu->leanJit &&
-                    (mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision)) {
+                    (mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].gen == mmu->gen)) {
                     auto &e = cpu->mem->hostTlb.leanDeviceWrite[(va >> 12) & 15];
                     e.key = hostTlbKey(gen, va, privileged);
                     e.pa = (MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu) | 1;
@@ -1462,14 +1476,17 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     // A page holding code keeps no write entry, so each store to it is checked against the code's lines.
     bool codePage = false;
     if constexpr (write) {
-        cpuPrvArm920Stored(cpu, MMU_TRANSLATE_RESULT_PA(r), size);
+        cpuPrvArm920Stored(cpu, MMU_TRANSLATE_RESULT_PA(r), size, buf);
         codePage = cpuPrvArm920CodePage(cpu, MMU_TRANSLATE_RESULT_PA(r));
     }
     uint8_t *host = page + (MMU_TRANSLATE_RESULT_PA(r) & 0xfffu);
     if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
     cpu->leanBus += counted;
-    // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
-    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision) &&
+    // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned. A page the TLB
+    // doesn't hold, as its 1 KB subpages have different APs (WinCE's KData page), is filled too when the
+    // access is allowed on all of it; the host TLB is flushed with every TLB flush, TTB and domain change.
+    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].gen == mmu->gen ||
+         cpuPrvLeanWholePage(cpu, va, mva, privileged, write)) &&
         !(uintptr_t(page) & 1)) {
         struct HostTlb &t = cpu->mem->hostTlb;
         if (!codePage) {
@@ -5910,9 +5927,17 @@ bool cpuArm920UsrRegisters(const ArmCpu *cpu, uint32_t *sp, uint32_t *lr) {
 
 bool cpuArm920InterruptRaised(const ArmCpu *cpu) { return cpu->waitingIrqs || cpu->waitingFiqs; }
 
-void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
+void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count, bool startBlocks) {
     cpu->jitAccessPcs = pcs;
     cpu->jitAccessPcCount = count;
+    cpu->jitAccessPcsStartBlocks = startBlocks;
+}
+
+uint32_t cpuArm920JitInstructionsNow(const ArmCpu *cpu) {
+#ifdef FROND_DYNARMIC
+    if (cpu->leanJit) return jitRanInstructionsNow(cpu->jit);
+#endif
+    return 0;
 }
 
 bool cpuArm920SetCodeHooks(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
@@ -6048,8 +6073,10 @@ bool cpuJitCodePageWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value
         e = {};
         return false;
     }
-    // Aligned and at most 4 bytes, so the store is inside one word and one line.
-    if ((jitPage && cpu->jitCode->hitWord(pa)) || (leanPage && cpu->leanCode->hitLine(pa))) return false;
+    // Aligned and at most 4 bytes, so the store is inside one word and one line. A store to code or a walked
+    // table word drops or notes it as the slow path would, before the store.
+    if ((jitPage && cpu->jitCode->hitWord(pa)) || (leanPage && cpu->leanCode->hitLine(pa)))
+        cpuPrvArm920Stored(cpu, pa, size, &value);
     memcpy(e.host + (va & 0xfffu), &value, size);
     cpu->leanBus += e.counted;
     return true;
@@ -6115,20 +6142,36 @@ static uint8_t *cpuPrvJitHostCodePage(ArmCpu *cpu, uint32_t va) {
     return (uint8_t *)romGetPeepholeBuffer(rom) + (page - data);
 }
 
+// ARM920T Fast blocks: plain pages only, straight from memory: Fast keeps no I-cache contents.
+static bool cpuPrvJitFetchMva(ArmCpu *cpu, uint32_t mva, uint32_t *word) {
+    const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, mva, cpu->privileged, false);
+    if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
+    bool counted;
+    const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
+    if (!page) return false;
+    memcpy(word, page + (pa & 0xfffu), 4);
+    return true;
+}
+
+bool cpuJitFetchMva(ArmCpu *cpu, uint32_t mva, uint32_t *word) {
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks) return false;
+    return cpuPrvJitFetchMva(cpu, mva & ~3u, word);
+}
+
+bool cpuJitFetchPa(ArmCpu *cpu, uint32_t pa, uint32_t *word) {
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return false;
+    bool counted;
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
+    if (!page) return false;
+    memcpy(word, page + (pa & 0xffcu), 4);
+    return true;
+}
+
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
     va &= ~3u;
     if (cpu->model == ArmCpuModel::arm920t) {
-        if (cpu->jitBlocks) {
-            // Plain pages only, straight from memory: Fast keeps no I-cache contents. The MMU sees the MVA.
-            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, cpuPrvMva(cpu, va), cpu->privileged, false);
-            if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
-            bool counted;
-            const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
-            const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
-            if (!page) return false;
-            memcpy(word, page + (pa & 0xfffu), 4);
-            return true;
-        }
+        if (cpu->jitBlocks) return cpuPrvJitFetchMva(cpu, cpuPrvMva(cpu, va), word);  // the MMU sees the MVA
         uint_fast8_t fsr;
         return icacheArm920Word(cpu->ic, va, cpu->privileged, &fsr, word);
     }
@@ -6154,6 +6197,33 @@ bool cpuJitRefused(const ArmCpu *cpu) { return cpu->jitRefused; }
 
 bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access) {
     const MMUTranslateResult r = mmuTranslateCodeAccess(cpu->memorySystem.mmu, va, access);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+    *pa = MMU_TRANSLATE_RESULT_PA(r);
+    return true;
+}
+
+// A page table word's host address for mmuTranslateCodeAccessMemo: RAM through the lean path's pages.
+static const uint8_t *cpuPrvTableWord(void *ctx, uint32_t pa) {
+    ArmCpu *cpu = (ArmCpu *)ctx;
+    bool counted;
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
+    return page ? page + (pa & 0xffcu) : nullptr;
+}
+
+uint32_t cpuJitTtb(ArmCpu *cpu) { return mmuGetTTP(cpu->memorySystem.mmu); }
+
+bool cpuJitTlbLive(ArmCpu *cpu, uint32_t va) { return mmuTlbLive(cpu->memorySystem.mmu, va); }
+
+void cpuJitSetFillWatch(ArmCpu *cpu, const uint8_t *pages) { mmuSetFillWatch(cpu->memorySystem.mmu, pages); }
+
+uint32_t cpuJitWatchedFills(ArmCpu *cpu, const uint32_t **pages) {
+    return mmuWatchedFills(cpu->memorySystem.mmu, pages);
+}
+
+bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, MmuCodeWalkMemo *memo) {
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return cpuJitCodePa(cpu, va, pa, access);
+    const MMUTranslateResult r =
+        mmuTranslateCodeAccessMemo(cpu->memorySystem.mmu, va, access, memo, cpuPrvTableWord, cpu);
     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
     *pa = MMU_TRANSLATE_RESULT_PA(r);
     return true;
@@ -6238,6 +6308,13 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
     return (uint8_t *)romGetPeepholeBuffer(rom) + (data - (uint8_t *)romGetData(rom));
 }
 
+void cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa) {
+    if (!cpu->jitCode) return;
+    // A newly marked page loses its host TLB entries, so its stores come through cpuPrvArm920Stored.
+    if (cpu->jitCode->note(pa, false)) hostTlbFlush(&cpu->mem->hostTlb);
+    cpu->jitCode->noteWord(pa);
+}
+
 void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa) {
     if (cpu->jitCode && cpu->jitCode->page(pa)) cpu->jitCode->noteWord(pa);
 }
@@ -6282,6 +6359,8 @@ bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc) {
 }
 
 bool cpuJitSwiHalts(const ArmCpu *cpu, uint32_t returnPc) { return cpu->jitSwiHalt && cpu->jitSwiHalt == returnPc; }
+
+bool cpuJitAccessPcsStartBlocks(const ArmCpu *cpu) { return cpu->jitAccessPcsStartBlocks; }
 
 bool cpuJitPrivileged(ArmCpu *cpu) { return cpu->privileged; }
 
@@ -6939,7 +7018,8 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
             // ARM920T word stores use PC+12; the JIT uses the ARMv5 PC+8 value.
             if ((word & 0x0e108000) == 0x08008000 ||
                 (word & 0x0c50f000) == 0x0400f000) return false;
-            if ((word >> 28) == 15 || (word & 0x0ffffff0) == 0x012fff30 ||
+            // PLD, which never executes on the ARM920T (execFn_noop), is a no-op in the JIT too.
+            if (((word >> 28) == 15 && (word & 0x0D70F000UL) != 0x0550F000UL) || (word & 0x0ffffff0) == 0x012fff30 ||
                 (word & 0x0fff0ff0) == 0x016f0f10 ||
                 (word & 0x0f9000f0) == 0x01000050 ||
                 (word & 0x0f900090) == 0x01000080 ||
@@ -6966,15 +7046,16 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
         }
         // Fast blocks: what the lean path leaves to the step stays out too (CP15, exception returns, S-bit
         // LDM/STM, unpredictable forms), except MSR of the CPSR control field, which the JIT runs through
-        // cpuJitSetCpsr (a pending interrupt it unmasks ends the run), the two exception returns below and SWI,
-        // which cpuJitSwi takes as the step would (the run ends at the vector).
+        // cpuJitSetCpsr (a pending interrupt it unmasks ends the run), the two exception returns below, SWI,
+        // which cpuJitSwi takes as the step would (the run ends at the vector), and PLD, a no-op in both.
         if (cpu->jitBlocks) {
             if (!thumb) {
                 const bool msrCpsr = (word & 0x0ff0fff0) == 0x0120f000 || (word & 0x0ff0f000) == 0x0320f000;
                 // MOVS PC, LR and SUBS PC, LR, #4 return through cpuJitExceptionReturn.
                 const bool exceptionReturn = (word & 0x0fffffff) == 0x01b0f00e || (word & 0x0fffffff) == 0x025ef004;
                 const bool swi = (word & 0x0f000000) == 0x0f000000 && (word >> 28) != 15;
-                if (!msrCpsr && !exceptionReturn && !dacr && !swi && cpuPrvLeanClassArm(word) == LeanClass::exit)
+                const bool pld = (word >> 28) == 15 && (word & 0x0D70F000UL) == 0x0550F000UL;
+                if (!msrCpsr && !exceptionReturn && !dacr && !swi && !pld && cpuPrvLeanClassArm(word) == LeanClass::exit)
                     return false;
             } else {
                 const uint16_t h = (pc & 2) ? word >> 16 : word & 0xffff;
@@ -7244,6 +7325,8 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span,
     uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
     int jitStop;
     const uint32_t ran = jitRun(cpu->jit, cpu->regs, cpsr, budget, jitStop);
+    // A marked access that faulted, or ended the run, leaves its pc behind.
+    cpu->jitAccessPc = 0;
     if (instructions) *instructions = jitLastInstructions(cpu->jit);
     *stop = jitStop == FROND_JIT_BUDGET ? arm920JitBudget :
             jitStop == FROND_JIT_HALT   ? arm920JitHalt :

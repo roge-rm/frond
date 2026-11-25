@@ -417,7 +417,15 @@ void A32AddressSpace::CompileJob(CompileThread::Job& job) {
     const A32::LocationDescriptor descriptor{ir_block.Location()};
     const A32::LocationDescriptor end_location{ir_block.EndLocation()};
     Common::FrondBlockTargets(ir_block, job.targets);
-    std::lock_guard lock{code_mutex};
+    // The guest thread holds code_mutex for short installs. Trying a few times before sleeping on it saves
+    // the guest thread a futex wake when it unlocks.
+    std::unique_lock lock{code_mutex, std::defer_lock};
+    for (int i = 0; i < 64 && !lock.try_lock(); i++) {
+        std::this_thread::yield();
+    }
+    if (!lock.owns_lock()) {
+        lock.lock();
+    }
     if (job.epoch != compile_thread->Epoch()) {
         job.status = CompileThread::Status::Cancelled;
         return;
@@ -728,6 +736,9 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .check_halt_on_memory_access = conf.check_halt_on_memory_access,
         .check_halt_on_link = conf.check_halt_on_link,
         .max_unchecked_instructions = conf.enable_cycle_counting ? conf.max_unchecked_instructions : 0,
+        .frond_page_guard = conf.frond_page_guard,
+        .frond_page_guard_end = conf.frond_page_guard_end,
+        .frond_page_guard_fpscr = conf.frond_page_guard_fpscr,
 
         .page_table_pointer = mcl::bit_cast<u64>(conf.page_table),
         .page_table_address_space_bits = 32,

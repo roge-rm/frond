@@ -137,6 +137,32 @@ A32EmitX64::EmittedBlock A32EmitX64::EmitUnregistered(IR::Block& block) {
     code.align();
     const u8* const entrypoint = code.getCurr();
 
+    // Frond: the page guard (A32::UserConfig::frond_page_guard), before anything runs.
+    if (conf.frond_page_guard && (A32::LocationDescriptor{block.Location()}.FPSCR().Value() & conf.frond_page_guard_fpscr)) {
+        const u32 first = A32::LocationDescriptor{block.Location()}.PC();
+        const u32 last = A32::LocationDescriptor{block.EndLocation()}.PC() - 1;
+        SharedLabel guarded;
+        for (u32 page = first >> 12; page <= last >> 12 && page < (conf.frond_page_guard_end >> 12); page++) {
+            if (!guarded) {
+                guarded = GenSharedLabel();
+            }
+            code.mov(rax, mcl::bit_cast<u64>(conf.frond_page_guard + page));
+            code.cmp(byte[rax], 0);
+            code.jne(*guarded, code.T_NEAR);
+        }
+        if (guarded) {
+            ctx.deferred_emits.emplace_back([this, guarded, first] {
+                code.L(*guarded);
+                code.mov(code.ABI_PARAM2.cvt32(), first);
+                code.mov(code.ABI_PARAM3.cvt32(), 1);
+                code.mov(MJitStateReg(A32::Reg::PC), code.ABI_PARAM2.cvt32());
+                code.SwitchMxcsrOnExit();
+                Devirtualize<&A32::UserCallbacks::InterpreterFallback>(conf.callbacks).EmitCall(code);
+                code.ReturnFromRunCode(true);
+            });
+        }
+    }
+
     EmitCondPrelude(ctx);
 
     for (auto iter = block.begin(); iter != block.end(); ++iter) {

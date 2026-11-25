@@ -344,7 +344,9 @@ public:
     // Waits until every queued job is finished (sync mode).
     void WaitIdle() {
         std::unique_lock lock{mutex};
+        idle_waiters++;
         idle.wait(lock, [this] { return busy == 0 || stopping; });
+        idle_waiters--;
     }
 
     bool HasDone() const { return done_count.load(std::memory_order_acquire) != 0; }
@@ -474,7 +476,9 @@ private:
 #endif
         std::unique_lock lock{mutex};
         for (;;) {
+            worker_waiting = true;
             wake.wait(lock, [this] { return stopping || !queue.empty() || !ahead_queue.empty(); });
+            worker_waiting = false;
             if (stopping) {
                 // Queued jobs are dropped; nobody waits for them.
                 busy = 0;
@@ -509,13 +513,14 @@ private:
             lock.lock();
             done.push_back(std::move(job));
             done_count.store(done.size(), std::memory_order_release);
-            if (--busy == 0) {
+            if (--busy == 0 && idle_waiters != 0) {
                 idle.notify_all();
             }
         }
     }
 
     void Enqueue(IR::LocationDescriptor location, std::unique_ptr<A32::CodeSnapshot> snapshot, bool ahead, unsigned depth) {
+        bool sleeping;
         auto job = std::make_unique<Job>();
         job->location = location;
         job->snapshot = std::move(snapshot);
@@ -531,8 +536,11 @@ private:
             std::lock_guard lock{mutex};
             (ahead ? ahead_queue : queue).push_back(std::move(job));
             busy++;
+            sleeping = worker_waiting;
         }
-        wake.notify_one();
+        if (sleeping) {
+            wake.notify_one();
+        }
     }
 
     // Takes the oldest ahead job off the queue, to make room for a newer one. False if
@@ -546,7 +554,7 @@ private:
             }
             job = std::move(ahead_queue.front());
             ahead_queue.pop_front();
-            if (--busy == 0) {
+            if (--busy == 0 && idle_waiters != 0) {
                 idle.notify_all();
             }
         }
@@ -581,6 +589,9 @@ private:
     std::vector<std::unique_ptr<Job>> done;
     std::size_t busy = 0;
     bool stopping = false;
+    // Notifies go only to a thread that waits, as bionic's condition variables make a syscall for each.
+    bool worker_waiting = false;   // the worker is in wake.wait, so Enqueue has to wake it
+    std::size_t idle_waiters = 0;  // threads in WaitIdle
     std::atomic<std::size_t> done_count{0};
     std::atomic<std::uint64_t> epoch{0};
     std::atomic<bool> high_water{false};  // set by the worker, cleared with the cache

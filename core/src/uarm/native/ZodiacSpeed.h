@@ -51,19 +51,20 @@ public:
     bool Due(uint64_t now) const { return !started || now - start.wall >= windowUsec; }
 
     // Guest thread, when Due: true after a whole window, with its figures in Line() and Ips().
-    // retired is the machine's instruction count, guestTicks its 32768 Hz clock.
-    bool Sample(uint64_t now, uint64_t retired, uint64_t guestTicks) {
+    // retired is the machine's instruction count, guestTicks its 32768 Hz clock, droppedUsec the real
+    // time the main loop has dropped as lag so far.
+    bool Sample(uint64_t now, uint64_t retired, uint64_t guestTicks, uint64_t droppedUsec = 0) {
         const uint64_t guestCpu = ThreadCpuUsec(CLOCK_THREAD_CPUTIME_ID, true);
         const uint64_t sdlCpu = ThreadCpuUsec(sdlClock, sdlClockValid);
         if (!started) {
             started = true;
             draws = frames = drawUsec = 0;
-            Restart(now, retired, guestTicks, guestCpu, sdlCpu);
+            Restart(now, retired, guestTicks, guestCpu, sdlCpu, droppedUsec);
             return false;
         }
         if (retired < start.retired || guestTicks < start.guestTicks) {  // counters went back, as after a state load
             draws = frames = drawUsec = 0;
-            Restart(now, retired, guestTicks, guestCpu, sdlCpu);
+            Restart(now, retired, guestTicks, guestCpu, sdlCpu, droppedUsec);
             return false;
         }
         const uint64_t wall = now - start.wall;
@@ -77,7 +78,7 @@ public:
         std::snprintf(text, sizeof text,
             "%s: %.1fM instr/s, %.1fM per emulating second, %.3fx real time; guest thread %.1f%% emulating, "
             "%.1f%% CPU; %.1f frames/s handed over (%.2f ms each), %.1f drawn (%.1f/s merged), %.1f renders/s "
-            "(%.2f ms each), SDL thread %.1f%% CPU",
+            "(%.2f ms each), SDL thread %.1f%% CPU; %.0f ms of lag dropped",
             label, instructions / seconds / 1e6,
             window.emulationUsec ? instructions / (window.emulationUsec / 1e6) / 1e6 : 0.0,
             guestSeconds / seconds,
@@ -89,7 +90,8 @@ public:
             window.published > drawnFrames ? (window.published - drawnFrames) / seconds : 0.0,
             drawn / seconds,
             drawn ? drawTime / 1e3 / drawn : 0.0,
-            sdlClockValid ? 100.0 * (sdlCpu - start.sdlCpu) / wall : 0.0);
+            sdlClockValid ? 100.0 * (sdlCpu - start.sdlCpu) / wall : 0.0,
+            droppedUsec >= start.droppedUsec ? (droppedUsec - start.droppedUsec) / 1e3 : 0.0);
         line = text;
         if (fmKnown && start.fmKnown && fmSamples >= start.fmSamples && fmSounding >= start.fmSounding) {
             const uint64_t made = fmSamples - start.fmSamples, sounded = fmSounding - start.fmSounding;
@@ -97,7 +99,7 @@ public:
             else std::snprintf(text, sizeof text, "; FM off");
             line += text;
         }
-        Restart(now, retired, guestTicks, guestCpu, sdlCpu);
+        Restart(now, retired, guestTicks, guestCpu, sdlCpu, droppedUsec);
         return true;
     }
 
@@ -109,14 +111,15 @@ public:
 
 private:
     struct Window {
-        uint64_t wall{0}, retired{0}, guestTicks{0}, guestCpu{0}, sdlCpu{0};
+        uint64_t wall{0}, retired{0}, guestTicks{0}, guestCpu{0}, sdlCpu{0}, droppedUsec{0};
         uint64_t emulationUsec{0}, handoffUsec{0}, published{0};
         uint64_t fmSamples{0}, fmSounding{0};
         bool fmKnown{false};
     };
 
-    void Restart(uint64_t now, uint64_t retired, uint64_t guestTicks, uint64_t guestCpu, uint64_t sdlCpu) {
-        start = Window{now, retired, guestTicks, guestCpu, sdlCpu};
+    void Restart(uint64_t now, uint64_t retired, uint64_t guestTicks, uint64_t guestCpu, uint64_t sdlCpu,
+                 uint64_t droppedUsec) {
+        start = Window{now, retired, guestTicks, guestCpu, sdlCpu, droppedUsec};
         start.fmSamples = fmSamples;
         start.fmSounding = fmSounding;
         start.fmKnown = fmKnown;
