@@ -113,3 +113,18 @@ bool rx1950NandSave(const std::string& path, S3cNand& nand, std::string& error) 
     nand.clearDirty();
     return true;
 }
+
+uint32_t rx1950UserStoreBlockFromMbr(const uint8_t* sector0) {
+    if (!sector0 || sector0[510] != 0x55 || sector0[511] != 0xaa) return rx1950UserStoreBlock;
+    constexpr uint32_t reservedBlocks = 21;
+    for (unsigned i = 0; i < 4; ++i) {
+        const uint8_t* entry = sector0 + 0x1be + 16 * i;
+        const uint8_t type = entry[4];
+        if (type != 0x04 && type != 0x06 && type != 0x0b && type != 0x0c) continue;
+        const uint32_t start = uint32_t(entry[8]) | uint32_t(entry[9]) << 8 | uint32_t(entry[10]) << 16 | uint32_t(entry[11]) << 24;
+        const uint32_t block = start / S3cNand::pagesPerBlock + reservedBlocks;
+        if (start == 0 || block >= S3cNand::blocks) return rx1950UserStoreBlock;
+        return block;
+    }
+    return rx1950UserStoreBlock;
+}

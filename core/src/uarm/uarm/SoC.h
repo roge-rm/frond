@@ -164,6 +164,8 @@ class SoC {
     // False on a board with no PACE or guest calls: installs, exports, launches and the database list.
     virtual bool GuestServicesSupported() const { return true; }
     virtual bool HardResetSupported() const { return true; }
+    // The rx1950 was made with a CEBL of any firmware; its session records that (MachineSession.h).
+    virtual bool AnyFirmware() const { return false; }
     // Install copies the file onto the SD card for the guest's own tools (Windows CE, frondNative::installToSdCard).
     virtual bool InstallsToCard() const { return false; }
     void KeyDown(enum KeyId key);

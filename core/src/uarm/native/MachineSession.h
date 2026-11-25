@@ -103,6 +103,9 @@ inline std::filesystem::path machineFolderForSave(const std::filesystem::path& p
     return folder;
 }
 
+// The session metadata of an rx1950 made with --any-firmware. Other sessions leave the metadata empty.
+inline constexpr char anyFirmwareRecord[] = "any-firmware";
+
 inline void fillState(SoC& soc, frondSession::Contents& contents) {
     const auto* profile = deviceProfile5(soc.GetDeviceType());
     contents.deviceName = profile ? profile->name : "";
@@ -113,6 +116,8 @@ inline void fillState(SoC& soc, frondSession::Contents& contents) {
         return b.size && p ? std::vector<uint8_t>(p, p + b.size) : std::vector<uint8_t>{};
     };
     contents.nor = copy(soc.GetRomData());
+    // A session made with --any-firmware reopens without it.
+    if (soc.AnyFirmware()) contents.metadata.assign(std::begin(anyFirmwareRecord), std::end(anyFirmwareRecord) - 1);
     // Internal NAND saves to nand.frondnand (frondNand), never into the .frond.
     contents.memory = copy(soc.GetMemoryData());
     contents.savestate = copy(soc.GetSavestate());

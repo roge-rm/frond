@@ -519,12 +519,15 @@ void SocS3C2442::TickUsbHost(uint64_t t) {
 }
 
 SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash, size_t flashSize, std::string& error,
-                               const BatteryPower& battery) {
-    if (!rx1950IsCebl(cebl, size)) {
-        error = "not the rx1950's CEBL.nbf that Frond runs (HP's WM5 ROM 1.01.00 ENG)";
+                               const BatteryPower& battery, bool anyFirmware) {
+    // Any CEBL has the NBF header and the 256 KiB eboot the loader copies to SDRAM.
+    if (anyFirmware ? !cebl || size != nbfHeader + ebootBytes : !rx1950IsCebl(cebl, size)) {
+        error = anyFirmware ? "the CEBL.nbf isn't a 0xa5a byte header and 256 KiB of eboot"
+                            : "not the rx1950's CEBL.nbf that Frond runs (HP's WM5 ROM 1.01.00 ENG)";
         return nullptr;
     }
     std::unique_ptr<SocS3C2442> soc(new SocS3C2442());
+    soc->anyFirmware = anyFirmware;
     soc->rom.assign(cebl, cebl + size);
     soc->battery = battery;
     S3c2442Options options;
@@ -849,7 +852,11 @@ void SocS3C2442::HardReset() {
         activeSync.reset();
     }
     DisarmMicrophone();
-    if (!machine->nand.eraseBlocks(rx1950UserStoreBlock, S3cNand::blocks - rx1950UserStoreBlock))
+    // The partition table's own start, so another ROM's store isn't cut into.
+    uint8_t mbr[S3cNand::pageSize];
+    const uint32_t storeBlock = pages && pages->readPage(21 * S3cNand::pagesPerBlock, mbr)
+        ? rx1950UserStoreBlockFromMbr(mbr) : rx1950UserStoreBlock;
+    if (!machine->nand.eraseBlocks(storeBlock, S3cNand::blocks - storeBlock))
         std::cerr << "rx1950: hard reset couldn't erase the whole user store" << std::endl;
     machine->powerOnReset();
     ApplyHostInputs();

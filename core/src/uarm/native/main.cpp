@@ -145,6 +145,7 @@ struct Options {
     optional<string> controllerMap;  // --controller-map
     bool headphonesIn;       // --headphones-in
     BatteryPower battery;    // --battery
+    bool anyFirmware;        // --any-firmware: any rx1950 CEBL; recorded in the session
 };
 
 namespace {
@@ -165,6 +166,8 @@ bool gFastEngineMissing = false;
     // it onto a file.
     std::optional<frondMachine::Media> nandMedia;
     bool nandFromMalloc = false;
+    // The session was made with --any-firmware (its metadata says so).
+    bool sessionAnyFirmware = false;
     // Guest time awake between the eject and the insert, so the card driver handles the removal
     // first, and for an SD card until SoC::SdRemovalHandled says it has where the board can tell. A
     // guest the eject doesn't wake, or that never handles it, gets the card after swapInsertLimit.
@@ -281,6 +284,7 @@ bool gFastEngineMissing = false;
             cerr << "separate NAND image cannot be used with session file" << endl;
             return false;
         }
+        sessionAnyFirmware = std::string(contents.metadata.begin(), contents.metadata.end()) == frondNative::anyFirmwareRecord;
         ramSize = contents.ramSize;
         if (ramSize == 0) ramSize = ramSizeFromMemorySize(contents.memory.size());
         displayMode = static_cast<DisplayMode>(contents.displayMode);
@@ -623,7 +627,12 @@ bool gFastEngineMissing = false;
 
         // A new rx1950 takes HP's CEBL.nbf as its NOR and an OS .nbf (HP's CEOS.nbf, or one that lays out the same) as --nand, made into the 64 MB flash here.
         if (rx1950 && sessionDevice == deviceTypeInvalid) {
-            if (!rx1950IsCebl(static_cast<const uint8_t*>(nor.data), nor.size)) {
+            if (options.anyFirmware) {
+                if (nor.size != 0xa5a + 256 * 1024) {
+                    cerr << "HP iPAQ rx1950: the NOR must be a CEBL.nbf (0xa5a byte header, 256 KiB eboot)" << endl;
+                    return false;
+                }
+            } else if (!rx1950IsCebl(static_cast<const uint8_t*>(nor.data), nor.size)) {
                 cerr << "HP iPAQ rx1950: the NOR must be HP's CEBL.nbf from the WM5 ROM 1.01.00 ENG" << endl;
                 return false;
             }
@@ -638,7 +647,7 @@ bool gFastEngineMissing = false;
                 cerr << "HP iPAQ rx1950: the OS image (--nand) isn't a usable .nbf: " << why << endl;
                 return false;
             }
-            if (!rx1950IsCeos(static_cast<const uint8_t*>(nand.data), nand.size))
+            if (!options.anyFirmware && !rx1950IsCeos(static_cast<const uint8_t*>(nand.data), nand.size))
                 cerr << "HP iPAQ rx1950: this OS image isn't HP's tested CEOS.nbf" << endl;
             delete[] static_cast<uint8_t*>(nand.data);
             nand.data = new uint8_t[flash.size()];
@@ -805,7 +814,8 @@ bool gFastEngineMissing = false;
             cpuSetFastEngine(false);
             string why;
             soc = SocS3C2442::Create(static_cast<const uint8_t*>(nor.data), nor.size,
-                                     static_cast<uint8_t*>(nand.data), nand.size, why, options.battery);
+                                     static_cast<uint8_t*>(nand.data), nand.size, why, options.battery,
+                                     sessionDevice == deviceTypeInvalid ? options.anyFirmware : sessionAnyFirmware);
             if (!soc) {
                 cerr << "HP iPAQ rx1950: " << why << endl;
                 return false;
@@ -2029,6 +2039,10 @@ int main(int argc, char** argv) {
         .help("start with headphones plugged in on a supported ARM Palm")
         .default_value(false).implicit_value(true);
 
+    program.add_argument("--any-firmware")
+        .help("rx1950: take any CEBL.nbf and don't warn about another CEOS.nbf; a new machine's session records it")
+        .default_value(false).implicit_value(true);
+
     program.add_argument("--battery")
         .help("the battery: max, level N or host N (0-100), then charging or battery (not charging); max charging by default")
         .metavar("<\"max|level N|host N [charging|battery]\">")
@@ -2363,7 +2377,8 @@ int main(int argc, char** argv) {
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),
                        .controllerMap = program.present("--controller-map"),
-                       .headphonesIn = program.get<bool>("--headphones-in")};
+                       .headphonesIn = program.get<bool>("--headphones-in"),
+                       .anyFirmware = program.get<bool>("--any-firmware")};
     BatteryPower::Parse(program.get("--battery"), options.battery);
 
     logEnable();

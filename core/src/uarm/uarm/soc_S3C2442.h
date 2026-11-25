@@ -30,9 +30,11 @@ class SocS3C2442 : public SoC {
     // cebl is CEBL.nbf. flash is the whole NAND, data then spare per page (rx1950NandImage), taken over
     // and given back with delete[]; null when a session's NAND file is attached after (frondNand::attachFile).
     // battery sets the AC and charge pins before the machine starts, so a start on the charger raises no EINT2.
+    // anyFirmware accepts any CEBL that fits the reserved blocks, not only HP's.
     // nullptr with the reason in error when it can't run.
     static SocS3C2442* Create(const uint8_t* cebl, size_t size, uint8_t* flash, size_t flashSize, std::string& error,
-                              const BatteryPower& battery = {});
+                              const BatteryPower& battery = {}, bool anyFirmware = false);
+    bool AnyFirmware() const override { return anyFirmware; }
 
     void Reset() override;
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
@@ -48,7 +50,7 @@ class SocS3C2442 : public SoC {
     void JamKey(enum KeyId key, uint32_t durationMsec) override;
     bool PrepareM68kSupport() override { return false; }
     bool GuestServicesSupported() const override { return false; }
-    // A clean boot: the user store's NAND blocks erased (rx1950UserStoreBlock on), then a power-on reset with
+    // A clean boot: the user store's NAND blocks erased (from the first block rx1950UserStoreBlockFromMbr finds), then a power-on reset with
     // SDRAM cleared. WM5 formats the empty store and starts as from a new import (welcome, alignment, setup).
     void HardReset() override;
     bool HardResetSupported() const override { return true; }
@@ -138,6 +140,7 @@ class SocS3C2442 : public SoC {
     struct NandPages;
 
     std::vector<uint8_t> rom, saved;
+    bool anyFirmware = false;
     std::unique_ptr<S3c2442Machine> machine;
     std::unique_ptr<NandPages> pages;
     MemoryBuffer nandPageBuffer{};

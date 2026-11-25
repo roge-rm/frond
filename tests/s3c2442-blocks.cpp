@@ -1002,6 +1002,36 @@ static void nandImageTests() {
     assert(!rx1950NandImage(eboot.data(), eboot.size(), nbf.data(), nbf.size(), flash, error));
 }
 
+// The user store's first block from the MBR: HP's WM5 FAT at logical sector 56032 gives 1772, a WM6.1 image's
+// at 56128 gives 1775; no signature, no FAT entry or a start past the NAND gives the fallback.
+static void userStoreBlockTests() {
+    auto mbr = [](unsigned slot, uint8_t type, uint32_t start, bool signature = true) {
+        std::vector<uint8_t> sector(512, 0);
+        uint8_t* entry = &sector[0x1be + 16 * slot];
+        entry[4] = type;
+        for (unsigned i = 0; i < 4; ++i) entry[8 + i] = uint8_t(start >> (8 * i));
+        entry[12] = 1;
+        if (signature) sector[510] = 0x55, sector[511] = 0xaa;
+        return sector;
+    };
+    assert(rx1950UserStoreBlock == 1772);
+    assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x04, 56032).data()) == 1772);
+    assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x04, 56128).data()) == 1775);
+    assert(rx1950UserStoreBlockFromMbr(mbr(1, 0x0b, 56128).data()) == 1775);
+    // The first FAT partition wins over later ones and non-FAT types are skipped.
+    auto two = mbr(0, 0x25, 1000);
+    two[0x1be + 16 + 4] = 0x06;
+    two[0x1be + 16 + 8] = 0x40, two[0x1be + 16 + 9] = 0xdb;  // 56128
+    two[0x1be + 32 + 4] = 0x04;
+    assert(rx1950UserStoreBlockFromMbr(two.data()) == 1775);
+    // Erased flash, a missing signature, no FAT entry and a start past the NAND fall back.
+    assert(rx1950UserStoreBlockFromMbr(std::vector<uint8_t>(512, 0xff).data()) == 1772);
+    assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x04, 56128, false).data()) == 1772);
+    assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x25, 56128).data()) == 1772);
+    assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x04, 0x7fffffff).data()) == 1772);
+    assert(rx1950UserStoreBlockFromMbr(nullptr) == 1772);
+}
+
 // The blocks the OS's drivers set up before they're modelled in full: an empty SD slot, no USB cable,
 // the ADC with the stylus up, DMA and IIS registers, IIC with every device answering, and RTCRST.
 static void quietBlockTests() {
@@ -1526,6 +1556,7 @@ int main() {
     nandTests();
     nandEraseBlocksTests();
     nandImageTests();
+    userStoreBlockTests();
     quietBlockTests();
     std::puts("s3c2442 blocks: ok");
     return 0;
