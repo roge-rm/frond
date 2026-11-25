@@ -41,6 +41,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     interface Host {
         // UDP port for beacons; 0 turns discovery off.
         val discoveryPort: Int
+        val allowNetwork: Boolean get() = false
+        fun networkAddresses(): List<String> = emptyList()
         // Called on the engine thread when discovery starts and stops, for the Wi-Fi multicast lock.
         fun discovery(on: Boolean) {}
         // False while Android's local network access is off for Frond.
@@ -186,7 +188,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         Thread(r, "FrondLinkCoreConnect").apply { isDaemon = true }
     }
     private var selector: Selector? = null
-    private var listener: ServerSocketChannel? = null
+    private var listeners = emptyList<ServerSocketChannel>()
+    private var listenAddresses = ""
     private var udp: DatagramChannel? = null
     private var thread: Thread? = null
     @Volatile private var running = false
@@ -240,29 +243,33 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     fun start(): String? {
         val sel = Selector.open()
         selector = sel
-        val server = ServerSocketChannel.open()
         try {
-            server.setOption(StandardSocketOptions.SO_REUSEADDR, true)
-            try { server.bind(InetSocketAddress(store.identity.port), 16) } catch (e: IOException) { server.bind(InetSocketAddress(0), 16) }
+            listeners = TcpListeners.open(store.identity.port, host.allowNetwork, 16, fallbackPort = true)
+            for (server in listeners) {
+                server.configureBlocking(false)
+                server.register(sel, SelectionKey.OP_ACCEPT)
+            }
         } catch (e: IOException) {
-            server.close()
+            for (server in listeners) try { server.close() } catch (_: IOException) {}
             sel.close()
-            return "Couldn't take connections from the network."
+            return "Couldn't open the link listener."
         }
-        server.configureBlocking(false)
-        server.register(sel, SelectionKey.OP_ACCEPT)
-        listener = server
-        listenPort = server.socket().localPort
-        if (host.discoveryPort != 0) {
+        listenPort = listeners.first().socket().localPort
+        val network = if (host.allowNetwork) host.networkAddresses() else emptyList()
+        listenAddresses = if (network.isEmpty()) TcpListeners.addresses(listeners)
+            else network.joinToString(", ") { NetRelay.hostPort(it, listenPort) }
+        if (host.allowNetwork && host.discoveryPort != 0) {
             try {
                 val d = DatagramChannel.open()
+                udp = d
                 d.setOption(StandardSocketOptions.SO_REUSEADDR, true)
                 d.setOption(StandardSocketOptions.SO_BROADCAST, true)
                 d.bind(InetSocketAddress(host.discoveryPort))
                 d.configureBlocking(false)
                 d.register(sel, SelectionKey.OP_READ)
-                udp = d
             } catch (e: IOException) {
+                try { udp?.close() } catch (_: IOException) {}
+                udp = null
                 Log.w(TAG, "link: no discovery: $e")
             }
         }
@@ -310,7 +317,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         host.updatePhone(null)
         if (radioOn) { host.stopRadio(); radioOn = false }
         endPairRequest("cancelled")
-        try { listener?.close() } catch (_: IOException) {}
+        for (server in listeners) try { server.close() } catch (_: IOException) {}
         try { udp?.close() } catch (_: IOException) {}
         try { selector?.close() } catch (_: IOException) {}
         if (wasActive) host.discovery(false)
@@ -331,7 +338,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                     if (!key.isValid) continue
                     when (val what = key.attachment()) {
                         is Conn -> connReady(what, key)
-                        else -> if (key.channel() === listener) incoming() else if (key.channel() === udp) datagrams()
+                        else -> when (val channel = key.channel()) {
+                            is ServerSocketChannel -> incoming(channel)
+                            udp -> datagrams()
+                        }
                     }
                 }
                 while (true) { val task = tasks.poll() ?: break; task(); if (!running) break }
@@ -509,9 +519,9 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         } catch (_: IOException) {}
     }
 
-    private fun incoming() {
+    private fun incoming(listener: ServerSocketChannel) {
         while (true) {
-            val s = try { listener?.accept() } catch (e: IOException) { null } ?: return
+            val s = try { listener.accept() } catch (e: IOException) { null } ?: return
             val from = (s.remoteAddress as? InetSocketAddress)?.address
             if (!LinkWire.allowedPeer(from)) { s.close(); continue }
             val t = now()
@@ -1747,7 +1757,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         val near = JSONArray()
         for ((id, n) in nearby) near.put(JSONObject().put("id", id).put("name", n.name).put("address", n.address.hostAddress).put("port", n.port))
         return JSONObject().put("type", "state").put("id", store.identity.hex).put("name", store.identity.name).put("port", listenPort)
-            .put("connections", list).put("nearby", near)
+            .put("connections", list).put("nearby", near).put("listen", listenAddresses)
     }
 
     private fun tick() {
@@ -1783,7 +1793,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         syncCores()
         for (a in ArrayList(attaches)) if ((a.st == St.BUSY || a.st == St.IDLE) && a.retryAt <= t) matchPeer(a.link)
         // Discovery.
-        val active = discoveryActive()
+        val active = udp != null && discoveryActive()
         if (active != wasActive) host.discovery(active)
         if (active && (!wasActive || t - lastBeacon >= BEACON_MS)) {
             if (!wasActive) beacon(LinkWire.QUERY)

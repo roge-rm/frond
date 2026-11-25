@@ -100,7 +100,8 @@ class Hub : public QObject {
     void broadcastWatchers(const QJsonObject& o);
     int watchers() const;
     // TCP
-    void incoming();
+    void incoming(QTcpServer& server);
+    QString listenAddresses() const;
     Conn* makeConn(QTcpSocket* s, bool outgoing);
     void connInput(Conn* c);
     void afterLink(Conn* c);
@@ -182,6 +183,8 @@ class Hub : public QObject {
     QElapsedTimer clock;
     QLocalServer server;
     QTcpServer listener;
+    QTcpServer ipv6Listener;
+    bool allowNetwork{false};
     QUdpSocket udp;
     quint16 discoveryPort{defaultPort};
     QList<QPair<QHostAddress, quint16>> beaconTargets;  // FROND_LINK_BEACON_TO, else broadcast

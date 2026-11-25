@@ -334,6 +334,8 @@ On Linux "This computer" is the first row. It joins machines running in differen
 
 A row's menu (right-click on Linux, ⋮ on Android) has Rename, Address…, Bluetooth radio and Forget. Rename is only your name for it. Address… sets an address to try when the install isn't found by itself, and Forget removes the pairing, after which the other install shows "pair again".
 
+Connections listens on loopback by default. To accept incoming links and use Nearby across the network, turn on **Allow incoming Frond links over the network** in Android Settings, or start the desktop with `FROND_LINK_ALLOW_NETWORK=1`. On Android close Connections and stop any machines using it before reopening. On desktop exit any running link service before changing the environment variable. Connections shows the listening addresses.
+
 To pair, open Connections on both. The other install shows up under Nearby, and Pair (or Add by address… if it isn't listed, with an address like `192.168.1.20`) asks it for a code. It shows a 6-digit code, for example "dan-laptop wants to pair. Code 482 913", and you type that code in on the first one ("Enter the code shown on Pixel 8"). The code lasts 2 minutes. After 3 wrong tries, or once the code runs out, that install won't take a new pairing for a minute. Pairing swaps keys, and every later link checks them. If an install's key doesn't match, the row says "Key changed, pair again" and Frond doesn't link until you pair again. That happens after a reinstall, and it can also mean someone else is using that address.
 
 Frond links over TCP and UDP port 5035. It only takes links from private, link-local and ULA addresses (`192.168.x.x`, `10.x.x.x`, `fe80::`, `fd..::` and the like), so a VPN works if it gives out addresses like those. A firewall that blocks 5035 on either computer shows the other as "Not seen". Allow both TCP and UDP on 5035.
@@ -513,7 +515,7 @@ Modem and phone by device:
 
 ### USB HotSync
 
-Plugs the device's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
+Plugs the device's USB port into the computer. On Android use Wait for a peer, turn on **Allow network peers**, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
 
 ### Sync Manager
 

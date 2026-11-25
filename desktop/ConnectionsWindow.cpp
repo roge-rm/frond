@@ -97,6 +97,7 @@ ConnectionsWindow::ConnectionsWindow(LinkClient* link, QWidget* parent) : QDialo
     auto* top = new QHBoxLayout;
     header = new QLabel(tr("This Frond"), this);
     header->setObjectName("thisFrond");
+    header->setWordWrap(true);
     rename = new QPushButton(tr("Rename…"), this);
     rename->setObjectName("renameThisFrond");
     top->addWidget(header, 1);
@@ -182,7 +183,9 @@ QString ConnectionsWindow::status(const QJsonObject& c) {
 
 void ConnectionsWindow::showState(const QJsonObject& s) {
     state = s;
-    header->setText(tr("This Frond: %1").arg(s.value("name").toString()));
+    const auto name = tr("This Frond: %1").arg(s.value("name").toString());
+    const auto addresses = s.value("listen").toString();
+    header->setText(addresses.isEmpty() ? name : name + "\n" + tr("Listening at %1").arg(addresses));
     const auto selected = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
     list->clear();
     auto* local = new QListWidgetItem(marker(!s.value("local").toString().isEmpty(), palette()),

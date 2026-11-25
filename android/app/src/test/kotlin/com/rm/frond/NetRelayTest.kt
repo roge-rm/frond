@@ -1,5 +1,8 @@
 package com.rm.frond
 
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.nio.channels.ServerSocketChannel
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,6 +20,31 @@ class NetRelayTest {
         // gdb's usual remote port.
         assertEquals(3333, DebugLink.defaultPort)
         assertEquals(DebugLink.DEFAULT_PORT, DebugLink.defaultPort)
+    }
+
+    @Test
+    fun listenersBindLoopbackUnlessNetworkIsEnabled() {
+        val haveIpv6 = runCatching {
+            ServerSocketChannel.open().use { it.bind(InetSocketAddress(TcpListeners.ipv6Loopback, 0)) }
+        }.isSuccess
+        val local = TcpListeners.open(0, BeamMode.Listen(5034).allowNetwork, 4)
+        try {
+            val expected = listOf(TcpListeners.ipv4Loopback) +
+                if (haveIpv6) listOf(TcpListeners.ipv6Loopback) else emptyList()
+            assertEquals(expected, local.map { it.socket().inetAddress })
+            val port = local.first().socket().localPort
+            assertTrue(local.all { it.socket().localPort == port })
+            for (listener in local) {
+                Socket().use { client ->
+                    client.connect(listener.localAddress, 1000)
+                    listener.accept().use { assertTrue(it.isConnected) }
+                }
+            }
+        } finally {
+            local.forEach { it.close() }
+        }
+        val network = TcpListeners.open(0, BeamMode.Listen(5034, allowNetwork = true).allowNetwork, 4).single()
+        network.use { assertTrue(it.socket().inetAddress.isAnyLocalAddress) }
     }
 
     @Test
@@ -64,6 +92,10 @@ class NetRelayTest {
         // Saved modes carry their port, whichever relay reads them.
         assertEquals(BeamMode.Connect("10.0.2.2", 5034), BeamMode.decode(BeamMode.Connect("10.0.2.2", 5034).encode()))
         assertEquals(BeamMode.Listen(5033), BeamMode.decode("listen:5033"))
+        val network = BeamMode.Listen(5033, allowNetwork = true)
+        assertEquals(network, BeamMode.decode(network.encode()))
+        assertFalse(Settings().debuggerNetwork)
+        assertFalse(Settings().linkNetwork)
     }
 
     @Test

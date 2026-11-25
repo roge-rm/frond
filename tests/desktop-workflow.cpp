@@ -37,7 +37,6 @@
 #include <QSpinBox>
 #include <QSlider>
 #include <QProcess>
-#include <QTcpServer>
 #include <QTcpSocket>
 #include <QImage>
 #include "MainWindow.h"
@@ -61,6 +60,7 @@
 #include <QJsonObject>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QNetworkInterface>
 #include <QTcpServer>
 #include <QUdpSocket>
 #include <atomic>
@@ -101,6 +101,7 @@ struct TestHub {
         env.insert("FROND_LINK_PORT", QString::number(port)); env.insert("FROND_LINK_DISCOVERY_PORT", "0");
         env.insert("FROND_BTVIRT", fakeRadio());
         env.remove("FROND_LINK_SOCKET");
+        env.remove("FROND_LINK_ALLOW_NETWORK");
     }
     QString store() const { return data + "/frond/connections"; }
     QString socket() const { return run + "/frond/link.sock"; }
@@ -5988,6 +5989,8 @@ for line in s.makefile('rb'):
         ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
         ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1,127.0.0.2:%1").arg(ub));
         hb.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ub));
+        ha.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
+        hb.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
         hb.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(ua));
         HubUser a(ha), a1(ha);
         auto b = std::make_unique<HubUser>(hb), b1 = std::make_unique<HubUser>(hb);
@@ -6051,6 +6054,7 @@ for line in s.makefile('rb'):
         const quint16 ua = freeUdpPort();
         TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
         ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
+        ha.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
         ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(freeUdpPort()));
         HubUser a(ha), b(hb), a1(ha);
         QVERIFY(pairHubs(a, b, false));
@@ -8099,6 +8103,38 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }
+    void linkListenLoopback() {
+        QTcpServer probe;
+        const bool ipv6 = probe.listen(QHostAddress::LocalHostIPv6, 0);
+        probe.close();
+        const auto discovery = freeUdpPort();
+        TestHub hub({}, "loopback", 0);
+        hub.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(discovery));
+        HubUser user(hub);
+        user.client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+        const auto state = user.last("state");
+        const auto port = quint16(state.value("port").toInt());
+        QVERIFY(port != 0);
+        const auto addresses = QString("127.0.0.1:%1").arg(port) +
+            (ipv6 ? QString(", [::1]:%1").arg(port) : QString());
+        QCOMPARE(state.value("listen").toString(), addresses);
+        const auto reaches = [port](const QHostAddress& address) {
+            QTcpSocket client;
+            client.connectToHost(address, port);
+            return client.waitForConnected(1000);
+        };
+        QVERIFY(reaches(QHostAddress::LocalHost));
+        if (ipv6) QVERIFY(reaches(QHostAddress::LocalHostIPv6));
+        for (const auto& address : QNetworkInterface::allAddresses()) {
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback())
+                QVERIFY(!reaches(address));
+        }
+        QUdpSocket udp;
+        QVERIFY(udp.bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress));
+        killHub(user);
+    }
+
     // Pairing by an IPv6 loopback address.
     void linkPairingIpv6() {
         QTcpServer probe;

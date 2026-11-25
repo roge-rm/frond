@@ -43,6 +43,8 @@ data class Settings(
     // The core's gdb server, relayed by DebugLink on debuggerPort. The Palm waits for gdb before it runs.
     val debugger: Boolean = false,
     val debuggerPort: Int = DebugLink.DEFAULT_PORT,
+    val debuggerNetwork: Boolean = false,
+    val linkNetwork: Boolean = false,
 ) {
     // HomeActivity passes these to FrondActivity, which runs in its own process.
     fun putInto(intent: Intent): Intent = intent
@@ -54,6 +56,7 @@ data class Settings(
         .putExtra(EXTRA_HIDE_TOUCH, hideTouchWithController)
         .putExtra(EXTRA_DEBUGGER, debugger)
         .putExtra(EXTRA_DEBUGGER_PORT, debuggerPort)
+        .putExtra(EXTRA_DEBUGGER_NETWORK, debuggerNetwork)
 
     companion object {
         private const val FILE = "settings"
@@ -68,6 +71,8 @@ data class Settings(
         private const val FAST_AUDIO_MIGRATED = "fastAudioPerDevice"
         private const val EXTRA_DEBUGGER = "debugger"
         private const val EXTRA_DEBUGGER_PORT = "debuggerPort"
+        private const val EXTRA_DEBUGGER_NETWORK = "debuggerNetwork"
+        private const val LINK_NETWORK = "linkNetwork"
 
         // Reads the file again when the other process wrote it: Home and the emulator run in their own
         // processes and both change Sound.
@@ -83,6 +88,8 @@ data class Settings(
                 hideTouchWithController = p.getBoolean(EXTRA_HIDE_TOUCH, false),
                 debugger = p.getBoolean(EXTRA_DEBUGGER, false),
                 debuggerPort = NetRelay.port(p.getInt(EXTRA_DEBUGGER_PORT, DebugLink.DEFAULT_PORT).toString()) ?: DebugLink.DEFAULT_PORT,
+                debuggerNetwork = p.getBoolean(EXTRA_DEBUGGER_NETWORK, false),
+                linkNetwork = p.getBoolean(LINK_NETWORK, false),
             )
         }
 
@@ -116,6 +123,8 @@ data class Settings(
                 .putBoolean(EXTRA_HIDE_TOUCH, settings.hideTouchWithController)
                 .putBoolean(EXTRA_DEBUGGER, settings.debugger)
                 .putInt(EXTRA_DEBUGGER_PORT, settings.debuggerPort)
+                .putBoolean(EXTRA_DEBUGGER_NETWORK, settings.debuggerNetwork)
+                .putBoolean(LINK_NETWORK, settings.linkNetwork)
                 .apply()
         }
 
@@ -132,6 +141,8 @@ data class Settings(
                 hideTouchWithController = extras.getBoolean(EXTRA_HIDE_TOUCH, saved.hideTouchWithController),
                 debugger = extras.getBoolean(EXTRA_DEBUGGER, saved.debugger),
                 debuggerPort = extras.getInt(EXTRA_DEBUGGER_PORT, saved.debuggerPort),
+                debuggerNetwork = extras.getBoolean(EXTRA_DEBUGGER_NETWORK, saved.debuggerNetwork),
+                linkNetwork = saved.linkNetwork,
             )
         }
 

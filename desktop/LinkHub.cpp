@@ -154,10 +154,15 @@ QString Hub::start() {
     bool ok = false;
     const int envPort = qEnvironmentVariableIntValue("FROND_LINK_PORT", &ok);
     const quint16 wantPort = ok ? quint16(envPort) : store.port;
-    if (!listener.listen(QHostAddress::Any, wantPort) && !listener.listen(QHostAddress::Any, 0))
+    allowNetwork = qEnvironmentVariableIntValue("FROND_LINK_ALLOW_NETWORK") == 1;
+    const QHostAddress address(allowNetwork ? QHostAddress::Any : QHostAddress::LocalHost);
+    if (!listener.listen(address, wantPort) && !listener.listen(address, 0))
         return listener.errorString();
-    listener.setMaxPendingConnections(kMaxPending);
-    connect(&listener, &QTcpServer::newConnection, this, &Hub::incoming);
+    if (!allowNetwork) ipv6Listener.listen(QHostAddress::LocalHostIPv6, listener.serverPort());
+    for (auto* tcp : {&listener, &ipv6Listener}) {
+        tcp->setMaxPendingConnections(kMaxPending);
+        connect(tcp, &QTcpServer::newConnection, this, [this, tcp] { incoming(*tcp); });
+    }
     const int envDiscovery = qEnvironmentVariableIntValue("FROND_LINK_DISCOVERY_PORT", &ok);
     discoveryPort = ok ? quint16(envDiscovery) : defaultPort;
     // Test hooks: the address the beacon socket binds, and host:port targets instead of broadcast.
@@ -167,8 +172,8 @@ QString Hub::start() {
         const auto port = quint16(item.section(':', 1).toUInt());
         if (!host.isNull() && port) beaconTargets.push_back({host, port});
     }
-    if (discoveryPort && udp.bind(bindTo.isNull() ? QHostAddress(QHostAddress::AnyIPv4) : bindTo, discoveryPort,
-                                  QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint))
+    if (allowNetwork && discoveryPort && !bindTo.isNull() &&
+        udp.bind(bindTo, discoveryPort, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint))
         connect(&udp, &QUdpSocket::readyRead, this, &Hub::datagrams);
     if (const int idle = qEnvironmentVariableIntValue("FROND_LINK_IDLE_EXIT_MS", &ok); ok && idle > 0) idleExitMs = idle;
     // Test hook: a shorter life for the code shown while someone pairs with us.
@@ -358,8 +363,8 @@ Hub::Conn* Hub::makeConn(QTcpSocket* s, bool outgoing) {
     return c;
 }
 
-void Hub::incoming() {
-    while (auto* s = listener.nextPendingConnection()) {
+void Hub::incoming(QTcpServer& tcp) {
+    while (auto* s = tcp.nextPendingConnection()) {
         const auto from = s->peerAddress();
         if (!allowedPeer(from)) { s->abort(); s->deleteLater(); continue; }
         auto& times = recent[from.toString()];
@@ -1202,6 +1207,23 @@ QString Hub::peerChannels(const QString& hex) const {
     return kinds.join(QStringLiteral(" · "));
 }
 
+QString Hub::listenAddresses() const {
+    const auto port = listener.serverPort();
+    if (allowNetwork) {
+        QStringList addresses;
+        for (const auto& ip : QNetworkInterface::allAddresses()) {
+            if (!ip.isNull()) addresses.append(ip.protocol() == QAbstractSocket::IPv6Protocol
+                ? QString("[%1]:%2").arg(ip.toString()).arg(port)
+                : QString("%1:%2").arg(ip.toString()).arg(port));
+        }
+        addresses.removeDuplicates();
+        return addresses.join(", ");
+    }
+    QString addresses = QString("127.0.0.1:%1").arg(port);
+    if (ipv6Listener.isListening()) addresses += QString(", [::1]:%1").arg(port);
+    return addresses;
+}
+
 QJsonObject Hub::snapshot() const {
     QJsonArray list;
     for (const auto& p : store.peers) {
@@ -1224,7 +1246,7 @@ QJsonObject Hub::snapshot() const {
     for (auto it = nearby.begin(); it != nearby.end(); ++it)
         near.append(QJsonObject{{"id", it.key()}, {"name", it->name}, {"address", it->address.toString()}, {"port", int(it->port)}});
     return {{"type", "state"}, {"id", hexId(store.local().id)}, {"name", store.name()}, {"port", int(listener.serverPort())},
-            {"connections", list}, {"nearby", near}, {"local", peerChannels("local")}};
+            {"connections", list}, {"nearby", near}, {"local", peerChannels("local")}, {"listen", listenAddresses()}};
 }
 
 void Hub::tick() {

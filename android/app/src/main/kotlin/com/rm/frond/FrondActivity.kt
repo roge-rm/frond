@@ -1604,14 +1604,13 @@ open class FrondActivity : SDLActivity() {
             val error = synchronized(debugLock) {
                 // Back right at launch already stopped it.
                 if (debugStopped) return@Thread
-                DebugLink.relay(BeamMode.Listen(settings.debuggerPort), port)
+                DebugLink.relay(BeamMode.Listen(settings.debuggerPort, settings.debuggerNetwork), port)
             }
-            val addresses = NetRelay.addresses(applicationContext)
-            val text = when {
-                error != null -> error
-                addresses.isEmpty() -> "Waiting for gdb on port ${settings.debuggerPort}"
-                else -> "Waiting for gdb at " + addresses.joinToString(", ") { "$it:${settings.debuggerPort}" }
-            }
+            val relay = DebugLink.status.value
+            val addresses = if (settings.debuggerNetwork && relay.phase == NetRelay.Phase.WAITING)
+                NetRelay.addresses(applicationContext) else emptyList()
+            val text = error ?: if (addresses.isEmpty()) com.rm.frond.ui.debuggerText(relay)
+                else "Waiting for gdb at " + addresses.joinToString(", ") { NetRelay.hostPort(it, settings.debuggerPort) }
             runOnUiThread { if (!(gdbBlocksLink && link.connectedOnce) && !leaving) { note.text = text; note.visibility = View.VISIBLE } }
             // Nothing can reach the core's gdb port, so let the Palm run without it.
             if (error != null) releaseDebugger(port)
