@@ -4425,6 +4425,12 @@ UsbPacketResult imx1MachineUsbIn(Imx1Machine* machine, uint8_t endpoint, uint8_t
 void imx1MachineSetUsbHostPending(Imx1Machine* machine, bool pending) {
     if (machine) machine->probe->usbHostPending = pending;
 }
+bool imx1MachineForwardRtc(Imx1Machine* machine, uint64_t seconds) {
+    if (!machine) return false;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return false;
+    return p->peripherals.forwardRtc(seconds);
+}
 bool imx1MachineUsbOutReady(const Imx1Machine* machine, uint8_t endpoint) {
     return machine && machine->probe->cs5Configuration.usbState().endpointOutReady(endpoint);
 }

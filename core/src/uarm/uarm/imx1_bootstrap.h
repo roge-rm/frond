@@ -149,6 +149,7 @@ class Imx1Bootstrap {
     void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
     uint32_t lcdcContrastPhase() const { return contrastPhase; }
     bool setRtcInitialTime(Imx1RtcTime time) { SourceChange change(*this); syncReference(); return rtc.initialise(time); }
+    bool forwardRtc(uint64_t seconds) { SourceChange change(*this); syncReference(); return rtc.forwardSeconds(seconds); }
     void setI2cScenario(bool enabled) { SourceChange change(*this); i2c.setSingleMasterScenario(enabled); }
     void setI2cBus(Imx1I2cBus* bus) { SourceChange change(*this); i2c.setBus(bus); }
     void setI2cObserver(Imx1I2cObserver observer, void* context) { SourceChange change(*this); i2c.setObserver(observer, context); }

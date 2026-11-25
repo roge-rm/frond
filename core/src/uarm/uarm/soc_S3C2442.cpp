@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <iostream>
 
 #include "CPCrc.h"
@@ -954,15 +953,10 @@ bool SocS3C2442::SetBattery(const BatteryPower& value) {
     return true;
 }
 
-void SocS3C2442::SetClockToHost() {
-    const std::time_t now = std::time(nullptr);
-    std::tm local{};
-#ifdef _WIN32
-    if (localtime_s(&local, &now)) return;
-#else
-    if (!localtime_r(&now, &local)) return;
-#endif
-    machine->rtc.setTime(rx1950RtcTime(local));
+void SocS3C2442::ForwardClock(uint64_t seconds) {
+    if (!seconds || halted) return;
+    if (!rx1950RtcForward(machine->rtc, machine->intc, seconds))
+        std::cerr << "rx1950: the clock was left as saved, its registers don't hold a time" << std::endl;
 }
 
 // The charge and notification LED, stepped by the board's blinker in guest time. No vibrate motor.

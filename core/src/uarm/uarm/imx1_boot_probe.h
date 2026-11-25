@@ -488,6 +488,9 @@ UsbPacketResult imx1MachineUsbIn(Imx1Machine*, uint8_t endpoint, uint8_t* data, 
 bool imx1MachineUsbOutReady(const Imx1Machine*, uint8_t endpoint);
 // The USB host has a tick due: a waiting guest's clock runs on to the bound instead of waiting.
 void imx1MachineSetUsbHostPending(Imx1Machine*, bool pending);
+// The RTC moved on by whole seconds, as with the device asleep that long (Imx1Rtc::forwardSeconds): for a session
+// opened again. False when the RTC has no known time or isn't running.
+bool imx1MachineForwardRtc(Imx1Machine*, uint64_t seconds);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,

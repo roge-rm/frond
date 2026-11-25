@@ -708,6 +708,11 @@ bool SocIMX1::LoadBringUpState(const uint8_t* data, size_t size) {
     return LoadState(data, size, imx1StateAllowBootInputs);
 }
 
+void SocIMX1::ForwardClock(uint64_t seconds) {
+    if (!seconds || halted) return;
+    if (!imx1MachineForwardRtc(machine, seconds)) std::cerr << "zodiac: the clock was left as saved" << std::endl;
+}
+
 bool SocIMX1::SetBattery(const BatteryPower& value) {
     battery = value;
     ApplyBattery();

@@ -630,37 +630,91 @@ static void cableRestoreTests() {
     assert(suspended(*d));
 }
 
-// The RTC opened again takes a set time in its registers (BCD, WM5's year from 1950, day of week + 1) and goes on
-// counting from it; the alarm and tick settings are kept.
+// The RTC's seven time registers from BCDSEC.
+static std::vector<uint32_t> rtcRegisters(S3cRtc& rtc) {
+    std::vector<uint32_t> v(7);
+    for (unsigned i = 0; i < 7; ++i) assert(rtc.read(0x70 + 4 * i, v[i]) == S3cAccess::ok);
+    return v;
+}
+
+// A session opened again: the RTC moves on by the time it was closed, from whatever time the guest had (one the
+// user set included), through month, leap day and year ends in WM5's own fields (BCD, the year binary from 1950,
+// day of week + 1). The alarm and tick settings and the second's phase are kept; an alarm passed on the way is
+// raised. A machine whose registers hold no time is left alone.
 static void rtcRestoreTests() {
     auto a = make({loop});
     a->rtc.ticnt = 0x85;
     a->rtc.alarm[2] = 0x07;
+    a->rtc.secondPhase = 1234;
+    // A time the user set: Wednesday 2026-11-25 07:41:59 (RTCEN on, as WM5 writes it).
+    a->rtc.rtccon = 1;
+    const uint32_t set[7] = {0x59, 0x41, 0x07, 0x25, 4, 0x11, 76};
+    for (unsigned i = 0; i < 7; ++i) assert(a->rtc.write(0x70 + 4 * i, set[i]) == S3cAccess::ok);
+    a->rtc.secondPhase = 1234;
     std::vector<uint8_t> state;
     std::string why;
     assert(a->saveState(state, why));
     auto b = make({loop});
     assert(b->loadState(state.data(), state.size(), why));
-    std::tm t{};
-    t.tm_year = 2026 - 1900;
-    t.tm_mon = 10;
-    t.tm_mday = 25;
-    t.tm_wday = 3;
-    t.tm_hour = 7;
-    t.tm_min = 41;
-    t.tm_sec = 59;
-    b->rtc.setTime(rx1950RtcTime(t));
-    uint32_t v = 0;
-    const uint32_t want[7] = {0x59, 0x41, 0x07, 0x25, 4, 0x11, 76};
-    for (unsigned i = 0; i < 7; ++i) {
-        assert(b->rtc.read(0x70 + 4 * i, v) == S3cAccess::ok);
-        if (v != want[i]) std::fprintf(stderr, "rtc register %u: %x, wanted %x\n", i, v, want[i]);
-        assert(v == want[i]);
+    int64_t t = 0;
+    assert(rx1950RtcSeconds(b->rtc, t));
+    // Closed for 3 days, 5 hours and 1 second: Saturday 2026-11-28 12:42:00.
+    b->intc.srcpnd = 0;
+    assert(rx1950RtcForward(b->rtc, b->intc, 3 * 86400 + 5 * 3600 + 1));
+    std::vector<uint32_t> want = {0x00, 0x42, 0x12, 0x28, 7, 0x11, 76};
+    assert(rtcRegisters(b->rtc) == want);
+    assert(b->rtc.ticnt == 0x85 && b->rtc.alarm[2] == 0x07 && b->rtc.secondPhase == 1234);
+    assert(!(b->intc.srcpnd & (1u << s3cIrq::rtc)));
+    // It goes on counting from there.
+    b->rtc.advance(32768 - 1234, b->intc);
+    want[0] = 0x01;
+    assert(rtcRegisters(b->rtc) == want);
+    // Across a year end and a leap day: 2027-12-31 23:59:30 plus 60 days and 40 s is 2028-03-01 00:00:10, a Wednesday.
+    const int64_t newYear = rx1950DaysFromCivil(2027, 12, 31) * 86400 + 86370;
+    b->rtc.setTime(rx1950RtcTimeAt(newYear));
+    assert(rx1950RtcForward(b->rtc, b->intc, 60 * 86400 + 40));
+    want = {0x10, 0x00, 0x00, 0x01, 4, 0x03, 78};
+    assert(rtcRegisters(b->rtc) == want);
+    // The conversions agree both ways for every day over two centuries' worth of the year byte.
+    for (int64_t day = rx1950DaysFromCivil(1950, 1, 1); day < rx1950DaysFromCivil(2200, 1, 1); day += 37) {
+        b->rtc.setTime(rx1950RtcTimeAt(day * 86400 + 3661));
+        assert(rx1950RtcSeconds(b->rtc, t) && t == day * 86400 + 3661);
     }
-    assert(b->rtc.ticnt == 0x85 && b->rtc.alarm[2] == 0x07);
-    b->rtc.advance(32768, b->intc);
-    assert(b->rtc.read(0x70, v) == S3cAccess::ok && v == 0x00);
-    assert(b->rtc.read(0x74, v) == S3cAccess::ok && v == 0x42);
+    // An alarm in the time closed: ALMEN with hour and minute on, at 09:30; closed from 08:00 to 10:00 raises it, from
+    // 10:00 to 11:00 doesn't, and with ALMEN off nothing is raised.
+    const int64_t eight = rx1950DaysFromCivil(2026, 11, 25) * 86400 + 8 * 3600;
+    b->rtc.alarm[1] = 0x30;
+    b->rtc.alarm[2] = 0x09;
+    b->rtc.rtcalm = 0x40 | 0x06;
+    b->rtc.setTime(rx1950RtcTimeAt(eight));
+    b->intc.srcpnd = 0;
+    assert(rx1950RtcForward(b->rtc, b->intc, 2 * 3600));
+    assert(b->intc.srcpnd & (1u << s3cIrq::rtc));
+    b->intc.srcpnd = 0;
+    assert(rx1950RtcForward(b->rtc, b->intc, 3600));
+    assert(!(b->intc.srcpnd & (1u << s3cIrq::rtc)));
+    // A full date alarm a year on, with seconds: found across the days between.
+    b->rtc.setTime(rx1950RtcTimeAt(eight));
+    b->rtc.alarm[0] = 0x15;
+    b->rtc.alarm[3] = 0x02;
+    b->rtc.alarm[4] = 0x01;
+    b->rtc.alarm[5] = 78;
+    b->rtc.rtcalm = 0x7f;
+    const int64_t due = rx1950DaysFromCivil(2028, 1, 2) * 86400 + 9 * 3600 + 30 * 60 + 15;
+    assert(rx1950RtcForward(b->rtc, b->intc, uint64_t(due - eight - 1)));
+    assert(!(b->intc.srcpnd & (1u << s3cIrq::rtc)));
+    assert(rx1950RtcForward(b->rtc, b->intc, 1));
+    assert(b->intc.srcpnd & (1u << s3cIrq::rtc));
+    b->intc.srcpnd = 0;
+    b->rtc.rtcalm = 0x3f;
+    b->rtc.setTime(rx1950RtcTimeAt(eight));
+    assert(rx1950RtcForward(b->rtc, b->intc, uint64_t(due - eight)));
+    assert(!(b->intc.srcpnd & (1u << s3cIrq::rtc)));
+    // Registers that hold no time (a minute of 0x6a) are left as they are.
+    b->rtc.bcd[1] = 0x6a;
+    const auto before = rtcRegisters(b->rtc);
+    assert(!rx1950RtcForward(b->rtc, b->intc, 100));
+    assert(rtcRegisters(b->rtc) == before);
 }
 
 // UART bit rates from the FCLK/n clock WM5 picks, and a byte from the far end raising the receive interrupt.

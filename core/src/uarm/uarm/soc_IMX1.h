@@ -130,6 +130,8 @@ class SocIMX1 : public SoC {
     bool LcdEnabled() override;
     // The battery level reaches the guest through the graphics chip's mode 1 ADC and the ASP's U input, set
     // again after every load and reset.
+    // The i.MX1 RTC on by the time a session was closed.
+    void ForwardClock(uint64_t seconds) override;
     bool BatterySupported() const override { return true; }
     bool SetBattery(const BatteryPower& value) override;
     // The battery inputs the machine has now, for tests: the ASP U word, the mode 1 sample and GPIO B14 (low

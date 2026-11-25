@@ -170,6 +170,8 @@ bool gFastEngineMissing = false;
     bool nandFromMalloc = false;
     // The session was made with --any-firmware (its metadata says so).
     bool sessionAnyFirmware = false;
+    // The host's time when the session was saved, in Unix seconds, if its metadata has it.
+    std::optional<int64_t> sessionSavedAt;
     // Guest time awake between the eject and the insert, so the card driver handles the removal
     // first, and for an SD card until SoC::SdRemovalHandled says it has where the board can tell. A
     // guest the eject doesn't wake, or that never handles it, gets the card after swapInsertLimit.
@@ -286,7 +288,9 @@ bool gFastEngineMissing = false;
             cerr << "separate NAND image cannot be used with session file" << endl;
             return false;
         }
-        sessionAnyFirmware = std::string(contents.metadata.begin(), contents.metadata.end()) == frondNative::anyFirmwareRecord;
+        const auto records = frondNative::parseSessionMetadata(contents.metadata);
+        sessionAnyFirmware = records.anyFirmware;
+        sessionSavedAt = records.savedAt;
         ramSize = contents.ramSize;
         if (ramSize == 0) ramSize = ramSizeFromMemorySize(contents.memory.size());
         displayMode = static_cast<DisplayMode>(contents.displayMode);
@@ -925,8 +929,13 @@ bool gFastEngineMissing = false;
             cerr << "failed to restore savestate" << endl;
             return false;
         }
-        // A saved machine opened again takes the host's clock. Runs on guest time keep the saved one so they repeat.
-        if (savestate.size && savestate.data && !options.emulatedTime) soc->SetClockToHost();
+        if (savestate.size && savestate.data) {
+            // A saved machine opened again: its clock moves on by the time it was closed, as a device asleep that
+            // long. Runs on guest time keep the saved one so they repeat, as do sessions saved without the time.
+            const int64_t now = int64_t(std::time(nullptr));
+            if (sessionSavedAt && !options.emulatedTime && now > *sessionSavedAt)
+                soc->ForwardClock(uint64_t(now - *sessionSavedAt));
+        }
         // A swapped slot is ejected now and its card goes in later, in the guest loop below. The
         // stick's detect line drops here, after the restore, so a guest asleep at the save wakes
         // on it as on a hot eject.
