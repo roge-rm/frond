@@ -318,22 +318,40 @@ void ActiveSyncSession::Run() {
             if (!library.FinishAssignment(connected, error)) throw std::runtime_error(error);
         } else if (!library.UpdateAssignment(connected, error)) {
             throw std::runtime_error(error);
+        } else if (const auto made = library.FindAssignment(key)) {
+            connected.generation = made->generation;  // so FinishAssignment after pairing finds the new row
         }
         manager.Update([&](SyncStatus& status) { status.profile = confirmed->name; });
 
-        const auto pairing = profile.ActiveSyncPairing(key);
-        bool partnershipMissing = false;
+        // A device that has never chosen gets a partnership on its first sync, as desktop
+        // ActiveSync's setup does; without one the guest's ActiveSync shows no sync at all.
+        auto pairing = profile.ActiveSyncPairing(key);
+        bool partnershipMissing = false, paired = false;
+        std::string pairingNote;
+        if (pairing == "confirmed") {
+            progress("partnership", 0, 0, {});
+            paired = HasActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
+            if (!paired) {
+                // Gone after a hard reset or removed on the device: set it up again now.
+                partnershipMissing = true;
+                if (!profile.ClearConfirmedActiveSyncPairing(key, error)) throw std::runtime_error(error);
+                pairing = profile.ActiveSyncPairing(key);
+            }
+        }
         if (pairing == "requested") {
+            const bool automatic = profile.DeviceValue(key, "activesync-pair").empty();
             progress("partnership", 0, 0, {});
-            connected.userId = EnsureActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
-            if (!library.FinishAssignment(connected, error) ||
-                !profile.ConfirmActiveSyncPairing(key, error))
-                throw std::runtime_error(error);
-        } else if (pairing == "confirmed") {
-            progress("partnership", 0, 0, {});
-            partnershipMissing = !HasActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
-            if (partnershipMissing && !profile.ClearConfirmedActiveSyncPairing(key, error))
-                throw std::runtime_error(error);
+            try {
+                connected.userId = EnsureActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
+                if (!library.FinishAssignment(connected, error) || !profile.ConfirmActiveSyncPairing(key, error))
+                    throw std::runtime_error(error);
+                paired = true;
+            } catch (const std::exception& failure) {
+                // An asked-for pairing fails the sync and stays pending; an automatic one is tried again next time.
+                if (!automatic || !FrondRapiConnected(client.get())) throw;
+                pairingNote = "Couldn't set up a desktop partnership: " + std::string(failure.what());
+                profile.Log(key, "ActiveSync: " + pairingNote);
+            }
         }
 
         progress("files", 0, 0, {});
@@ -348,7 +366,7 @@ void ActiveSyncSession::Run() {
         }
 
         std::string outlook;
-        if (pairing == "requested" || (pairing == "confirmed" && !partnershipMissing)) {
+        if (paired) {
             std::vector<PimKind> kinds;
             for (const auto kind : {PimKind::contacts, PimKind::calendar, PimKind::tasks})
                 if (profile.GetPimAction(key, kind) != PimAction::skip) kinds.push_back(kind);
@@ -383,8 +401,9 @@ void ActiveSyncSession::Run() {
             sent = 1;
         }
         message = sent ? "CAB sent. Finish installation on the device." : "Windows Mobile connected. No CABs queued.";
-        if (partnershipMissing) message += " Desktop partnership missing. Pair again in sync settings.";
-        else if (pairing == "requested" || pairing == "confirmed") message += " Desktop partnership verified.";
+        if (paired) message += partnershipMissing ? " Desktop partnership set up again." : " Desktop partnership verified.";
+        else if (partnershipMissing) message += " Desktop partnership missing.";
+        if (!pairingNote.empty()) message += " " + pairingNote;
         if (!files.empty()) message += " " + files;
         if (!outlook.empty()) message += " " + outlook;
         profile.Log(key, "ActiveSync: " + message);

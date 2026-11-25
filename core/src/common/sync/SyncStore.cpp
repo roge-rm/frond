@@ -695,12 +695,14 @@ bool SyncProfile::SetActiveSyncSerial(const std::string& deviceKey, bool serial,
 }
 
 std::string SyncProfile::ActiveSyncPairing(const std::string& deviceKey) {
-    return DeviceValue(deviceKey, "activesync-pair");
+    // Nothing stored pairs on the next sync; "declined" is a cancelled request.
+    const auto value = DeviceValue(deviceKey, "activesync-pair");
+    return value.empty() ? "requested" : value == "declined" ? "" : value;
 }
 
 bool SyncProfile::RequestActiveSyncPairing(const std::string& deviceKey, bool request, std::string& error) {
     if (!request && ActiveSyncPairing(deviceKey) != "requested") return true;
-    return SetDeviceValue(deviceKey, "activesync-pair", request ? "requested" : "", &error);
+    return SetDeviceValue(deviceKey, "activesync-pair", request ? "requested" : "declined", &error);
 }
 
 bool SyncProfile::ConfirmActiveSyncPairing(const std::string& deviceKey, std::string& error) {

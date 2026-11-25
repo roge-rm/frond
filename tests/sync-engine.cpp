@@ -674,6 +674,10 @@ void TestActiveSync(const std::string& root) {
     CHECK(profile.QueueInstall("", "Test.CAB", cab, cabItem, error, "cab"));
     CHECK(InstallItemFitsKind(cabItem, "winmo") && !InstallItemFitsKind(cabItem, "palm") && InstallItemFitsKind(cabItem, ""));
     CHECK(InstallItemFitsKind(palmItem, "palm") && !InstallItemFitsKind(palmItem, "winmo") && InstallItemFitsKind(palmItem, ""));
+    // Nothing chosen pairs on the next sync; this first run cancels it.
+    CHECK(profile.ActiveSyncPairing(key) == "requested");
+    CHECK(profile.RequestActiveSyncPairing(key, false, error));
+    CHECK(profile.ActiveSyncPairing(key).empty());
     profile.Close();
 
     SyncOptions options;
@@ -805,10 +809,13 @@ void TestActiveSync(const std::string& root) {
                 "<characteristic type=\"Registry\"><nocharacteristic type=\"" + path +
                 "\"/></characteristic>")));
         }
+        // It sets the partnership up again at once; a refusal there doesn't fail the sync.
+        CHECK(RapiReply(rapi, 0x0e, Words({5, 0x80004005})));
         finish(afterReset);
         CHECK(manager.Status().state == SyncStatus::State::done);
         CHECK(manager.Status().message.find("Desktop partnership missing.") != std::string::npos);
-        CHECK(profile.ActiveSyncPairing(key).empty());
+        CHECK(manager.Status().message.find("Couldn't set up a desktop partnership") != std::string::npos);
+        CHECK(profile.ActiveSyncPairing(key) == "requested");
         CHECK(profile.RequestActiveSyncPairing(key, true, error));
         CHECK(profile.ActiveSyncPairing(key) == "requested");
         CHECK(profile.RequestActiveSyncPairing(key, false, error));

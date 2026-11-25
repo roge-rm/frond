@@ -3908,12 +3908,15 @@ for line in s.makefile('rb'):
         const auto path = library.ProfilePath(profile);
         const auto device = frondSync::MachineDeviceKey("active-test");
         frondSync::SyncProfile storage;
-        QVERIFY(act("Pair on next sync", true));
+        // A device that hasn't chosen pairs on its next sync.
+        QVERIFY(act("Cancel request", true));
+        QVERIFY(storage.Open(path, problem));
+        QVERIFY(storage.ActiveSyncPairing(device).empty());
+        QVERIFY(!frondSync::ActiveSyncFilesFolder(path).empty());
+        storage.Close();
+        QVERIFY(act("Pair on next sync", false));
         QVERIFY(storage.Open(path, problem));
         QCOMPARE(QString::fromStdString(storage.ActiveSyncPairing(device)), QString("requested"));
-        QVERIFY(!frondSync::ActiveSyncFilesFolder(path).empty());
-        QVERIFY(act("Cancel request", false));
-        QVERIFY(storage.ActiveSyncPairing(device).empty());
         storage.Close();
         QVERIFY(library.DeleteProfile(profile.id, problem));
     }

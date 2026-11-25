@@ -222,6 +222,7 @@ class SyncProfile {
 
     bool ActiveSyncUsesSerial(const std::string& deviceKey);
     bool SetActiveSyncSerial(const std::string& deviceKey, bool serial, std::string& error);
+    // "requested" (also with nothing chosen yet), "confirmed", or empty when the user cancelled.
     std::string ActiveSyncPairing(const std::string& deviceKey);
     bool RequestActiveSyncPairing(const std::string& deviceKey, bool request, std::string& error);
     bool ConfirmActiveSyncPairing(const std::string& deviceKey, std::string& error);
