@@ -1109,6 +1109,11 @@ test-battery-control: out/frond out/frond-68k
 
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
+# The top bar's HotSync on a T|X with USB HotSync up presses without replugging; needs the T|X smoke machine, else skipped.
+.PHONY: test-tx-hotsync-top-bar
+test-tx-hotsync-top-bar: out/frond
+	@session=build/smoke/machines/palm-tx; if [ -e $$session ]; then rm -rf build/tx-hotsync-top-bar && python3 tests/tx-hotsync-top-bar.py $$session build/tx-hotsync-top-bar; else echo "tx-hotsync-top-bar: no T|X smoke machine, skipped"; fi
+
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
 # that side is skipped.
 .PHONY: test-core-control

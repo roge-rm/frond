@@ -755,6 +755,12 @@ class DesktopControl {
                 queueSyncPress(ctx, true);
                 return {true, "sync", "Starting a HotSync over USB."};
             }
+            // A cable already plugged in and up is not replugged: the press goes in as the cradle button's does.
+            if (usbSync && ctx.usb->Host() && ctx.usb->Host()->GetPhase() == UsbBusHost::Phase::running) {
+                if (!ctx.soc->PressHotSync())
+                    return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
+                return {true, "sync", "HotSync button pressed."};
+            }
             const HostSerial::Config config{Kind::syncManager, 0, {}};
             const bool usbFree = caps.usb && ctx.usb && !UsbHostBridge::NetworkLink(ctx.soc) &&
                                  ctx.usb->GetConfig().kind == Kind::off;
