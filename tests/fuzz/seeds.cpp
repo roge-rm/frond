@@ -1,10 +1,13 @@
 // Writes the synthetic seed corpora for the fuzz targets: seeds DIR makes DIR/<target>/<n>.
 // Every seed is made here from Frond's own encoders or by hand; none come from firmware,
 // sessions or user data.
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "CreateZipContext.h"
@@ -19,7 +22,9 @@
 #include "sync/SyncStore.h"
 #include "sync/Wbxml.h"
 #include "messages.h"
+#include "savestate/Chunk.h"
 #include "wire.h"
+#include "SeedFdp.h"
 
 namespace fs = std::filesystem;
 using Bytes = std::vector<uint8_t>;
@@ -73,7 +78,66 @@ Bytes PalmDbFile(bool resource) {
     db.Write(file);
     return file;
 }
+
+void Be32(Bytes& b, uint32_t v) { Be16(b, uint16_t(v >> 16)), Be16(b, uint16_t(v)); }
+
+// An Ethernet frame from the guest (MAC 02:46:72:6f:6e:64) to the router, with an IPv4 packet.
+Bytes Ipv4(uint8_t protocol, uint32_t from, uint32_t to, const Bytes& body) {
+    Bytes ip{0x45, 0};
+    Be16(ip, uint16_t(20 + body.size())), Be16(ip, 1), Be16(ip, 0x4000);
+    ip.push_back(64), ip.push_back(protocol), Be16(ip, 0);
+    Be32(ip, from), Be32(ip, to);
+    return Cat(ip, body);
+}
+Bytes Ether(const Bytes& payload, uint16_t type = 0x0800, bool broadcast = false) {
+    Bytes e = broadcast ? Bytes(6, 0xff) : Bytes{0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
+    e.insert(e.end(), {0x02, 0x46, 0x72, 0x6f, 0x6e, 0x64});
+    Be16(e, type);
+    return Cat(e, payload);
+}
+Bytes Udp(uint16_t from, uint16_t to, const Bytes& payload) {
+    Bytes u;
+    Be16(u, from), Be16(u, to), Be16(u, uint16_t(8 + payload.size())), Be16(u, 0);
+    return Cat(u, payload);
+}
+Bytes TcpSyn(uint16_t from, uint16_t to) {
+    Bytes t;
+    Be16(t, from), Be16(t, to), Be32(t, 1000), Be32(t, 0);
+    t.push_back(5 << 4), t.push_back(0x02), Be16(t, 8192), Be16(t, 0), Be16(t, 0);
+    return t;
+}
+Bytes Dhcp(uint8_t type) {
+    Bytes b(240, 0);
+    b[0] = 1, b[1] = 1, b[2] = 6, b[4] = 0x12, b[10] = 0x80;
+    const uint8_t mac[] = {0x02, 0x46, 0x72, 0x6f, 0x6e, 0x64};
+    std::copy(mac, mac + 6, b.begin() + 28);
+    b[236] = 0x63, b[237] = 0x82, b[238] = 0x53, b[239] = 0x63;
+    b.insert(b.end(), {53, 1, type, 255});
+    return b;
+}
+Bytes DnsQuery() {
+    Bytes q{0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 5, 'f', 'r', 'o', 'n', 'd', 4, 't', 'e', 's', 't', 0, 0, 1, 0, 1};
+    return q;
+}
+
+// GDB remote packets with their checksums.
+std::string Gdb(const std::string& packet) {
+    uint8_t sum = 0;
+    for (char c : packet) sum = uint8_t(sum + uint8_t(c));
+    char tail[4];
+    std::snprintf(tail, sizeof tail, "#%02x", sum);
+    return "$" + packet + tail;
+}
+std::string Hex(const std::string& text) {
+    static const char digits[] = "0123456789abcdef";
+    std::string out;
+    for (unsigned char c : text) out += digits[c >> 4], out += digits[c & 15];
+    return out;
+}
+
 }  // namespace
+
+void StorageSeeds(const std::function<void(const std::string&, const std::vector<uint8_t>&)>& seed);
 
 int main(int argc, char** argv) {
     using namespace frondSync;
@@ -259,7 +323,7 @@ int main(int argc, char** argv) {
     {
         const std::string text(3000, 'q');
         GzipContext gzip(text.data(), text.size());
-        while (gzip.GetState() == 0) gzip.Continue();
+        while (gzip.GetState() == 0 || gzip.GetState() == 1) gzip.Continue();
         Seed("gunzip", Bytes(gzip.GetGzipData(), gzip.GetGzipData() + gzip.GetGzipSize()));
     }
 
@@ -317,6 +381,191 @@ int main(int argc, char** argv) {
             Seed("sync-profile", file(library.ProfilePath(info) + "/profile.db", 0));
         }
         fs::remove_all(root);
+    }
+
+    {
+        // The router: ARP, DHCP, DNS, ICMP, the Network HotSync wakeup and TCP to HotSync and ActiveSync.
+        const uint32_t guest = 0x0a00020f, host = 0x0a000202, dns = 0x0a000203;
+        Bytes arp{0, 1, 8, 0, 6, 4, 0, 1, 0x02, 0x46, 0x72, 0x6f, 0x6e, 0x64, 10, 0, 2, 15, 0, 0, 0, 0, 0, 0, 10, 0, 2, 2};
+        const Bytes dhcp = Ether(Ipv4(17, 0, 0xffffffff, Udp(68, 67, Dhcp(1))), 0x0800, true);
+        const Bytes dnsFrame = Ether(Ipv4(17, guest, dns, Udp(1234, 53, DnsQuery())));
+        const Bytes ping = Ether(Ipv4(1, guest, host, Bytes{8, 0, 0, 0, 0, 1, 0, 1, 'p', 'i', 'n', 'g'}));
+        const Bytes wakeup = Ether(Ipv4(17, guest, host, Udp(14237, 14237, Bytes{0xfa, 0xde, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0})));
+        const Bytes hotsync = Ether(Ipv4(6, guest, host, TcpSyn(1025, 14238)));
+        const Bytes activeSync = Ether(Ipv4(6, guest, host, TcpSyn(1026, 990)));
+        const Bytes airSync = Ether(Ipv4(6, guest, host, TcpSyn(1027, 26675)));
+        for (unsigned mode = 0; mode < 3; ++mode) {
+            Fdp f;
+            f.Int(mode, 0, 2).Bool(true);
+            if (mode == 2) f.Bool(true);
+            const std::vector<Bytes> frames = mode == 0 ? std::vector<Bytes>{Ether(arp, 0x0806, true), dhcp, dnsFrame, ping}
+                                              : mode == 1 ? std::vector<Bytes>{dhcp, wakeup, hotsync}
+                                                          : std::vector<Bytes>{dhcp, activeSync, airSync};
+            for (const auto& frame : frames) f.Int(frame.size(), 14, 1518).Data(frame).Bool(true).Int(50000000, 0, 2000000000ull);
+            Seed("wifi-router", f.Build());
+        }
+        Fdp f;
+        f.Bool(true).Bool(false);
+        for (const auto& packet : {Ipv4(17, guest, dns, Udp(1234, 53, DnsQuery())), Ipv4(1, guest, host, Bytes{8, 0, 0, 0, 0, 1, 0, 1}),
+                                   Ipv4(17, guest, host, Udp(14237, 14237, Bytes{0xfa, 0xde, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0})),
+                                   Ipv4(6, guest, host, TcpSyn(1025, 14238)), Ipv4(6, guest, 0x08080808, TcpSyn(1026, 80))})
+            f.Int(packet.size(), 20, 1500).Data(packet).Bool(true).Int(50000000, 0, 2000000000ull).Int(1, 0, 63);
+        Seed("slirp-ip", f.Build());
+    }
+
+    {
+        // RNDIS bring-up as a device answers it: INIT, the MAC and frame size queries, the filter, then a frame.
+        auto completion = [](uint32_t type, uint32_t id, const Bytes& rest) {
+            Bytes m;
+            Le32(m, type | 0x80000000u), Le32(m, uint32_t(16 + rest.size())), Le32(m, id), Le32(m, 0);
+            return Cat(m, rest);
+        };
+        Bytes init;
+        for (uint32_t v : {1u, 0u, 1u, 0u, 1u, 0x4000u, 3u, 0u, 0u}) Le32(init, v);
+        Bytes mac;
+        Le32(mac, 6), Le32(mac, 16), mac.insert(mac.end(), {0x02, 0x11, 0x22, 0x33, 0x44, 0x55});
+        Bytes frameSize;
+        Le32(frameSize, 4), Le32(frameSize, 16), Le32(frameSize, 1500);
+        Bytes packet;
+        const Bytes frame = Ether(Ipv4(17, 0x0a00020f, 0x0a000202, Udp(1, 2, Bytes(8, 1))));
+        Le32(packet, 1), Le32(packet, uint32_t(44 + frame.size())), Le32(packet, 36), Le32(packet, uint32_t(frame.size()));
+        packet.resize(44, 0);
+        packet = Cat(packet, frame);
+        Fdp f;
+        f.Int(64, 8, 512);
+        const std::vector<Bytes> replies{completion(2, 1, init), completion(4, 2, mac), completion(4, 3, frameSize), completion(5, 4, {})};
+        for (const auto& reply : replies) {
+            f.Int(1000, 0, 6000000000ull).Int(0, 0, 8).Bool(true);  // the command goes out
+            f.Int(1000, 0, 6000000000ull).Int(2, 0, 8).Int(8, 0, 16).Data(Bytes{1, 0, 0, 0, 0, 0, 0, 0});
+            f.Int(1000, 0, 6000000000ull).Int(1, 0, 8).Int(reply.size(), 0, 1100).Data(reply).Bool(true);
+        }
+        f.Int(1000, 0, 6000000000ull).Int(4, 0, 8).Int(packet.size(), 0, 0x4000).Data(packet);
+        f.Int(1000, 0, 6000000000ull).Int(6, 0, 8).Int(frame.size(), 0, 1600).Data(frame);
+        f.Int(1000, 0, 6000000000ull).Int(5, 0, 8).Int(64, 1, 1024);
+        Seed("rndis-host", f.Build());
+    }
+
+    {
+        // USB: a device descriptor and a configuration, Palm's vendor-class HotSync port or RNDIS with CDC data.
+        Bytes device{18, 1, 0x10, 0x01, 0, 0, 0, 16, 0x30, 0x08, 0x02, 0x00, 0, 1, 1, 2, 3, 1};
+        auto config = [](const Bytes& interfaces, uint8_t count) {
+            Bytes c{9, 2, 0, 0, count, 1, 0, 0x80, 50};
+            c = Cat(c, interfaces);
+            c[2] = uint8_t(c.size()), c[3] = uint8_t(c.size() >> 8);
+            return c;
+        };
+        const Bytes palm{9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 0x02, 2, 64, 0, 0};
+        const Bytes rndis{9, 4, 0, 0, 1, 0xef, 1, 1, 0, 7, 5, 0x81, 3, 8, 0, 1,
+                          9, 4, 1, 0, 2, 0x0a, 0, 0, 0, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 0x03, 2, 64, 0, 0};
+        for (const auto& [interfaces, count, rndisOn] : {std::tuple{palm, uint8_t(1), false}, std::tuple{rndis, uint8_t(2), true}}) {
+            const auto c = config(interfaces, count);
+            Bytes in = device;
+            in.push_back(uint8_t(c.size())), in.push_back(uint8_t(c.size() >> 8));
+            in = Cat(in, c);
+            Fdp f;
+            f.Bool(rndisOn).Data(Bytes(300, 0x03));
+            Seed("usb-bus-host", Cat(in, f.Build()));
+        }
+    }
+
+    {
+        const std::string packets = Gdb("qSupported:multiprocess+") + "+" + Gdb("?") + Gdb("g") + Gdb("p f") + Gdb("pf") +
+                                    Gdb("P1=78563412") + Gdb("m100,10") + Gdb("M100,4:01020304") + Gdb("Z0,200,4") +
+                                    Gdb("z0,200,4") + Gdb("qXfer:features:read:target.xml:0,100") + Gdb("vCont?") +
+                                    Gdb("qRcmd," + Hex("pace-break 1000")) + Gdb("qRcmd," + Hex("pace")) + Gdb("s") + Gdb("c") +
+                                    "\x03" + Gdb("D");
+        Seed("gdbstub-arm", Cat(Bytes(8, 0), Bytes(packets.begin(), packets.end())));
+        Seed("gdbstub-arm", Cat(Bytes{0, 0, 0, 0, 0, 0, 0, 3}, Bytes(packets.begin(), packets.end())));
+        const std::string m68k = Gdb("qSupported") + Gdb("?") + Gdb("qOffsets") + Gdb("g") + Gdb("p11") + Gdb("P1=5") +
+                                 Gdb("m0,20") + Gdb("m0,4") + Gdb("M10,2:abcd") + Gdb("Z0,1000,2") + Gdb("Z2,2000,4") +
+                                 Gdb("z2,2000,4") + Gdb("Hg0") + Gdb("s") + "\x03" + Gdb("c") + "\x03" + Gdb("D");
+        Seed("gdbstub-68k", Cat(Bytes(8, 0), Bytes(m68k.begin(), m68k.end())));
+    }
+
+    {
+        const std::string lines = "1\tsave\t" + Hex("/tmp/a.frond") + "\n0\tpanel-visible\t" + Hex("on") + "\n0\tcancel-files\t\n" +
+                                  "2\tsd-create\t" + Hex("64") + "\n3\tquit\t\n";
+        for (uint8_t choices : {0, 7}) Seed("desktop-channel", Cat(Bytes{choices}, Bytes(lines.begin(), lines.end())));
+    }
+
+    {
+        // Two chunks: a version word and values, then a buffer and a string.
+        Bytes state;
+        Le32(state, 2), Le32(state, 0), Le32(state, 4), Le32(state, 1), Le32(state, 6);
+        for (uint32_t v : {1u, 0x12u, 0x3456u, 0x789abcdeu}) Le32(state, v);
+        Le32(state, 2);
+        for (char c : std::string("fuzz string\0\0\0\0\0\0\0\0\0\0\0", 20)) state.push_back(uint8_t(c));
+        Fdp f;
+        f.Int(3, 0, 64);
+        for (const auto& [chunk, kind, size] : {std::tuple{8u, 2u, 1u}, std::tuple{0u, 10u, 0u}, std::tuple{1u, 5u, 20u}})
+            f.Int(chunk, 0, 255).Int(kind, 0, 255).Int(size, 0, 65535);
+        f.Bool(false).Data(state);
+        Seed("savestate", f.Build());
+    }
+
+    StorageSeeds([](const std::string& target, const Bytes& bytes) { Seed(target, bytes); });
+
+    {
+        // A Tapwave-style update made here: a PRC whose ROMZ id 2 is gzip of 64 zero bytes, alone and in a zip.
+        Bytes rom(64, 0), gz;
+        {
+            GzipContext gzip(rom.data(), rom.size());
+            while (gzip.GetState() == 0 || gzip.GetState() == 1) gzip.Continue();
+            gz.assign(gzip.GetGzipData(), gzip.GetGzipData() + gzip.GetGzipSize());
+        }
+        Bytes prc(0x20, 0);
+        std::memcpy(prc.data(), "Zodiac Update", 13);
+        Be16(prc, 1), Be16(prc, 1);
+        prc.resize(0x3c, 0);
+        prc.insert(prc.end(), {'r', 'o', 'm', 'z', 'T', 'p', 'w', 'v'});
+        Be32(prc, 0), Be32(prc, 0), Be16(prc, 2);
+        prc.insert(prc.end(), {'c', 'o', 'd', 'e'}), Be16(prc, 1), Be32(prc, 0x4e + 20 + 2);
+        prc.insert(prc.end(), {'R', 'O', 'M', 'Z'}), Be16(prc, 2), Be32(prc, 0x4e + 20 + 2 + 4);
+        prc.insert(prc.end(), {0, 0, 1, 2, 3, 4});
+        prc = Cat(prc, gz);
+        Seed("zodiac-rom", Cat(Bytes{1}, prc));
+        CreateZipContext zip;
+        zip.Initialize(6);
+        zip.AddEntry("Zodiac_Update.prc");
+        zip.WriteData(prc.data(), prc.size());
+        const auto* z = static_cast<const uint8_t*>(zip.GetZipData());
+        Seed("zodiac-rom", Cat(Bytes{1}, Bytes(z, z + zip.GetZipDataSize())));
+        Seed("zodiac-rom", Cat(Bytes{0}, Bytes(z, z + zip.GetZipDataSize())));
+    }
+
+    {
+        // Standard MIDI files: format 0 with tempo, notes, sysex and end of track; format 1 with two tracks.
+        auto track = [](const Bytes& events) {
+            Bytes t{'M', 'T', 'r', 'k'};
+            Be32(t, uint32_t(events.size()));
+            return Cat(t, events);
+        };
+        auto header = [](uint16_t format, uint16_t tracks, uint16_t division) {
+            Bytes h{'M', 'T', 'h', 'd', 0, 0, 0, 6};
+            Be16(h, format), Be16(h, tracks), Be16(h, division);
+            return h;
+        };
+        const Bytes events{0, 0xff, 0x51, 3, 0x07, 0xa1, 0x20, 0, 0x90, 60, 100, 0x60, 0x80, 60, 0, 0, 0xf0, 3, 0x43, 0x10, 0xf7,
+                           0x81, 0x00, 0x90, 64, 90, 0x40, 64, 0, 0, 0xff, 0x2f, 0};
+        Seed("zodiac-smf", Cat(header(0, 1, 96), track(events)));
+        Seed("zodiac-smf", Cat(Cat(header(1, 2, 480), track(Bytes{0, 0xff, 0x58, 4, 4, 2, 24, 8, 0, 0xff, 0x2f, 0})), track(events)));
+        Seed("zodiac-smf", Cat(header(0, 1, 0xe728), track(events)));
+    }
+
+    {
+        // Firmware headers: a Palm ROM card header for the 68k check and an rx1950-style NBF for the OS scan.
+        Bytes rom(0x20000, 0xff);
+        const uint8_t card[] = {0, 0, 0, 0x01, 0x00, 0x00, 0x00, 0x00};
+        std::memcpy(rom.data(), card, sizeof card);
+        Seed("qt-firmware-input", Cat(Bytes{128}, rom));
+        Bytes nbf(0xa5a + 520 * 4, 0xff);
+        for (size_t s = 0; s < 4; ++s) nbf[0xa5a + 520 * s + 512] = uint8_t(s), nbf[0xa5a + 520 * s + 513] = 0, nbf[0xa5a + 520 * s + 514] = 0, nbf[0xa5a + 520 * s + 515] = 0;
+        Seed("qt-firmware-input", Cat(Bytes{0}, nbf));
+        const std::string lines = "0\tevent\tready\t\n0\tevent\tpointer-press\t" + Hex("123") + "\n0\tevent\tsd-progress\t" +
+                                  Hex("1 2") + "\n0\tevent\tusb\t" + Hex("on") + "\n1\tok\tdone\t" + Hex("Complete") + "\n" +
+                                  "2\terror\tbusy\t\n";
+        Seed("qt-desktop-client", Cat(Bytes{0x0b}, Bytes(lines.begin(), lines.end())));
+        Seed("qt-desktop-client", Cat(Bytes{0x20}, Bytes(lines.begin(), lines.end())));
     }
     return 0;
 }

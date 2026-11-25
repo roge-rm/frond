@@ -3339,11 +3339,14 @@ test-sony-ma2-fm:
 # Fuzz targets (clang and libFuzzer), one per parser of outside data; harnesses in tests/fuzz/.
 # make fuzz builds them all in FUZZ_ROOT with seed corpora from tests/fuzz/seeds.cpp;
 # make fuzz-run FUZZ_TIME=120 (after make fuzz) runs each for that many seconds (FUZZ_ONLY picks some), logs and
-# crashes to FUZZ_OUT; FUZZ_FLAGS adds libFuzzer options. The core's common library is built again with the
+# crashes to FUZZ_OUT; FUZZ_FLAGS adds libFuzzer options. wifi-router and slirp-ip run in their own network
+# namespace (unshare -rn), as libslirp opens host sockets for what the guest sends, and refuse to run outside one. The core's common library is built again with the
 # sanitizers in FUZZ_ROOT; after changing FUZZ_CFLAGS delete FUZZ_ROOT/core and FUZZ_ROOT/link.
 FUZZ_TARGETS := hayes-modem ppp-server irda-phone netsync-wakeup hotsync-link hotsync-session dlp activesync-connect rapi \
 	wbxml airsync-http link-wire link-mux link-pairing link-handshake \
-	palm-db pim-record installer session-file rom-info gunzip zip rx1950-nand sync-profile
+	palm-db pim-record installer session-file rom-info gunzip zip rx1950-nand sync-profile \
+	wifi-router slirp-ip rndis-host usb-bus-host gdbstub-arm gdbstub-68k desktop-channel \
+	savestate card-container fat-image zodiac-rom zodiac-smf
 FUZZ_CC ?= $(or $(shell command -v clang-19 2>/dev/null),clang)
 FUZZ_CXX ?= $(or $(shell command -v clang++-19 2>/dev/null),clang++)
 FUZZ_ROOT = $(OBJ_ROOT)/fuzz
@@ -3358,6 +3361,41 @@ FUZZ_COMMON_LIB = $(FUZZ_ROOT)/core/common/libcommon.a
 FUZZ_LINK_LIB = $(FUZZ_ROOT)/link/libfrondlink.a
 FUZZ_LIBS = $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB) -lpthread -ldl -lm
 FUZZ_EXTRA_rx1950-nand = core/src/uarm/uarm/rx1950_nand_image.cpp core/src/uarm/uarm/s3c2442_nand.cpp
+# libslirp is built from its pinned source with the sanitizers so its guest input is covered too;
+# FUZZ_SLIRP_TARBALL is the archive android/build-network.py fetches (checked against its SHA-256).
+FUZZ_SLIRP_VERSION = libslirp-v4.9.1
+FUZZ_SLIRP_SHA256 = 3caff6e2de445f4995629d4929c55419f661b2b1d14f12481e155a71c1e8f811
+FUZZ_SLIRP_TARBALL ?= android/build/net/sources/$(FUZZ_SLIRP_VERSION).tar.bz2
+FUZZ_SLIRP_LIB = $(FUZZ_ROOT)/slirp/build/libslirp.a
+FUZZ_SLIRP = -Wno-deprecated-declarations -I$(FUZZ_ROOT)/slirp/$(FUZZ_SLIRP_VERSION)/src -I$(FUZZ_ROOT)/slirp/build $(FUZZ_SLIRP_LIB) \
+	$(shell pkg-config --libs glib-2.0) -lresolv
+FUZZ_EXTRA_wifi-router = -Icore/src/common/net core/src/common/net/WifiRouter.cpp $(FUZZ_SLIRP)
+FUZZ_EXTRA_slirp-ip = -Icore/src/common/net core/src/common/net/SlirpIp.cpp $(FUZZ_SLIRP)
+FUZZ_EXTRA_usb-bus-host = core/src/common/UsbBusHost.cpp
+FUZZ_EXTRA_gdbstub-arm = -Icore/src/uarm -pthread
+FUZZ_68K_PLATFORM = core/src/cloudpilot/emulator/palm/Platform
+FUZZ_EXTRA_gdbstub-68k = -DEMULATION_LEVEL=EMULATION_UNIX -Wno-multichar -Wno-pragma-pack -Icore/src/cloudpilot/emulator \
+	-Icore/src/cloudpilot/emulator/hardware -Icore/src/cloudpilot/emulator/uae -Icore/src/cloudpilot/emulator/patch \
+	-Icore/src/cloudpilot/emulator/palm/Device -I$(FUZZ_68K_PLATFORM) -I$(FUZZ_68K_PLATFORM)/Core/Hardware/IncsPrv \
+	-I$(FUZZ_68K_PLATFORM)/Core/System/IncsPrv -I$(FUZZ_68K_PLATFORM)/Incs -I$(FUZZ_68K_PLATFORM)/Incs/Core \
+	-I$(FUZZ_68K_PLATFORM)/Incs/Core/Hardware -I$(FUZZ_68K_PLATFORM)/Incs/Core/System -I$(FUZZ_68K_PLATFORM)/Incs/Core/UI \
+	-I$(FUZZ_68K_PLATFORM)/Incs/Libraries -Icore/src/cloudpilot/emulator/suspend -Icore/src/cloudpilot/native \
+	core/src/cloudpilot/native/GdbStub.cpp
+FUZZ_EXTRA_zodiac-rom = -Izodiac-rom zodiac-rom/ZodiacRom.cpp -lz
+$(FUZZ_ROOT)/fuzz-wifi-router $(FUZZ_ROOT)/fuzz-slirp-ip: $(FUZZ_SLIRP_LIB) core/src/common/net/WifiRouter.cpp \
+	core/src/common/net/SlirpIp.cpp $(wildcard core/src/common/net/*.h)
+# The desktop's Qt parsers, against QtCore only (no GUI), when Qt 6 is there.
+FUZZ_QT := $(shell pkg-config --exists Qt6Core && echo yes)
+FUZZ_QT_TARGETS := $(if $(FUZZ_QT),qt-firmware-input qt-desktop-client)
+FUZZ_TARGETS += $(FUZZ_QT_TARGETS)
+FUZZ_QT_FLAGS = -fPIC -Idesktop $(shell pkg-config --cflags Qt6Core)
+FUZZ_EXTRA_qt-firmware-input = $(FUZZ_QT_FLAGS) $(shell pkg-config --libs Qt6Core)
+FUZZ_EXTRA_qt-desktop-client = $(FUZZ_QT_FLAGS) -I$(FUZZ_ROOT)/moc $(shell pkg-config --cflags --libs Qt6Network)
+FUZZ_MOC ?= $(or $(wildcard /usr/lib/qt6/libexec/moc),moc)
+$(FUZZ_ROOT)/moc/DesktopClient.moc.cpp: desktop/DesktopClient.h
+	mkdir -p $(dir $@)
+	$(FUZZ_MOC) -i $< -o $@
+$(FUZZ_ROOT)/fuzz-qt-desktop-client: $(FUZZ_ROOT)/moc/DesktopClient.moc.cpp desktop/DesktopClient.cpp
 
 .PHONY: fuzz fuzz-run $(FUZZ_COMMON_LIB)
 fuzz: $(FUZZ_TARGETS:%=$(FUZZ_ROOT)/fuzz-%) $(FUZZ_ROOT)/.seeds
@@ -3365,6 +3403,15 @@ fuzz: $(FUZZ_TARGETS:%=$(FUZZ_ROOT)/fuzz-%) $(FUZZ_ROOT)/.seeds
 $(FUZZ_COMMON_LIB):
 	$(MAKE) -C core/src/common FROND_CORE_OBJ=$(abspath $(FUZZ_ROOT))/core CC_NATIVE=$(FUZZ_CC) CXX_NATIVE=$(FUZZ_CXX) \
 		CFLAGS_NATIVE="$(FUZZ_CFLAGS)" bin
+
+# shift-base is off for libslirp: ip_icmp.c shifts 0xf by 28 as an int on every ICMP error it sends.
+$(FUZZ_SLIRP_LIB):
+	echo "$(FUZZ_SLIRP_SHA256)  $(FUZZ_SLIRP_TARBALL)" | sha256sum -c --quiet
+	rm -rf $(FUZZ_ROOT)/slirp && mkdir -p $(FUZZ_ROOT)/slirp
+	tar -xjf $(FUZZ_SLIRP_TARBALL) -C $(FUZZ_ROOT)/slirp
+	CC=$(FUZZ_CC) CFLAGS="$(FUZZ_CFLAGS) -fno-sanitize=shift-base" meson setup --default-library=static --buildtype=plain \
+		$(FUZZ_ROOT)/slirp/build $(FUZZ_ROOT)/slirp/$(FUZZ_SLIRP_VERSION)
+	ninja -C $(FUZZ_ROOT)/slirp/build libslirp.a
 
 $(FUZZ_LINK_LIB): $(LINK_SOURCES) $(wildcard link/*.h)
 	mkdir -p $(FUZZ_ROOT)/link
@@ -3377,16 +3424,17 @@ $(FUZZ_ROOT)/fuzz-%: tests/fuzz/%.cpp $(wildcard tests/fuzz/*.h) $(FUZZ_COMMON_L
 	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) -fsanitize=fuzzer $(FUZZ_INCLUDE) $< $(FUZZ_EXTRA_$*) $(FUZZ_LIBS) -o $@
 
 # Seeds are written again on each build; the runs keep their own corpus in FUZZ_OUT.
-$(FUZZ_ROOT)/.seeds: tests/fuzz/seeds.cpp $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
-	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) $(FUZZ_INCLUDE) $< $(FUZZ_LIBS) -o $(FUZZ_ROOT)/fuzz-seeds
-	ASAN_OPTIONS=detect_leaks=0 $(FUZZ_ROOT)/fuzz-seeds $(FUZZ_ROOT)/seeds
+$(FUZZ_ROOT)/.seeds: tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp tests/fuzz/SeedFdp.h $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
+	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) $(FUZZ_INCLUDE) tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp $(FUZZ_LIBS) -o $(FUZZ_ROOT)/fuzz-seeds
+	rm -rf $(FUZZ_ROOT)/seeds && ASAN_OPTIONS=detect_leaks=0 $(FUZZ_ROOT)/fuzz-seeds $(FUZZ_ROOT)/seeds
 	touch $@
 
 fuzz-run:
 	umask 077 && mkdir -p $(FUZZ_OUT)/scratch && chmod 700 $(FUZZ_OUT) && ulimit -c 0 && \
 	for t in $(or $(FUZZ_ONLY),$(FUZZ_TARGETS)); do \
 		mkdir -p $(FUZZ_OUT)/corpus/$$t $(FUZZ_OUT)/crashes/$$t; \
-		FROND_FUZZ_SCRATCH=$(abspath $(FUZZ_OUT))/scratch $(FUZZ_ROOT)/fuzz-$$t -max_total_time=$(FUZZ_TIME) \
+		case $$t in wifi-router|slirp-ip) wrap="unshare -rn";; *) wrap=;; esac; \
+		FROND_FUZZ_SCRATCH=$(abspath $(FUZZ_OUT))/scratch $$wrap $(FUZZ_ROOT)/fuzz-$$t -max_total_time=$(FUZZ_TIME) \
 			-artifact_prefix=$(FUZZ_OUT)/crashes/$$t/ -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 $(FUZZ_FLAGS) \
 			$(FUZZ_OUT)/corpus/$$t $(FUZZ_ROOT)/seeds/$$t > $(FUZZ_OUT)/$$t-$(FUZZ_TIME)s.log 2>&1; \
 		echo "$$t: exit $$? $$(grep -m1 -o 'SUMMARY: .*' $(FUZZ_OUT)/$$t-$(FUZZ_TIME)s.log)"; \
