@@ -1,7 +1,8 @@
 // RenderLink's event handover: queued events and ones pushed by another thread while the
 // filter goes in reach the guest queue once each, in order, and render resets ask for a
 // full redraw and a new renderer, an event ends the guest thread's wait, and a press or
-// release marks input pending until it's taken.
+// release marks input pending until it's taken. A game controller's presses and stick reach the
+// guest queue as controller events, and the key Set controls saves for a button matches them.
 #include <SDL.h>
 
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "ControllerMap.h"
 #include "RenderThread.h"
 
 static int failures = 0;
@@ -146,6 +148,64 @@ int main() {
         check(!pending.inputPending.load(), "stick and finger motion don't end a slice");
         pending.TakeInputs(taken);
         SDL_SetEventFilter(nullptr, nullptr);
+    }
+
+    // A virtual game controller with the filter in: SDL makes its controller events from the
+    // joystick ones in an event watch, which runs only for events the filter lets through.
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+        std::fprintf(stderr, "SDL_InitSubSystem: %s\n", SDL_GetError());
+        return 1;
+    }
+    {
+        SDL_VirtualJoystickDesc desc{};
+        desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+        desc.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+        desc.naxes = SDL_CONTROLLER_AXIS_MAX;
+        desc.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
+        desc.name = "Frond test controller";
+        const int index = SDL_JoystickAttachVirtualEx(&desc);
+        check(index >= 0 && SDL_IsGameController(index), "the virtual joystick is a game controller");
+        SDL_GameController* controller = index >= 0 ? SDL_GameControllerOpen(index) : nullptr;
+        check(controller != nullptr, "the virtual controller opens");
+        if (controller) {
+            SDL_Joystick* joystick = SDL_GameControllerGetJoystick(controller);
+            const SDL_JoystickID id = SDL_JoystickInstanceID(joystick);
+            RenderLink pads(4, 4);
+            SDL_PumpEvents();
+            SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+            pads.InstallFilter();
+            std::vector<RenderLink::Input> taken;
+            pads.TakeInputs(taken);
+            // What Set controls saves when the button goes down in --controller-listen.
+            PadKey key = PadKey::count;
+            check(padKeyFromId("a", key) && key == PadKey::a, "Set controls names A");
+            ControllerMap map;
+            map.assign(PalmKey::app1, key);
+            SDL_JoystickSetVirtualButton(joystick, SDL_CONTROLLER_BUTTON_A, SDL_PRESSED);
+            SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_RIGHTX, 32767);
+            // The SDL thread's pump.
+            SDL_PumpEvents();
+            pads.DrainQueue();
+            pads.TakeInputs(taken);
+            PadReading reading;
+            bool joystickEvents = false;
+            for (const auto& input : taken) {
+                const auto& event = input.event;
+                if (event.type >= SDL_JOYAXISMOTION && event.type < SDL_CONTROLLERAXISMOTION) joystickEvents = true;
+                if (event.type == SDL_CONTROLLERBUTTONDOWN && event.cbutton.which == id)
+                    reading.buttons |= uint32_t(1) << event.cbutton.button;
+                if (event.type == SDL_CONTROLLERAXISMOTION && event.caxis.which == id &&
+                    event.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTX)
+                    reading.rightX = event.caxis.value;
+            }
+            const PadKeyMask held = padKeysHeld(reading);
+            check(map.pressed(held) == uint64_t(1) << int(PalmKey::app1), "a bound controller button presses its Palm button");
+            check((held & padKeyBit(PadKey::rightRight)) != 0, "the controller's stick reaches the guest");
+            check(!joystickEvents, "the joystick events stay with SDL");
+            SDL_SetEventFilter(nullptr, nullptr);
+            SDL_GameControllerClose(controller);
+        }
+        if (index >= 0) SDL_JoystickDetachVirtual(index);
     }
 
     SDL_Quit();
