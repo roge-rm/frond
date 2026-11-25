@@ -2052,11 +2052,12 @@ struct Probe {
     // the change. hard is the most instructions the slice has left. Returns the instructions passed.
     // The checks skipUartPollStepped starts with, on the probe's own state alone: false when it would pass nothing.
     bool uartPollCandidate() const {
-        if (!uartPollSkip || failed || graphicsWireStatus != Imx1BootstrapAccess::ok || blPrefix || pcStop.armed ||
-            !quietCycles || linesPending || deferredHclk || retired < 3)
-            return false;
+        // The last word goes first: it rules out nearly every step.
+        if (retired < 3) return false;
         const uint32_t w2 = stepped[(retired - 1) % 3].instruction;
-        return w2 == 0x0afffffcu || w2 == 0x1afffffcu;
+        if (w2 != 0x0afffffcu && w2 != 0x1afffffcu) return false;
+        return uartPollSkip && !failed && graphicsWireStatus == Imx1BootstrapAccess::ok && !blPrefix && !pcStop.armed &&
+               quietCycles && !linesPending && !deferredHclk;
     }
     uint64_t skipUartPollStepped(uint64_t hard) {
         // Runs after every step: the checks on the probe's own state go first, the CPU calls after them.
