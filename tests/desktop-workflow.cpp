@@ -3466,6 +3466,14 @@ def emitcam():
         except OSError: continue
         cam=text; s.sendall(b'0\tevent\tcamera\t'+text.hex().encode()+b'\n')
 threading.Thread(target=emitcam,daemon=True).start()
+# The text put in the "emitsync" file goes to the app as a sync event.
+def emitsync():
+    while True:
+        time.sleep(0.02)
+        try: text=open(here+'/emitsync','rb').read(); os.remove(here+'/emitsync')
+        except OSError: continue
+        s.sendall(b'0\tevent\tsync\t'+text.hex().encode()+b'\n')
+threading.Thread(target=emitsync,daemon=True).start()
 mic=b'off'
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
@@ -3494,6 +3502,13 @@ for line in s.makefile('rb'):
         s.sendall(b'0\tevent\tsync\t'+b'syncing usb backup 1/2 Memo'.hex().encode()+b'\n')
         time.sleep(0.3)
         s.sendall(b'0\tevent\tsync\t'+b'done usb: Backup complete'.hex().encode()+b'\n')
+    # ActiveSync waits at the partnership question until the app answers.
+    if cmd==b'activesync-start':
+        s.sendall(b'0\tevent\tsync\t'+b'syncing usb partnership-question'.hex().encode()+b'\n')
+    if cmd==b'activesync-answer':
+        s.sendall(b'0\tevent\tsync\t'+b'syncing usb files'.hex().encode()+b'\n')
+        time.sleep(0.2)
+        s.sendall(b'0\tevent\tsync\t'+b'done usb: Windows Mobile connected.'.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY").replace("DEVICE", device));
         core.close();
@@ -4027,6 +4042,73 @@ for line in s.makefile('rb'):
         QVERIFY(renamed.open(QIODevice::ReadOnly));
         QCOMPARE(renamed.readAll().trimmed(), machine);
         QVERIFY(!QFileInfo::exists(ids.fileName()));
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // ActiveSync asks before a first partnership; the answer goes to the core and the box closes
+    // by itself when the core moves on without one.
+    void activeSyncPartnershipQuestion() {
+        QSettings().clear();
+        QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Pocket", 6, "hp-ipaq-rx1950", 0);
+        QTemporaryDir files;
+        menuCore(files.path(), "hp-ipaq-rx1950");
+        if (QTest::currentTestFailed()) return;
+        frondSync::SyncLibrary library;
+        QString error;
+        QVERIFY2(frondDesktopSync::openLibrary(library, error), qPrintable(error));
+        frondSync::ProfileInfo profile;
+        std::string problem;
+        QVERIFY(library.CreateProfile("Pocket PC", profile, problem));
+        MainWindow window(files.filePath("core"));
+        window.show();
+        window.openSession(managedSession("Pocket"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        auto* sync = bar->findChild<QAction*>("barSync");
+        QVERIFY(sync);
+        QTRY_VERIFY_WITH_TIMEOUT(sync->isVisible() && sync->isEnabled(), 5000);
+        QCOMPARE(sync->text(), QString("ActiveSync"));
+        QFile ids(frondSessions::syncIdPath(managedSession("Pocket")));
+        QTRY_VERIFY_WITH_TIMEOUT(ids.exists(), 5000);
+        QVERIFY(ids.open(QIODevice::ReadOnly));
+        const auto machine = ids.readAll().trimmed().toStdString();
+        ids.close();
+        QVERIFY(library.Assign(frondSync::MachineDeviceKey(machine), profile.id, problem, "winmo"));
+        auto readSent = [&] {
+            QFile file(files.filePath("sent"));
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray{};
+        };
+        auto question = [&] { return window.findChild<QMessageBox*>("partnershipQuestion"); };
+        auto* label = bar->findChild<QLabel*>("barStatus");
+
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-start ask"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        QCOMPARE(question()->text(), QString("Set up an ActiveSync partnership with this device?"));
+        question()->findChild<QPushButton*>("partnershipGuest")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-answer guest"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("ActiveSync complete:"), 3000);
+        QVERIFY(!question());
+
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        question()->findChild<QPushButton*>("partnershipSetUp")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-answer set-up"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("ActiveSync complete:"), 3000);
+
+        // The guest's cable came out: the core ends the sync and the question goes with it.
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        QFile events(files.filePath("emitsync"));
+        QVERIFY(events.open(QIODevice::WriteOnly));
+        events.write("failed usb: ActiveSync ended before the partnership question was answered.");
+        events.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!question(), 3000);
+        QCOMPARE(readSent().count("activesync-answer"), 2);
+        window.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QVERIFY(library.DeleteProfile(profile.id, problem));
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }

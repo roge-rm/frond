@@ -553,7 +553,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && !frondPosix::IsAbsolutePath(path)) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "voice-key" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "voice-key" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && command != "activesync-answer" && !path.empty()) return {false, "argument", "This command takes no argument."};
         if (command == "install" && ctx.soc->InstallsToCard()) {
             const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path);
             return {result.ok, result.code, result.message};
@@ -688,12 +688,27 @@ class DesktopControl {
             manager.Configure(options);
             return {true, "sync", SyncState()};
         }
+        if (command == "activesync-answer") {
+            if (path != "set-up" && path != "guest") return {false, "argument", "Use set-up or guest."};
+            if (!frondSync::SyncManager::Get().AnswerPartnership(path == "set-up"))
+                return {false, "none", "No partnership question is open."};
+            return {true, "sync", path == "set-up" ? "Setting up a partnership." : "Connecting as a guest."};
+        }
         if (command == "activesync-start") {
             auto* device = dynamic_cast<SocS3C2442*>(ctx.soc);
             if (!device || !ctx.usb) return {false, "unsupported", "ActiveSync is unavailable for this device."};
             if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
                 return {false, "busy", "An ActiveSync is already running."};
-            if (path == "serial" || (path.empty() && frondSync::ConfiguredActiveSyncUsesSerial())) {
+            // A trailing "ask": the frontend answers the partnership question; without it the device pairs.
+            const bool ask = path == "ask" || (path.size() > 4 && path.compare(path.size() - 4, 4, " ask") == 0);
+            const auto transport = ask ? path.substr(0, path.size() == 3 ? 0 : path.size() - 4) : path;
+            {
+                auto& manager = frondSync::SyncManager::Get();
+                auto options = manager.Options();
+                options.askPartnership = ask;
+                manager.Configure(options);
+            }
+            if (transport == "serial" || (transport.empty() && frondSync::ConfiguredActiveSyncUsesSerial())) {
                 if (!ctx.serial || !ctx.serialPort) return {false, "unsupported", "Serial ActiveSync is unavailable."};
                 ctx.usb->Stop();
                 ctx.serial->Stop();
@@ -701,7 +716,7 @@ class DesktopControl {
                 if (!device->StartSerialActiveSync()) return {false, "serial", "Couldn't attach the serial ActiveSync cable."};
                 return {true, "sync", "Starting ActiveSync over serial."};
             }
-            if (!path.empty() && path != "usb") return {false, "argument", "Use usb or serial."};
+            if (!transport.empty() && transport != "usb") return {false, "argument", "Use usb or serial."};
             ctx.usbError.clear();
             if (!ctx.usb->StartCable(ctx.soc, ctx.usbError)) return {false, "usb", ctx.usbError};
             device->StartActiveSync();

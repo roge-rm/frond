@@ -437,6 +437,13 @@ class MainWindow : public QMainWindow {
     bool editSyncSettings(const QString& session, QWidget* parent);
     void startSync();
     void showSyncStatus(const QString& state);
+    // The core's ActiveSync partnership question: shown while the sync waits at it, answered
+    // through the background slot once it's free.
+    QPointer<QMessageBox> partnershipBox;
+    QString partnershipUnsent;
+    bool partnershipAnswered{false};  // until the core leaves the question
+    void askPartnership(bool open);
+    void sendPartnershipAnswer();
     QString runningMachineDir() const;
     QString runningCardName(int n = 0) const;
     void pickCard(int n = 0);

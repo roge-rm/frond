@@ -82,6 +82,11 @@ class SyncPipe {
         std::lock_guard lock(mutex);
         return closed;
     }
+    // Closed, or the device side finished sending.
+    bool Ended() const {
+        std::lock_guard lock(mutex);
+        return closed || inputFinished;
+    }
 
     // Engine side.
     class End final : public SyncStream {

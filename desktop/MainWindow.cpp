@@ -267,7 +267,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         });
     }
     // A switch between apps waiting for the background slot goes once it's free.
-    connect(&client, &DesktopClient::backgroundResult, this, [this] { QTimer::singleShot(0, this, [this] { sendAppActive(); sendVoiceKey(); }); });
+    connect(&client, &DesktopClient::backgroundResult, this, [this] { QTimer::singleShot(0, this, [this] { sendAppActive(); sendVoiceKey(); sendPartnershipAnswer(); }); });
     connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
         if (command == "speed-state" && runningPreferences.showMips) {
             palmHolder->setMips(ok ? message : QString());
@@ -278,6 +278,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (ok) voiceSent = message == "down"; else voiceWanted = voiceSent = false;
         }
         if (command == "gamepad-state" && ok) gamepadReply(message);
+        if (command == "activesync-answer" && !ok) log->appendPlainText(command + ": " + message);
         if (command == "cradle-setting") showCradle(ok ? message : QString());
         if (command == "battery-state" || command == "battery") {
             if (command == "battery" && !ok) { batterySent.clear(); failure(message); return; }
@@ -296,7 +297,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     mipsTimer->setInterval(1000);
     connect(mipsTimer, &QTimer::timeout, this, [this] { pollMips(); });
     printerTimer = new QTimer(this);
-    connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); pollGamepad(); });
+    connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); pollGamepad(); sendPartnershipAnswer(); });
     printerTimer->start(1000);
     auto* danaPending = new QLabel(root);
     danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
@@ -904,6 +905,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     connect(&client, &DesktopClient::finished, this, [this] {
         syncMachineId.clear(); syncMachineError.clear(); syncRunning = false; voiceWanted = voiceSent = false;
+        askPartnership(false);
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
@@ -996,6 +998,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         QTimer::singleShot(0, this, [this] {
             if (internalListWanted) listInternal();
             if (appsStale) listApps();
+            sendPartnershipAnswer();
         });
         // The answer is the map the core now uses, already saved; nothing to show.
         if (command == "controller-map") {
@@ -3186,7 +3189,7 @@ void MainWindow::startSync() {
         if (!assignment) return;
     }
     if (frondDesktopSync::protocol(runningDevice) == frondDesktopSync::Protocol::activeSync) {
-        send("activesync-start");
+        send("activesync-start", "ask");
         return;
     }
     QString connection;
@@ -3207,7 +3210,10 @@ void MainWindow::showSyncStatus(const QString& state) {
     if (wasRunning != syncRunning) refresh();
     const bool active = frondDesktopSync::protocol(runningDevice) == frondDesktopSync::Protocol::activeSync;
     const auto label = active ? tr("ActiveSync") : tr("HotSync");
-    if (syncRunning) notify(tr("%1: %2").arg(label, state.mid(8)), 0);
+    const bool question = active && syncRunning && state.section(' ', 2, 2) == "partnership-question";
+    askPartnership(question);
+    if (question) notify(tr("ActiveSync: waiting for an answer"), 0);
+    else if (syncRunning) notify(tr("%1: %2").arg(label, state.mid(8)), 0);
     else if (state.startsWith("done ") || state.startsWith("failed ")) {
         const bool failed = state.startsWith("failed ");
         const auto details = state.section(": ", 1);
@@ -3216,6 +3222,44 @@ void MainWindow::showSyncStatus(const QString& state) {
         if (!failed && panels->current() == 0) { appsStale = true; listApps(); }
         if (syncWindow && !QApplication::activeModalWidget()) syncWindow->refresh();
     } else if (state == "off" && wasRunning) notify({}, 0);
+}
+
+// Opened without a nested event loop, like failure(). Closing it (Esc) connects as a guest, as
+// cancelling desktop ActiveSync's setup did.
+void MainWindow::askPartnership(bool open) {
+    if (!open) {
+        partnershipUnsent.clear();
+        partnershipAnswered = false;
+        if (auto* box = partnershipBox.data()) {
+            partnershipBox = nullptr;
+            box->close();
+        }
+        return;
+    }
+    if (partnershipBox || partnershipAnswered) return;
+    auto* box = new QMessageBox(QMessageBox::Question, tr("ActiveSync"), tr("Set up an ActiveSync partnership with this device?"),
+                                QMessageBox::NoButton, this);
+    box->setObjectName("partnershipQuestion");
+    auto* setUp = box->addButton(tr("Set up"), QMessageBox::AcceptRole);
+    auto* guest = box->addButton(tr("Connect as guest"), QMessageBox::RejectRole);
+    setUp->setObjectName("partnershipSetUp");
+    guest->setObjectName("partnershipGuest");
+    box->setDefaultButton(setUp);
+    box->setEscapeButton(guest);
+    connect(box, &QDialog::finished, box, &QObject::deleteLater);
+    connect(box, &QDialog::finished, this, [this, box, setUp] {
+        if (partnershipBox != box) return;
+        partnershipBox = nullptr;
+        partnershipAnswered = true;
+        partnershipUnsent = box->clickedButton() == setUp ? "set-up" : "guest";
+        sendPartnershipAnswer();
+    });
+    partnershipBox = box;
+    box->open();
+}
+void MainWindow::sendPartnershipAnswer() {
+    if (partnershipUnsent.isEmpty() || !client.running() || stopping || !client.available()) return;
+    if (client.requestBackground("activesync-answer", partnershipUnsent)) partnershipUnsent.clear();
 }
 
 QString MainWindow::serialChoice() const {

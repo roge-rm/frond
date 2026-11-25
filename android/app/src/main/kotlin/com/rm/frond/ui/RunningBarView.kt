@@ -99,6 +99,8 @@ class RunningBarState {
     internal var syncManager by mutableStateOf(false)
     internal var syncSettings by mutableStateOf(false)
     internal var syncAssignment by mutableStateOf(false)
+    // The core's ActiveSync partnership question is open and not yet answered.
+    internal var partnershipQuestion by mutableStateOf(false)
 }
 
 class RunningBarActions(
@@ -118,6 +120,8 @@ class RunningBarActions(
     val filesOpen: (Boolean) -> Unit,
     val startSync: () -> Unit,
     val syncMachines: () -> List<Session>,
+    // true sets up an ActiveSync partnership, false connects as a guest.
+    val answerPartnership: (Boolean) -> Unit,
 )
 
 @Composable
@@ -126,7 +130,7 @@ fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
         // The view is the whole screen while a sheet is open, so its scrim catches every touch.
         val menuOpen = state.menuOpen
         val sheetOpen = state.sheet != null
-        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment || state.model?.let { it.busy != null || it.path != null || it.log != null } == true
+        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment || state.partnershipQuestion || state.model?.let { it.busy != null || it.path != null || it.log != null } == true
         if (RunningBar.autoHides(state.mode, state.shown, menuOpen, sheetOpen, dialogOpen)) {
             LaunchedEffect(state.touches, menuOpen, sheetOpen, dialogOpen) {
                 delay(RunningBar.AUTO_HIDE_MS)
@@ -268,6 +272,15 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
         if (state.syncSettings) SyncDeviceDialog(machine, onClose = { state.syncSettings = false },
             protocol = state.syncProtocol, networkHotSync = model.device.supportsNetworkHotSync())
     }
+    // Back connects as a guest, as cancelling desktop ActiveSync's setup did; a tap outside does nothing.
+    if (state.partnershipQuestion) AlertDialog(
+        onDismissRequest = { actions.answerPartnership(false) },
+        properties = DialogProperties(dismissOnClickOutside = false),
+        title = { Text("ActiveSync") },
+        text = { Text("Set up an ActiveSync partnership with this device?") },
+        confirmButton = { TextButton(onClick = { actions.answerPartnership(true) }) { Text("Set up") } },
+        dismissButton = { TextButton(onClick = { actions.answerPartnership(false) }) { Text("Connect as guest") } },
+    )
     BusyDialog(model)
     AlertBox(model)
     CardPickerDialogs(model)

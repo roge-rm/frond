@@ -1281,6 +1281,7 @@ open class FrondActivity : SDLActivity() {
                         openMenu = { openMenu() }, menuRow = { menuRow(it) },
                         openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
                         startSync = ::startSync, syncMachines = { Sessions.list(this@FrondActivity) },
+                        answerPartnership = ::answerPartnership,
                     ))
                 }
             }
@@ -1350,6 +1351,8 @@ open class FrondActivity : SDLActivity() {
                         val connection = SyncNative.call(this@FrondActivity, "hotsync-transport",
                             "profile" to assigned, "device" to SyncNative.deviceKey(machine)).getString("connection")
                         link.request(protocol.startCommand, connection, timeoutSeconds = 10)
+                    } else if (protocol == SyncProtocol.ACTIVE_SYNC) {
+                        link.request(protocol.startCommand, PartnershipQuestion.START_ARGUMENT, timeoutSeconds = 10)
                     } else link.request(protocol.startCommand, timeoutSeconds = 10)
                 }
                 if (reply == null) bar.syncAssignment = true
@@ -1365,11 +1368,31 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    // Answered once per question; the core moving on (or the session ending) closes it.
+    private var partnershipAnswered = false
+
+    private fun answerPartnership(setUp: Boolean) {
+        if (!bar.partnershipQuestion) return
+        bar.partnershipQuestion = false
+        partnershipAnswered = true
+        val scope = barOwner?.lifecycleScope ?: return
+        scope.launch {
+            val reply = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                link.request(PartnershipQuestion.ANSWER_COMMAND, PartnershipQuestion.answer(setUp), timeoutSeconds = 10)
+            }
+            if (!reply.ok && reply.code != "none") menuModel?.note = reply.message
+        }
+    }
+
     private fun syncState(raw: String) {
         val state = raw.substringBefore("; profile ")
         val label = bar.syncProtocol?.label ?: return
         bar.syncRunning = state.startsWith("syncing ")
+        val question = PartnershipQuestion.open(state)
+        if (!question) partnershipAnswered = false
+        bar.partnershipQuestion = question && !partnershipAnswered
         bar.syncStatus = when {
+            question -> "Waiting for an answer"
             bar.syncRunning -> state.removePrefix("syncing ")
             state.startsWith("waiting ") && bar.syncStatus != null -> "Waiting for $label"
             else -> null

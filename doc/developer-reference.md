@@ -328,7 +328,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `cradle-button-state`, `cradle-button` | None to read, `down` or `up` to set | `cradle-button`: actual button state, or `unavailable` for a read on devices without this control. |
 | `sync-state`, `sync-profile` | None to read, profile name to set (empty to use the assigned profile) | `sync`: Sync Manager status. The profile change applies to the next HotSync. |
 | `sync-start` | Empty, `local` or `network` | `sync`: start HotSync on USB or serial. Over USB the press goes in once the device comes up, or after 2 s (a Zodiac's USB only comes up once HotSync runs), and right after a sync it waits like `hotsync`. `local` also disables Network HotSync. With `network`, open the guest's HotSync app and return `network` with a prompt to tap Network HotSync. |
-| `activesync-start` | `usb`, `serial` or empty for the configured transport | `sync`: start ActiveSync on Windows Mobile. |
+| `activesync-start` | `usb`, `serial` or empty for the configured transport, then optionally `ask` | `sync`: start ActiveSync on Windows Mobile. With `ask`, a device with no partnership and no saved answer waits at stage `partnership-question` for `activesync-answer`; without it, it pairs. |
+| `activesync-answer` | `set-up` or `guest` | `sync`: answer the partnership question. `guest` syncs nothing and isn't asked again. `none` when no question is open. |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |

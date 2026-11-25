@@ -9,10 +9,12 @@
 // button with a port routed here. Thread-safe.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -30,6 +32,9 @@ struct SyncOptions {
     bool network{false};    // route the virtual host's Network HotSync to this manager
     std::string userName;    // name for a handheld that has no user yet; empty: the profile's name
     int networkReplyIdleMs{0}; // override the default DLP reply deadline for a slow network route
+    // A frontend is there to answer: a Windows Mobile device with no partnership and no saved
+    // answer waits on AnswerPartnership. Off, it pairs without asking (scripted runs).
+    bool askPartnership{false};
 };
 
 bool ConfiguredHotSyncUsesNetwork(const SyncOptions& options);
@@ -72,6 +77,12 @@ class SyncManager {
     // Used by the session while it runs.
     void Update(const std::function<void(SyncStatus&)>& change);
 
+    // The session's partnership question: the stage reads partnership-question until the frontend
+    // answers. Blocks the session's thread; empty when `ended` turns true first (polled).
+    std::optional<bool> AskPartnership(const std::function<bool()>& ended);
+    // From the frontend: true sets up a partnership, false connects as a guest. False with no question open.
+    bool AnswerPartnership(bool setUp);
+
    private:
     SyncManager() = default;
     mutable std::mutex mutex;
@@ -81,6 +92,10 @@ class SyncManager {
     SyncStatus status;
     int endpoints{0};
     std::function<void(const std::string&)> listener;
+    std::mutex questionMutex;
+    std::condition_variable questionChanged;
+    bool questionOpen{false};
+    std::optional<bool> answer;
 };
 
 // A thread running SyncManager::Serve on a stream, for a transport that polls a SyncPipe.

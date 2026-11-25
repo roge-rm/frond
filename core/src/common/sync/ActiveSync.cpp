@@ -325,8 +325,10 @@ void ActiveSyncSession::Run() {
 
         // A device that has never chosen gets a partnership on its first sync, as desktop
         // ActiveSync's setup does; without one the guest's ActiveSync shows no sync at all.
+        // With a frontend there it asks first, holding the connection open like the desktop's
+        // setup wizard; a guest connection stores "declined" so it isn't asked again.
         auto pairing = profile.ActiveSyncPairing(key);
-        bool partnershipMissing = false, paired = false;
+        bool partnershipMissing = false, paired = false, guest = false;
         std::string pairingNote;
         if (pairing == "confirmed") {
             progress("partnership", 0, 0, {});
@@ -336,6 +338,15 @@ void ActiveSyncSession::Run() {
                 partnershipMissing = true;
                 if (!profile.ClearConfirmedActiveSyncPairing(key, error)) throw std::runtime_error(error);
                 pairing = profile.ActiveSyncPairing(key);
+            }
+        }
+        if (pairing == "requested" && options.askPartnership && profile.DeviceValue(key, "activesync-pair").empty()) {
+            const auto answer = manager.AskPartnership([this] { return pipes[0]->Ended() || pipes[1]->Ended(); });
+            if (!answer) throw std::runtime_error("ActiveSync ended before the partnership question was answered.");
+            if (!*answer) {
+                if (!profile.RequestActiveSyncPairing(key, false, error)) throw std::runtime_error(error);
+                pairing = profile.ActiveSyncPairing(key);
+                guest = true;
             }
         }
         if (pairing == "requested") {
@@ -403,6 +414,7 @@ void ActiveSyncSession::Run() {
         message = sent ? "CAB sent. Finish installation on the device." : "Windows Mobile connected. No CABs queued.";
         if (paired) message += partnershipMissing ? " Desktop partnership set up again." : " Desktop partnership verified.";
         else if (partnershipMissing) message += " Desktop partnership missing.";
+        if (guest) message += " Connected as a guest.";
         if (!pairingNote.empty()) message += " " + pairingNote;
         if (!files.empty()) message += " " + files;
         if (!outlook.empty()) message += " " + outlook;
