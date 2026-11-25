@@ -204,7 +204,8 @@ void listMidiOutputPorts(QObject* context, std::function<void(const QStringList&
         done({});
     });
     core->start(midiCore, {"--music-midi-ports"});
-    timeout->start(5000);
+    // A first start of a newly installed core can take seconds on Windows while it's scanned.
+    timeout->start(20000);
 }
 
 QString midiPortKey(const QString& name) {
@@ -492,6 +493,8 @@ void MachineSettings::showMusic() {
     if (!zodiac || choice != "midi" || midiPortsListed) return;
     midiPortsListed = true;
     listMidiOutputPorts(this, [this](const QStringList& ports) {
+        // Nothing found is asked again the next time MIDI device is chosen.
+        if (ports.isEmpty()) midiPortsListed = false;
         const auto keep = midiPort->currentData().toString();
         const QSignalBlocker blocked(midiPort);
         midiPort->clear();
@@ -499,6 +502,10 @@ void MachineSettings::showMusic() {
         midiPort->addItem(tr("Frond's own port"), "virtual");
 #endif
         for (const auto& port : ports) midiPort->addItem(port, port);
+        if (midiPort->count() == 0 && keep.isEmpty()) {
+            midiPort->addItem(tr("No MIDI ports found"));
+            midiPort->setItemData(0, false, Qt::UserRole - 1);  // disabled
+        }
         int index = keep.isEmpty() ? 0 : midiPort->findData(keep);
         // The same port under new client numbers.
         if (index < 0)
