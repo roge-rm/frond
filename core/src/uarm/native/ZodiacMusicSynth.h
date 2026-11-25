@@ -30,6 +30,7 @@
 #include "GuestAudioClock.h"
 #include "audio_queue.h"
 #include "zodiac_music_player.h"
+#include "zodiac_soft_limit.h"
 
 class ZodiacMusicSynth {
    public:
@@ -259,12 +260,13 @@ class ZodiacMusicSynth {
         }
         int16_t part[step * 2];
         tsf_render_short(font_, part, int(n), 0);
+        const bool boost = target > 65536 || renderGain_ > 65536;
         const int64_t from = renderGain_, change = int64_t(target) - from;
         for (size_t i = 0; i < n; ++i) {
             const int64_t gain = from + change * int64_t(i + 1) / int64_t(n);
             for (size_t c = 0; c < 2; ++c) {
                 const int64_t v = stereo[i * 2 + c] + part[i * 2 + c] * gain / 65536;
-                stereo[i * 2 + c] = int16_t(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
+                stereo[i * 2 + c] = int16_t(boost ? zodiacSoftLimit(v) : v < -32768 ? -32768 : v > 32767 ? 32767 : v);
             }
         }
         renderGain_ = target;
