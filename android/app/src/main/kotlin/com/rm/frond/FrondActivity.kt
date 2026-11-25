@@ -296,6 +296,8 @@ open class FrondActivity : SDLActivity() {
         // A btvirt and sockets left by an emulator that was killed.
         BtLink.cleanLater(applicationContext)
         super.onCreate(savedInstanceState)
+        UnbufferedInput.request(window.decorView)
+        InputTrace.followFrames()
         // After the core's library loads, which ZodiacMidi tells when the device fails.
         midiOutId?.let { zodiacMidi = ZodiacMidi(this, it) }
         fitInsideSystemBars()
@@ -651,6 +653,7 @@ open class FrondActivity : SDLActivity() {
     override fun onBackPressed() = back()
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        InputTrace.key(event)
         if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
             if (event.action == android.view.KeyEvent.ACTION_UP) back()
             return true
@@ -696,7 +699,14 @@ open class FrondActivity : SDLActivity() {
     private val captureSticks = StickKeys()
     private val captureRight = RightStickAxes()
     private val captureHat = HatKeys()
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        InputTrace.motion("touch", event)
+        UnbufferedInput.touch(window.decorView, event)
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK)) InputTrace.motion("joystick", event)
         val editor = bar.controls
         if (editor != null && event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             // A stick pushed past half travel is assigned; the Palm gets nothing while a button waits.
