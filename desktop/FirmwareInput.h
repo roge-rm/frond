@@ -153,6 +153,9 @@ inline bool serialAbsent(Device device) { return device == Device::zire72; }
 // The connector or cradle has a separate HotSync button on these boards.
 inline bool hasHotSyncButton(Device device) { return deviceProfileHasHotSyncButton5(int(device)); }
 
+// A voice or record key the Record button holds down.
+inline bool hasVoiceKey(Device device) { return deviceProfileHasVoiceKey5(int(device)); }
+
 // A 68k ROM's big-endian card header, read the way frond-68k reads it before its own full check.
 inline Device68kRomInfo5 inspectRom68k(QFile& rom) {
     return deviceProfileInspect68kRom5(rom.size(), [&](uint64_t at, uint8_t* bytes, size_t count) {

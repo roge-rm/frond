@@ -193,6 +193,8 @@ class DeviceDataTest(unittest.TestCase):
             self.assertTrue(profiles[name]['hot_sync_button'], name)
         for name in ('palm-zire-72', 'sony-clie-tg50', 'repalm'):
             self.assertFalse(profiles[name]['hot_sync_button'], name)
+        for name, has in (('palm-zire-72', True), ('sony-clie-tg50', True), ('hp-ipaq-rx1950', True), ('palm-tx', False), ('palm-e2', False)):
+            self.assertEqual(profiles[name]['voice_key'], has, name)
         kotlin = (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()
         self.assertIn('id = "palm-e2-franken"', kotlin)
         self.assertIn('hotSyncButton = true', kotlin)

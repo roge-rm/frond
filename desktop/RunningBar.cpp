@@ -158,6 +158,14 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     syncAction->setVisible(false);
     soundAction = button("sound-on", "barSound", tr("Sound"), Button::Sound);
     soundAction->setCheckable(true);
+    recordAction = addAction(frondIcons::icon("mic"), tr("Record"));
+    recordAction->setObjectName("barRecord");
+    recordAction->setToolTip(tr("Record"));
+    recordAction->setVisible(false);
+    // Held down to record: the key follows the mouse button.
+    auto* recordButton = static_cast<QToolButton*>(widgetForAction(recordAction));
+    connect(recordButton, &QToolButton::pressed, this, [this] { emit recordHeld(true); });
+    connect(recordButton, &QToolButton::released, this, [this] { emit recordHeld(false); });
     powerAction = button("power", "barPower", tr("Power"), Button::Power);
     auto* more = new QToolButton(this);
     more->setObjectName("barMore");
@@ -255,6 +263,8 @@ void RunningBar::apply(const runningRules::Traits& traits, const runningRules::S
     cardAction->setIcon(frondIcons::icon(icons[int(card)]));
     cardAction->setToolTip(card == runningRules::CardIcon::None ? tr("Storage (Ctrl+2)")
                                                                 : tr("Storage: %1 (Ctrl+2)").arg(tr(tips[int(card)])));
+    recordAction->setVisible(buttons.record);
+    recordAction->setEnabled(buttons.recordEnabled);
     powerAction->setVisible(buttons.power);
     powerAction->setEnabled(buttons.powerEnabled);
     keyboardAction->setVisible(buttons.keyboard);

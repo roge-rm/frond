@@ -93,7 +93,7 @@ object RunningSheets {
     // ---- Display and audio ----
 
     enum class DisplayRow { SIZE, SMOOTH, CONTRAST, SHOW_KEYBOARD, JOG, SPEED, CAMERA }
-    enum class AudioRow { SOUND, HEADPHONES, MICROPHONE, AUDIO_PREVIEW, RUMBLE }
+    enum class AudioRow { SOUND, HEADPHONES, MICROPHONE, AUDIO_PREVIEW, RUMBLE, RECORD_KEY }
 
     // The groups of the settings sheet, in the desktop's order. Game controller is where the controller keys are set.
     enum class Group(val label: String) { DISPLAY("Display"), AUDIO("Audio"), GAME_CONTROLLER("Game controller"), BATTERY("Battery"), SPEED("Speed") }
@@ -123,6 +123,7 @@ object RunningSheets {
         if (!device.runs68k || device.microphone) rows += AudioRow.MICROPHONE
         if (!device.runs68k) rows += AudioRow.AUDIO_PREVIEW
         if (device.vibrate) rows += AudioRow.RUMBLE
+        if (device.voiceKey) rows += AudioRow.RECORD_KEY
         return rows
     }
 

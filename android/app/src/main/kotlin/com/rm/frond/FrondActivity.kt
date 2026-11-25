@@ -259,6 +259,7 @@ open class FrondActivity : SDLActivity() {
         // The core names a new machine's file on its first save, so an older path may not be the one in use.
         sessionPath = Sessions.resolve(this, intent?.getStringExtra(EXTRA_SESSION))
         machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
+        recordKey = machineSettings.recordKey
         val device = launchDevice()
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
@@ -664,6 +665,12 @@ open class FrondActivity : SDLActivity() {
                 editor.assign(event.keyCode)
                 assignedKey = event.keyCode
             }
+            return true
+        }
+        // The phone key chosen for Record is held down for as long as it is, and is used up here.
+        if (recordKey.matches(event.keyCode) && !leaving) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) holdRecord(true)
+            else if (event.action == android.view.KeyEvent.ACTION_UP) holdRecord(false)
             return true
         }
         // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
@@ -1240,6 +1247,7 @@ open class FrondActivity : SDLActivity() {
         bar.soundKey = RunningBar.soundKey(device)
         bar.sound = sound
         bar.powerKey = RunningBar.powerKey(device)
+        bar.recordKey = RunningBar.recordKey(device)
         bar.syncMachine = session?.id
         bar.syncProtocol = session?.let { SyncProtocol.forDevice(device) }
         val owner = BarOwner().also { it.create() }
@@ -1268,7 +1276,7 @@ open class FrondActivity : SDLActivity() {
             setContent {
                 androidx.compose.runtime.CompositionLocalProvider(androidx.activity.compose.LocalActivityResultRegistryOwner provides results) {
                     com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
-                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
+                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() }, record = { holdRecord(it) },
                         keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) }, autoHide = { setBarShown(false, remember = false) },
                         openMenu = { openMenu() }, menuRow = { menuRow(it) },
                         openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
@@ -1549,6 +1557,31 @@ open class FrondActivity : SDLActivity() {
             }
             runOnUiThread { if (!leaving) applySound() }
         }, "FrondBarSound").apply { isDaemon = true }.start()
+    }
+
+    // The phone key held to record, from the machine's settings.
+    private var recordKey = RecordKey.NONE
+    private var recordHeld = false
+    // Key changes go to the core one at a time, in order.
+    private val recordSender = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "FrondRecordKey").apply { isDaemon = true } }
+
+    fun applyRecordKey() {
+        val key = Sessions.forPath(this, sessionPath)?.settings?.recordKey ?: return
+        runOnUiThread {
+            // Letting go of a key that is no longer the record key must not leave the Palm's key down.
+            if (key != recordKey) holdRecord(false)
+            recordKey = key
+        }
+    }
+
+    // Holds the Palm's voice or record key down or lets it go; a repeat of the same state is ignored.
+    private fun holdRecord(down: Boolean) {
+        if (down == recordHeld) return
+        recordHeld = down
+        recordSender.execute {
+            val reply = link.request("voice-key", if (down) "d" else "u", timeoutSeconds = 10)
+            if (!reply.ok) Log.w(TAG, "record: ${reply.code} ${reply.message}")
+        }
     }
 
     // Presses and releases the Palm's power key by key replay on the control link.

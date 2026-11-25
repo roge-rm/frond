@@ -78,6 +78,7 @@ class RunningBarState {
     var sound by mutableStateOf(true)
     var soundKey by mutableStateOf(false)
     var powerKey by mutableStateOf(false)
+    var recordKey by mutableStateOf(false)
     var keyboardKey by mutableStateOf(false)
     var menuOpen by mutableStateOf(false)
     // The device and model behind the menu; null until the firmware is resolved.
@@ -104,6 +105,8 @@ class RunningBarActions(
     val back: () -> Unit,
     val toggleSound: () -> Unit,
     val power: () -> Unit,
+    // The Record button went down (true) or was let go (false).
+    val record: (Boolean) -> Unit,
     val keyboard: () -> Unit,
     val show: () -> Unit,
     val hide: () -> Unit,
@@ -194,6 +197,18 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
             if (device != null && !device.runs68k) BarButton({ state.model?.rotate() }, button) {
                 Icon(painterResource(R.drawable.ic_rotate_device), contentDescription = "Rotate")
             }
+            if (state.recordKey) IconButton({}, Modifier.size(button).pointerInput(Unit) {
+                // Held down to record: the key is down for as long as the finger is.
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    actions.record(true)
+                    try {
+                        do { val event = awaitPointerEvent() } while (event.changes.any { it.pressed })
+                    } finally {
+                        actions.record(false)
+                    }
+                }
+            }) { Icon(painterResource(R.drawable.ic_mic), contentDescription = "Record") }
             if (state.powerKey) BarButton(actions.power, button) { Icon(painterResource(R.drawable.ic_power), contentDescription = "Power") }
             Box {
                 BarButton(actions.openMenu, button) { Icon(Icons.Default.MoreVert, contentDescription = "More") }

@@ -86,6 +86,7 @@ fun MachineSettingsScreen(model: HomeModel) {
                 MachineAudioPreviewRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             }
             if (draft.device.vibrate) MachineRumbleRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
+            if (draft.device.voiceKey) MachineRecordKeyRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (draft.device.zodiac) MachineMusicRows(draft.settings, { model.changeMachineSettings(it) }) { model.importSoundFont(it) }
             Header("Battery", Modifier.padding(top = 16.dp))
             MachineBatteryRows(draft.settings, false, null) { model.changeMachineSettings(it) }

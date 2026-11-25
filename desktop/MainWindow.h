@@ -171,6 +171,7 @@ class MainWindow : public QMainWindow {
     void notify(const QString& text, int ms = 5000);
     void barChosen(runningRules::Id id);
     void barPressed(RunningBar::Button button);
+    void sendVoiceKey();
     void runShortcut(runningRules::Shortcut what);
     void togglePanel(int page);
     void panelChanged(int page);
@@ -317,6 +318,7 @@ class MainWindow : public QMainWindow {
     QFutureWatcher<frondBattery::HostState>* hostWatcher{nullptr};
     frondBattery::HostState hostBattery;
     bool batteryRetry{false};
+    bool voiceWanted{false}, voiceSent{false};  // the Record button, and what the core was last told
     bool batteryKnown{false}, batterySupported{false}, batteryChargingSupported{true};
     QString speedText;
     void updateBarMachine();

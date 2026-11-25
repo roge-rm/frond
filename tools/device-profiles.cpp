@@ -45,6 +45,7 @@ int main() {
         std::cout << ",\"runner_eligible\":" << (deviceProfileRunnerEligible5(p.deviceType) ? "true" : "false")
                   << ",\"runs_68k\":" << (deviceProfileRuns68k5(p.deviceType) ? "true" : "false")
                   << ",\"hot_sync_button\":" << (deviceProfileHasHotSyncButton5(p.deviceType) ? "true" : "false")
+                  << ",\"voice_key\":" << (deviceProfileHasVoiceKey5(p.deviceType) ? "true" : "false")
                   << ",\"pending_usb\":" << std::quoted(deviceProfilePendingUsb5(p.deviceType))
                   << ",\"colour_lcd\":" << (deviceProfileColourLcd5(p.deviceType) ? "true" : "false")
                   << ",\"os\":\"" << (deviceProfileOs5(p) == DeviceOs5::windowsCe ? "windows-ce" : "palm-os") << "\""

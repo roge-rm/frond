@@ -238,8 +238,11 @@ int main() {
                    (other.deviceType == deviceTypeTX || other.deviceType == deviceTypeE2 ||
                     other.deviceType == deviceTypeFrankenE2 || other.board == DeviceBoard5::imx1Zodiac ||
                     other.board == DeviceBoard5::ez328 || vzPalm(other)));
+        assert(deviceProfileHasVoiceKey5(deviceTypeZire72) && deviceProfileHasVoiceKey5(deviceTypeTG50) &&
+               deviceProfileHasVoiceKey5(deviceTypeRx1950) && !deviceProfileHasVoiceKey5(deviceTypeTX) &&
+               !deviceProfileHasVoiceKey5(deviceTypeE2));
         for (int unknown : {-1, 99}) {
-            assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown));
+            assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown) && !deviceProfileHasVoiceKey5(unknown));
         }
         assert(p->norSize == (8u << 20) && p->headerOffset == 0x20000 && p->legacySessionNor);
         for (size_t size : {size_t(256), size_t(4u << 20), size_t((8u << 20) - 1), size_t((8u << 20) + 1), size_t(16u << 20)}) {

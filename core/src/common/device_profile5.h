@@ -487,6 +487,11 @@ inline bool deviceProfileHasHotSyncButton5(int32_t deviceType) {
                        (profile->board == DeviceBoard5::vz328 && !deviceTypeIsDana5(deviceType)));
 }
 
+// A voice or record key: the Zire 72 and TG50 voice key, the rx1950 record button (keyIdVoice).
+inline bool deviceProfileHasVoiceKey5(int32_t deviceType) {
+    return deviceType == deviceTypeZire72 || deviceType == deviceTypeTG50 || deviceType == deviceTypeRx1950;
+}
+
 // A connector the device has that Frond doesn't run yet, named as the frontends grey it out; empty for none.
 // The Dana computer port and the remaining VZ cradle ports need their USB device controllers.
 inline const char* deviceProfilePendingUsb5(int32_t deviceType) {

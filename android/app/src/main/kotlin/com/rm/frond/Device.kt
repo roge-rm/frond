@@ -96,6 +96,8 @@ data class Device internal constructor(
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
+    // A voice or record key the frontends offer as a held button.
+    val voiceKey: Boolean = false,
     // A connector the device has that isn't emulated yet, shown greyed out; empty for none.
     val pendingUsb: String = "",
     // A colour LCD, shown as the guest draws it: no contrast setting.

@@ -553,7 +553,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && !frondPosix::IsAbsolutePath(path)) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "voice-key" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && !path.empty()) return {false, "argument", "This command takes no argument."};
         if (command == "install" && ctx.soc->InstallsToCard()) {
             const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path);
             return {result.ok, result.code, result.message};
@@ -801,6 +801,13 @@ class DesktopControl {
             if (!ctx.soc->HeadphonesSupported() || !ctx.soc->SetHeadphones(path == "in"))
                 return {false, "unsupported", "This device has no headphone jack that can be set."};
             return {true, "headphones", ctx.soc->HeadphonesIn() ? "in" : "out"};
+        }
+        if (command == "voice-key") {
+            // d holds the voice or record key down, u lets it go; queued like other keys.
+            if (path != "d" && path != "u") return {false, "argument", "Use d or u."};
+            if (!deviceProfileHasVoiceKey5(ctx.soc->GetDeviceType())) return {false, "unsupported", "This device has no voice key."};
+            if (path == "d") ctx.soc->KeyDown(keyIdVoice); else ctx.soc->KeyUp(keyIdVoice);
+            return {true, "voice-key", path == "d" ? "down" : "up"};
         }
         if (command == "cradle-button-state")
             return {true, "cradle-button", !ctx.soc->CradleButtonSupported() ? "unavailable" : ctx.soc->CradleButtonDown() ? "down" : "up"};

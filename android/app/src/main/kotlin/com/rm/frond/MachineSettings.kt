@@ -68,6 +68,23 @@ enum class BarMode(val label: String, val arg: String) {
     OWN_SPACE("Own space", "space"),
 }
 
+// The phone key held to record on a device with a voice or record key; arg is the saved name. The key is only
+// used while that machine runs. keyCode is an Android KeyEvent code, 0 for none.
+enum class RecordKey(val label: String, val arg: String, val keyCode: Int) {
+    NONE("None", "none", 0),
+    VOLUME_DOWN("Volume down", "volume-down", android.view.KeyEvent.KEYCODE_VOLUME_DOWN),
+    VOLUME_UP("Volume up", "volume-up", android.view.KeyEvent.KEYCODE_VOLUME_UP),
+    L3("Gamepad L3", "l3", android.view.KeyEvent.KEYCODE_BUTTON_THUMBL),
+    SELECT("Gamepad Select", "select", android.view.KeyEvent.KEYCODE_BUTTON_SELECT),
+    ;
+
+    fun matches(code: Int) = keyCode != 0 && code == keyCode
+
+    companion object {
+        fun byArg(arg: String?) = entries.firstOrNull { it.arg == arg } ?: NONE
+    }
+}
+
 // Which per-machine rows Edit settings and the running menu show. Every device has speed. A 68k device
 // has contrast (on a grey LCD) and no engine or low-latency audio.
 data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Boolean, val audioPreview: Boolean) {
@@ -131,6 +148,8 @@ data class MachineSettings(
     val musicOutput: MusicOutput = MusicOutput.FM,
     val soundFont: String = "",
     val midiDevice: String = "",
+    // A device with a voice or record key: the phone key held to record.
+    val recordKey: RecordKey = RecordKey.NONE,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
@@ -144,7 +163,8 @@ data class MachineSettings(
         if (headphonesIn) it.put("headphonesIn", true)
         if (musicOutput != MusicOutput.FM) it.put("musicOutput", musicOutput.arg)
         if (soundFont.isNotEmpty()) it.put("soundFont", soundFont)
-        if (midiDevice.isNotEmpty()) it.put("midiDevice", midiDevice) }
+        if (midiDevice.isNotEmpty()) it.put("midiDevice", midiDevice)
+        if (recordKey != RecordKey.NONE) it.put("recordKey", recordKey.arg) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -253,6 +273,7 @@ data class MachineSettings(
                 musicOutput = MusicOutput.entries.firstOrNull { it.arg == json.optString("musicOutput") } ?: MusicOutput.FM,
                 soundFont = json.optString("soundFont", ""),
                 midiDevice = json.optString("midiDevice", ""),
+                recordKey = RecordKey.byArg(json.optString("recordKey")),
             )
         }
     }

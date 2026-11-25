@@ -267,12 +267,15 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         });
     }
     // A switch between apps waiting for the background slot goes once it's free.
-    connect(&client, &DesktopClient::backgroundResult, this, [this] { QTimer::singleShot(0, this, [this] { sendAppActive(); }); });
+    connect(&client, &DesktopClient::backgroundResult, this, [this] { QTimer::singleShot(0, this, [this] { sendAppActive(); sendVoiceKey(); }); });
     connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
         if (command == "speed-state" && runningPreferences.showMips) {
             palmHolder->setMips(ok ? message : QString());
             const auto figure = ok ? runningRules::speedFigure(message) : QString();
             if (figure != speedText) { speedText = figure; if (!embedded) updateBarMachine(); }
+        }
+        if (command == "voice-key") {
+            if (ok) voiceSent = message == "down"; else voiceWanted = voiceSent = false;
         }
         if (command == "gamepad-state" && ok) gamepadReply(message);
         if (command == "cradle-setting") showCradle(ok ? message : QString());
@@ -815,6 +818,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(runningBar, &RunningBar::chosen, this, &MainWindow::barChosen);
     connect(runningBar->menu(), &QMenu::aboutToShow, this, [this] { pollGamepad(); });
     connect(runningBar, &RunningBar::pressed, this, &MainWindow::barPressed);
+    connect(runningBar, &RunningBar::recordHeld, this, [this](bool down) { voiceWanted = down; sendVoiceKey(); });
     connect(runningBar, &RunningBar::networkChosen, this, [this](const QString& mode) {
         if (const auto index = network->findData(mode); index >= 0 && network->isEnabled()) { network->setCurrentIndex(index); emit network->activated(index); }
     });
@@ -839,6 +843,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
                "On the Sony CLIÉ T415, F1 to F4 are Date Book, Address, To Do and Memo Pad, Page Up and Page Down turn the Jog Dial, End presses it, and Home is the Jog Dial's Back.\n"
+               "On the HP iPAQ rx1950, F5 is the record button.\n"
                "Escape: Power, on devices with a power key in the button bar, except the de-NVFS E2\n\n"
                "Shortcuts, in the Palm window and in this one:\n"
                "Ctrl+S: Save. Ctrl+Shift+S: Save a copy. Ctrl+W: Save and Stop. Ctrl+I: Install.\n"
@@ -898,7 +903,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         else send("device-state");
     });
     connect(&client, &DesktopClient::finished, this, [this] {
-        syncMachineId.clear(); syncMachineError.clear(); syncRunning = false;
+        syncMachineId.clear(); syncMachineError.clear(); syncRunning = false; voiceWanted = voiceSent = false;
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
@@ -2250,6 +2255,12 @@ void MainWindow::runShortcut(runningRules::Shortcut what) {
         case Shortcut::FullScreen: toggleFullScreen(); break;
         case Shortcut::Quit: break;
     }
+}
+// Sends the Record button's state to the core when it differs from what the core has. One request is
+// in flight at a time; the reply sends the next change.
+void MainWindow::sendVoiceKey() {
+    if (voiceWanted == voiceSent || !client.available()) return;
+    client.requestBackground("voice-key", voiceWanted ? "d" : "u");
 }
 void MainWindow::barPressed(RunningBar::Button button) {
     switch (button) {

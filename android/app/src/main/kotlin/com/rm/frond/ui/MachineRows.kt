@@ -155,6 +155,12 @@ fun MachineRumbleRow(device: Device, settings: MachineSettings, listStyle: Boole
     }
 }
 
+// The phone key held to record, for a device with a voice or record key.
+@Composable
+fun MachineRecordKeyRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineChoiceRow("Record key", settings.recordKey, com.rm.frond.RecordKey.entries, { it.label }, listStyle) { onChange(settings.copy(recordKey = it)) }
+}
+
 // Exact or Fast, for ARM devices.
 @Composable
 fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
