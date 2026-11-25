@@ -5,6 +5,7 @@ import android.system.Os
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import org.json.JSONObject
 import java.io.File
 
@@ -23,22 +24,39 @@ open class CoreLink(
         val ir: LinkWire.IrStatus? = null,
         val error: String? = null,
         val title: String = "Infrared",
+        val native: String = "",
     ) {
         val text: String get() = when {
             error != null -> "Off. $error"
-            choice == InfraredChoice.MODEM && error == null -> "Modem"
+            choice == InfraredChoice.MODEM -> callText("Modem")
+            choice == InfraredChoice.PPP -> if (native.startsWith("ppp ")) "Direct PPP: ${native.substringAfter(' ')}" else "Direct PPP"
             choice == InfraredChoice.SYNC_MANAGER -> "Sync Manager"
-            choice == InfraredChoice.PHONE && error == null -> "Mobile phone"
+            choice == InfraredChoice.PHONE -> callText("Mobile phone")
             choice == InfraredChoice.PRINTER && error == null && title == "Infrared" -> "Printer"
             !active && InfraredChoice.linkId(choice) != null -> "$title: Unknown connection"
             !active -> "Off"
             ir != null -> LinkWire.channelText(title, ir)
             else -> "$title: connecting"
         }
+
+        private fun callText(label: String): String {
+            val call = native.substringBefore(';').split(' ')
+            return when (call.getOrNull(1)) {
+                "online" -> "$label: online at ${call.getOrNull(2).orEmpty()}"
+                "idle", "linked", "dialling" -> "$label: ${call[1]}"
+                else -> label
+            }
+        }
     }
 
     private val state = MutableStateFlow(Status(title = title))
     val status: StateFlow<Status> get() = state
+
+    fun acceptNativeState(value: String) {
+        state.update { current ->
+            if (value.startsWith("${current.choice} ")) current.copy(native = value) else current
+        }
+    }
 
     private val lock = Any()
     private var connection: LinkConnection? = null
@@ -50,11 +68,20 @@ open class CoreLink(
     // Sets the core's port and the link for choice. Blocks on the control link, so never on the main
     // thread. Returns an error to show, or null.
     fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String,
-              attachedSync: Boolean = false): String? {
+              attachedSync: Boolean = false, modemSync: Boolean = false): String? {
         synchronized(lock) {
+            if (modeCommand == "serial-mode") {
+                val syncMode = if (choice == InfraredChoice.MODEM && modemSync) "sync"
+                    else if (state.value.choice == InfraredChoice.MODEM) "off" else null
+                if (syncMode != null) {
+                    val reply = control.request("modem-sync", syncMode, timeoutSeconds = 30)
+                    if (!reply.ok) return reply.message
+                }
+            }
             // The modem, the phone and the printer are the core's own: no link, no socket.
             val own = when {
                 choice == InfraredChoice.MODEM && modeCommand == "serial-mode" -> "modem"
+                choice == InfraredChoice.PPP && modeCommand == "serial-mode" -> "ppp"
                 choice == InfraredChoice.SYNC_MANAGER && modeCommand == "serial-mode" -> "sync"
                 choice == InfraredChoice.PHONE && modeCommand == "irda-mode" -> "phone"
                 choice == InfraredChoice.PRINTER && modeCommand == "irda-mode" -> "printer"
@@ -63,14 +90,17 @@ open class CoreLink(
             if (own != null) {
                 detach()
                 val reply = control.request(modeCommand, own, timeoutSeconds = 30)
-                state.value = if (reply.ok) Status(choice, title = title) else Status(choice, error = reply.message, title = title)
+                if (!reply.ok && own == "modem" && modemSync)
+                    control.request("modem-sync", "off", timeoutSeconds = 30)
+                state.value = if (reply.ok) Status(choice, title = title, native = reply.message)
+                    else Status(choice, error = reply.message, title = title)
                 return if (reply.ok) null else reply.message
             }
             val id = InfraredChoice.active(choice, LinkStore.choices(InfraredChoice.folder(context)))
             if (id == null) {
                 detach()
                 val wasOn = attachedSync || state.value.active || state.value.choice in
-                    listOf(InfraredChoice.MODEM, InfraredChoice.PHONE, InfraredChoice.PRINTER, InfraredChoice.SYNC_MANAGER)
+                    listOf(InfraredChoice.MODEM, InfraredChoice.PPP, InfraredChoice.PHONE, InfraredChoice.PRINTER, InfraredChoice.SYNC_MANAGER)
                 state.value = Status(choice, title = title)
                 if (wasOn) {
                     val reply = control.request(modeCommand, "off", timeoutSeconds = 30)
@@ -163,17 +193,24 @@ object SerialLink : CoreLink("serial", "serial-mode", "Serial", "serial")
 // start from the machine's settings and when changed while it runs.
 object BluetoothLink {
     data class Status(
-        // The machine's setting: off, radio or link:<id>.
         val choice: String = BluetoothChoice.OFF,
         // The core's Bluetooth is on the engine's socket.
         val active: Boolean = false,
         val bt: LinkWire.BtStatus? = null,
         val error: String? = null,
+        val phone: String = "",
+        val phoneSync: String = "",
     ) {
         val text: String get() = when {
             error != null -> "Off. $error"
             !active && InfraredChoice.linkId(choice) != null -> "Bluetooth: Unknown connection"
             !active -> "Off"
+            choice == BluetoothChoice.PHONE && bt?.state != "noradio" -> when {
+                phone == "unavailable" -> "Bluetooth: Mobile phone unavailable"
+                phone.startsWith("online ") -> "Mobile phone: online at ${phone.substringAfter(' ')}"
+                phone == "idle" || phone == "dialling" -> "Mobile phone: $phone"
+                else -> "Bluetooth: starting the mobile phone"
+            }
             bt != null -> LinkWire.bluetoothText(bt)
             choice == BluetoothChoice.RADIO -> "Bluetooth: This Frond's radio"
             else -> "Bluetooth: connecting"
@@ -195,7 +232,8 @@ object BluetoothLink {
 
     // Sets the core's Bluetooth and the engine's attach for choice. Blocks on the control link and on the
     // engine listening, so never on the main thread. Returns an error to show, or null.
-    fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String): String? {
+    fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String,
+              syncMachine: String? = null): String? {
         synchronized(lock) {
             val link = BluetoothChoice.active(choice, LinkStore.choices(InfraredChoice.folder(context)))
             if (link == null) {
@@ -207,6 +245,7 @@ object BluetoothLink {
                 ?: return "Couldn't make a folder for the Bluetooth socket.".also { state.value = Status(choice, error = it) }
             val op = JSONObject().put("op", "bt-attach").put("machine", machine).put("device", device)
                 .put("link", link).put("socket", path)
+            if (choice == BluetoothChoice.PHONE) op.put("phone", true).put("syncMachine", syncMachine.orEmpty())
             if (op.toString() == attach?.toString() && corePath == path) {
                 state.value = state.value.copy(choice = choice, error = null)
                 return null
@@ -254,7 +293,7 @@ object BluetoothLink {
             controllers = event.optInt("controllers"),
         )
         if (bt.listening) listening?.countDown()
-        state.value = state.value.copy(bt = bt)
+        state.value = state.value.copy(bt = bt, phone = event.optString("phone"), phoneSync = event.optString("phoneSync"))
     }
 
     private fun detach() {

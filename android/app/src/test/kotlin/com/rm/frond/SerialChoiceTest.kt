@@ -38,6 +38,27 @@ class SerialChoiceTest {
         assertEquals(listOf("off"), InfraredChoice.serialChoices("off", emptyList(), modem = false).map { it.first })
     }
 
+    @Test fun directPppIsOnlyOfferedOnSupportedSerialPorts() {
+        val ppp = InfraredChoice.PPP
+        assertEquals(ppp, MachineSettings.from(MachineSettings(serial = ppp).json()).serial)
+        val iiix = requireNotNull(Device.byId("palm-iiix"))
+        assertEquals("off", MachineSettings(serial = ppp).forDevice(iiix, Device.TX).serial)
+        assertEquals("off", InfraredChoice.normaliseInfrared(ppp))
+        assertEquals(listOf("off", ppp), InfraredChoice.serialChoices("off", emptyList(), modem = false, ppp = true).map { it.first })
+        assertEquals("Direct PPP: online", CoreLink.Status(ppp, title = "Serial", native = "ppp online").text)
+        assertEquals("Modem: online at 33600",
+            CoreLink.Status("modem", title = "Serial", native = "modem online 33600; hotsync sync waiting modem").text)
+    }
+
+    @Test fun bluetoothPhoneUsesTheLocalRadioAndKeepsItsOwnSetting() {
+        val phone = BluetoothChoice.PHONE
+        assertEquals(phone, MachineSettings.from(MachineSettings(bluetooth = phone).json()).bluetooth)
+        assertEquals(BluetoothChoice.RADIO, BluetoothChoice.active(phone, emptyList()))
+        assertEquals(phone to "Mobile phone", BluetoothChoice.choices("off", emptyList()).last())
+        assertEquals("Mobile phone: online at 33600",
+            BluetoothLink.Status(choice = phone, active = true, phone = "online 33600").text)
+    }
+
     @Test fun phoneChoice() {
         val s = MachineSettings(infrared = "phone")
         assertEquals("phone", s.json().getString("infrared"))

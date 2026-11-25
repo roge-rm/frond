@@ -53,6 +53,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         fun startRadio(): String? = null
         fun radioRunning(): Boolean = false
         fun stopRadio() {}
+        fun updatePhone(machine: String?) = BtLink.PhoneStatus()
     }
 
     // Gets events on the engine thread. Must not block for long.
@@ -120,6 +121,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         // Bluetooth: the engine's socket the core connects to, once per controller.
         var btServer: LocalServerSocket? = null
         var btBound: LocalSocket? = null
+        var phoneMachine: String? = null
         // Serial: the reader takes one buffer from the core at a time and waits on the gate until the mux has
         // taken it all (outHeld is what didn't fit yet), so the core's queue fills and its CTS drops. Bytes
         // from the link go to the writer thread; credit goes back as it writes them (unacked). pendingIn holds
@@ -201,6 +203,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     private var radioStarted = 0L
     private var radioIdleSince = 0L
     private var radioFailedAt = 0L
+    private var phoneState = BtLink.PhoneStatus()
+    private var phoneOwner: Attach? = null
     private val runs = HashMap<String, PeerRun>()
     private val nearby = HashMap<String, Nearby>()
     private val recent = HashMap<String, ArrayList<Long>>()
@@ -303,6 +307,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         for (k in ArrayList(controllers)) dropController(k, false)
         for (a in attaches) { closeCore(a); closeBtServer(a) }
         attaches.clear()
+        host.updatePhone(null)
         if (radioOn) { host.stopRadio(); radioOn = false }
         endPairRequest("cancelled")
         try { listener?.close() } catch (_: IOException) {}
@@ -1297,9 +1302,12 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         if (attaches.any { it.client === c && it.bt }) return  // one per client
         val a = Attach(c, op.optString("machine"), op.optString("device"), op.optString("link"), op.optString("socket"),
             LinkWire.KIND_BLUETOOTH)
+        if (a.link == LinkWire.RADIO && op.optBoolean("phone")) a.phoneMachine = op.optString("syncMachine")
         attaches += a
         if (a.socketPath.isNotEmpty()) btListen(a)
-        if (a.link == LinkWire.RADIO) startRadio()
+        if (a.link == LinkWire.RADIO) {
+            if (a.phoneMachine == null) startRadio()
+        }
         else {
             val r = run(a.link)
             if (r.link == null && r.dialing == null) { r.nextTry = now(); r.backoff = 0 }
@@ -1404,13 +1412,15 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     private fun btRadioConnect(k: Controller) {
         k.radioTry = now() + RADIO_RETRY_MS
         if (k.radioSock != null) return
-        val path = startRadio() ?: return  // shown as no radio; it waits
+        val privateRadio = k.owner?.phoneMachine != null
+        val path = (if (privateRadio) phoneState.socket.takeIf { k.owner === phoneOwner } else startRadio()) ?: return
         val s = LocalSocket()
         try {
             s.connect(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
         } catch (e: IOException) {
             shut(s)
-            val starting = host.radioRunning() && now() - radioStarted < RADIO_START_MS
+            val starting = if (privateRadio) phoneState.call == "starting"
+                else host.radioRunning() && now() - radioStarted < RADIO_START_MS
             if (!starting) dropController(k)
             return
         }
@@ -1578,7 +1588,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         }
     }
 
-    private fun radioWanted() = controllers.any { it.wantsRadio } || attaches.any { it.bt && it.link == LinkWire.RADIO }
+    private fun radioWanted() = controllers.any { it.wantsRadio && it.owner?.phoneMachine == null } ||
+        attaches.any { it.bt && it.link == LinkWire.RADIO && it.phoneMachine == null }
 
     // This Frond's radio's socket, starting it if it isn't running. Null while there's none.
     private fun startRadio(): String? {
@@ -1597,6 +1608,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     private fun radioTick() {
         val t = now()
+        phoneOwner = attaches.firstOrNull { it.phoneMachine != null }
+        phoneState = host.updatePhone(phoneOwner?.phoneMachine)
         for (k in ArrayList(controllers)) if (k in controllers && k.wantsRadio && k.radioSock == null && t >= k.radioTry) btRadioConnect(k)
         if (!radioOn) return
         if (radioWanted()) { radioIdleSince = t; return }
@@ -1673,8 +1686,11 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     // ---- Status ----
 
     private fun status(a: Attach): JSONObject {
-        if (a.bt && a.link == LinkWire.RADIO)
+        if (a.bt && a.link == LinkWire.RADIO) {
             return btStatus(a).put("peer", "This Frond").put("state", if (host.radioAvailable()) "radio" else "noradio")
+                .put("phone", if (a === phoneOwner) phoneState.call else "")
+                .put("phoneSync", if (a === phoneOwner) phoneState.sync else "")
+        }
         val p = store.find(a.link)
         val r = runs[a.link]
         val state = when {

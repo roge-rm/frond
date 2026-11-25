@@ -104,9 +104,10 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (draft.device.serialPort) {
                 val choices = remember(draft.device, draft.settings.serial) {
                     InfraredChoice.serialChoices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)),
-                        draft.device.modem, SyncProtocol.forDevice(draft.device) == SyncProtocol.HOT_SYNC)
+                        draft.device.modem, SyncProtocol.forDevice(draft.device) == SyncProtocol.HOT_SYNC, ppp = draft.device.runs68k)
                 }
-                Choice("Serial port", draft.settings.serial, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
+                val current = draft.settings.serial.takeIf { value -> choices.any { it.first == value } } ?: InfraredChoice.OFF
+                Choice("Serial port", current, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(serial = it))
                 }
             }

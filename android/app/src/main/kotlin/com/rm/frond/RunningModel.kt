@@ -20,6 +20,7 @@ class ModelHost(
     val lifecycleScope: kotlinx.coroutines.CoroutineScope,
     private val ui: (Runnable) -> Unit,
     private val onFinish: () -> Unit,
+    val syncState: (String) -> Unit,
 ) {
     val applicationContext: android.content.Context = context.applicationContext
     val contentResolver: android.content.ContentResolver get() = applicationContext.contentResolver
@@ -1011,7 +1012,8 @@ class RunningModel(
             sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(serial = choice) } }
             activity.runOnUiThread { settings = settings.copy(serial = choice) }
             if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
-            SerialLink.apply(activity.applicationContext, l, choice, name, device.label, attachedSync = attachedSync)
+            SerialLink.apply(activity.applicationContext, l, choice, name, device.label,
+                attachedSync = attachedSync, modemSync = sessionId != null)
         }
     }
 
@@ -1062,10 +1064,15 @@ class RunningModel(
         if (bluetoothWatcher != null) return
         bluetoothWatcher = activity.lifecycleScope.launch {
             BluetoothLink.status.collect {
+                val before = bluetooth
                 bluetooth = it
-                ++bluetoothEpoch
-                radio = null
-                readRadio()
+                if (it.phoneSync != before.phoneSync)
+                    activity.syncState(it.phoneSync.ifEmpty { "off" })
+                if (it.bt != before.bt || it.active != before.active || it.choice != before.choice) {
+                    ++bluetoothEpoch
+                    radio = null
+                    readRadio()
+                }
             }
         }
     }
@@ -1113,12 +1120,13 @@ class RunningModel(
         }
     }
 
-    // Off, radio or link:<id>: kept in the machine's settings, then applied to the core and the link.
+    // Kept in the machine's settings, then applied to the core and the link.
     fun changeBluetooth(choice: String) = device("Changing Bluetooth", "Couldn't change Bluetooth", false) { l ->
         sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(bluetooth = choice) } }
         activity.runOnUiThread { settings = settings.copy(bluetooth = choice) }
         if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
-        BluetoothLink.apply(activity.applicationContext, l, choice, name, device.label).also { activity.runOnUiThread { readRadio() } }
+        BluetoothLink.apply(activity.applicationContext, l, choice, name, device.label, sessionId)
+            .also { activity.runOnUiThread { readRadio() } }
     }
 
     // Both go back to the Palm, where the reset or rotation shows.

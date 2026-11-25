@@ -22,7 +22,7 @@ struct frond_dun {
 
 extern "C" {
 
-struct frond_dun* frond_dun_create(const char* sync_folder, const char* sync_profile) {
+struct frond_dun* frond_dun_create(const char* sync_folder, const char* sync_profile, const char* sync_machine) {
     auto dun = std::make_unique<frond_dun>();
     if (!dun->network.Valid()) return nullptr;
     if (sync_folder) {
@@ -30,6 +30,7 @@ struct frond_dun* frond_dun_create(const char* sync_folder, const char* sync_pro
         frondSync::SyncOptions options;
         options.root = sync_folder;
         if (sync_profile) options.profile = sync_profile;
+        if (sync_machine) options.machineKey = sync_machine;
         options.network = true;
         // Allow the Palm's TCP retransmission backoff on the 33.6 kbit/s Bluetooth modem.
         options.networkReplyIdleMs = 45000;

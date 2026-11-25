@@ -147,10 +147,14 @@ val bluetoothTasks = listOf("arm64-v8a", "x86_64").map { abi ->
         group = "build"
         inputs.file(rootProject.file("build-bluetooth.py"))
         inputs.file(File(repoRoot, "tools/bluez-bdaddr.patch"))
+        inputs.file(File(repoRoot, "tools/bluez-bthost-config.patch"))
+        inputs.file(File(repoRoot, "tools/bluez-bthost-stream.patch"))
         inputs.file(File(androidComponents.sdkComponents.sdkDirectory.get().asFile,
             "ndk/28.2.13676358/source.properties"))
         outputs.file(File(bluetoothRoot, "$abi/.built"))
         outputs.file(File(bluetoothRoot, "jniLibs/$abi/libbtvirt.so"))
+        outputs.dir(File(bluetoothRoot, "$abi/source").absoluteFile)
+        outputs.dir(File(bluetoothRoot, "$abi/phone"))
         commandLine("python3", rootProject.file("build-bluetooth.py"),
             "--ndk", File(androidComponents.sdkComponents.sdkDirectory.get().asFile, "ndk/28.2.13676358"),
             "--abi", abi, "--root", bluetoothRoot)
@@ -159,6 +163,9 @@ val bluetoothTasks = listOf("arm64-v8a", "x86_64").map { abi ->
 bluetoothTasks[1].configure { mustRunAfter(bluetoothTasks[0]) }
 tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
+        dependsOn(bluetoothTasks)
+    }
+    if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
         dependsOn(bluetoothTasks)
     }
 }
@@ -183,6 +190,7 @@ android {
                     "-DANDROID_STL=c++_shared",
                     "-DFROND_CORE=${coreSource.absolutePath}",
                     "-DFROND_NETWORK_ROOT=${networkRoot.absolutePath}",
+                    "-DFROND_BLUETOOTH_ROOT=${bluetoothRoot.absolutePath}",
                     "-DSDL2_SOURCE=${sdlSource.absolutePath}",
                     "-DSDL2_IMAGE_SOURCE=${sdlImageSource.absolutePath}",
                     "-DFROND_SELF_TEST=${if (selfTest) "ON" else "OFF"}",
@@ -194,7 +202,8 @@ android {
                     "-DCMAKE_C_COMPILER_LAUNCHER=$ccache;prefix_command=",
                     "-DCMAKE_CXX_COMPILER_LAUNCHER=$ccache;prefix_command=",
                 )
-                if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "frondlink", "frondsync", "jit-differential", "benchmark-replay")
+                targets += listOf("main", "main68k", "frondcard", "frondlink", "frondsync", "frond-bluetooth-phone")
+                if (jitDifferential) targets += listOf("jit-differential", "benchmark-replay")
             }
         }
     }
@@ -220,8 +229,10 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
+            externalNativeBuild.cmake.arguments += "-DFROND_PHONE_OUTPUT=${File(bluetoothRoot, "debug").absolutePath}"
         }
         release {
+            externalNativeBuild.cmake.arguments += "-DFROND_PHONE_OUTPUT=${File(bluetoothRoot, "release").absolutePath}"
             if (releaseStoreFile != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -231,6 +242,8 @@ android {
         jniLibs.useLegacyPackaging = true
     }
     sourceSets {
+        getByName("debug").jniLibs.directories.add(File(bluetoothRoot, "debug").absolutePath)
+        getByName("release").jniLibs.directories.add(File(bluetoothRoot, "release").absolutePath)
         getByName("main") {
             jniLibs.directories.add(File(bluetoothRoot, "jniLibs").absolutePath)
             assets.directories.add(licencesAssets.get().asFile.absolutePath)
@@ -245,6 +258,12 @@ android {
     buildFeatures {
         compose = true
     }
+}
+
+// The phone is a PIE executable, packaged alongside btvirt so Android extracts both.
+tasks.configureEach {
+    if (name == "mergeDebugJniLibFolders") dependsOn("externalNativeBuildDebug")
+    if (name == "mergeReleaseJniLibFolders") dependsOn("externalNativeBuildRelease")
 }
 
 dependencies {

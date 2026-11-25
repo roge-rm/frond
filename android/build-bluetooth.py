@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Android btvirt executable with the NDK."""
+"""Build Android's btvirt and stage BlueZ sources for the Bluetooth phone."""
 import argparse
 import hashlib
 from pathlib import Path
@@ -34,14 +34,17 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=True)
-    patch = Path(__file__).resolve().parents[1] / 'tools/bluez-bdaddr.patch'
+    tools = Path(__file__).resolve().parents[1] / 'tools'
+    patch = tools / 'bluez-bdaddr.patch'
+    phone_patches = [tools / name for name in ('bluez-bthost-config.patch', 'bluez-bthost-stream.patch')]
     identity = hashlib.sha256(Path(__file__).read_bytes() + patch.read_bytes()
+                              + b''.join(path.read_bytes() for path in phone_patches)
                               + str(args.ndk.resolve()).encode()
                               + (args.ndk / 'source.properties').read_bytes()).hexdigest()
     build = root / args.abi
     stamp = build / '.built'
     output = root / 'jniLibs' / args.abi / 'libbtvirt.so'
-    if stamp.is_file() and stamp.read_text() == identity and output.is_file():
+    if stamp.is_file() and stamp.read_text() == identity and output.is_file() and (build / 'phone/emulator/bthost.c').is_file():
         print(f'Android btvirt {args.abi}: cached')
         return
     archive = root / 'sources/bluez.tar.gz'
@@ -58,6 +61,7 @@ def main():
     with tarfile.open(archive) as tar:
         tar.extractall(build, filter='data')
     source = build / f'bluez-{REVISION}'
+    (build / 'source').symlink_to(source.name, target_is_directory=True)
     run('patch', '-p1', '--batch', '--fuzz=0', '-i', patch, cwd=source)
     # Bionic exposes getrandom at API 28; the syscall is available at API 26.
     for name in ['emulator/server.c', 'src/shared/util.c']:
@@ -75,6 +79,11 @@ def main():
 #define HAVE_GETRANDOM 1
 ''')
     (build / 'bluetooth').symlink_to(source / 'lib/bluetooth', target_is_directory=True)
+    phone = build / 'phone'
+    (phone / 'emulator').mkdir(parents=True)
+    shutil.copyfile(source / 'emulator/bthost.c', phone / 'emulator/bthost.c')
+    for patch in phone_patches:
+        run('patch', '-p1', '--batch', '--fuzz=0', '-i', patch, cwd=phone)
     binary = args.ndk.resolve() / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
     triple = 'aarch64-linux-android' if args.abi == 'arm64-v8a' else 'x86_64-linux-android'
     cc = binary / f'{triple}26-clang'

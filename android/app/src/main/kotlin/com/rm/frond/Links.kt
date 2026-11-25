@@ -72,6 +72,7 @@ object Links {
             override fun startRadio() = BtLink.start(context)
             override fun radioRunning() = BtLink.running()
             override fun stopRadio() = BtLink.stop()
+            override fun updatePhone(machine: String?) = BtLink.updatePhone(context, machine)
         })
         val failed = e.start()
         if (failed != null) {
@@ -406,6 +407,7 @@ object InfraredChoice {
     const val OFF = "off"
 
     const val MODEM = "modem"
+    const val PPP = "ppp"
     const val SYNC_MANAGER = "sync"
 
     const val PHONE = "phone"
@@ -423,6 +425,7 @@ object InfraredChoice {
     // The serial port can also go to the modem or Sync Manager.
     fun normaliseSerial(value: String?): String = when (value) {
         MODEM -> MODEM
+        PPP -> PPP
         SYNC_MANAGER -> SYNC_MANAGER
         else -> normalise(value)
     }
@@ -435,8 +438,10 @@ object InfraredChoice {
         if (linkId(current) != null && none { it.first == current }) add(current to "Unknown connection")
     }
 
-    fun serialChoices(current: String, paired: List<Pair<String, String>>, modem: Boolean, sync: Boolean = false): List<Pair<String, String>> =
+    fun serialChoices(current: String, paired: List<Pair<String, String>>, modem: Boolean,
+                      sync: Boolean = false, ppp: Boolean = false): List<Pair<String, String>> =
         choices(current, paired).toMutableList().also {
+            if (ppp) it.add(1, PPP to "Direct PPP")
             if (modem) it.add(1, MODEM to "Modem")
             if (sync) it.add(1, SYNC_MANAGER to "Sync Manager")
         }
@@ -454,14 +459,15 @@ object InfraredChoice {
     fun folder(context: Context): File = LinkStore.folder(context.filesDir)
 }
 
-// The machine's Bluetooth choice in its settings: off, radio (This Frond's radio) or link:<id> for a paired
-// connection, as on the desktop without its Controller socket and This computer.
+// The machine's Bluetooth choice in its settings.
 object BluetoothChoice {
     const val OFF = "off"
     const val RADIO = "radio"
+    const val PHONE = "phone"
 
     fun normalise(value: String?): String = when {
         value == RADIO -> RADIO
+        value == PHONE -> PHONE
         value != null && InfraredChoice.linkId(value) != null -> value
         else -> OFF
     }
@@ -471,11 +477,12 @@ object BluetoothChoice {
     fun choices(current: String, paired: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
         add(OFF to "Off")
         add(RADIO to "This Frond")
+        add(PHONE to "Mobile phone")
         for ((id, name) in paired) add("link:$id" to name)
         if (InfraredChoice.linkId(current) != null && none { it.first == current }) add(current to "Unknown connection")
     }
 
     // The engine's bt-attach link: radio or the connection's id. Null for off and for a connection that's gone.
     fun active(value: String, paired: List<Pair<String, String>>): String? =
-        if (value == RADIO) RADIO else InfraredChoice.active(value, paired)
+        if (value == RADIO || value == PHONE) RADIO else InfraredChoice.active(value, paired)
 }

@@ -337,12 +337,12 @@ State commands take no argument. Mode commands change the setting and reply with
 | `camera-mode` | `pattern`, `picture:PATH` (PNG, JPEG, BMP), `webcam:DEVICE` (V4L2 in YUYV, Linux desktop) or `frames` | `camera`; for `frames` the path of the frames file |
 | `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`), `jog-landscape=`(`hidden` `beside` `under` `over`) | `display`: `queued`, applied once the app is in the foreground |
 | `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error; frond-68k's modem gives `modem idle\|dialling\|online 33600` |
-| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, and `modem` for `serial-mode` on a device with a snap-on modem (frond-68k, `unsupported` elsewhere there), `phone` for `irda-mode` on a device with the `irPhone` capability (`unsupported` elsewhere, and on frond-68k before Palm OS 3.3) | the state |
+| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`. frond-68k also offers `ppp` for `serial-mode` and `modem` on devices with a snap-on modem. `irda-mode` offers `phone` with the `irPhone` capability and Palm OS 3.3 or later. | the state |
 | `irda-state` | | `infrared`; the phone gives `phone idle\|linked\|dialling\|online 33600` |
 | `irprinter` | `status`, `save ABSOLUTE_PATH` or `clear` | `irprinter`: any error text, then `attached\|off receiving\|ready bytes=N receiving=R last=LAST idle=MS` for the infrared printer (`irda-mode printer`): N is the held output `save` writes, R the bytes of a job still coming in, LAST the last save's result and MS the milliseconds since a byte arrived or a job ended (-1 with none) |
 | `irda-stats` | | `infrared`: counters `rx= tx= rx_drop= tx_drop= pending= baud= rx_on= tx_on= power= sleeping=`; frond-68k gives `rx= tx= port=`; the phone gives `frames_in= frames_out= bad= connects= resent= timeouts=` (frond-68k with `port=` first) |
 | `serial-stats` | | frond-68k: `serial`: the modem's `power=on\|off dtr=on\|off`, or `off` outside modem mode |
-| `modem-sync` | none, or `off`, `pty`, `tcp:PORT` or `unix:PATH` | frond-68k: `modem-sync`: the modem's HotSync link, as `serial-state` shows a link; `unsupported` without a modem |
+| `modem-sync` | none, or `off`, `pty`, `tcp:PORT`, `unix:PATH` or `sync` | frond-68k shows the modem's HotSync link. `sync` routes it to Sync Manager. |
 | `bluetooth-state` | | `bluetooth` |
 | `bluetooth-mode` | `off` or an absolute Unix socket path | `bluetooth` |
 | `network-state` | | `network`: mode name |
@@ -486,7 +486,7 @@ The per-machine settings file `<name>.frond.settings.json` has `infrared`, `seri
 | `infrared`, `serial` | `off`, `pty`, `tcp:PORT`, `link:local` (This computer, desktop), `link:ID` |
 | `infrared` | also `phone` on a device with the `irPhone` capability: the desktop passes `--irda phone`, Android sends `irda-mode phone` once the core answers and opens no link |
 | `infrared` | also `printer` on any device with infrared: the desktop passes `--irda printer`, Android sends `irda-mode printer` once the core answers and opens no link. Both poll `irprinter status` every second while it is the choice |
-| `serial` | also `modem` on a device with the `modem` capability (the 68k Palms except the m100 and m105): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
+| `serial` | `modem` on a device with the `modem` capability and `ppp` for direct PPP on 68k serial ports. Android sends the mode once the core answers. |
 | `usb` | `off`, `pty`, `tcp:PORT` |
 | `usbPort` | Dana: `off`, `printer` or `wifi`, the USB port choice. The desktop sends `printer attach on` or `usb-port wifi` once the core answers, Android does the same on connect. Older settings with `usbPrinter` true count as `printer`; the file still writes `usbPrinter` when the choice is the printer |
 | `wifiModule` | Dana Wireless: `false` when the built-in Wi-Fi is off, left out when on. Sent as `network-mode disabled` or `wireless` at every start, before the USB port choice |
@@ -605,7 +605,7 @@ out/frond-68k iiix.frond --serial pty
 | `--audio-output FILE` | Write the piezo sound to a WAV file. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
 | `--tone-log` | Print each tone change (`tone: HZ Hz duty D at S s`). |
-| `--modem-sync off\|pty\|tcp:PORT\|unix:PATH` | frond-68k: the modem's HotSync link. A call to the HotSync number (4687962) is bridged to it raw, for pilot-link. Devices with the `modem` capability. |
+| `--modem-sync off\|pty\|tcp:PORT\|unix:PATH\|sync` | frond-68k uses this endpoint for a modem call to 4687962. Use `sync` for Sync Manager or a host endpoint for pilot-link. Devices with the `modem` capability. |
 | `--serial off\|pty\|tcp:PORT\|unix:PATH\|modem`, `--irda off\|pty\|tcp:PORT\|unix:PATH\|phone` | Connect the serial port or infrared to a host PTY, a loopback TCP listener or a Unix socket. The PTY path is printed. `modem` puts the snap-on modem on the serial port (devices with the `modem` capability): any number dialled connects at 33600 to a PPP server with slirp behind it, guest 10.0.2.15, DNS 10.0.2.3. `phone` puts a mobile phone with the same modem on the IR port (devices with the `irPhone` capability, Palm OS 3.3 or later), reached over IrCOMM. |
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
@@ -635,8 +635,8 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `snapshot FILE` | Save the Palm screen as a PNG. |
 | `window-snapshot FILE` | Save the whole window, with silkscreen and buttons, as a PNG. |
 | `audio-on`, `audio-off`, `sound-state` | Turn sound on or off, or show it. |
-| `serial-mode off\|pty\|tcp:PORT\|unix:PATH\|modem`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH\|phone` | Set the serial or infrared endpoint and show its state. |
-| `modem-sync off\|pty\|tcp:PORT\|unix:PATH` | Set the modem's HotSync link and show it. |
+| `serial-mode off\|pty\|tcp:PORT\|unix:PATH\|modem\|ppp`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH\|phone` | Set the serial or infrared endpoint and show its state. |
+| `modem-sync off\|pty\|tcp:PORT\|unix:PATH\|sync` | Set the modem's HotSync link and show it. |
 | `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp\|unix ENDPOINT connected\|waiting`, for the modem `modem idle\|dialling\|online 33600` (then `; hotsync` and the HotSync link while it's on), or for the phone `phone idle\|linked\|dialling\|online 33600`. |
 | `hotsync` | Press and release the cradle's HotSync button. |
 | `backlight-state` | `backlight: on` or `off`. |

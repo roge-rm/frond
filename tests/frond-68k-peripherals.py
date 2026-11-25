@@ -3,6 +3,7 @@
 and wake, beaming a memo both ways with a IIIx, serial HotSync with pilot-link over a PTY, TCP and a Unix socket, the unix: endpoints, the ARM card swap flags refused, and installing, launching, listing
 and exporting databases. Each ROM boots to the launcher once; every check starts from that
 session. --only ppp also dials out over serial PPP to slirp and fetches example.com, --only
+directppp uses the built-in serial PPP server, --only
 modem does the same through the snap-on modem (--serial modem) and --only irphone through the
 infrared phone (--irda phone). --only modemsync HotSyncs over the modem both ways: Modem Sync to the
 HotSync number through --modem-sync pty, then Network HotSync over PPP to pilot-xfer on net:.
@@ -33,10 +34,10 @@ import palm_boot  # noqa: E402
 import boot_fixture  # noqa: E402
 from wait_for import wait_until, WaitTimeout  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'usb', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
+CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'usb', 'unix', 'card-flags', 'databases', 'ppp', 'directppp', 'modem', 'irphone',
           'modemsync']
 # Reach example.com over the internet, so they only run when asked for with --only.
-OPT_IN = {'ppp', 'modem', 'irphone', 'modemsync'}
+OPT_IN = {'ppp', 'directppp', 'modem', 'irphone', 'modemsync'}
 T415_ROM = 'Sony/CLIE-T400/Sony-Clie-T400.rom'
 # The device under test; main() sets it from each ROM's name.
 DEVICE = 'palm-iiix'
@@ -641,15 +642,7 @@ def check_ppp(rom, session, root, probes):
                                   start_new_session=True)
         try:
             m.install(probes['ppp68k'])
-            m.core.launch('Preferences')
-            # Panel picker, Network, the Connection trigger, then Direct Serial on 3.5 and
-            # Cradle/Cable on 4.1, whose panel list has Date & Time and whose default service
-            # has a two-line user name.
-            taps = ((135, 5), (125, 73), (100, 92), (110, 84)) if '4.1' in rom.name else \
-                ((135, 5), (125, 62), (100, 87), (110, 121))
-            for x, y in taps:
-                m.core.tap(m.root, x, y)
-                time.sleep(0.7)
+            select_direct_serial(m, rom)
             m.frame('network.png')
             m.core.launch('Frond PPP')
             end = time.monotonic() + 90
@@ -668,6 +661,45 @@ def check_ppp(rom, session, root, probes):
     if not dns or not connections or not received:
         raise AssertionError(f'slirp saw {dns} datagrams, {connections} connections, {received} data packets')
     return f'{dns} DNS datagram, {connections} TCP connection, {received} data packets back; {state.split(", ", 1)[1]}'
+
+
+def select_direct_serial(machine, rom):
+    machine.core.launch('Preferences')
+    # Panel picker, Network, the Connection trigger, then Direct Serial on 3.5 and
+    # Cradle/Cable on 4.1, whose panel list has Date & Time and a two-line user name.
+    taps = ((135, 5), (125, 73), (100, 92), (110, 84)) if '4.1' in rom.name else \
+        ((135, 5), (125, 62), (100, 87), (110, 121))
+    for x, y in taps:
+        machine.core.tap(machine.root, x, y)
+        time.sleep(0.7)
+
+
+def check_directppp(rom, session, root, probes):
+    """The built-in PPP server accepts a Direct Serial connection and carries NetLib HTTP."""
+    if not palm_boot.rom_device(DEVICE)['serial'] or '3.1' in rom.name:
+        raise Skip('needs a serial port and the 3.5 or 4.1 Network panel')
+    with Machine(session, root, 'directppp', '--serial', 'ppp') as m:
+        if m.send('serial-state', 'serial:') != 'serial: ppp idle':
+            raise AssertionError('PPP is not idle at start')
+        m.install(probes['ppp68k'])
+        select_direct_serial(m, rom)
+        m.core.launch('Frond PPP')
+        log = m.root / 'log.pdb'
+        end = time.monotonic() + 90
+        while time.monotonic() < end:
+            state = m.send('serial-state', 'serial:')
+            if state == 'serial: ppp online' and 'written' in m.send(f'db-export-db FrondPPPLog "{log}"', 'export'):
+                break
+            time.sleep(1)
+        m.frame('probe.png')
+    if not log.exists():
+        raise AssertionError(f'PPP probe did not finish, {state}')
+    data = log.read_bytes()
+    record = data[int.from_bytes(data[78:82], 'big'):].split(b'\0')[0]
+    lines = record.decode(errors='replace').splitlines()
+    if not any(line.startswith('HTTP/') and ' 200' in line for line in lines):
+        raise AssertionError(' | '.join(lines))
+    return f'{state}, ' + ' | '.join(lines)
 
 
 def check_modem(rom, session, root, probes):
@@ -899,10 +931,10 @@ def build_probes(root, sdk):
 
 
 NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'contrast': [], 'beam': [], 'serial': [], 'usb': [], 'unix': [], 'card-flags': [], 'databases': [],
-         'ppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': []}
+         'ppp': ['ppp68k'], 'directppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': []}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'contrast': check_contrast, 'sleep': check_sleep, 'beam': check_beam,
        'serial': check_serial, 'usb': check_usb,
-       'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp,
+       'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp, 'directppp': check_directppp,
        'modem': check_modem, 'irphone': check_irphone, 'modemsync': check_modemsync}
 
 

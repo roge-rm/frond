@@ -203,9 +203,11 @@ data class MachineSettings(
         return if (gamepad == attached) null else copy(gamepad = attached)
     }
 
-    // The same settings for another device: an engine left at the old device's default takes the new one's.
     fun forDevice(from: Device, to: Device): MachineSettings =
-        if (engine == from.defaultEngine) copy(engine = to.defaultEngine) else this
+        copy(
+            engine = if (engine == from.defaultEngine) to.defaultEngine else engine,
+            serial = if (serial == InfraredChoice.PPP && !(to.runs68k && to.serialPort)) InfraredChoice.OFF else serial,
+        )
 
     companion object {
         const val DEFAULT_CONTRAST = 50

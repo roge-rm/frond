@@ -1,8 +1,8 @@
 #ifndef FROND_68K_MODEM_TRANSPORT_H
 #define FROND_68K_MODEM_TRANSPORT_H
 
-// The serial port's transport: a host link (HostTransport68k) or, in modem mode, a snap-on
-// Hayes modem whose calls reach a PPP server and slirp, or for the HotSync number a second host
+// The serial port's transport: a host link (HostTransport68k), direct PPP or a snap-on
+// Hayes modem whose calls reach PPP and slirp, or for the HotSync number a second host
 // link (the modem HotSync link) that pilot-link answers. The modem is powered while the guest's
 // serial line driver is on. Its clock is guest time in nanoseconds that never runs backwards,
 // so a session load (which moves the cycle count) doesn't upset its timers. All on the
@@ -24,32 +24,41 @@ class ModemTransport68k : public EmTransportSerial {
 
     HostTransport68k& Host() { return host; }
     const HostTransport68k& Host() const { return host; }
-    bool ModemMode() const { return bool(engine); }
+    bool ModemMode() const { return engine && !engine->direct; }
+    bool DirectMode() const { return engine && engine->direct; }
 
     // Modem mode on or off. Turning it on starts slirp and fails if slirp can't start.
-    bool SetModemMode(bool on, std::string& error) {
-        if (on == ModemMode()) return true;
-        if (!on) {
+    bool SetNetworkMode(bool modem, bool direct, std::string& error) {
+        if (modem == ModemMode() && direct == DirectMode()) return true;
+        if (!modem && !direct) {
             engine.reset();
             return true;
         }
-        auto made = std::make_unique<Engine>();
+        auto made = std::make_unique<Engine>(direct);
         if (!made->network.Valid()) {
             error = "slirp did not start";
             return false;
         }
         engine = std::move(made);
         credit.Restart();
-        if (powered) engine->modem.SetPower(true, Now());
+        if (modem && powered) engine->modem.SetPower(true, Now());
         // A session saved mid-call and started before modem mode came on.
-        if (!droppedCall.empty()) engine->modem.LineDropped(droppedCall, Now());
-        droppedCall.clear();
+        if (modem) {
+            if (!droppedCall.empty()) engine->modem.LineDropped(droppedCall, Now());
+            droppedCall.clear();
+        }
         return true;
     }
 
     // modem idle, modem dialling or modem online SPEED.
     std::string Describe() const {
         if (!engine) return "off";
+        if (DirectMode()) {
+            if (engine->ppp.IpcpOpen()) return "ppp online";
+            const auto phase = engine->ppp.GetPhase();
+            return phase == frondModem::PppServer::Phase::Idle ||
+                   phase == frondModem::PppServer::Phase::Down ? "ppp idle" : "ppp connecting";
+        }
         switch (engine->modem.GetState()) {
             case frondModem::HayesModem::State::Dialling: return "modem dialling";
             case frondModem::HayesModem::State::Online:
@@ -62,7 +71,7 @@ class ModemTransport68k : public EmTransportSerial {
     // power=on|off dtr=on|off as the modem sees them and the guest's DTR edges since modem mode
     // came on, or off outside modem mode.
     std::string Stats() const {
-        if (!engine) return "off";
+        if (!ModemMode()) return "off";
         return std::string("power=") + (engine->modem.GetState() == frondModem::HayesModem::State::Off ? "off" : "on") +
                " dtr=" + (engine->modem.Dtr() ? "on" : "off") + " dtr_rises=" + std::to_string(engine->dtrRises) +
                " dtr_drops=" + std::to_string(engine->dtrDrops);
@@ -72,36 +81,52 @@ class ModemTransport68k : public EmTransportSerial {
         powered = true;
         if (!engine) return host.Open();
         credit.Restart();
-        engine->modem.SetPower(true, Now());
+        if (ModemMode()) engine->modem.SetPower(true, Now());
         return true;
     }
     bool Close() override {
         powered = false;
         if (!engine) return host.Close();
-        engine->modem.SetPower(false, Now());
+        if (DirectMode()) engine->ppp.HangUp();
+        else engine->modem.SetPower(false, Now());
         return true;
     }
 
     bool Read(long& count, void* data) override {
         if (!engine) return host.Read(count, data);
         const long n = std::max(0L, std::min(count, credit.Take(config.fBaud)));
-        count = long(engine->modem.Read(static_cast<uint8_t*>(data), size_t(n)));
+        auto* bytes = static_cast<uint8_t*>(data);
+        count = long(DirectMode() ? engine->ppp.ToModem(bytes, size_t(n), Now())
+                                  : engine->modem.Read(bytes, size_t(n)));
         credit -= count;
         return true;
     }
     bool Write(long& count, const void* data) override {
         if (!engine) return host.Write(count, data);
-        if (powered && count > 0) engine->modem.Write(static_cast<const uint8_t*>(data), size_t(count), Now());
+        if (!powered || count <= 0) return true;
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        const auto now = Now();
+        if (DirectMode()) {
+            const auto phase = engine->ppp.GetPhase();
+            if (phase == frondModem::PppServer::Phase::Idle || phase == frondModem::PppServer::Phase::Down) {
+                const auto* flag = std::find(bytes, bytes + count, uint8_t(0x7e));
+                if (flag == bytes + count) return true;
+                engine->ppp.Answer(now);
+            }
+            engine->ppp.FromModem(bytes, size_t(count), now);
+        } else {
+            engine->modem.Write(bytes, size_t(count), now);
+        }
         return true;
     }
     bool CanRead() override {
         if (!engine) return host.CanRead();
-        return powered && engine->modem.Available() && credit.Take(config.fBaud) > 0;
+        return powered && Available() && credit.Take(config.fBaud) > 0;
     }
     bool CanWrite() override { return engine ? powered : host.CanWrite(); }
     size_t BytesPending() override {
         if (!engine) return host.BytesPending();
-        return powered ? std::min<size_t>(engine->modem.Available(), size_t(credit.Take(config.fBaud))) : 0;
+        return powered ? std::min<size_t>(Available(), size_t(credit.Take(config.fBaud))) : 0;
     }
 
     void SetConfig(const Config& next) override {
@@ -111,13 +136,13 @@ class ModemTransport68k : public EmTransportSerial {
     void SetRTS(RTSControl control) override { host.SetRTS(control); }
     void SetDTR(bool dtr) override {
         host.SetDTR(dtr);
-        if (!engine) return;
+        if (!ModemMode()) return;
         if (dtr != engine->modem.Dtr()) ++(dtr ? engine->dtrRises : engine->dtrDrops);
         engine->modem.SetDTR(dtr, Now());
     }
     // The guest's DTR as it is now, for a new modem or after a load; not counted as an edge.
     void SyncDTR(bool dtr) {
-        if (engine) engine->modem.SetDTR(dtr, Now());
+        if (ModemMode()) engine->modem.SetDTR(dtr, Now());
     }
     void SetBreak(bool on) override { host.SetBreak(on); }
     bool RequiresSync() override { return false; }
@@ -135,6 +160,13 @@ class ModemTransport68k : public EmTransportSerial {
         }
         if (lineDriverOn != powered) lineDriverOn ? Open() : Close();
         const uint64_t now = Now();
+        if (DirectMode()) {
+            if (powered) {
+                engine->ppp.Service(now);
+                if (!engine->ppp.Carrier(now)) engine->ppp.HangUp();
+            }
+            return;
+        }
         PumpHotSync();
         engine->modem.Service(now);
         PumpHotSync();
@@ -142,26 +174,29 @@ class ModemTransport68k : public EmTransportSerial {
 
     // True while a call to the HotSync number is up.
     bool HotSyncCall() const {
-        return engine && engine->line.HotSyncCall() && engine->hotsync.InCall();
+        return ModemMode() && engine->line.HotSyncCall() && engine->hotsync.InCall();
     }
 
     // For a session save: the modem's settings if the guest is off hook, or empty.
-    std::string SavedCall() const { return engine ? engine->modem.SavedCall() : droppedCall; }
+    std::string SavedCall() const { return ModemMode() ? engine->modem.SavedCall() : droppedCall; }
 
     // After a session load. call is what SavedCall gave when it was saved: with a call up, the
     // line has dropped since, so the guest gets NO CARRIER and has to dial again. Without one the
     // modem is idle. A call saved outside modem mode waits for modem mode to come on.
     void SessionLoaded(const std::string& call) {
         droppedCall.clear();
-        if (!engine) droppedCall = call;
+        if (!ModemMode()) droppedCall = call;
         else if (call.empty() || !engine->modem.LineDropped(call, Now())) engine->modem.Drop(Now());
+        if (DirectMode()) engine->ppp.HangUp();
         credit.Restart();
     }
 
    private:
     struct Engine {
+        explicit Engine(bool direct) : direct(direct) {}
+        const bool direct;
         frondNet::SlirpIp network;
-        frondModem::PppServer ppp{network};
+        frondModem::PppServer ppp{network, {!direct, false}};
         frondModem::PipeLine hotsync;
         frondModem::LineSwitch line{ppp, hotsync};
         frondModem::HayesModem modem{line};
@@ -169,6 +204,8 @@ class ModemTransport68k : public EmTransportSerial {
         bool syncPeerSeen{false};
         unsigned dtrRises{0}, dtrDrops{0};
     };
+
+    size_t Available() const { return DirectMode() ? engine->ppp.Available() : engine->modem.Available(); }
 
     // Guest nanoseconds, carried on across a load that moves the cycle count back.
     uint64_t Now() {
@@ -184,6 +221,11 @@ class ModemTransport68k : public EmTransportSerial {
         auto& pipe = engine->hotsync;
         pipe.SetReachable(syncLink.GetKind() != HostLink68k::Kind::off);
         if (!pipe.InCall() || !engine->line.HotSyncCall()) {
+            if (engine->syncPeerSeen && syncLink.GetKind() == HostLink68k::Kind::syncManager) {
+                // A new call starts with a fresh HotSync stream, including after an interrupted sync.
+                std::string error;
+                syncLink.Open(HostLink68k::Kind::syncManager, 0, error);
+            }
             engine->syncPeerSeen = false;
             syncLink.DropReceived();
             return;

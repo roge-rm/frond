@@ -21,6 +21,7 @@ class ZodiacTest {
             assertTrue(model.zodiac)
             assertEquals(480 to 320, model.width to model.height)
             assertEquals(8192000L, model.norSize)
+            assertTrue(model.irPhone)
             assertTrue(model.sound)
             assertTrue(model.sdWriteProtection)
             assertFalse(model.lowLatencyAudio)

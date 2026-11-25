@@ -375,7 +375,7 @@ int main() {
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.irPhone == (p.board == DeviceBoard5::ez328 || vzPalm(p) || p.deviceType == deviceTypeTX ||
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
-                                          p.deviceType == deviceTypeZire72));
+                                          p.deviceType == deviceTypeZire72 || deviceTypeIsZodiac5(p.deviceType)));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbPrinter == deviceTypeIsDana5(p.deviceType));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbWifi == (p.deviceType == deviceTypeDana));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.builtInWifi == (p.deviceType == deviceTypeDanaWireless));
@@ -683,7 +683,7 @@ static void zodiac2() {
     const auto& c = p->capabilities;
     // Serial (UART1), IrDA (UART2), USB HotSync and Bluetooth (the HCI shim) are on.
     assert(!c.network && !c.keyboard && c.serial && c.usb && !c.fastAudio && c.infrared &&
-           c.bluetooth && c.sound && !c.microphone && !c.backgroundPanel);
+           c.bluetooth && c.irPhone && c.sound && !c.microphone && !c.backgroundPanel);
     assert(p->norSize == 0x7d0000 && !p->nandSize && !p->requiresExplicitNand);
     assert(p->minRam == (128u << 20) && p->maxRam == p->minRam);
     const auto* first = deviceProfileNamed5("tapwave-zodiac-1");

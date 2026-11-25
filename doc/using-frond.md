@@ -409,7 +409,9 @@ On the CLIÉ T415, set USB to Off in Connections to use Serial for HotSync. Use 
 
 A 68k Palm's serial port is the cradle connector, set to Off, a PTY or a TCP port like the other serial ports. Serial HotSync works with pilot-link on that path (`pilot-xfer -p /dev/pts/N -l`): press HotSync in the Connections panel, then start HotSync on the Palm. Infrared beaming works as on the other devices.
 
-A 68k Palm reaches the network the way the real ones did, with PPP over the serial port to a PPP server on the host. Frond doesn't redirect NetLib for it. Put the serial port on a PTY or TCP port, from the command line:
+A 68k Palm reaches the network with PPP over its serial port. On Android set **Serial port** to **Direct PPP** in **Edit settings** or **Connections**, then set up Palm OS as described below. The built-in router gives the guest 10.0.2.15, with DNS at 10.0.2.3.
+
+On desktop you can also use the built-in router with `--serial ppp`, or connect a host PPP server to a PTY or TCP port:
 
 ```sh
 out/frond-68k iiix.frond --serial pty     # prints: serial: pty /dev/pts/N connected
@@ -463,6 +465,8 @@ Disconnect hangs up. Loading a session saved while online gives NO CARRIER, as i
 
 ### HotSync by modem
 
+On Android, assign the machine a Sync Manager profile and set **Serial port** to **Modem**. In the HotSync app select **Modem** and dial 4687962 to sync straight to that profile. For Network HotSync, set **Connection** to **Network** in **Sync settings**, then tap Frond's HotSync button or reopen the machine. Use 10.0.2.2 as the Primary PC Address in the guest and select the dial-up service in **Modem Sync Prefs**.
+
 On Linux the modem can HotSync with pilot-link two ways. The state line shows the PTY for the first, for example "Modem: idle, HotSync on /dev/pts/5".
 
 - Modem Sync to a number: dial 4687962 (HOTSYNC on a keypad) and the call goes straight to that PTY. Run `pilot-xfer -p /dev/pts/5 -l` (or another pilot-link command), then in the HotSync app tap Modem, enter 4687962 as the phone number, keep Palm Modem US/Canada and tap the HotSync button. With a dial prefix like `9,` it still works.
@@ -476,18 +480,20 @@ Devices with an infrared phone can use Mobile phone in the Infrared list (Linux,
 2. Palm OS 4.1: use the built-in IR to Phone connection.
 3. Dial any number, with PPP and Query DNS as above, and Connect.
 
+On a Zodiac, make a new connection in Prefs → Connection. Set **Connect to** to **Modem** and **Via** to **Infrared**, then select that connection in the Network panel.
+
 The state line reads "Mobile phone: idle", "linked" once the Palm has found the phone, "dialling", then "online at 33600". It takes about 5 to 20 seconds to come up. Infrared beaming to another Frond is off while Mobile phone is on.
 
 ### Mobile phone over Bluetooth
 
-Devices with Bluetooth can use Mobile phone in the Bluetooth list on Linux. It's This Frond's radio with a phone called "Frond Phone" on it, which offers Dial-up Networking and has the same modem and internet as the infrared phone. Machines on This Frond's radio still find each other.
+Devices with Bluetooth can use **Mobile phone** in the Bluetooth list on Android and Linux. Look for "Frond Phone", which offers Dial-up Networking and has the same modem and internet as the infrared phone. On Android the phone uses a radio private to the running machine's Sync Manager profile. On Linux the phone shares This Frond's radio.
 
 1. In Prefs, Connection, make a connection to a phone via Bluetooth, and find Frond Phone with Device. Pair with the passkey 1234.
 2. Dial any number, with PPP and Query DNS as above, and Connect.
 
-The status reads "Bluetooth: This Frond's radio, Mobile phone: idle", then "dialling" and "online at 33600" during a call. The Debian package includes the phone; a source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built. Android doesn't have it yet.
+The phone status shows "idle", then "dialling" and "online at 33600" during a call. The Android app and Debian package include the phone. A Linux source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built.
 
-For Zodiac Network HotSync over Bluetooth dial-up, start the phone peer on the virtual radio with a Sync Manager folder:
+For Zodiac Network HotSync over Bluetooth dial-up on Android, assign a profile in **Sync settings** and select **Mobile phone**. On Linux, start the phone peer with a Sync Manager folder:
 
 ```sh
 build/bluetooth-opp-peer/bluetooth-opp-peer RADIO-SOCKET --dun --sync-folder PROFILE-FOLDER
@@ -500,7 +506,8 @@ Modem and phone by device:
 | | Modem on serial | Mobile phone on infrared | Mobile phone on Bluetooth |
 |---|---|---|---|
 | 68k Palms | yes, Palm OS 3.1, 3.5, 4.1, not the m100 and m105 | yes, Palm OS 3.5 and 4.1 | no |
-| T\|X, TG50, E2, Zire 72 | no | yes | yes, Linux |
+| T\|X, TG50, E2, Zire 72 | no | yes | yes, Android and Linux |
+| Zodiac 1 and 2 | no | yes | yes, Android and Linux |
 | Tungsten E3 | no | no | no |
 | Dana, Dana Wireless | no | no | no |
 
@@ -601,7 +608,7 @@ What each device has, beyond the Devices table in the [README](../README.md#devi
 | Sound | yes | yes | yes | yes | yes, see below | yes, piezo | yes |
 | Low-latency audio | yes | yes | yes | yes | shorter queue | | shorter queue |
 | Microphone | | | | yes | yes | | yes |
-| Network | yes | | | | | PPP over serial | Virtual Wi-Fi |
+| Network | Virtual Wi-Fi, IR and Bluetooth dial-up | Virtual Wi-Fi card, IR and Bluetooth dial-up | | Virtual Wi-Fi card, IR and Bluetooth dial-up | IR and Bluetooth dial-up | Direct PPP, modem and IR dial-up where supported | Virtual Wi-Fi |
 | Serial port | yes | yes | yes | not offered | yes | yes | ActiveSync |
 | USB HotSync | yes | yes | yes | yes | yes | | ActiveSync |
 | Infrared beaming | yes | yes | yes | yes | yes | yes | yes |
