@@ -1365,11 +1365,8 @@ void jitCardResponses() {
     assert(reads >= 20);
 }
 
-// Slot 2's SD block with a card, from Thumb code at its driver's pcs: the clock, then single-block reads (CMD17)
-// of sectors 1 to 6, a single-block write (CMD24) to sector 9 and a two-block read (CMD18) of sectors 8 and 9. The
-// status 2 and status 1 waits are the driver's own loops (too short here for skipSlot2Poll to pass rounds). Each
-// data word read is added into r6. Fast with slot2Lean (data port and status reads and data port writes in generated
-// code, the rest charged there) reads Exact's words, as Fast without it does.
+// Slot 2's SD block with a synthetic card. Thumb code at the driver's PCs polls for blocks and
+// adds the words it reads into r6.
 std::vector<uint8_t> slot2Disk(64 * 512);
 bool slot2DiskRead(uint32_t sector, void* buf) {
     if (sector >= 64) return false;
@@ -1409,10 +1406,13 @@ Outcome slot2Run(const std::vector<uint32_t>& words, bool fast) {
     imx1MachineSetGraphicsSdCard(m, slot2Card());
     return finish(m);
 }
-void jitSlot2Reads() {
+std::vector<uint32_t> slot2Guest(bool longWait) {
     GraphicsGuest g;
     g.words.resize(0x500000 / 4);
-    g.setup(); g.display(); g.clocks();
+    g.setup();
+    // With the display off, scan boundaries do not split the quiet spans.
+    if (!longWait) g.display();
+    g.clocks();
     g.graphics(0xc51a0, 0x1c0, 0x203f2000);               // aperture 2 over the SD block
     // Thumb code at pc, image offset pc - 0x20000000.
     const auto thumb = [&](uint32_t pc, std::initializer_list<uint16_t> code) {
@@ -1437,6 +1437,7 @@ void jitSlot2Reads() {
     thumb(0x204d26c2, {strR1, bxLr});                     // the interface select
     thumb(0x204d26cc, {strR1, bxLr});                     // reset 0, then 7
     thumb(0x204d26d8, {strR1, bxLr});
+    thumb(0x204d230c, {strR1, bxLr});                     // bus width option
     thumb(0x204d2310, {strR1, bxLr});                     // clock
     thumb(0x204d2316, {ldrhR2, 0x05d3, 0xd5fc, bxLr});    // while !(clock & 0x100)
     thumb(0x204d2476, {ldrhR2, 0x0453, 0xd4fc, bxLr});    // while status 2 & 0x4000
@@ -1465,7 +1466,8 @@ void jitSlot2Reads() {
     call(0x204d26cc, sd + 0x1c0, 0);
     g.spin(2000);
     call(0x204d26d8, sd + 0x1c0, 7);
-    call(0x204d2310, sd + 0x48, 0x140);                  // the slow clock, for long waits
+    if (longWait) call(0x204d230c, sd + 0x50, 0x8000);   // one-bit bus
+    call(0x204d2310, sd + 0x48, 0x140);
     call(0x204d2316, sd + 0x48);
     const auto command = [&](uint32_t value, uint32_t sector, uint32_t count) {
         call(0x204d2476, sd + 0x3c);
@@ -1482,24 +1484,32 @@ void jitSlot2Reads() {
         call(0x204d23f4, sd + 0x3c, 0);
         call(0x204d3736, 0, 0, 0, 1, sd + 0x40, 128);
     };
-    for (uint32_t sector = 1; sector <= 6; ++sector) { command(0x5c11, sector, 1); readBlock(); }
-    command(0x4c18, 9, 1);
-    call(0x204d237c, sd + 0x3c);
-    call(0x204d23f4, sd + 0x3c, 0);
-    call(0x204d2bbe, 0, 0, 0, 0x01030507, sd + 0x40, 128);
+    if (!longWait) {
+        for (uint32_t sector = 1; sector <= 6; ++sector) { command(0x5c11, sector, 1); readBlock(); }
+        command(0x4c18, 9, 1);
+        call(0x204d237c, sd + 0x3c);
+        call(0x204d23f4, sd + 0x3c, 0);
+        call(0x204d2bbe, 0, 0, 0, 0x01030507, sd + 0x40, 128);
+    }
     command(0x3c12, 8, 2);
     call(0x204d2428, sd + 0x38, 0xfffb);
     readBlock(); readBlock();
     call(0x204d2408, 0, 0x16010000, sd + 0x20);
     call(0x204d2428, sd + 0x38, 0xfffb);
     g.end();
-    const auto exact = slot2Run(g.words, false);
+    return std::move(g.words);
+}
+
+// Single-block reads and a write, then a two-block read with the display on.
+void jitSlot2Reads() {
+    const auto words = slot2Guest(false);
+    const auto exact = slot2Run(words, false);
     imx1SetSlot2Lean(false);
-    const auto plain = slot2Run(g.words, true);
+    const auto plain = slot2Run(words, true);
     imx1SetSlot2Lean(true);
     const uint64_t reads = imx1MachineLeanSlot2Reads(nullptr), writes = imx1MachineLeanSlot2Writes(nullptr);
     const uint64_t charged = imx1MachineJitSlot2Accesses(nullptr), rounds = imx1MachineSlot2PollRounds(nullptr);
-    const auto fast = slot2Run(g.words, true);
+    const auto fast = slot2Run(words, true);
     print("jit slot 2 exact", exact); print("jit slot 2 blocks", plain); print("jit slot 2 lean", fast);
     std::printf("jit slot 2: sum %08x against %08x; %llu reads and %llu writes on the lean path, %llu charged, "
                 "%llu wait rounds passed\n", fast.run.result.registers[6], exact.run.result.registers[6],
@@ -1514,6 +1524,33 @@ void jitSlot2Reads() {
     assert(imx1MachineLeanSlot2Reads(nullptr) - reads >= 8 * 100);
     assert(imx1MachineLeanSlot2Writes(nullptr) - writes >= 100);
     assert(imx1MachineJitSlot2Accesses(nullptr) > charged);
+}
+
+// The two-block read on a slow, one-bit bus leaves several full poll rounds in a quiet span.
+void jitSlot2PollWait() {
+    const char* env = std::getenv("FROND_SLOT2_POLL_SKIP");
+    const bool was = !(env && *env && !std::strcmp(env, "0"));
+    const auto words = slot2Guest(true);
+    imx1SetSlot2Lean(true);
+    imx1SetSlot2PollSkip(false);
+    const uint64_t rounds = imx1MachineSlot2PollRounds(nullptr);
+    const auto exact = slot2Run(words, false);
+    const auto plain = slot2Run(words, true);
+    assert(imx1MachineSlot2PollRounds(nullptr) == rounds);
+
+    imx1SetSlot2PollSkip(true);
+    const auto fast = slot2Run(words, true);
+    const auto passed = imx1MachineSlot2PollRounds(nullptr) - rounds;
+    imx1SetSlot2PollSkip(was);
+    print("jit slot 2 long wait exact", exact);
+    print("jit slot 2 long wait without skip", plain);
+    print("jit slot 2 long wait with skip", fast);
+    std::printf("jit slot 2 long wait: %llu poll rounds skipped\n", (unsigned long long)passed);
+    std::fflush(stdout);
+    assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.registers[6]);
+    sameResult(exact, plain);
+    same(plain, fast);
+    assert(passed > 0);
 }
 
 // A graphics memory store and 62 other instructions a round while timer 1's compare IRQ comes due, with the display
@@ -2823,6 +2860,7 @@ void jitLong() {
     jitCardWaits();
     jitCardResponses();
     jitSlot2Reads();
+    jitSlot2PollWait();
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();
@@ -2856,6 +2894,14 @@ void jitLong() {
 #define ZODIAC_FAST_LEAN_MAIN main
 #endif
 int ZODIAC_FAST_LEAN_MAIN() {
+    if (std::getenv("ZODIAC_FAST_LEAN_SLOT2")) {
+        imx1SetFastBlocksDefault(true);
+        cpuSetJitSync(true);
+        setenv("FROND_JIT_HOT", "1", 1);
+        jitSlot2Reads();
+        jitSlot2PollWait();
+        return 0;
+    }
     if (std::getenv("ZODIAC_FAST_LEAN_RING")) {
         // The ring tests alone, for running again with span options off (FROND_ZODIAC_CROSS_END=0 and the like):
         // Fast still ends with Exact's results.

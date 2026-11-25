@@ -111,7 +111,7 @@ inline SdResult openFileCard(const std::filesystem::path& folder, uint32_t kind,
     auto& store = cardStore(kind);
     if (store.initialized()) return frondSdCandidate::fail("busy", "Take the current card out first.");
     const char* name = frondMachine::fileCardSibling(kind);
-    frondSession::CardSwap swap;
+    frondSession::CardSwapSlot swap;
     swap.identityGiven = true;
     swap.identity = identity;
     frondMachine::Media media;
@@ -189,7 +189,7 @@ inline SdResult putInMs(const std::filesystem::path& folder, MemoryStickControll
         }
         return {true, "inserted", {}};
     }
-    frondSession::CardSwap swap;
+    frondSession::CardSwapSlot swap;
     swap.identityGiven = true;
     swap.identity = identity;
     frondMachine::Media media;

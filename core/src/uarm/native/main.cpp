@@ -139,6 +139,8 @@ struct Options {
     bool cardSwap;                  // the frontend changed the card files while the machine was off
     optional<string> cardIdentity;  // the card put in: 64 hex digits
     bool cardProtected;
+    optional<string> sd2CardIdentity;
+    bool sd2CardProtected;
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
@@ -158,7 +160,7 @@ bool gFastEngineMissing = false;
     // elsewhere, or none. It resumes ejected and the card it holds now goes in once the guest has
     // run swapInsertDelay awake, as a hot swap would. The stick's write protection is set from
     // `msProtect`.
-    bool sdSwapped = false, msSwapped = false, msProtect = false;
+    bool sdSwapped = false, sd2Swapped = false, msSwapped = false, msProtect = false;
     // The session's second SD card (the Zodiac's slot 2) was saved in its slot.
     bool secondCardIn = false;
     // A v9 session's NAND, attached from nand.frondnand once the SoC is made. A NAND in RAM came
@@ -369,6 +371,7 @@ bool gFastEngineMissing = false;
             if (media.kind == frondMachine::kindMs || media.kind == frondMachine::kindMsPro) msProtect = media.writeProtected;
         }
         sdSwapped = contents.sdSwapped;
+        sd2Swapped = contents.sd2Swapped;
         msSwapped = contents.msSwapped;
         romInfo = RomInfo5(nor.data, nor.size);
         if (profile->detect != DeviceDetect5::norSize && romInfo.GetDeviceType() != sessionDevice) {
@@ -387,16 +390,19 @@ bool gFastEngineMissing = false;
         std::filesystem::path folder;
         const std::filesystem::path work = options.workFolder ? *options.workFolder : std::string();
         frondSession::CardSwap swap;
-        if (options.cardIdentity) {
-            frondNative::CardIdentity identity{};
-            if (!frondNative::parseIdentityHex(*options.cardIdentity, identity)) {
-                cerr << "--card-identity takes the card's identity as 64 hex digits" << endl;
+        const auto readCardIdentity = [](const optional<string>& text, bool protect, const char* flag,
+                                         frondSession::CardSwapSlot& slot) {
+            if (text && !frondNative::parseIdentityHex(*text, slot.identity)) {
+                cerr << flag << " takes the card's identity as 64 hex digits" << endl;
                 return false;
             }
-            swap.identityGiven = true;
-            swap.identity = identity;
-        }
-        swap.writeProtected = options.cardProtected;
+            slot.identityGiven = text.has_value();
+            slot.writeProtected = protect;
+            return true;
+        };
+        if (!readCardIdentity(options.cardIdentity, options.cardProtected, "--card-identity", swap.first) ||
+            !readCardIdentity(options.sd2CardIdentity, options.sd2CardProtected, "--sd2-card-identity", swap.second))
+            return false;
         if (frondSession::loadPath(path, contents, folder, frondSession::msPhysicalBytes, work,
                                    options.cardSwap ? &swap : nullptr)) {
             sessionFolder = folder.string();
@@ -473,6 +479,14 @@ bool gFastEngineMissing = false;
         Options options = requested;
         if (!options.cardSwap && (options.cardIdentity || options.cardProtected)) {
             cerr << "--card-identity and --card-protected go with --card-swap" << endl;
+            return false;
+        }
+        if (!options.cardSwap && (options.sd2CardIdentity || options.sd2CardProtected)) {
+            cerr << "--sd2-card-identity and --sd2-card-protected go with --card-swap" << endl;
+            return false;
+        }
+        if (options.sd2CardProtected && !options.sd2CardIdentity) {
+            cerr << "--sd2-card-protected requires --sd2-card-identity" << endl;
             return false;
         }
         if (options.gdbPort && (*options.gdbPort == 0 || *options.gdbPort > 65535)) {
@@ -902,8 +916,8 @@ bool gFastEngineMissing = false;
             msCtrlrSwapOnLoad(memoryStick, true);
         }
         soc->SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
-        // Slot 2's card goes in first, so the load carries it on from the state's SD2 section.
-        if (secondCardIn && !soc->Sd2Insert()) {
+        // Only the saved card carries on from the state's SD2 section.
+        if (secondCardIn && !sd2Swapped && !soc->Sd2Insert()) {
             cerr << "session second SD card could not be put in" << endl;
             return false;
         }
@@ -915,6 +929,8 @@ bool gFastEngineMissing = false;
         // stick's detect line drops here, after the restore, so a guest asleep at the save wakes
         // on it as on a hot eject.
         bool sdInsertPending = false, msInsertPending = false;
+        std::optional<uint64_t> sd2InsertEpoch;
+        if (sd2Swapped && secondCardIn) sd2InsertEpoch = sdCardStore(1).epoch();
         soc->SetSdWriteProtect(frondNative::slotCards().sdProtected);
         soc->SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
         if (msSwapped) {
@@ -952,6 +968,7 @@ bool gFastEngineMissing = false;
         }
         const uint64_t ejectedAt = soc->GetTime();
         std::optional<uint64_t> awakeAt;
+        uint64_t sd2AwakeTime = 0, sd2LastTime = ejectedAt;
 
         AudioQueue* audioQueue = audioQueueCreate(AUDIO_QUEUE_SIZE);
         soc->SetAudioQueue(audioQueue);
@@ -1609,17 +1626,32 @@ bool gFastEngineMissing = false;
                 }
                 inputTrace::note("cycle", true, "end");
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.
-                if (sdInsertPending || msInsertPending) {
+                if (sdInsertPending || msInsertPending || sd2InsertEpoch) {
                     const uint64_t time = soc->GetTime();
-                    if (!awakeAt && !(socPxa && socPxa->PowerSleeping())) awakeAt = time;
-                    const bool handled = !sdInsertPending || soc->SdRemovalHandled().value_or(true);
-                    if ((awakeAt && time - *awakeAt >= swapInsertDelay && handled) || time - ejectedAt >= swapInsertLimit) {
-                        bool inserted = false;
-                        if (sdInsertPending) soc->SdInsert(), inserted = soc->SdInserted();
-                        if (msInsertPending) inserted = msCtrlrInsert(memoryStick, true) || inserted;
-                        sdInsertPending = msInsertPending = false;
-                        // The launcher learns of a hot insert from its reply; this one gets an event.
-                        if (inserted && desktop) desktop->event("card", "inserted");
+                    const bool timedOut = time >= ejectedAt && time - ejectedAt >= swapInsertLimit;
+                    if (sdInsertPending || msInsertPending) {
+                        if (!awakeAt && !(socPxa && socPxa->PowerSleeping())) awakeAt = time;
+                        const bool handled = !sdInsertPending || soc->SdRemovalHandled().value_or(true);
+                        if ((awakeAt && time - *awakeAt >= swapInsertDelay && handled) || timedOut) {
+                            bool inserted = false;
+                            if (sdInsertPending) soc->SdInsert(), inserted = soc->SdInserted();
+                            if (msInsertPending) inserted = msCtrlrInsert(memoryStick, true) || inserted;
+                            sdInsertPending = msInsertPending = false;
+                            if (inserted && desktop) desktop->event("card", "inserted");
+                        }
+                    }
+                    if (sd2InsertEpoch) {
+                        // A card taken out, replaced or already put in while waiting supersedes the insert.
+                        if (sdCardStore(1).epoch() != *sd2InsertEpoch || soc->Sd2Inserted()) {
+                            sd2InsertEpoch.reset();
+                        } else {
+                            if (!soc->PowerSleeping() && time >= sd2LastTime) sd2AwakeTime += time - sd2LastTime;
+                            sd2LastTime = time;
+                            if (sd2AwakeTime >= swapInsertDelay || timedOut) {
+                                sd2InsertEpoch.reset();
+                                if (soc->Sd2Insert() && desktop) desktop->event("card", "sd2-inserted");
+                            }
+                        }
                     }
                 }
                 serial.Service();
@@ -2243,6 +2275,13 @@ int main(int argc, char** argv) {
         .help("with --card-swap, a card put in is write protected")
         .default_value(false).implicit_value(true);
 
+    program.add_argument("--sd2-card-identity")
+        .help("with --card-swap, the identity of the card put in the second SD slot, as 64 hex digits")
+        .metavar("<hex>");
+    program.add_argument("--sd2-card-protected")
+        .help("with --sd2-card-identity, the card put in the second SD slot is write protected")
+        .default_value(false).implicit_value(true);
+
     program.add_argument("--serial")
         .help("connect the TX serial port to a host PTY (pty), a TCP listener on 127.0.0.1 "
               "(tcp:PORT), a Unix socket (unix:PATH, in a 0700 folder you own), one client at a time, or the "
@@ -2373,6 +2412,8 @@ int main(int argc, char** argv) {
                        .cardSwap = program.get<bool>("--card-swap"),
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),
+                       .sd2CardIdentity = program.present("--sd2-card-identity"),
+                       .sd2CardProtected = program.get<bool>("--sd2-card-protected"),
                        .fastEngine = program.get("--engine") == "fast",
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),

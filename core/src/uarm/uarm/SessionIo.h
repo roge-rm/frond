@@ -48,12 +48,16 @@ struct Contents {
     bool sdSwapped{}, msSwapped{}, sd2Swapped{};
 };
 
-// A load with --card-swap: the frontend may have changed the card files while the machine was off.
-// `identity` and `writeProtected` describe the card put in, given with --card-identity.
-struct CardSwap {
+struct CardSwapSlot {
     bool identityGiven{};
     std::array<uint8_t, frondMachine::identityBytes> identity{};
     bool writeProtected{};
+};
+
+// Card identities and write protection for a load with --card-swap.
+struct CardSwap {
+    CardSwapSlot first;
+    CardSwapSlot second;
 };
 
 inline uint32_t le32(const uint8_t* p) {
@@ -731,7 +735,7 @@ inline bool parseFolderSession(const uint8_t* data, size_t size, Contents& out) 
 // A card file the frontend put in under --card-swap, checked as a new card of its kind: what Files…
 // or a standalone change left beside it is settled, then header, size and payload as a load does,
 // and no session journals or full copies beside it.
-inline bool swappedInCard(const std::filesystem::path& folder, const char* name, const CardSwap& swap,
+inline bool swappedInCard(const std::filesystem::path& folder, const char* name, const CardSwapSlot& swap,
                           frondMachine::Media& out) {
     if (!swap.identityGiven) {
         std::cerr << "a card put in needs --card-identity" << std::endl;
@@ -800,9 +804,8 @@ inline bool swappedInCard(const std::filesystem::path& folder, const char* name,
 // Fits the saved cards to the card files now in the folder, slot by slot (SD; Memory Stick or Pro;
 // the Zodiac's second SD). A saved card whose file is there unchanged, with the same identity when
 // one is given, stays as saved: same SD or Pro generation, same classic stick change counter. A
-// missing file empties the slot; another card, or the same one changed, is checked as a new card,
-// except in the second SD slot, which loads empty and takes the card with sd2-put-in. The device profile check comes later, as
-// for any load.
+// missing file empties the slot. A changed card is checked as a new card. Without second-slot
+// metadata, a changed card in that slot is left for sd2-put-in. The device profile check comes later.
 inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parsed, const CardSwap& swap) {
     std::vector<frondMachine::Media> cards;
     const std::vector<std::vector<const char*>> slots = {{frondMachine::sdSibling},
@@ -830,9 +833,9 @@ inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parse
         }
         if (!saved && !present) continue;
         bool& swapped = slot == 0 ? parsed.sdSwapped : slot == 2 ? parsed.sd2Swapped : parsed.msSwapped;
-        // --card-identity names the first slot's or the stick's card, never the second SD slot's.
+        const auto& requested = slot == 2 ? swap.second : swap.first;
         if (saved && present && saved->name == present &&
-            (slot == 2 || !swap.identityGiven || swap.identity == saved->identity)) {
+            (!requested.identityGiven || requested.identity == saved->identity)) {
             std::error_code ec;
             const auto path = folder / present;
             uint64_t changes = 0;
@@ -850,11 +853,9 @@ inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parse
         }
         swapped = true;
         if (!present) continue;
-        // Slot 2 loads empty for any card file that isn't the saved card as saved (taken out, another
-        // card, or the same one changed elsewhere); the frontend puts it in with sd2-put-in.
-        if (slot == 2) continue;
+        if (slot == 2 && !requested.identityGiven) continue;
         frondMachine::Media card;
-        if (!swappedInCard(folder, present, swap, card)) return false;
+        if (!swappedInCard(folder, present, requested, card)) return false;
         cards.push_back(std::move(card));
     }
     // Internal NAND isn't in a slot; it loads as saved, settled first.
