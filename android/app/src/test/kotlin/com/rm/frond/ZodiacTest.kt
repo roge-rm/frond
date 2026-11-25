@@ -2,6 +2,7 @@ package com.rm.frond
 
 import android.content.pm.ActivityInfo
 import android.view.KeyEvent
+import java.nio.file.Files
 import com.rm.frond.ZodiacPad.Event.Axis
 import com.rm.frond.ZodiacPad.Event.Button
 import org.junit.Assert.assertEquals
@@ -12,16 +13,20 @@ import org.junit.Test
 
 class ZodiacTest {
     private val zodiac = Device.byId(Device.ZODIAC_ID)!!
+    private val zodiac1 = Device.byId("tapwave-zodiac-1")!!
 
     @Test fun listedWithItsScreenAndNoFirmwareVariant() {
-        assertTrue(zodiac in Device.shown)
-        assertTrue(zodiac.zodiac)
-        assertEquals(480 to 320, zodiac.width to zodiac.height)
-        assertEquals(8192000L, zodiac.norSize)
-        assertTrue(zodiac.sound)
-        assertFalse(zodiac.lowLatencyAudio)
-        assertFalse(zodiac.runs68k)
-        assertFalse(Device.entries.any { it.zodiac && it != zodiac })
+        for (model in listOf(zodiac1, zodiac)) {
+            assertTrue(model in Device.shown)
+            assertTrue(model.zodiac)
+            assertEquals(480 to 320, model.width to model.height)
+            assertEquals(8192000L, model.norSize)
+            assertTrue(model.sound)
+            assertTrue(model.sdWriteProtection)
+            assertFalse(model.lowLatencyAudio)
+            assertFalse(model.runs68k)
+            assertEquals(Engine.FAST, MachineSettings.defaults(model).engine)
+        }
     }
 
     @Test fun newMachinesRunFastAtOriginalSpeed() {
@@ -63,6 +68,15 @@ class ZodiacTest {
         val info = Firmware.inspect(size) { at, count -> image.copyOfRange(at.toInt(), (at + count).toInt()) }
         assertEquals(zodiac, info.device)
         assertTrue(info.validLayout)
+        val rom = Files.createTempFile("zodiac-nor", ".rom").toFile()
+        try {
+            rom.writeBytes(image)
+            assertEquals(zodiac, Firmware.detect(rom))
+            assertNull(Firmware.check(zodiac, rom, null))
+            assertNull(Firmware.check(zodiac1, rom, null))
+        } finally {
+            rom.delete()
+        }
     }
 
     private fun pad(): Pair<ZodiacPad, MutableList<ZodiacPad.Event>> {

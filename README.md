@@ -63,7 +63,7 @@ Dan
 | Tungsten E3 | 5.4 | 320×480 colour | SD | yes | yes | | | USB, serial |
 | Zire 72 | 5.2 | 320×320 colour | SD | yes | yes | yes | Wi-Fi card | USB |
 | Sony CLIÉ TG50 | 5.0 | 320×320 colour | Memory Stick | yes | yes | yes | | USB, serial |
-| Tapwave Zodiac | 5.2 | 480×320 colour | two SD | yes | yes | yes | | USB, serial |
+| Tapwave Zodiac 1 and 2 | 5.2 | 480×320 colour | two SD | yes | yes | yes | | USB, serial |
 | **Palm OS 3 and 4, 68k** | | | | | | | | |
 | Palm IIIx | 3.1, 3.5 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIe | 3.1 | 160×160 grey | | piezo | yes | | PPP | serial |
@@ -132,7 +132,7 @@ These builds are made as is and I haven't tried them. Get them from [Releases](h
 | Tungsten E3 | the modified 8 MiB E2 ROM | optional |
 | Zire 72 | 14,942,208 bytes | none |
 | Sony CLIÉ TG50 | 13,041,664 bytes | none |
-| Tapwave Zodiac | the 8,192,000 byte ROM, or Tapwave's Zodiac 1.1 update (the zip or the PRC in it) | none |
+| Tapwave Zodiac 1 and 2 | the 8,192,000 byte ROM, or Tapwave's Zodiac 1.1 update (the zip or the PRC in it) | none |
 | Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100 and m105 | one ROM file, 1.2 to 2.1 MB | none |
 | Palm m125, m130, m500, m505, m515, m520 and IBM WorkPad c500 | one ROM file, 2.4 to 4.2 MB | none |
 | AlphaSmart Dana and Dana Wireless | one ROM file, 6 MiB | none |

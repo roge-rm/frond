@@ -64,14 +64,15 @@ class FirmwareInputTest : public QObject {
             QCOMPARE(nor.write(company, 4), qint64(4));
         }
         nor.flush();
-        // Detected and taken as itself, with no NAND, and never as another device.
+        // The same NOR serves both models. Auto still selects the Zodiac 2.
         const auto zodiac = frondFirmware::deviceFromId("tapwave-zodiac-2");
-        QVERIFY(zodiac != Device::automatic);
+        const auto zodiac1 = frondFirmware::deviceFromId("tapwave-zodiac-1");
+        QVERIFY(frondFirmware::isZodiac(zodiac) && frondFirmware::isZodiac(zodiac1));
         QCOMPARE(frondFirmware::detectDevice(path), zodiac);
-        for (Device selected : {Device::automatic, zodiac}) {
+        for (Device selected : {Device::automatic, zodiac, zodiac1}) {
             Device resolved = Device::automatic;
             QCOMPARE(frondFirmware::validateFiles(selected, path, {}, &resolved), QString());
-            QCOMPARE(resolved, zodiac);
+            QCOMPARE(resolved, selected == Device::automatic ? zodiac : selected);
         }
         for (Device selected : {Device::tx, Device::e2})
             QCOMPARE(frondFirmware::validateFiles(selected, path, {}),

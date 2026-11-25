@@ -28,7 +28,7 @@ Which ROM each 68k device and the Zodiac take:
 - The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's.
 - The CLIÉ T415 takes the retail T415 ROM, including the 8 MiB dump with two identical copies of its 4 MiB flash. The Sony T400 ROM from POSE also works.
 - Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana.
-- For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
+- Zodiac 1 (32 MiB) and Zodiac 2 (128 MiB) use the same 1.1 ROM. Choose **Tapwave Zodiac 1** when adding that model. Automatic detection picks the Zodiac 2. For either model, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 
 A session has your firmware, installed apps and personal data in it. Keep it to yourself.
 

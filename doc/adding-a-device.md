@@ -45,20 +45,20 @@ Hardware that exists on the real device but isn't done yet stays in the profile 
 
 For a shared board, audit checks for the existing device type and name in the core, frontends and tools. Share hardware selection through the board model, and use capabilities for supported host interfaces. Keep ROM signatures, firmware-specific patches and qualified audio hooks separate. Test the existing device too when changing a shared path.
 
-## Zodiac 2 hardware
+## Zodiac hardware
 
-The Tapwave Zodiac 2 (`tapwave-zodiac-2`) is the only device on the i.MX1 board model. It isn't a PXA or OMAP board, and it runs ARM code only.
+The Tapwave Zodiac 1 (`tapwave-zodiac-1`) and Zodiac 2 (`tapwave-zodiac-2`) share the i.MX1 board model. They run ARM code.
 
 | Part | In Frond |
 |---|---|
 | CPU | ARM920T at 200 MHz: MMU, instruction and data caches, Thumb. Exact and Fast engines |
-| Memory | 8,192,000 byte NOR ROM (small and big PalmCards at offsets 0 and 0x20000, company `Tpwv`, HAL `MX1a`), 128 MiB SDRAM |
+| Memory | 8,192,000 byte NOR ROM (small and big PalmCards at offsets 0 and 0x20000, company `Tpwv`, HAL `MX1a`), 32 MiB SDRAM on the Zodiac 1 and 128 MiB on the Zodiac 2. GPIO D6 selects the 32 MiB model at reset |
 | SoC blocks | i.MX1 AITC, system control and PLLs, EIM chip selects, timers, watchdog, RTC, GPIO, DMA, LCDC (contrast only), PWM, ASP pen ADC, I2C, SSI, UARTs (idle), MMCSD |
 | Graphics | Virtual W4200-compatible graphics chip behind chip select 5: ring of command packets, solid fills, copies, stretch blits, line packets, 480x320 RGB565 display. Fast can draw fills on the host GPU (`FROND_ZODIAC_GPU`) |
 | Sound | Virtual YMF768 on chip select 4 |
-| Storage | One SD slot (the card sits on the graphics chip side) |
+| Storage | Two SD slots. Slot 1 uses the i.MX1 MMCSD controller and slot 2 uses the W4200 |
 | Controls | Pen, four Action keys, Home, Function, two triggers, analogue stick |
-| Not done | Network, serial, USB, infrared, Bluetooth, modem, camera, microphone |
+| Connections | Serial, USB cradle, infrared and Bluetooth |
 
 The ROM is read-only input: `tools/zodiac-rom.py` takes it out of Tapwave's Zodiac 1.1 update. Hardware the ROM touches that has no model yet stops the machine with the address, rather than answering with a guess. Where the chip documents no behaviour, the model takes an explicit input or policy (`zodiac-boot-probe` options such as `--gpio-a-input`, `--rtc-initial-time` and `--ram-mib`).
 

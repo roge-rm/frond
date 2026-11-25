@@ -109,6 +109,16 @@ struct DeviceProfile5 {
 inline constexpr uint32_t deviceCompanyPalm5 = 0x50616c6d;  // 'Palm'
 inline constexpr size_t deviceNameMax5 = 31;
 
+constexpr DeviceProfile5 zodiacProfile5(DeviceType5 type, const char* name, const char* label, uint32_t ram) {
+    return {type, name, label, DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
+            DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
+            DeviceBoard5::imx1Zodiac, DeviceArt::zodiac,
+            {false, false, true, true, false, true, true, true, false, false, false, false, false, false, false, 3, true},
+            0x7d0000, 0, ram, ram, DisplayMode::mode_480x320, 1u << 10, false,
+            DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
+            {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}};
+}
+
 // Inventory of native models and reserved names, not a list of verified Palm devices.
 inline constexpr DeviceProfile5 deviceProfiles5[] = {
     {deviceTypeTX, "palm-tx", "Palm TX", DeviceCohort5::txNand, DeviceSupport5::txDesktop,
@@ -324,16 +334,9 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      6u << 20, 0, 16u << 20, 16u << 20, DisplayMode::mode_560x160, 1u << 9, false,
      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
-    // The guarded i.MX1 machine behind SocIMX1: screen, pen, buttons, stick, an SD card in slot 1, up
-    // to 2 GB as the OS has no SDHC, PCM sound, the connector's serial port (UART1), IrDA (UART2), USB
-    // HotSync through the cradle (the W4200's USB function) and Bluetooth through an HCI shim (zodiac_bluetooth.cpp).
-    {deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
-     DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
-     DeviceBoard5::imx1Zodiac, DeviceArt::zodiac,
-     {false, false, true, true, false, true, true, true, false, false, false, false, false, false, false, 3, true},
-     0x7d0000, 0, 128u << 20, 128u << 20, DisplayMode::mode_480x320, 1u << 10, false,
-     DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
-     {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}},
+    // Both models use the same ROM; the header inspector defaults to the Zodiac 2.
+    zodiacProfile5(deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", 128u << 20),
+    zodiacProfile5(deviceTypeZodiac1, "tapwave-zodiac-1", "Tapwave Zodiac 1", 32u << 20),
 
     // Sony CLIE T415: DragonBall VZ with 8 MiB of RAM, a 320x320 16-grey panel and the silkscreen below it,
     // a classic Memory Stick slot (4 to 128 MB, no Pro), IrDA, USB cradle and Sony FM and ADPCM sound.
@@ -436,6 +439,15 @@ inline bool deviceTypeIsDana5(int32_t deviceType) {
     return deviceType == deviceTypeDana || deviceType == deviceTypeDanaWireless;
 }
 
+inline bool deviceTypeIsZodiac5(int32_t deviceType) {
+    return deviceType == deviceTypeZodiac2 || deviceType == deviceTypeZodiac1;
+}
+
+// A shared ROM can identify the family. Sessions still check the exact device type.
+inline bool deviceProfileTakesArmRom5(int32_t device, int32_t detected) {
+    return detected >= 0 && (device == detected || (deviceTypeIsZodiac5(device) && deviceTypeIsZodiac5(detected)));
+}
+
 // Built devices only; reserved names have no internal type.
 inline const DeviceProfile5* deviceProfile5(int32_t deviceType) {
     if (deviceType < 0) return nullptr;
@@ -455,7 +467,7 @@ inline bool deviceProfileHasPalmBoardInputs5(int32_t deviceType) {
 }
 
 inline bool deviceProfileSdWriteProtection5(int32_t deviceType) {
-    return deviceType == deviceTypeZodiac2 || deviceProfileHasPalmBoardInputs5(deviceType);
+    return deviceTypeIsZodiac5(deviceType) || deviceProfileHasPalmBoardInputs5(deviceType);
 }
 
 inline bool deviceProfileNetworkHotSync5(const DeviceProfile5& profile) {

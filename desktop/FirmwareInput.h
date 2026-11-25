@@ -41,6 +41,9 @@ inline Device deviceFromId(const QString& id) {
 }
 
 inline QString deviceName(Device device) { return QString::fromUtf8(profile(device).displayName); }
+inline bool isZodiac(Device device) {
+    return device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac;
+}
 
 // Which settings a device supports, from the device table.
 using Capabilities = DeviceCapabilities5;
@@ -263,13 +266,14 @@ inline QString validateFiles(Device chosen, const QString& norPicked, const QStr
                                          : QStringLiteral("This NOR image has no Tungsten E2 header. Check the device choice.");
     const auto info = inspectNor(nor);
     const auto& selected = profile(device);
-    if (info.profile && info.profile != &selected && info.profile->deviceType != deviceTypeE2 &&
+    const bool takesRom = info.profile && deviceProfileTakesArmRom5(selected.deviceType, info.profile->deviceType);
+    if (info.profile && !takesRom && info.profile->deviceType != deviceTypeE2 &&
         info.profile->deviceType != deviceTypeZire72)
         return QStringLiteral("This is a %1 NOR image. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
     if (device != Device::tx && device != Device::e2 && device != Device::zire72) {
-        if (info.profile && info.profile != &selected)
+        if (info.profile && !takesRom)
             return QStringLiteral("This is a %1 NOR image. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
-        if (selected.detect == DeviceDetect5::cardHeader && info.profile != &selected)
+        if (selected.detect == DeviceDetect5::cardHeader && !takesRom)
             return QStringLiteral("This NOR image has no %1 header.").arg(deviceName(device));
         if (!info.validLayout) return QStringLiteral("This %1 NOR image has an invalid card layout.").arg(deviceName(device));
         if (!selected.nandSize && !nandPath.isEmpty()) return QStringLiteral("This device has no NAND. Leave the NAND image empty.");

@@ -9,6 +9,7 @@
 
 #include "Defer.h"
 #include "SoC.h"
+#include "device_profile5.h"
 #include "soc_IMX1.h"
 #include "syscall_dispatch.h"
 
@@ -59,7 +60,7 @@ void require(bool ok, const char* reason) {
 }
 
 SocIMX1* zodiac(SoC& soc) {
-    return soc.GetDeviceType() == DeviceType5::deviceTypeZodiac2 ? static_cast<SocIMX1*>(&soc) : nullptr;
+    return deviceTypeIsZodiac5(soc.GetDeviceType()) ? static_cast<SocIMX1*>(&soc) : nullptr;
 }
 
 uint32_t word(SocIMX1& soc, uint32_t address) {

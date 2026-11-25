@@ -1229,7 +1229,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send("hold-state");
             return;
         }
-        if (!stopping && frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2" &&
+        if (!stopping && frondFirmware::isZodiac(runningDevice) &&
             (command == "cradle" || command == "reset" || command == "hard-reset") && send("cradle-setting")) return;
         // frond-68k's state replies go on with the card's key and flags: the first word says it.
         const auto word = message.section(' ', 0, 0);
@@ -1350,7 +1350,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             firstStartPending = false;
             firstDone = true;
         }
-        const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
+        const bool zodiac = frondFirmware::isZodiac(runningDevice);
         const bool sdWriteProtection = deviceProfileSdWriteProtection5(int(runningDevice));
         if (!stopping && sdWriteProtection && cardPresent && command == "sd-state" && send("sd-protection")) {
             protectionStartPending = true;
@@ -1610,7 +1610,7 @@ void MainWindow::refresh() {
     if (speedBox->count() != frondSessions::speedChoices(m68k).size())
         fillSpeedBox(speedBox, m68k, frondSessions::speedName(runningPreferences));
     liveDisplay({});
-    shown(frondFirmware::deviceId(currentDevice()) == "tapwave-zodiac-2", {cradleToggle});
+    shown(frondFirmware::isZodiac(currentDevice()), {cradleToggle});
     cradleToggle->setEnabled(enabled && !cradleSetting.isEmpty());
     cradleToggle->setChecked(cradleSetting == "attached");
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
@@ -1694,7 +1694,7 @@ void MainWindow::refresh() {
     sdExchange->setVisible(known && cardPresent);
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
-    const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
+    const bool zodiac = frondFirmware::isZodiac(runningDevice);
     const bool sdWriteProtection = deviceProfileSdWriteProtection5(int(runningDevice));
     sdRetry->setVisible(!known || ((memoryStick || sdWriteProtection) && cardPresent && !protectionKnown));
     cardPick->setVisible(known);
@@ -2158,7 +2158,7 @@ void MainWindow::afterDevice() {
     // Asks the core what it supports, once a second until it answers, then the host battery once a minute.
     batteryTimer->start(1000);
     batteryTick();
-    if (frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2" && send("cradle-setting")) {
+    if (frondFirmware::isZodiac(runningDevice) && send("cradle-setting")) {
         cradleStartupPending = true;
         return;
     }

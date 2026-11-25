@@ -385,8 +385,10 @@ object Firmware {
         if (rom.device != null) return "This is a ${rom.device.label} ROM. Choose ${rom.device.label}."
         val header = try { header(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
         val info = try { inspect(nor, Device.entries + device) } catch (e: IOException) { return "Couldn't read the NOR image." }
-        if (info.device != null && info.device != device && info.device != Device.E2 && info.device != Device.ZIRE72)
-            return "This is a ${info.device.label} NOR image. Choose ${info.device.label}."
+        val detected = info.device
+        val takesRom = detected == device || (device.zodiac && detected?.zodiac == true)
+        if (detected != null && !takesRom && detected != Device.E2 && detected != Device.ZIRE72)
+            return "This is a ${detected.label} NOR image. Choose ${detected.label}."
         val norSize = nor.length()
         val nandSize = nand?.length()
         when (device) {
@@ -428,7 +430,7 @@ object Firmware {
             else -> {
                 if (info.device == Device.E2) return "This is a Tungsten E2 NOR image. Choose Tungsten E2."
                 if (norSize != device.norSize) return "The ${device.label} NOR image must be ${mib(device.norSize)}."
-                if (device.detectKind == 0 && info.device != device) return "This NOR image has no ${device.label} header."
+                if (device.detectKind == 0 && !takesRom) return "This NOR image has no ${device.label} header."
                 if (!info.validLayout) return "This ${device.label} NOR image has an invalid card layout."
                 if (!device.hasNand && nand != null) return "This device has no NAND. Leave the NAND image empty."
                 if (device.nandRequired && nand == null) return "Choose a NAND image for the ${device.label}."

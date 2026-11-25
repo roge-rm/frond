@@ -138,11 +138,13 @@ class RunningSheetsTest {
     }
 
     @Test fun bothZodiacSdSlotsShowWriteProtection() {
-        val zodiac = Device.byId("tapwave-zodiac-2")!!
-        for (n in 0..1) {
-            assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.EJECTED, false, false, n))
-            assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.INSERTED, false, false, n))
-            assertFalse(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.NONE, false, false, n))
+        for (id in listOf("tapwave-zodiac-1", "tapwave-zodiac-2")) {
+            val zodiac = Device.byId(id)!!
+            for (slot in 0..1) {
+                assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.EJECTED, false, false, slot))
+                assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.INSERTED, false, false, slot))
+                assertFalse(CardRow.WRITE_PROTECT in RunningSheets.cardRows(zodiac, SdCard.State.NONE, false, false, slot))
+            }
         }
     }
 
@@ -187,7 +189,7 @@ class RunningSheetsTest {
 
     @Test fun audioRowsFollowTheHardware() {
         val vibrating = setOf("palm-m500", "palm-m505", "palm-m515", "palm-m520", "ibm-workpad-c500",
-            "sony-clie-t415", "tapwave-zodiac-2")
+            "sony-clie-t415", "tapwave-zodiac-1", "tapwave-zodiac-2")
         for (device in Device.entries) {
             val rows = RunningSheets.audioRows(device)
             assertEquals(AudioRow.SOUND, rows.first())

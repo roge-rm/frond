@@ -371,7 +371,7 @@ bool gFastEngineMissing = false;
         sdSwapped = contents.sdSwapped;
         msSwapped = contents.msSwapped;
         romInfo = RomInfo5(nor.data, nor.size);
-        if (profile->detect != DeviceDetect5::norSize && romInfo.GetDeviceType() != sessionDevice) {
+        if (profile->detect != DeviceDetect5::norSize && !deviceProfileTakesArmRom5(sessionDevice, romInfo.GetDeviceType())) {
             cerr << "session device profile does not match ROM" << endl;
             return false;
         }
@@ -584,7 +584,7 @@ bool gFastEngineMissing = false;
             ? sessionDevice : requestedDevice != deviceTypeInvalid ? requestedDevice
                                                                    : romInfo.GetDeviceType();
         if (romInfo.IsValid() && deviceProfile5(romInfo.GetDeviceType()) &&
-            romInfo.GetDeviceType() != deviceType) {
+            !deviceProfileTakesArmRom5(deviceType, romInfo.GetDeviceType())) {
             cerr << "selected device profile does not match ROM" << endl;
             return false;
         }
@@ -619,7 +619,7 @@ bool gFastEngineMissing = false;
                 return false;
             }
         } else if (!rx1950) {
-            cerr << romInfo;
+            romInfo.Print(cerr, deviceType);
         }
 
         if (!sizeDetected && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
@@ -673,7 +673,7 @@ bool gFastEngineMissing = false;
         }
 
         if (ramSize == 0) ramSize = isTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
-        // The Zodiac 2 has one RAM size, which its ROM header doesn't give.
+        // The ROM header doesn't distinguish the Zodiac models or report their RAM sizes.
         if (!options.ramSize && sessionDevice == deviceTypeInvalid &&
             (deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac || rx1950))
             ramSize = deviceProfile5(deviceType)->minRam;
@@ -781,9 +781,9 @@ bool gFastEngineMissing = false;
             // Its machine has an engine of its own, set below; the JIT isn't used.
             cpuSetFastEngine(false);
             string why;
-            soc = SocIMX1::Create(static_cast<const uint8_t*>(nor.data), nor.size, why);
+            soc = SocIMX1::Create(static_cast<const uint8_t*>(nor.data), nor.size, why, deviceType);
             if (!soc) {
-                cerr << "Tapwave Zodiac 2: " << why << endl;
+                cerr << deviceProfile5(deviceType)->displayName << ": " << why << endl;
                 return false;
             }
 #ifdef FROND_ZODIAC_DEVELOPER
@@ -800,7 +800,7 @@ bool gFastEngineMissing = false;
             }
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
-                cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
+                cerr << deviceProfile5(deviceType)->displayName << ": the Fast engine is not available here, running Exact" << endl;
             // With a SoundFont or a MIDI out taking the events, the hooks don't print them.
             if (options.musicHooks || options.musicSoundFont || options.musicMidiOut)
                 static_cast<SocIMX1*>(soc)->SetMusicHooks(true, !options.musicSoundFont && !options.musicMidiOut);
@@ -1493,7 +1493,7 @@ bool gFastEngineMissing = false;
                 // A stopped Zodiac or rx1950 machine can't go on. It ends the run like any other fatal error,
                 // and nothing is saved over the session.
                 if (zodiac && zodiac->Halted())
-                    throw runtime_error("Tapwave Zodiac 2: the machine stopped: " + zodiac->StopText());
+                    throw runtime_error(string(deviceProfile5(deviceType)->displayName) + ": the machine stopped: " + zodiac->StopText());
                 if (rx1950Soc && rx1950Soc->Halted())
                     throw runtime_error("HP iPAQ rx1950: the machine stopped: " + rx1950Soc->StopText());
 

@@ -33,6 +33,7 @@ class RomInfo5 {
     size_t GetHeaderOffset() const;
 
     DeviceType5 GetDeviceType() const;
+    std::ostream& Print(std::ostream& stream, DeviceType5 device) const;
 
     const DeviceFirmwareVariant5* GetFirmwareVariant() const;
 
