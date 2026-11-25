@@ -7,6 +7,8 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QString>
+#include <QStringList>
+#include <algorithm>
 #include <vector>
 #include "device_profile5.h"
 
@@ -22,6 +24,26 @@ inline const auto devices = [] {
         if (p.frontend.available) result.push_back(static_cast<Device>(p.deviceType));
     return result;
 }();
+
+inline const DeviceProfile5& profile(Device device);
+// The devices of a picker group, oldest release first; the table order breaks a tie.
+inline std::vector<Device> devicesInGroup(DeviceGroup5 group) {
+    std::vector<Device> result;
+    for (auto device : devices)
+        if (deviceProfile5(int(device))->group == group) result.push_back(device);
+    std::stable_sort(result.begin(), result.end(), [](Device a, Device b) {
+        return deviceProfile5(int(a))->released < deviceProfile5(int(b))->released;
+    });
+    return result;
+}
+// The ids of the last 3 devices a machine was made for, newest first: `id` goes to the front.
+inline QStringList pushRecentDevice(QStringList recent, const QString& id) {
+    if (id.isEmpty()) return recent;
+    recent.removeAll(id);
+    recent.prepend(id);
+    while (recent.size() > 3) recent.removeLast();
+    return recent;
+}
 
 inline const DeviceProfile5& profile(Device device) {
     const auto* p = deviceProfile5(int(device));

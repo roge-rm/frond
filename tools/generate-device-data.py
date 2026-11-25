@@ -15,7 +15,7 @@ DESKTOP_ONLY = set()
 def outputs(profiles):
     available = [p for p in profiles['profiles'] if p['available'] and p['name'] not in DESKTOP_ONLY]
     fields = {
-        'id': 'name', 'label': 'display_name', 'cohort': 'cohort', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
+        'id': 'name', 'label': 'display_name', 'group': 'group', 'released': 'released', 'cohort': 'cohort', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',
         'sound': 'sound', 'storageSlot': 'storage_slot', 'sdSlot': 'sd_slot', 'memoryStick': 'memory_stick_supported', 'network': 'network', 'serialPort': 'serial', 'microphone': 'microphone', 'camera': 'camera',
         'keyboard': 'keyboard', 'usb': 'usb', 'infrared': 'infrared', 'bluetooth': 'bluetooth', 'modem': 'modem', 'irPhone': 'ir_phone', 'usbPrinter': 'usb_printer', 'usbWifi': 'usb_wifi', 'builtInWifi': 'built_in_wifi', 'wifiOnlyNetwork': 'wifi_only_network', 'clieGamepad': 'clie_gamepad',
@@ -75,7 +75,7 @@ def outputs(profiles):
                 kotlin += '            ),\n'
             kotlin += '        ),\n'
         kotlin += '    ),\n'
-    kotlin += ')\n'
+    kotlin += ')\n\n// The groups of the device picker, in order.\ninternal val deviceGroups = listOf(' + ', '.join(json.dumps(g, ensure_ascii=False) for g in profiles.get('groups', [])) + ')\n'
     return {
         ROOT / 'tools/device-profiles.json': json.dumps(profiles, ensure_ascii=False, indent=2) + '\n',
         ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt': kotlin,

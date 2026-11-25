@@ -379,6 +379,7 @@ class HomeModel(private val activity: HomeActivity) {
                     return
                 }
                 val session = Sessions.create(activity, draft.device, settings = draft.settings)
+                DevicePicker.remember(activity, draft.device)
                 if (cards.any { it.isNotEmpty() }) HomeWork.startCards[session.id] = cards
                 machineDraft = null
                 reload()

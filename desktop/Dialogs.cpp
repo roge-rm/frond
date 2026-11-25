@@ -14,6 +14,8 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
+#include <QSettings>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
@@ -37,22 +39,59 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     setWindowTitle(tr("Import firmware"));
     setObjectName("firmwareDialog");
     form = new QFormLayout;
+    // The combo holds the choice (its items are the device's fixed name; empty detects) and stays hidden. The
+    // button opens the menu: Detect, Recent, then a submenu for each group.
     device = new QComboBox(this);
     device->setObjectName("device");
-    // Items hold the device's fixed name; empty detects.
+    device->setVisible(false);
     device->addItem(tr("Detect from the NOR image"), QString());
-    // Sorted by name here; the device list itself keeps its order.
-    QList<Device> sorted(std::begin(frondFirmware::devices), std::end(frondFirmware::devices));
-    std::stable_sort(sorted.begin(), sorted.end(), [](Device a, Device b) {
-        return QString::localeAwareCompare(frondFirmware::deviceName(a), frondFirmware::deviceName(b)) < 0;
-    });
-    for (auto d : sorted) {
-        const auto id = frondFirmware::deviceId(d);
-        const auto name = frondFirmware::deviceName(d);
-        device->addItem(name, id);
-    }
+    for (auto d : frondFirmware::devices)
+        device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
     device->setCurrentIndex(std::max(0, device->findData(frondFirmware::deviceId(preselect))));
-    form->addRow(tr("Device"), device);
+    auto* deviceButton = new QPushButton(this);
+    deviceButton->setObjectName("deviceButton");
+    deviceButton->setStyleSheet("text-align: left; padding: 4px 8px;");
+    auto* menu = new QMenu(deviceButton);
+    menu->setObjectName("deviceMenu");
+    deviceButton->setMenu(menu);
+    auto pick = [this](const QString& id) { device->setCurrentIndex(std::max(0, device->findData(id))); };
+    auto fillMenu = [this, menu, pick] {
+        menu->clear();
+        auto* detect = menu->addAction(tr("Detect from the NOR image"));
+        detect->setObjectName("deviceDetect");
+        connect(detect, &QAction::triggered, this, [pick] { pick(QString()); });
+        const auto recent = QSettings().value("recentDevices").toStringList();
+        QList<QString> shown;
+        for (const auto& id : recent)
+            if (frondFirmware::deviceFromId(id) != Device::automatic) shown.append(id);
+        if (!shown.isEmpty()) {
+            auto* sub = menu->addMenu(tr("Recent"));
+            sub->setObjectName("deviceGroupRecent");
+            for (const auto& id : shown) {
+                auto* action = sub->addAction(frondFirmware::deviceName(frondFirmware::deviceFromId(id)));
+                action->setData(id);
+                connect(action, &QAction::triggered, this, [pick, id] { pick(id); });
+            }
+        }
+        for (auto group : deviceGroups5) {
+            const auto members = frondFirmware::devicesInGroup(group);
+            if (members.empty()) continue;
+            auto* sub = menu->addMenu(QString::fromUtf8(deviceGroupName5(group)));
+            sub->setObjectName(QString("deviceGroup%1").arg(int(group)));
+            for (auto d : members) {
+                const auto id = frondFirmware::deviceId(d);
+                auto* action = sub->addAction(frondFirmware::deviceName(d));
+                action->setData(id);
+                connect(action, &QAction::triggered, this, [pick, id] { pick(id); });
+            }
+        }
+    };
+    connect(menu, &QMenu::aboutToShow, this, fillMenu);
+    fillMenu();
+    auto showChoice = [this, deviceButton] { deviceButton->setText(device->currentText()); };
+    connect(device, &QComboBox::currentIndexChanged, this, showChoice);
+    showChoice();
+    form->addRow(tr("Device"), deviceButton);
     auto field = [&](const QString& label, const QString& key, QLabel** labelWidget = nullptr) {
         auto* row = new QHBoxLayout;
         auto* edit = new QLineEdit(this);

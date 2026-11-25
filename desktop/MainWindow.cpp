@@ -2677,6 +2677,8 @@ void MainWindow::addDevice() {
     if (dialog.exec() != QDialog::Accepted) return;
     const auto device = dialog.imported();
     const auto chosenCards = dialog.chosenCards();
+    settings.setValue("recentDevices", frondFirmware::pushRecentDevice(
+        settings.value("recentDevices").toStringList(), frondFirmware::deviceId(device)));
     const auto name = frondSessions::reserve(sessionFolder(), frondFirmware::deviceName(device), frondFirmware::deviceId(device));
     if (name.isEmpty())
         return failure(tr("Could not create the session storage directory."));

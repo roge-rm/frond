@@ -132,18 +132,7 @@ fun FirmwareScreen(model: HomeModel) {
                 trailingContent = {
                     Box {
                         TextButton(onClick = { choosing = true }, enabled = !busy) { Text("Change") }
-                        DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
-                            DropdownMenuItem(text = { Text("Detect from the firmware") }, onClick = {
-                                choosing = false
-                                changeDevice(null)
-                            })
-                            for (d in Device.shown.sortedBy { it.label.lowercase() }) {
-                                DropdownMenuItem(text = { Text(d.listLabel) }, onClick = {
-                                    choosing = false
-                                    changeDevice(d)
-                                })
-                            }
-                        }
+                        DeviceMenu(choosing, { choosing = false }, "Detect from the firmware", { changeDevice(null) }) { changeDevice(it) }
                     }
                 },
             )

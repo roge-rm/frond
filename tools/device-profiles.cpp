@@ -21,13 +21,18 @@ static const char* cohortName(DeviceCohort5 cohort) {
 }
 
 int main() {
-    std::cout << "{\"validation\":\"geometry only; boot compatibility requires separate evidence\",\"profiles\":[";
+    std::cout << "{\"validation\":\"geometry only; boot compatibility requires separate evidence\",\"groups\":[";
+    for (size_t n = 0; n < sizeof(deviceGroups5) / sizeof(deviceGroups5[0]); ++n)
+        std::cout << (n ? "," : "") << std::quoted(deviceGroupName5(deviceGroups5[n]));
+    std::cout << "],\"profiles\":[";
     bool first = true;
     for (const auto& p : deviceProfiles5) {
         if (!first) std::cout << ',';
         first = false;
         std::cout << "{\"name\":\"" << p.name << "\",\"display_name\":\"" << p.displayName
-                  << "\",\"cohort\":\"" << cohortName(p.cohort)
+                  << "\",\"group\":\"" << deviceGroupName5(p.group)
+                  << "\",\"released\":" << p.released
+                  << ",\"cohort\":\"" << cohortName(p.cohort)
                   << "\",\"status\":\""
                   << (p.support == DeviceSupport5::txDesktop ? "tx-desktop"
                       : p.support == DeviceSupport5::e2Desktop ? "e2-desktop"

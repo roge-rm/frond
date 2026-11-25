@@ -60,9 +60,7 @@ fun MachineSettingsScreen(model: HomeModel) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-            if (!editing) Choice("Device", draft.device, Device.shown.sortedBy { it.label.lowercase() }, { it.listLabel }) {
-                model.chooseMachine(it)
-            }
+            if (!editing) DeviceChoice("Device", draft.device) { model.chooseMachine(it) }
             // A card for each slot of a two-slot machine.
             if (!editing && com.rm.frond.Cards.hasSlot(draft.device, 1)) {
                 Header("Cards")

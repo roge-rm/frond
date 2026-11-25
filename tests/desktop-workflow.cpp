@@ -2361,6 +2361,45 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    // The device picker is a menu: Detect, Recent when there are any, then a submenu for each group.
+    void devicePickerMenu() {
+        QSettings().clear();
+        QTemporaryDir root;
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic);
+            auto* menu = dialog.findChild<QPushButton*>("deviceButton")->menu();
+            auto* device = dialog.findChild<QComboBox*>("device");
+            emit menu->aboutToShow();
+            QStringList top;
+            for (auto* a : menu->actions()) top << a->text();
+            QCOMPARE(top, QStringList({"Detect from the NOR image", "Palm OS 5", "Palm classic", "Sony CLIÉ", "Tapwave", "HP", "AlphaSmart", "IBM"}));
+            QStringList tapwave;
+            QAction* zodiac1 = nullptr;
+            for (auto* a : menu->actions())
+                if (a->text() == "Tapwave") for (auto* b : a->menu()->actions()) { tapwave << b->text(); if (b->data() == "tapwave-zodiac-1") zodiac1 = b; }
+            QCOMPARE(tapwave, QStringList({"Tapwave Zodiac 1", "Tapwave Zodiac 2"}));
+            QVERIFY(zodiac1);
+            zodiac1->trigger();
+            QCOMPARE(device->currentData().toString(), QString("tapwave-zodiac-1"));
+            QCOMPARE(dialog.findChild<QPushButton*>("deviceButton")->text(), QString("Tapwave Zodiac 1"));
+            menu->actions().first()->trigger();
+            QVERIFY(device->currentData().toString().isEmpty());
+        }
+        // Recent lists the stored devices, newest first, after Detect.
+        QSettings().setValue("recentDevices", QStringList({"palm-tx", "palm-e2", "unknown-device"}));
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic);
+            auto* menu = dialog.findChild<QPushButton*>("deviceButton")->menu();
+            emit menu->aboutToShow();
+            QCOMPARE(menu->actions().at(1)->text(), QString("Recent"));
+            QStringList recent;
+            for (auto* a : menu->actions().at(1)->menu()->actions()) recent << a->text();
+            QCOMPARE(recent, QStringList({"Palm TX", "Tungsten E2"}));
+            menu->actions().at(1)->menu()->actions().at(1)->trigger();
+            QCOMPARE(dialog.findChild<QComboBox*>("device")->currentData().toString(), QString("palm-e2"));
+        }
+        QSettings().clear();
+    }
     // A new Zodiac starts on Fast and the T|X, Zire 72 too, and other new machines on Exact, until the Engine is changed by hand; an
     // existing Zodiac keeps the engine it has, and Fast starts its core with --engine fast.
     void zodiacEngineDefault() {

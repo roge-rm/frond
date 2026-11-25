@@ -53,6 +53,8 @@ data class Device internal constructor(
     val id: String,
     val label: String,
     // Group from deviceProfiles5: ez68k-rom and vz68k-rom are the DragonBall EZ and VZ boards.
+    val group: String,
+    val released: Int,
     val cohort: String = "",
     val norSize: Long,
     val nandSize: Long,

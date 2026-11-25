@@ -1,9 +1,20 @@
 {
   "validation": "geometry only; boot compatibility requires separate evidence",
+  "groups": [
+    "Palm OS 5",
+    "Palm classic",
+    "Sony CLIÉ",
+    "Tapwave",
+    "HP",
+    "AlphaSmart",
+    "IBM"
+  ],
   "profiles": [
     {
       "name": "palm-tx",
       "display_name": "Palm TX",
+      "group": "Palm OS 5",
+      "released": 200510,
       "cohort": "tx-nor-nand",
       "status": "tx-desktop",
       "nor_bytes": 16777216,
@@ -96,6 +107,8 @@
     {
       "name": "palm-e2",
       "display_name": "Tungsten E2",
+      "group": "Palm OS 5",
+      "released": 200504,
       "cohort": "e2-nor-nand",
       "status": "e2-desktop",
       "nor_bytes": 8388608,
@@ -201,6 +214,8 @@
     {
       "name": "palm-e2-franken",
       "display_name": "Tungsten E3",
+      "group": "Palm OS 5",
+      "released": 200504,
       "cohort": "patched-e2",
       "status": "experimental-desktop",
       "nor_bytes": 8388608,
@@ -293,6 +308,8 @@
     {
       "name": "repalm",
       "display_name": "rePalm paravirtualized",
+      "group": "",
+      "released": 0,
       "cohort": "paravirtual",
       "status": "inherited-unverified",
       "nor_bytes": null,
@@ -367,6 +384,8 @@
     {
       "name": "palm-zire-72",
       "display_name": "Zire 72",
+      "group": "Palm OS 5",
+      "released": 200410,
       "cohort": "zire72-nor",
       "status": "zire72-desktop",
       "nor_bytes": 14942208,
@@ -459,6 +478,8 @@
     {
       "name": "sony-clie-tg50",
       "display_name": "Sony CLIÉ TG50",
+      "group": "Sony CLIÉ",
+      "released": 200308,
       "cohort": "tg50-nor",
       "status": "experimental-desktop",
       "nor_bytes": 13041664,
@@ -550,6 +571,8 @@
     {
       "name": "palm-iiix",
       "display_name": "Palm IIIx",
+      "group": "Palm classic",
+      "released": 199903,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -624,6 +647,8 @@
     {
       "name": "palm-iiie",
       "display_name": "Palm IIIe",
+      "group": "Palm classic",
+      "released": 199907,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -698,6 +723,8 @@
     {
       "name": "palm-iiixe",
       "display_name": "Palm IIIxe",
+      "group": "Palm classic",
+      "released": 200002,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -772,6 +799,8 @@
     {
       "name": "palm-v",
       "display_name": "Palm V",
+      "group": "Palm classic",
+      "released": 199903,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -846,6 +875,8 @@
     {
       "name": "palm-vx",
       "display_name": "Palm Vx",
+      "group": "Palm classic",
+      "released": 199910,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -920,6 +951,8 @@
     {
       "name": "palm-m100",
       "display_name": "Palm m100",
+      "group": "Palm classic",
+      "released": 200008,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -994,6 +1027,8 @@
     {
       "name": "palm-m105",
       "display_name": "Palm m105",
+      "group": "Palm classic",
+      "released": 200103,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1068,6 +1103,8 @@
     {
       "name": "palm-m125",
       "display_name": "Palm m125",
+      "group": "Palm classic",
+      "released": 200109,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1179,6 +1216,8 @@
     {
       "name": "palm-m500",
       "display_name": "Palm m500",
+      "group": "Palm classic",
+      "released": 200103,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1290,6 +1329,8 @@
     {
       "name": "ibm-workpad-c500",
       "display_name": "IBM WorkPad c500",
+      "group": "IBM",
+      "released": 200109,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1401,6 +1442,8 @@
     {
       "name": "palm-iiic",
       "display_name": "Palm IIIc",
+      "group": "Palm classic",
+      "released": 200002,
       "cohort": "ez68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1475,6 +1518,8 @@
     {
       "name": "palm-m505",
       "display_name": "Palm m505",
+      "group": "Palm classic",
+      "released": 200103,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1586,6 +1631,8 @@
     {
       "name": "palm-m515",
       "display_name": "Palm m515",
+      "group": "Palm classic",
+      "released": 200203,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1697,6 +1744,8 @@
     {
       "name": "palm-m130",
       "display_name": "Palm m130",
+      "group": "Palm classic",
+      "released": 200208,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1808,6 +1857,8 @@
     {
       "name": "palm-m520",
       "display_name": "Palm m520",
+      "group": "Palm classic",
+      "released": 200212,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -1919,6 +1970,8 @@
     {
       "name": "alphasmart-dana",
       "display_name": "AlphaSmart Dana",
+      "group": "AlphaSmart",
+      "released": 200206,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": 6291456,
@@ -2066,6 +2119,8 @@
     {
       "name": "alphasmart-dana-wireless",
       "display_name": "AlphaSmart Dana Wireless",
+      "group": "AlphaSmart",
+      "released": 200309,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": 6291456,
@@ -2213,6 +2268,8 @@
     {
       "name": "tapwave-zodiac-2",
       "display_name": "Tapwave Zodiac 2",
+      "group": "Tapwave",
+      "released": 200403,
       "cohort": "zodiac-nor",
       "status": "experimental-desktop",
       "nor_bytes": 8192000,
@@ -2322,6 +2379,8 @@
     {
       "name": "tapwave-zodiac-1",
       "display_name": "Tapwave Zodiac 1",
+      "group": "Tapwave",
+      "released": 200310,
       "cohort": "zodiac-nor",
       "status": "experimental-desktop",
       "nor_bytes": 8192000,
@@ -2431,6 +2490,8 @@
     {
       "name": "sony-clie-t415",
       "display_name": "Sony CLIÉ T415",
+      "group": "Sony CLIÉ",
+      "released": 200209,
       "cohort": "vz68k-rom",
       "status": "experimental-desktop",
       "nor_bytes": null,
@@ -2522,6 +2583,8 @@
     {
       "name": "hp-ipaq-210",
       "display_name": "HP iPAQ 210",
+      "group": "",
+      "released": 0,
       "cohort": "reserved",
       "status": "reserved",
       "nor_bytes": null,
@@ -2596,6 +2659,8 @@
     {
       "name": "hp-ipaq-rx1950",
       "display_name": "HP iPAQ rx1950",
+      "group": "HP",
+      "released": 200603,
       "cohort": "rx1950-nand",
       "status": "experimental-desktop",
       "nor_bytes": 264794,
@@ -2688,6 +2753,8 @@
     {
       "name": "hp-ipaq-h4350",
       "display_name": "HP iPAQ h4350",
+      "group": "",
+      "released": 0,
       "cohort": "reserved",
       "status": "reserved",
       "nor_bytes": null,

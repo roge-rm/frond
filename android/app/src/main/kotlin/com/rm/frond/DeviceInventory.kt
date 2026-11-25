@@ -5,6 +5,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-tx",
         label = "Palm TX",
+        group = "Palm OS 5",
+        released = 200510,
         cohort = "tx-nor-nand",
         norSize = 16777216L,
         nandSize = 138412032L,
@@ -69,6 +71,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-e2",
         label = "Tungsten E2",
+        group = "Palm OS 5",
+        released = 200504,
         cohort = "e2-nor-nand",
         norSize = 8388608L,
         nandSize = 34603008L,
@@ -147,6 +151,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-e2-franken",
         label = "Tungsten E3",
+        group = "Palm OS 5",
+        released = 200504,
         cohort = "patched-e2",
         norSize = 8388608L,
         nandSize = 34603008L,
@@ -211,6 +217,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-zire-72",
         label = "Zire 72",
+        group = "Palm OS 5",
+        released = 200410,
         cohort = "zire72-nor",
         norSize = 14942208L,
         nandSize = 0L,
@@ -275,6 +283,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "sony-clie-tg50",
         label = "Sony CLIÉ TG50",
+        group = "Sony CLIÉ",
+        released = 200308,
         cohort = "tg50-nor",
         norSize = 13041664L,
         nandSize = 0L,
@@ -338,6 +348,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-iiix",
         label = "Palm IIIx",
+        group = "Palm classic",
+        released = 199903,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -397,6 +409,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-iiie",
         label = "Palm IIIe",
+        group = "Palm classic",
+        released = 199907,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -456,6 +470,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-iiixe",
         label = "Palm IIIxe",
+        group = "Palm classic",
+        released = 200002,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -515,6 +531,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-v",
         label = "Palm V",
+        group = "Palm classic",
+        released = 199903,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -574,6 +592,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-vx",
         label = "Palm Vx",
+        group = "Palm classic",
+        released = 199910,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -633,6 +653,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m100",
         label = "Palm m100",
+        group = "Palm classic",
+        released = 200008,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -692,6 +714,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m105",
         label = "Palm m105",
+        group = "Palm classic",
+        released = 200103,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -751,6 +775,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m125",
         label = "Palm m125",
+        group = "Palm classic",
+        released = 200109,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -816,6 +842,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m500",
         label = "Palm m500",
+        group = "Palm classic",
+        released = 200103,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -881,6 +909,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "ibm-workpad-c500",
         label = "IBM WorkPad c500",
+        group = "IBM",
+        released = 200109,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -946,6 +976,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-iiic",
         label = "Palm IIIc",
+        group = "Palm classic",
+        released = 200002,
         cohort = "ez68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -1005,6 +1037,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m505",
         label = "Palm m505",
+        group = "Palm classic",
+        released = 200103,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -1070,6 +1104,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m515",
         label = "Palm m515",
+        group = "Palm classic",
+        released = 200203,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -1135,6 +1171,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m130",
         label = "Palm m130",
+        group = "Palm classic",
+        released = 200208,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -1200,6 +1238,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "palm-m520",
         label = "Palm m520",
+        group = "Palm classic",
+        released = 200212,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -1265,6 +1305,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "alphasmart-dana",
         label = "AlphaSmart Dana",
+        group = "AlphaSmart",
+        released = 200206,
         cohort = "vz68k-rom",
         norSize = 6291456L,
         nandSize = 0L,
@@ -1334,6 +1376,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "alphasmart-dana-wireless",
         label = "AlphaSmart Dana Wireless",
+        group = "AlphaSmart",
+        released = 200309,
         cohort = "vz68k-rom",
         norSize = 6291456L,
         nandSize = 0L,
@@ -1403,6 +1447,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "tapwave-zodiac-2",
         label = "Tapwave Zodiac 2",
+        group = "Tapwave",
+        released = 200403,
         cohort = "zodiac-nor",
         norSize = 8192000L,
         nandSize = 0L,
@@ -1470,6 +1516,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "tapwave-zodiac-1",
         label = "Tapwave Zodiac 1",
+        group = "Tapwave",
+        released = 200310,
         cohort = "zodiac-nor",
         norSize = 8192000L,
         nandSize = 0L,
@@ -1537,6 +1585,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "sony-clie-t415",
         label = "Sony CLIÉ T415",
+        group = "Sony CLIÉ",
+        released = 200209,
         cohort = "vz68k-rom",
         norSize = 0L,
         nandSize = 0L,
@@ -1600,6 +1650,8 @@ internal val deviceInventory = listOf(
     Device(
         id = "hp-ipaq-rx1950",
         label = "HP iPAQ rx1950",
+        group = "HP",
+        released = 200603,
         cohort = "rx1950-nand",
         norSize = 264794L,
         nandSize = 69206016L,
@@ -1662,3 +1714,6 @@ internal val deviceInventory = listOf(
         ),
     ),
 )
+
+// The groups of the device picker, in order.
+internal val deviceGroups = listOf("Palm OS 5", "Palm classic", "Sony CLIÉ", "Tapwave", "HP", "AlphaSmart", "IBM")

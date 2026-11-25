@@ -189,3 +189,25 @@ fun <T> Choice(label: String, value: T, options: List<T>, name: (T) -> String, o
         }
     }
 }
+
+// Like Choice, with the grouped device menu.
+@Composable
+fun DeviceChoice(label: String, value: com.rm.frond.Device, onChange: (com.rm.frond.Device) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        OutlinedTextField(
+            value = value.listLabel,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(label) },
+            trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Box(
+            Modifier.matchParentSize()
+                .semantics { contentDescription = "$label, ${value.listLabel}"; role = Role.DropdownList }
+                .clickableRow { open = true },
+        )
+        DeviceMenu(open, { open = false }, onPick = onChange)
+    }
+}
