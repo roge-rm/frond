@@ -122,9 +122,15 @@ uint32_t rx1950UserStoreBlockFromMbr(const uint8_t* sector0) {
         const uint8_t type = entry[4];
         if (type != 0x04 && type != 0x06 && type != 0x0b && type != 0x0c) continue;
         const uint32_t start = uint32_t(entry[8]) | uint32_t(entry[9]) << 8 | uint32_t(entry[10]) << 16 | uint32_t(entry[11]) << 24;
-        const uint32_t block = start / S3cNand::pagesPerBlock + reservedBlocks;
+        // Rounded up, so the erase never reaches into the block before the store.
+        const uint32_t block = (start + S3cNand::pagesPerBlock - 1) / S3cNand::pagesPerBlock + reservedBlocks;
         if (start == 0 || block >= S3cNand::blocks) return rx1950UserStoreBlock;
         return block;
     }
     return rx1950UserStoreBlock;
+}
+
+uint32_t rx1950UserStoreBlockFromPage(const uint8_t* page) {
+    if (!page || page[512] || page[513] || page[514] || page[515]) return rx1950UserStoreBlock;
+    return rx1950UserStoreBlockFromMbr(page);
 }

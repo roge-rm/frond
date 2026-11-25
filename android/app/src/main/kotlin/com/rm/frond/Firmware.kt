@@ -479,19 +479,20 @@ object Firmware {
     // Puts the picked NOR (see pick) and NAND into app storage. Checks them first and keeps the old
     // ones on any error. Returns an error message, or null when the new firmware is in place. Runs off
     // the main thread.
-    // With anyFirmware on for the rx1950 and no NOR picked, the stored one stays.
-    fun import(context: Context, device: Device, nandUri: Uri?, anyFirmware: Boolean = false): String? = synchronized(lock) {
-        return importLocked(context, device, picked(context), nandUri, anyFirmware && device.rx1950)
+    // With anyFirmware on for the rx1950 and no NOR chosen (norChosen false), the stored one stays.
+    // A NOR that was chosen but failed to load blocks the import.
+    fun import(context: Context, device: Device, nandUri: Uri?, anyFirmware: Boolean = false, norChosen: Boolean? = null): String? = synchronized(lock) {
+        return importLocked(context, device, picked(context), nandUri, anyFirmware && device.rx1950, norChosen)
     }
 
-    private fun importLocked(context: Context, device: Device, pickedNor: File, nandUri: Uri?, anyFirmware: Boolean = false): String? {
+    private fun importLocked(context: Context, device: Device, pickedNor: File, nandUri: Uri?, anyFirmware: Boolean = false, norChosen: Boolean? = null): String? {
         val folder = folder(context, device)
         folder.mkdirs()
         recover(listOf(nor(context, device), nand(context, device)))
         val newNor = File(folder, "nor.bin.new")
         val newNand = File(folder, "nand.bin.new")
         try {
-            val keepNor = anyFirmware && !pickedNor.isFile
+            val keepNor = anyFirmware && !(norChosen ?: pickedNor.isFile)
             if (keepNor && !nor(context, device).isFile) return RX1950_ANY_NO_NOR
             if (!keepNor && !pickedNor.isFile) return "Couldn't read the NOR image."
             // A copy, so the pick stays for another try after an error.
@@ -503,11 +504,17 @@ object Firmware {
             val pairs = listOfNotNull(if (keepNor) null else newNor to nor(context, device), if (nandUri != null) newNand to nand(context, device) else null)
             // A device whose NAND is optional loses the old one when the new firmware has none.
             val dropped = if (nandUri == null && !device.nandRequired) nand(context, device).takeIf { it.exists() } else null
+            // The marker goes first, so a failed write stops the import before any file changes.
+            val marker = anyFirmwareMarker(context, device)
+            val hadMarker = marker.exists()
+            fun setMarker(on: Boolean) = if (on) (marker.exists() || runCatching { marker.createNewFile() }.getOrDefault(false)) else (marker.delete() || !marker.exists())
+            if (!setMarker(anyFirmware)) { setMarker(hadMarker); return "Couldn't save the firmware." }
             val moved = mutableListOf<File>()
             val placed = mutableListOf<File>()
             fun undo(): String {
                 placed.forEach { it.delete() }
                 moved.forEach { File(it.path + ".old").renameTo(it) }
+                setMarker(hadMarker)
                 return "Couldn't save the firmware."
             }
             for (target in pairs.map { it.second } + listOfNotNull(dropped)) {
@@ -523,8 +530,6 @@ object Firmware {
                 placed += target
             }
             (pairs.map { it.second } + listOfNotNull(dropped)).forEach { File(it.path + ".old").delete() }
-            anyFirmwareMarker(context, device).delete()
-            if (anyFirmware) anyFirmwareMarker(context, device).createNewFile()
             pickedNor.delete()
             return null
         } finally {

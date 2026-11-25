@@ -855,7 +855,7 @@ void SocS3C2442::HardReset() {
     // The partition table's own start, so another ROM's store isn't cut into.
     uint8_t mbr[S3cNand::pageSize];
     const uint32_t storeBlock = pages && pages->readPage(21 * S3cNand::pagesPerBlock, mbr)
-        ? rx1950UserStoreBlockFromMbr(mbr) : rx1950UserStoreBlock;
+        ? rx1950UserStoreBlockFromPage(mbr) : rx1950UserStoreBlock;
     if (!machine->nand.eraseBlocks(storeBlock, S3cNand::blocks - storeBlock))
         std::cerr << "rx1950: hard reset couldn't erase the whole user store" << std::endl;
     machine->powerOnReset();

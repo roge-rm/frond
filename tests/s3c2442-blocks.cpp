@@ -1030,6 +1030,19 @@ static void userStoreBlockTests() {
     assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x25, 56128).data()) == 1772);
     assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x04, 0x7fffffff).data()) == 1772);
     assert(rx1950UserStoreBlockFromMbr(nullptr) == 1772);
+    // An unaligned start rounds up (56033 to 56064 gives 1773), so the block before the store is never erased.
+    assert(rx1950UserStoreBlockFromMbr(mbr(0, 0x04, 56033).data()) == 1773);
+    // The raw page counts only with logical sector 0 in its spare; any other number falls back.
+    auto raw = [&](uint32_t logical) {
+        auto page = mbr(0, 0x04, 56128);
+        page.resize(528, 0xff);
+        for (unsigned i = 0; i < 4; ++i) page[512 + i] = uint8_t(logical >> (8 * i));
+        return page;
+    };
+    assert(rx1950UserStoreBlockFromPage(raw(0).data()) == 1775);
+    assert(rx1950UserStoreBlockFromPage(raw(1).data()) == 1772);
+    assert(rx1950UserStoreBlockFromPage(raw(0xffffffff).data()) == 1772);
+    assert(rx1950UserStoreBlockFromPage(nullptr) == 1772);
 }
 
 // The blocks the OS's drivers set up before they're modelled in full: an empty SD slot, no USB cable,

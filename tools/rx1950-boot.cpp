@@ -578,7 +578,7 @@ int main(int argc, char** argv) {
         } else if (c == "hard-reset") {
             // As SocS3C2442::HardReset: the user store erased from the MBR's first FAT block, then power on.
             const size_t mbr = size_t(21) * S3cNand::pagesPerBlock * S3cNand::pageSize;
-            const uint32_t block = machine->nand.flash.size() > mbr ? rx1950UserStoreBlockFromMbr(&machine->nand.flash[mbr]) : rx1950UserStoreBlock;
+            const uint32_t block = machine->nand.flash.size() >= mbr + S3cNand::pageSize ? rx1950UserStoreBlockFromPage(&machine->nand.flash[mbr]) : rx1950UserStoreBlock;
             if (!machine->nand.eraseBlocks(block, S3cNand::blocks - block)) { std::printf("error: erase failed\n"); continue; }
             std::printf("hard-reset: erased blocks %u to %u\n", block, S3cNand::blocks - 1);
             machine->powerOnReset();

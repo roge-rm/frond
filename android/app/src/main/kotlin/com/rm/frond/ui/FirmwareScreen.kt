@@ -176,7 +176,7 @@ fun FirmwareScreen(model: HomeModel) {
                     scope.launch {
                         val (result, warning) = withContext(Dispatchers.IO) {
                             val any = anyFirmware && d.rx1950
-                            val r = Firmware.import(context, d, nand.takeIf { d.hasNand }, any)
+                            val r = Firmware.import(context, d, nand.takeIf { d.hasNand }, any, norUri != null)
                             r to if (r == null) Firmware.importWarning(context, d, any) else null
                         }
                         busy = false

@@ -79,16 +79,25 @@ inline QString importImages(const QString& root, Device chosen, const QString& n
     const auto nor = storedNor(root, device), nand = directory + "/nand.bin";
     auto cleanup = [&] { QFile::remove(nor + ".part"); QFile::remove(nand + ".part"); };
     cleanup();
+    // The marker is set first, so a failed write stops the import before any file changes.
+    const auto marker = anyFirmwareMarker(root, device);
+    const bool hadMarker = QFile::exists(marker);
+    auto setMarker = [&](bool on) {
+        if (!on) return !QFile::exists(marker) || QFile::remove(marker);
+        if (QFile::exists(marker)) return true;
+        QFile file(marker);
+        return file.open(QIODevice::WriteOnly);
+    };
+    if (!setMarker(anyFirmware)) { setMarker(hadMarker); return QStringLiteral("Couldn't save the firmware."); }
     if ((!keepNor && !QFile::copy(norPath, nor + ".part")) || (!nandPath.isEmpty() && !QFile::copy(nandPath, nand + ".part"))) {
         cleanup();
+        setMarker(hadMarker);
         return QStringLiteral("Couldn't save the firmware.");
     }
     if (!keepNor) QFile::remove(nor);
-    if (!keepNor && !QFile::rename(nor + ".part", nor)) { cleanup(); return QStringLiteral("Couldn't save the firmware."); }
+    if (!keepNor && !QFile::rename(nor + ".part", nor)) { cleanup(); setMarker(hadMarker); return QStringLiteral("Couldn't save the firmware."); }
     QFile::remove(nand);
-    if (!nandPath.isEmpty() && !QFile::rename(nand + ".part", nand)) { cleanup(); return QStringLiteral("Couldn't save the firmware."); }
-    QFile::remove(anyFirmwareMarker(root, device));
-    if (anyFirmware) QFile(anyFirmwareMarker(root, device)).open(QIODevice::WriteOnly);
+    if (!nandPath.isEmpty() && !QFile::rename(nand + ".part", nand)) { cleanup(); setMarker(hadMarker); return QStringLiteral("Couldn't save the firmware."); }
     if (resolved) *resolved = device;
     return {};
 }
