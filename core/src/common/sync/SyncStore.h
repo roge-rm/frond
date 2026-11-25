@@ -124,6 +124,12 @@ struct InstallItem {
     int64_t queuedAt{0}, doneAt{0};
 };
 
+// Whether a queued item applies to a device of this assignment kind (palm or winmo). An empty kind keeps every item.
+inline bool InstallItemFitsKind(const InstallItem& item, const std::string& kind) {
+    if (kind.empty()) return true;
+    return (item.target == "cab") == (kind == "winmo");
+}
+
 struct SyncLogEntry {
     std::string deviceKey;
     int64_t time{0};

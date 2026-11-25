@@ -296,7 +296,10 @@ private enum class SyncSection(val label: String, val kind: SyncKind? = null) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun SyncManagerScreen(machines: List<Session>, refresh: Int = 0, onClose: () -> Unit) {
+internal fun SyncManagerScreen(machines: List<Session>, refresh: Int = 0, protocol: SyncProtocol? = null, onClose: () -> Unit) {
+    // Opened for one device: only what applies to its kind. Without one, everything in the profile.
+    val deviceKind = when (protocol) { SyncProtocol.HOT_SYNC -> "palm"; SyncProtocol.ACTIVE_SYNC -> "winmo"; null -> "" }
+    val sections = SyncSection.entries.filter { protocol != SyncProtocol.ACTIVE_SYNC || it != SyncSection.BACKUPS }
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     val work = remember(scope) { SyncWork(scope) }
@@ -329,7 +332,7 @@ internal fun SyncManagerScreen(machines: List<Session>, refresh: Int = 0, onClos
             val id = choices.firstOrNull { it.id == selected }?.id ?: choices.firstOrNull()?.id ?: 0L
             val values = if (id == 0L) emptyList() else when (page) {
                 SyncSection.BACKUPS -> call("backups", "profile" to id).rows()
-                SyncSection.INSTALLS -> call("queue", "profile" to id).rows()
+                SyncSection.INSTALLS -> call("queue", "profile" to id, "kind" to deviceKind).rows()
                 SyncSection.LOG -> call("log", "profile" to id).rows()
                 else -> call("records", "profile" to id, "kind" to page.kind!!.wire).rows()
             }
@@ -462,7 +465,7 @@ internal fun SyncManagerScreen(machines: List<Session>, refresh: Int = 0, onClos
                     notice?.let { Text(it, style = MaterialTheme.typography.labelMedium) }
                     profileControls()
                     if (selected != null) {
-                        Choice("Show", section, SyncSection.entries, { it.label }) { if (!work.busy) { section = it; notice = null } }
+                        Choice("Show", section, sections, { it.label }) { if (!work.busy) { section = it; notice = null } }
                         val kind = section.kind
                         if (kind != null) {
                             Row {

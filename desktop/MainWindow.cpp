@@ -3133,6 +3133,9 @@ void MainWindow::showSyncManager() {
             syncWindow->machineNames.insert(QString::fromStdString(frondSync::MachineDeviceKey(id.toStdString())),
                                             QFileInfo(path).completeBaseName());
     }
+    // Opened during a session: only what applies to that device's kind.
+    const auto protocol = client.running() ? frondDesktopSync::protocol(runningDevice) : frondDesktopSync::Protocol::none;
+    syncWindow->setDeviceKind(protocol == frondDesktopSync::Protocol::hotSync ? "palm" : protocol == frondDesktopSync::Protocol::activeSync ? "winmo" : "");
     syncWindow->show();
     syncWindow->refresh();
     syncWindow->raise();

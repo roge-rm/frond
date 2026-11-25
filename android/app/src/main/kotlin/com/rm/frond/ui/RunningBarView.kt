@@ -245,7 +245,7 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
     if (state.syncManager) {
         val machines = remember { actions.syncMachines() }
         Dialog({ state.syncManager = false }, DialogProperties(usePlatformDefaultWidth = false)) {
-            Surface(Modifier.fillMaxSize()) { SyncManagerScreen(machines, refresh = state.syncRefresh) { state.syncManager = false } }
+            Surface(Modifier.fillMaxSize()) { SyncManagerScreen(machines, refresh = state.syncRefresh, protocol = state.syncProtocol) { state.syncManager = false } }
         }
     }
     state.syncMachine?.let { machine ->

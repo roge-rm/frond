@@ -672,6 +672,8 @@ void TestActiveSync(const std::string& root) {
     std::copy_n("MSCF", 4, cab.begin());
     CHECK(!profile.QueueInstall("", "Test.CAB", pdb, cabItem, error, "cab"));
     CHECK(profile.QueueInstall("", "Test.CAB", cab, cabItem, error, "cab"));
+    CHECK(InstallItemFitsKind(cabItem, "winmo") && !InstallItemFitsKind(cabItem, "palm") && InstallItemFitsKind(cabItem, ""));
+    CHECK(InstallItemFitsKind(palmItem, "palm") && !InstallItemFitsKind(palmItem, "winmo") && InstallItemFitsKind(palmItem, ""));
     profile.Close();
 
     SyncOptions options;

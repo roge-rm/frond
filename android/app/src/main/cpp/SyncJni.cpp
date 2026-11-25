@@ -230,7 +230,9 @@ bool run(const std::string& root, JsonObjectConst in, JsonObject out, std::strin
     }
     if (op == "queue") {
         auto rows = out.createNestedArray("rows");
+        const auto kind = str("kind");
         for (const auto& install : profile.InstallQueue()) {
+            if (!InstallItemFitsKind(install, kind)) continue;
             auto row = rows.createNestedObject();
             row["id"] = install.id;
             row["name"] = install.fileName;
