@@ -46,13 +46,14 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
 
     int renderHeight = windowHeight, renderWidth = windowWidth;
     SDL_GetRendererOutputSize(renderer, &renderWidth, &renderHeight);
+    const auto metrics = consistentWindowMetrics(windowWidth, windowHeight, renderWidth, renderHeight);
+    windowWidth = metrics.width;
+    windowHeight = metrics.height;
+    const float pixelsX = metrics.pixelsX, pixelsY = metrics.pixelsY;
 
-    if (renderHeight != windowHeight || renderWidth != windowWidth) {
-        SDL_RenderSetScale(renderer, static_cast<float>(renderWidth) / windowWidth,
-                           static_cast<float>(renderHeight) / windowHeight);
-    }
+    if (pixelsX != 1.f || pixelsY != 1.f) SDL_RenderSetScale(renderer, pixelsX, pixelsY);
 
-    artworkScale = scale * static_cast<float>(renderWidth) / windowWidth;
+    artworkScale = scale * pixelsX;
 
     if (fit != WindowFit::none) {
         const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
@@ -65,8 +66,6 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
 
         // The viewport is in output pixels while the scale is 1, then the scale maps device
         // pixels into it.
-        const float pixelsX = static_cast<float>(renderWidth) / windowWidth;
-        const float pixelsY = static_cast<float>(renderHeight) / windowHeight;
         SDL_RenderSetScale(renderer, 1, 1);
         const SDL_Rect viewport{int(std::lround(layout.x * pixelsX)), int(std::lround(layout.y * pixelsY)),
                                 int(std::lround(layout.width * pixelsX)),

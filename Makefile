@@ -313,7 +313,7 @@ out/frond-sync: $(COMMON_LIB) core/src/common/sync/SyncTool.cpp
 	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common/sync core/src/common/sync/SyncTool.cpp \
 		$(COMMON_LIB) -lpthread -o out/frond-sync$(EXE_SUFFIX)
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-window-layout test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
 
 # The checks that used to be recipe lines of test: itself, each a target so it is recorded.
 .PHONY: test-battery-power test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
@@ -851,6 +851,11 @@ test-net-wifi-router: prepare $(COMMON_NET_LIB) $(COMMON_LIB)
 test-scheduler: prepare
 	$(CXX) -std=c++17 -O2 -Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common tests/scheduler-order.cpp -o $(OBJ_ROOT)/test-scheduler-order
 	$(OBJ_ROOT)/test-scheduler-order
+
+.PHONY: test-window-layout
+test-window-layout: prepare
+	g++ -std=c++17 -O1 -Wall -Wextra -Icore/src/uarm/native tests/window-layout.cpp -o $(OBJ_ROOT)/test-window-layout
+	$(OBJ_ROOT)/test-window-layout
 
 .PHONY: test-device-controls
 test-device-controls: out/frond
