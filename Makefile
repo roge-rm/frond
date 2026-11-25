@@ -1293,15 +1293,26 @@ test-zodiac-bluetooth: $(OBJ_ROOT)/test-zodiac-bluetooth
 test-zodiac-frame-handoff: out/frond
 	ZODIAC_ROM="$(ZODIAC_ROM)" python3 tests/zodiac-frame-handoff.py
 
-.PHONY: test-zodiac-session-cards
+.PHONY: test-zodiac-session-cards test-zodiac-card-swap-cli
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
-test-zodiac-session-cards: out/frond
+test-zodiac-session-cards: $(OBJ_ROOT)/test-zodiac-session-cards
+	$(OBJ_ROOT)/test-zodiac-session-cards
+
+$(OBJ_ROOT)/test-zodiac-session-cards: out/frond tests/zodiac-session-cards.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-session-cards-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
 		tests/zodiac-session-cards.cpp @$(OBJ_ROOT)/zodiac-session-cards-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-session-cards
-	$(OBJ_ROOT)/test-zodiac-session-cards
+
+# The same fixture through the native runner's Unix desktop control socket.
+ifeq ($(HOST_OS),windows)
+test-zodiac-card-swap-cli:
+	@echo 'Zodiac card swap CLI: SKIP, needs a Unix desktop control socket'
+else
+test-zodiac-card-swap-cli: $(OBJ_ROOT)/test-zodiac-session-cards
+	python3 tests/zodiac-card-swap-cli.py $(OBJ_ROOT)/test-zodiac-session-cards
+endif
 
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.
@@ -3072,7 +3083,7 @@ test-zodiac-faster: $(OBJ_ROOT)/zodiac-boot-probe
 # The Zodiac checks not listed elsewhere in the suite. Left out for time: arm-add-pc, ldm-return and fast-lean;
 # cs4-capture is a diagnostic kept outside make test.
 .PHONY: test-zodiac
-test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-worker test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-music-hook test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-speed-line test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
+test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-worker test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-music-hook test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-card-swap-cli test-zodiac-stick-view test-zodiac-sound test-zodiac-speed-line test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
 test: test-zodiac
 
 # The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,

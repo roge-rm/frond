@@ -105,9 +105,9 @@ static bool Load(const fs::path& folder, frondSession::Contents& out, const fron
 
 static frondSession::CardSwap Swap(bool withIdentity, CardIdentity id = {}, bool protect = false) {
     frondSession::CardSwap swap;
-    swap.identityGiven = withIdentity;
-    swap.identity = id;
-    swap.writeProtected = protect;
+    swap.first.identityGiven = withIdentity;
+    swap.first.identity = id;
+    swap.first.writeProtected = protect;
     return swap;
 }
 
@@ -250,7 +250,7 @@ static void MoveAndPutIn(const fs::path& from, uint32_t kind, const CardIdentity
     assert(Settled(from, kind));
     frondMachine::Media check;
     auto swap = Swap(true, identity);
-    assert(frondSession::swappedInCard(from, name, swap, check));
+    assert(frondSession::swappedInCard(from, name, swap.first, check));
     assert(frondMachine::checkSdSibling(from / name, check, true) == frondMachine::SiblingStatus::ok);
 
     // Loads in another machine that was off.
@@ -679,6 +679,11 @@ static void SecondSlot() {
     WriteSd(a / frondMachine::sd2Sibling, bytes, 0x33, 7, Id(3));
     assert(!Load(a, got, nullptr));
     assert(Load(a, got, &swap) && got.media.size() == 1 && got.sd2Swapped && !got.sdSwapped);
+    swap.second = {true, Id(3), true};
+    assert(Load(a, got, &swap) && got.media.size() == 2 && got.sd2Swapped && !got.sdSwapped);
+    const auto& replacement = got.media.back();
+    assert(replacement.kind == frondMachine::kindSd2 && replacement.identity == Id(3) &&
+           replacement.contentGeneration == 7 && replacement.inserted && replacement.writeProtected);
     fs::remove(a / frondMachine::sd2Sibling);
     // Put back in while running.
     fs::rename(drawer / frondMachine::sd2Sibling, a / frondMachine::sd2Sibling);

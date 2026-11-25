@@ -130,8 +130,8 @@ static void LoadsAsPutIn(const fs::path& card, const char* siblingName, const ch
     contents.savestate = {10, 11, 12, 13};
     assert(frondSession::saveV7(machine / (machine.filename().string() + ".frond"), contents));
     frondSession::CardSwap swap;
-    swap.identityGiven = true;
-    for (auto& b : swap.identity) b = 'a';
+    swap.first.identityGiven = true;
+    for (auto& b : swap.first.identity) b = 'a';
     frondSession::Contents got;
     fs::path loaded;
     assert(frondSession::loadPath(machine, got, loaded, frondSession::msPhysicalBytes, {}, &swap));

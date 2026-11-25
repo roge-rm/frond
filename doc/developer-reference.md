@@ -25,8 +25,10 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `-s`, `--sd FILE` | SD card file. |
 | `--work-folder DIR` | Run a session from elsewhere, in this empty machine folder. Its card files are copied there. |
 | `--card-swap` | Load a session whose card files the launcher changed while it was off. A slot with another card, the same card changed elsewhere, or none comes up ejected, and the card there now goes in once the Palm has run 500 ms awake (5 s at most), with a `card` event. |
-| `--card-identity HEX` | With `--card-swap`, the identity of a card put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
-| `--card-protected` | With `--card-swap`, a card put in is write protected. |
+| `--card-identity HEX` | With `--card-swap`, the identity of the first SD card or Memory Stick put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
+| `--card-protected` | With `--card-swap`, the first SD card or Memory Stick put in is write protected. |
+| `--sd2-card-identity HEX` | With `--card-swap`, the identity of the card put in the Zodiac's second SD slot. Without it, a changed card in that slot is left for `sd2-put-in`. |
+| `--sd2-card-protected` | With `--sd2-card-identity`, the second SD card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
 | `--mips N` | A fixed core clock in MHz (Uncapped passes 3000). Default: the device's own clock, as the guest sets it (CCCR and CLKCFG on the PXA devices). |
 | `--emulated-time` | Every guest second gets the full clock, however slow the host, and input replay times are guest time. A slow host runs slower in wall time instead of giving the guest fewer cycles. For tests. |
@@ -272,7 +274,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `ready` | The core has connected. |
 | `close` | The user closed the window. The launcher decides what to do. |
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
-| `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
+| `card` | `inserted` for the first SD slot or Memory Stick, or `sd2-inserted` for the second SD slot, when a card that `--card-swap` left ejected goes in. |
 | `rumble` | `on` or `off`, sent while the Zodiac's guest rumble motor is on, Rumble is enabled and no game controller that can rumble is open, so the window can show it. |
 | `attention` | Guest LED and vibration state, sent when it changes, for example `led=green vibrate=1`. |
 | `sync` | Sync Manager status when it changes, or a failure starting a pending HotSync. |

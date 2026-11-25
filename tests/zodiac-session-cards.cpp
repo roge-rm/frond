@@ -26,7 +26,14 @@ void put32be(std::vector<uint8_t>& rom, size_t at, uint32_t v) { for (int i = 0;
 // The made-up ROM of test-zodiac-normal-runtime: the identity layout, and a branch to itself at 0.
 std::vector<uint8_t> rom() {
     constexpr size_t card = 0x20000;
-    std::vector<uint8_t> rom(card + 0x1000);
+    std::vector<uint8_t> rom(0x7d0000);
+    for (const size_t at : {size_t(0), card}) {
+        put32le(rom, at + 8, 0xfeedbeef);
+        std::memcpy(rom.data() + at + 0x10, "PalmCard", sizeof("PalmCard"));
+        put32le(rom, at + 0x80, 0x54707776);  // Tpwv
+        put32le(rom, at + 0x84, 0x4d583161);  // MX1a
+    }
+    put32le(rom, card + 0x6c, uint32_t(rom.size() - card));
     put32le(rom, card + 0x78, 0x400);
     put32le(rom, card + 0xac, 0x300);
     put32be(rom, card + 0x300 + 4, 0x9a24);
@@ -83,9 +90,10 @@ void startSession(SocIMX1& soc, const fs::path& folder, frondSession::Contents& 
 }
 }  // namespace
 
-int main() {
-    const fs::path root = fs::absolute("build/zodiac-session-cards");
-    fs::remove_all(root);
+int main(int argc, char* argv[]) {
+    const bool keepFixture = argc == 2;
+    const fs::path root = fs::absolute(keepFixture ? argv[1] : "build/zodiac-session-cards");
+    if (!keepFixture) fs::remove_all(root);
     fs::create_directories(root);
     std::string error;
     const auto image = rom();
@@ -107,6 +115,7 @@ int main() {
     fs::create_directories(folder);
     assert(frondNative::saveMachine(folder / "two.frond", *soc));
     assert(fs::is_regular_file(folder / frondMachine::sdSibling) && fs::is_regular_file(folder / frondMachine::sd2Sibling));
+    if (keepFixture) fs::copy(folder, root / "swap", fs::copy_options::recursive);
 
     frondSession::Contents contents;
     startSession(*soc, folder, contents);
@@ -168,6 +177,6 @@ int main() {
     run(*soc);
     assert(contents.media.size() == 1 && !second.initialized() && !soc->Sd2Inserted() && soc->SdInserted() && !soc->Halted());
     std::puts("PASS: a session saved after slot 2's card was taken out loads with slot 2 empty");
-    fs::remove_all(root);
+    if (!keepFixture) fs::remove_all(root);
     return 0;
 }
