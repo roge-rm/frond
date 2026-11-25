@@ -256,7 +256,12 @@ translated:
                 memcpy(&old, entries + n, 16);
                 const V4 same = (old & masks) == wants;
                 // Lanes 0 and 2: the entry was live and its fields differ.
-                any |= same & ~__builtin_shuffle(same, V4{1, 0, 3, 2});
+#if defined(__clang__)
+                const V4 swapped = __builtin_shufflevector(same, same, 1, 0, 3, 2);
+#else
+                const V4 swapped = __builtin_shuffle(same, V4{1, 0, 3, 2});
+#endif
+                any |= same & ~swapped;
                 memcpy(entries + n, &wants, 16);
             }
             replacedAny = any[0] | any[2];
