@@ -1,4 +1,5 @@
 #include "ControlsEditor.h"
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -54,7 +55,7 @@ ControlsDialog::ControlsDialog(const DeviceProfile5& profile, const ControllerMa
 ControlsDialog::~ControlsDialog() { stopCapture(); }
 
 // A row per Palm button: its name, a button per controller key that presses it (clicking one takes
-// it off), and Add.
+// it off), and Add. The Zodiac starts with the controller stick that moves its analogue stick.
 void ControlsDialog::fill() {
     // Later, as the button that asked for this may be one of them.
     while (auto* item = grid->takeAt(0)) {
@@ -62,6 +63,26 @@ void ControlsDialog::fill() {
         delete item;
     }
     int row = 0;
+    if (zodiacController(profile)) {
+        grid->addWidget(new QLabel(tr("Analogue stick")), row, 0);
+        auto* stick = new QComboBox;
+        stick->setObjectName("controlsStick");
+        stick->addItem(tr("Left stick"), int(PadStick::left));
+        stick->addItem(tr("Right stick"), int(PadStick::right));
+        stick->addItem(tr("None"), int(PadStick::none));
+        stick->setCurrentIndex(stick->findData(int(current.stick)));
+        connect(stick, &QComboBox::activated, this, [this, stick](int index) {
+            const auto chosen = PadStick(stick->itemData(index).toInt());
+            if (chosen == current.stick) return;
+            stopCapture();
+            current.setStick(chosen);
+            defaulted = false;
+            fill();
+            emit changed(current, false);
+        });
+        grid->addWidget(stick, row, 1, 1, 2);
+        ++row;
+    }
     for (const auto button : controllerPalmKeys(profile)) {
         auto* name = new QLabel(QString::fromStdString(palmKeyLabel(button, profile)));
         grid->addWidget(name, row, 0);

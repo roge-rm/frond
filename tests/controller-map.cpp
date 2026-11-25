@@ -24,7 +24,9 @@ static PadReading buttons(std::initializer_list<PadKey> keys) {
     return pad;
 }
 static GamepadInput apply(const ControllerMap& map, PadReading pad, bool zodiac, bool attached = false) {
-    return gamepadInput(map, padKeysHeld(pad), pad.leftX, pad.leftY, zodiac, attached);
+    int16_t x, y;
+    padStickAxes(pad, map.stick, x, y);
+    return gamepadInput(map, padKeysHeld(pad), x, y, zodiac, attached);
 }
 
 static void text() {
@@ -140,6 +142,45 @@ static void zodiacDefaults() {
     moved.assign(PalmKey::app1, PadKey::dpadUp);
     const auto pressed = apply(moved, buttons({PadKey::dpadUp}), true);
     assert(pressed.keys == deviceKeyBit(keyIdHard1) && !pressed.stick.held);
+}
+
+// Which controller stick moves the Zodiac's stick: left by default, right or none from the map.
+static void zodiacStick() {
+    const auto& zodiac = named("tapwave-zodiac-2");
+    const auto defaults = controllerDefaults(zodiac);
+    assert(defaults.stick == PadStick::left && defaults.encode().find(",stick:") == std::string::npos);
+    assert(palmKeyLabel(PalmKey::stickPress, zodiac) == "Stick press (centre)");
+    // Saved as an entry of its own, which a core without it skips as an unknown key.
+    ControllerMap right = defaults;
+    right.setStick(PadStick::right);
+    assert(right.stick == PadStick::right && right != defaults);
+    for (auto key : {PadKey::rightLeft, PadKey::rightRight, PadKey::rightUp, PadKey::rightDown})
+        assert(!right.keys.count(key));
+    assert(right.encode().find("stick:right") != std::string::npos);
+    assert(decodeControllerMap(right.encode(), zodiac) == right);
+    assert(decodeControllerMap("stick:none", zodiac).stick == PadStick::none);
+    assert(decodeControllerMap("stick:none", zodiac).keys.empty());
+    assert(decodeControllerMap("a:app1,stick:sideways", zodiac).stick == PadStick::left);
+    ControllerMap none;
+    none.setStick(PadStick::none);
+    assert(none.encode() == "stick:none");
+    // Right: the right stick moves it over its range and the left stick does nothing.
+    PadReading pad;
+    pad.rightX = 32767; pad.rightY = -32768;
+    auto input = apply(right, pad, true);
+    assert(input.stick.held && input.stick.x == 1 && input.stick.y == -1 && input.keys == 0);
+    pad = {};
+    pad.leftX = 32767;
+    assert(!apply(right, pad, true).stick.held);
+    // Left keeps the old behaviour; none leaves the stick to the d-pad.
+    assert(apply(defaults, pad, true).stick.held && apply(defaults, pad, true).stick.x == 1);
+    ControllerMap off = defaults;
+    off.setStick(PadStick::none);
+    assert(!apply(off, pad, true).stick.held);
+    pad.rightX = 32767;
+    assert(apply(off, pad, true).keys == deviceKeyBit(keyIdHard2));
+    pad.buttons = uint32_t(1) << int(PadKey::dpadLeft);
+    assert(apply(off, pad, true).stick.held && apply(off, pad, true).stick.x == -1);
 }
 
 static void clieDefaults() {
@@ -270,6 +311,7 @@ int main() {
     text();
     lists();
     zodiacDefaults();
+    zodiacStick();
     clieDefaults();
     triggers();
     devices68k();

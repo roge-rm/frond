@@ -116,6 +116,7 @@ inline std::string palmKeyLabel(PalmKey key, const DeviceProfile5& profile) {
         case K::app2: return "Action 2 (right)";
         case K::app3: return "Action 3 (left)";
         case K::app4: return "Action 4 (top)";
+        case K::stickPress: return "Stick press (centre)";
         default: break;
     }
     if (key >= K::app1 && key <= K::app4) {
@@ -163,10 +164,18 @@ inline std::string palmKeyLabel(PalmKey key, const DeviceProfile5& profile) {
     }
 }
 
-// One controller key presses one Palm button; a Palm button can have several keys. The Zodiac's left
-// stick is always its analogue stick, outside the map.
+// The controller stick that moves the Zodiac's analogue stick, outside the key map.
+enum class PadStick : int { left, right, none };
+inline const char* padStickId(PadStick stick) {
+    return stick == PadStick::right ? "right" : stick == PadStick::none ? "none" : "left";
+}
+
+// One controller key presses one Palm button; a Palm button can have several keys. On the Zodiac,
+// stick says which controller stick is its analogue stick (saved as "stick:right" or "stick:none",
+// left when missing, so older maps keep the left stick and older cores skip the entry).
 struct ControllerMap {
     std::map<PadKey, PalmKey> keys;
+    PadStick stick{PadStick::left};
 
     std::vector<PadKey> keysFor(PalmKey button) const {
         std::vector<PadKey> found;
@@ -176,7 +185,14 @@ struct ControllerMap {
     // Takes key from whatever it pressed before.
     void assign(PalmKey button, PadKey key) { keys[key] = button; }
     void remove(PadKey key) { keys.erase(key); }
-    bool operator==(const ControllerMap& o) const { return keys == o.keys; }
+    // Picks the Zodiac's stick and takes that stick's direction keys off, so it only moves the stick.
+    void setStick(PadStick chosen) {
+        stick = chosen;
+        if (chosen == PadStick::none) return;
+        const int first = int(chosen == PadStick::left ? PadKey::leftLeft : PadKey::rightLeft);
+        for (int i = first; i < first + 4; ++i) keys.erase(PadKey(i));
+    }
+    bool operator==(const ControllerMap& o) const { return keys == o.keys && stick == o.stick; }
     bool operator!=(const ControllerMap& o) const { return !(*this == o); }
 
     // "key:button,..." in key order, or "none" for an empty map, so it is never an empty argument.
@@ -186,6 +202,7 @@ struct ControllerMap {
             if (!text.empty()) text += ',';
             text += std::string(padKeyId(entry.first)) + ':' + palmKeyId(entry.second);
         }
+        if (stick != PadStick::left) text += std::string(text.empty() ? "" : ",") + "stick:" + padStickId(stick);
         return text.empty() ? "none" : text;
     }
 
@@ -250,6 +267,13 @@ inline ControllerMap decodeControllerMap(const std::string& text, const DevicePr
         start = comma + 1;
         const size_t colon = entry.find(':');
         if (colon == std::string::npos) continue;
+        if (entry.compare(0, colon, "stick") == 0) {
+            const std::string id = entry.substr(colon + 1);
+            if (id == "right") map.stick = PadStick::right;
+            else if (id == "none") map.stick = PadStick::none;
+            else if (id == "left") map.stick = PadStick::left;
+            continue;
+        }
         PadKey key;
         PalmKey button;
         if (!padKeyFromId(entry.substr(0, colon), key) || !palmKeyFromId(entry.substr(colon + 1), button)) continue;
@@ -270,6 +294,12 @@ struct PadReading {
     uint32_t buttons{0};  // one bit per SDL button, 0-20
     PadKeyMask axisHeld{0};
 };
+
+// The axes of the stick that moves the Zodiac's analogue stick; 0, 0 for none.
+inline void padStickAxes(const PadReading& pad, PadStick stick, int16_t& x, int16_t& y) {
+    x = stick == PadStick::left ? pad.leftX : stick == PadStick::right ? pad.rightX : 0;
+    y = stick == PadStick::left ? pad.leftY : stick == PadStick::right ? pad.rightY : 0;
+}
 
 // The controller keys a reading holds: its buttons and the axis keys past their press point.
 inline PadKeyMask padKeysHeld(PadReading& pad) {

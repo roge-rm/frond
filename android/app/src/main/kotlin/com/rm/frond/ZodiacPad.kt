@@ -8,9 +8,9 @@ import android.view.KeyEvent
 // Select Function and the left stick's click the stick's press. The map says which controller key
 // presses which of those; its defaults are that layout. A key mapped to a stick direction pushes the
 // stick all the way. The hat counts as the d-pad keys and the analogue triggers as L2 and R2, so they
-// follow the map too. The left stick always drives the analogue stick. Either stick pushed past half
-// travel also presses what the map gives that direction (ControllerMap.stickKey), so the right stick can
-// be the Action keys.
+// follow the map too. The map's stick (left by default, right or none) drives the analogue stick. Either
+// stick pushed past half travel also presses what the map gives that direction (ControllerMap.stickKey),
+// so the right stick can be the Action keys.
 // Not thread-safe: call it from the UI thread.
 class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private val send: (Event) -> Unit) {
     sealed class Event {
@@ -57,8 +57,8 @@ class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private
     fun axes(device: Int, stickX: Float, stickY: Float, hatX: Float, hatY: Float, leftTrigger: Float, rightTrigger: Float,
              rightX: Float = 0f, rightY: Float = 0f) {
         val pad = pads.getOrPut(device) { Pad() }
-        pad.stickX = stickX
-        pad.stickY = stickY
+        pad.stickX = when (map.stick) { ZodiacStick.LEFT -> stickX; ZodiacStick.RIGHT -> rightX; ZodiacStick.NONE -> 0f }
+        pad.stickY = when (map.stick) { ZodiacStick.LEFT -> stickY; ZodiacStick.RIGHT -> rightY; ZodiacStick.NONE -> 0f }
         stickKeys.update(device, ControllerMap.STICK_LEFT, stickX, stickY) { key, down -> key(device, key, down) }
         stickKeys.update(device, ControllerMap.STICK_RIGHT, rightX, rightY) { key, down -> key(device, key, down) }
         hat(device, pad, hatX, hatY)

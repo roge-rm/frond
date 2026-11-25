@@ -67,7 +67,7 @@ enum class PalmButton(val id: String) {
         FUNCTION -> "Function"
         TRIGGER_LEFT -> "Left trigger"
         TRIGGER_RIGHT -> "Right trigger"
-        STICK_PRESS -> "Stick press"
+        STICK_PRESS -> "Stick press (centre)"
         else -> id
     }
 
@@ -98,21 +98,45 @@ enum class PalmButton(val id: String) {
     }
 }
 
+// The controller stick that moves the Zodiac's analogue stick. Saved as the desktop's ControllerMap.h does.
+enum class ZodiacStick(val id: String, val label: String) {
+    LEFT("left", "Left stick"), RIGHT("right", "Right stick"), NONE("none", "None");
+
+    companion object {
+        fun byId(id: String) = entries.firstOrNull { it.id == id }
+    }
+}
+
 // Which controller key (an Android keycode, or a stick direction as stickKey numbers it) presses which
 // Palm button. One key presses one button; a button can have more than one key. The d-pad hat and left
-// stick always drive the 5-way, and the Zodiac's left stick its analogue stick.
-data class ControllerMap(val keys: Map<Int, PalmButton>) {
+// stick always drive the 5-way, and on the Zodiac `stick` is the one that moves its analogue stick
+// (saved as a "stick:right" or "stick:none" entry, left when missing, which an older app skips).
+data class ControllerMap(val keys: Map<Int, PalmButton>, val stick: ZodiacStick = ZodiacStick.LEFT) {
     fun keysFor(button: PalmButton): List<Int> = keys.filterValues { it == button }.keys.sorted()
 
     // Adds key to button's keys, taking it from whatever it pressed before.
-    fun assign(button: PalmButton, key: Int): ControllerMap = ControllerMap(keys + (key to button))
+    fun assign(button: PalmButton, key: Int): ControllerMap = copy(keys = keys + (key to button))
 
     // Takes one key off whatever it pressed.
-    fun remove(key: Int): ControllerMap = ControllerMap(keys - key)
+    fun remove(key: Int): ControllerMap = copy(keys = keys - key)
 
-    fun clear(button: PalmButton): ControllerMap = ControllerMap(keys.filterValues { it != button })
+    fun clear(button: PalmButton): ControllerMap = copy(keys = keys.filterValues { it != button })
 
-    fun encode(): String = keys.entries.sortedBy { it.key }.joinToString(",") { "${it.key}:${it.value.id}" }
+    // Picks the Zodiac's stick and takes that stick's direction keys off, so it only moves the stick.
+    fun withStick(chosen: ZodiacStick): ControllerMap {
+        val stickIndex = when (chosen) {
+            ZodiacStick.LEFT -> STICK_LEFT
+            ZodiacStick.RIGHT -> STICK_RIGHT
+            ZodiacStick.NONE -> return copy(stick = chosen)
+        }
+        val own = StickDirection.entries.map { stickKey(stickIndex, it) }.toSet()
+        return ControllerMap(keys - own, chosen)
+    }
+
+    fun encode(): String {
+        val entries = keys.entries.sortedBy { it.key }.map { "${it.key}:${it.value.id}" }
+        return (if (stick == ZodiacStick.LEFT) entries else entries + "stick:${stick.id}").joinToString(",")
+    }
 
     companion object {
         // Maps live in their own file, read again on every call, because Home and the session are separate
@@ -186,14 +210,19 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             if (text == null) return defaults(device)
             val allowed = PalmButton.on(device)
             val keys = mutableMapOf<Int, PalmButton>()
+            var stick = ZodiacStick.LEFT
             for (entry in text.split(',')) {
                 val parts = entry.split(':')
                 if (parts.size != 2) continue
+                if (parts[0] == "stick") {
+                    stick = ZodiacStick.byId(parts[1]) ?: stick
+                    continue
+                }
                 val key = parts[0].toIntOrNull() ?: continue
                 val button = PalmButton.byId(parts[1])?.takeIf { it in allowed } ?: continue
                 if (key > 0) keys[key] = button
             }
-            return ControllerMap(keys)
+            return ControllerMap(keys, stick)
         }
 
         @Suppress("DEPRECATION")

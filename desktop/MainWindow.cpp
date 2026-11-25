@@ -844,6 +844,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
                "On the Sony CLIÉ T415, F1 to F4 are Date Book, Address, To Do and Memo Pad, Page Up and Page Down turn the Jog Dial, End presses it, and Home is the Jog Dial's Back.\n"
+               "On the Tapwave Zodiac, the arrow keys push the stick, Enter and F10 press its centre, F1 to F4 are the Action buttons (bottom, right, left, top), F6 is Home, F7 is Function, and F8 and F9 are the left and right triggers.\n"
                "On the HP iPAQ rx1950, F5 is the record button.\n"
                "Escape: Power, on devices with a power key in the button bar, except the de-NVFS E2\n\n"
                "Shortcuts, in the Palm window and in this one:\n"

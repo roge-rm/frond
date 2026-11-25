@@ -234,6 +234,32 @@ class ZodiacTest {
         assertFalse(pad.key(1, KeyEvent.KEYCODE_BUTTON_B, true))
     }
 
+    @Test fun theMapChoosesTheStickThatMovesTheZodiacStick() {
+        assertEquals(ZodiacStick.LEFT, ControllerMap.defaults(zodiac).stick)
+        assertFalse(ControllerMap.defaults(zodiac).encode().contains("stick:"))
+        assertEquals("Stick press (centre)", PalmButton.STICK_PRESS.label(zodiac))
+        val rightUp = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.UP)
+        val right = ControllerMap.defaults(zodiac).assign(PalmButton.APP4, rightUp).withStick(ZodiacStick.RIGHT)
+        // The chosen stick's own direction keys come off; the saved text round-trips, as the desktop's.
+        assertFalse(rightUp in right.keys)
+        assertTrue(right.encode().endsWith(",stick:right"))
+        assertEquals(right, ControllerMap.decode(right.encode(), zodiac))
+        assertEquals(ZodiacStick.NONE, ControllerMap.decode("stick:none", zodiac).stick)
+        assertEquals(ZodiacStick.LEFT, ControllerMap.decode("96:app1,stick:sideways", zodiac).stick)
+
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(right) { events += it }
+        pad.axes(1, 1f, 0f, 0f, 0f, 0f, 0f, rightX = 0f, rightY = -1f)
+        assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_Y, -32768)), events)
+        events.clear()
+        pad.replaceMap(right.withStick(ZodiacStick.NONE))
+        events.clear()
+        pad.axes(1, 1f, 1f, 0f, 0f, 0f, 0f, rightX = 1f, rightY = 1f)
+        assertEquals(emptyList<ZodiacPad.Event>(), events)
+        pad.key(1, KeyEvent.KEYCODE_DPAD_LEFT, true)
+        assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_X, -32768)), events)
+    }
+
     @Test fun theRightStickPressesWhatTheMapGivesIt() {
         val events = mutableListOf<ZodiacPad.Event>()
         val map = ControllerMap.defaults(zodiac)
