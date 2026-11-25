@@ -3164,9 +3164,9 @@ class Runner {
 
     // A lost renderer (Android after its context goes) is made again with its textures.
     void ResetRenderer() {
-        for (auto* texture : {lcdTexture, silkscreenTexture, controlsTexture})
+        for (auto* texture : {lcdTexture, silkscreenTexture, controlsTexture, deviceTexture})
             if (texture) SDL_DestroyTexture(texture);
-        lcdTexture = silkscreenTexture = controlsTexture = nullptr;
+        lcdTexture = silkscreenTexture = controlsTexture = deviceTexture = nullptr;
         if (renderer) SDL_DestroyRenderer(renderer);
         renderer = nullptr;
         CreateRenderer();
@@ -3226,8 +3226,8 @@ class Runner {
     }
 
     // Where the device goes in the window and the scale the art is drawn at. Fixed: the window
-    // scale from the top left. Fitted: WindowLayout's place, drawn in device pixels through the
-    // viewport and render scale, with the art made at the output's own pixel size.
+    // scale from the top left. Fitted: WindowLayout's place, drawn in device pixels at the render
+    // scale on deviceTexture, which is copied there, with the art made at the output's own pixel size.
     void Layout() {
         if (!renderer) return;
         int windowWidth = 0, windowHeight = 0, outputWidth = 0, outputHeight = 0;
@@ -3258,6 +3258,15 @@ class Runner {
         if (silkscreenTexture && fit != WindowFit::none) SDL_SetTextureScaleMode(silkscreenTexture, SDL_ScaleModeLinear);
         if (controlsTexture) SDL_DestroyTexture(controlsTexture);
         controlsTexture = nullptr;
+        if (deviceTexture) SDL_DestroyTexture(deviceTexture);
+        deviceTexture = nullptr;
+        devicePlace = SDL_Rect{int(lround(layout.x * pixelsX)), int(lround(layout.y * pixelsY)),
+                               int(lround(layout.width * pixelsX)), int(lround(layout.height * pixelsY))};
+        if (fit != WindowFit::none && devicePlace.w > 0 && devicePlace.h > 0) {
+            deviceTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
+                                              devicePlace.w, devicePlace.h);
+            if (deviceTexture) SDL_SetTextureBlendMode(deviceTexture, SDL_BLENDMODE_NONE);
+        }
         if (fit != WindowFit::none && StripHeight() > 0) {
             controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
                                                 int(DeviceWidth() * artScale), int((StripHeight() - StripTop()) * artScale));
@@ -3294,13 +3303,16 @@ class Runner {
             !(SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED))
             shake = (SDL_GetTicks() / 16) % 2 ? 2 : -2;
 #endif
-        if (fitted) {
-            // The viewport is in output pixels at scale 1; the scale then maps device pixels into it.
-            const SDL_Rect viewport{int(lround(layout.x * pixelsX)) + shake, int(lround(layout.y * pixelsY)),
-                                    int(lround(layout.width * pixelsX)), int(lround(layout.height * pixelsY))};
-            SDL_RenderSetViewport(renderer, &viewport);
+        // Fitted: the device is drawn on deviceTexture at the scale that maps device pixels into it.
+        // A viewport isn't used there, as SDL3 (under sdl2-compat) scales its origin by the render
+        // scale and SDL2 doesn't. Without the texture it falls back to a viewport, right on SDL2 only.
+        const SDL_Rect place{devicePlace.x + shake, devicePlace.y, devicePlace.w, devicePlace.h};
+        if (fitted && DrawOnDevice()) {
+            SDL_RenderClear(renderer);
+        } else if (fitted) {
+            SDL_RenderSetViewport(renderer, &place);
             SDL_RenderSetScale(renderer, layout.scaleX * pixelsX, layout.scaleY * pixelsY);
-        } else if (shake) {
+        } else if (!fitted && shake) {
             int width = 0, height = 0;
             SDL_GetRendererOutputSize(renderer, &width, &height);
             const SDL_Rect viewport{shake, 0, width, height};
@@ -3332,10 +3344,12 @@ class Runner {
                     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
                     SDL_RenderClear(renderer);
                     drawDeviceControls(renderer, controls, lcd.Width(), -StripTop(), artScale, pressed, view, artState);
-                    SDL_SetRenderTarget(renderer, nullptr);
-                    SDL_RenderSetScale(renderer, 1, 1);
-                    SDL_RenderSetViewport(renderer, &viewport);
-                    SDL_RenderSetScale(renderer, sx, sy);
+                    if (!DrawOnDevice()) {
+                        SDL_SetRenderTarget(renderer, nullptr);
+                        SDL_RenderSetScale(renderer, 1, 1);
+                        SDL_RenderSetViewport(renderer, &viewport);
+                        SDL_RenderSetScale(renderer, sx, sy);
+                    }
                     controlsDirty = false;
                     shownPressed = pressed;
                 }
@@ -3348,7 +3362,21 @@ class Runner {
         // A jog panel beside the screen or the buttons is drawn straight on the window, after the strip
         // so the strip's texture can't cover the part beside the buttons.
         if (controls.sideTabWidth > 0) drawDeviceSidebar(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
+        if (fitted && deviceTexture) {
+            SDL_SetRenderTarget(renderer, nullptr);
+            SDL_RenderSetViewport(renderer, nullptr);
+            SDL_RenderSetScale(renderer, 1, 1);
+            SDL_RenderCopy(renderer, deviceTexture, nullptr, &place);
+        }
         if (present) SDL_RenderPresent(renderer);
+    }
+
+    // Fitted: draws on deviceTexture at the device scale.
+    // A texture target starts at scale 1 in SDL2 and keeps its own in SDL3, so the scale is set each time.
+    bool DrawOnDevice() {
+        if (!deviceTexture || SDL_SetRenderTarget(renderer, deviceTexture) != 0) return false;
+        SDL_RenderSetScale(renderer, layout.scaleX * pixelsX, layout.scaleY * pixelsY);
+        return true;
     }
 
     // The held back ctrl and shift presses only go down, so this doesn't retry releases.
@@ -3851,6 +3879,9 @@ class Runner {
     SDL_Texture* lcdTexture{nullptr};
     SDL_Texture* silkscreenTexture{nullptr};
     SDL_Texture* controlsTexture{nullptr};
+    // A fitted window's device, drawn at its output size and copied to devicePlace (output pixels).
+    SDL_Texture* deviceTexture{nullptr};
+    SDL_Rect devicePlace{};
     WindowFit fit{WindowFit::none};
     // The jog panel's placement, which sets the window's width and where the LCD sits.
     DeviceControlView view{};
