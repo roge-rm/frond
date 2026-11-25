@@ -234,6 +234,9 @@ class S3c2442Machine {
     // FIFO accesses that leave a packet for the host or take the last byte of one (host side, not saved).
     void setUsbVbus(bool on);
     bool usbVbus() const { return usbVbusOn; }
+    // The guest time VBUS last went away (a cable out, or a load of a state that had it in), UINT64_MAX if it hasn't
+    // since the machine was made. Host side, not saved.
+    uint64_t usbVbusOffAt() const { return usbVbusOffNs; }
     bool usbListening() const;
     // Times usbListening went on since the machine was made, for the host to see a reconnect.
     uint32_t usbEnableCount() const { return usbEnables; }
@@ -334,6 +337,7 @@ class S3c2442Machine {
     // After a GPIO or clock write: whether the host sees the USB device, counting each time it shows up.
     void usbPins();
     bool usbVbusOn = false, usbListeningWas = false;
+    uint64_t usbVbusOffNs = UINT64_MAX;
     uint32_t usbEnables = 0;
     // The Wi-Fi chip's power and reset pins after a GPIO change; its events and interrupt pin.
     void wifiPins();

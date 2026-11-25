@@ -18,7 +18,7 @@ namespace {
     // OUT_CSR1, OUT_CSR2
     constexpr uint8_t outPktReady = 0x01, outFlush = 0x10, outSendStall = 0x20, outSentStall = 0x40, outClearToggle = 0x80;
     constexpr uint8_t out2AutoClear = 0x80;
-    constexpr uint32_t usbReset = 0x04;
+    constexpr uint32_t usbSuspend = 0x01, usbReset = 0x04;
     bool fifoReg(uint32_t offset) { return offset >= 0x1c0 && offset <= 0x1d0; }
 }
 
@@ -165,6 +165,8 @@ void S3cUsbDevice::busReset() {
     }
     controlOpen = addressPending = setupIn = false;
 }
+
+void S3cUsbDevice::busSuspend() { reg(usbInt) |= usbSuspend; }
 
 void S3cUsbDevice::statusDone() {
     controlOpen = false;

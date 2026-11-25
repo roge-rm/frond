@@ -39,10 +39,12 @@ class AppsPanel : public QWidget {
     // note, or "No applications".
     void setDatabases(const std::vector<runningRules::Database>& all, const QString& note = {});
     QStringList names() const;
-    // Windows CE: only Install works (it copies onto the SD card); the list and the other buttons are greyed.
-    void setInstallOnly(bool on);
+    void setInstallOnly(bool on, bool windowsMobile = false);
+    void loadingInstalledPrograms();
+    void showInstalledPrograms(bool ok, const QString& message);
  signals:
     void installRequested();
+    void refreshInstalledPrograms();
     void otherRequested();
     void exportAllRequested();
     void launchRequested(const QString& name);
@@ -51,6 +53,6 @@ class AppsPanel : public QWidget {
  private:
     QListWidget* list;
     QLabel* empty;
-    QPushButton *otherButton{}, *exportAllButton{};
-    bool installOnly{false};
+    QPushButton *otherButton{}, *exportAllButton{}, *refreshButton{};
+    bool installOnly{false}, listWindowsMobile{false}, readingWindowsMobile{false};
 };

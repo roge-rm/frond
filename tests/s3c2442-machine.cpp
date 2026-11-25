@@ -587,6 +587,49 @@ static void vbusLoadTests() {
     assert(!b->usbVbus() && (b->gpio.input[S3cGpio::g] & (1u << 5)));
 }
 
+// USB_INT_REG's SUSPEND_INT (bit 0) and the INT_USBD line, with suspend and reset interrupts on as WM5's driver
+// has them while a host is attached.
+static bool suspended(S3c2442Machine& m) {
+    uint32_t v = 0;
+    assert(m.usbDevice.read(0x158, v) == S3cAccess::ok);
+    const bool on = v & 1;
+    assert(m.usbDevice.irq() == on);
+    if (on) assert(m.intc.srcpnd & (1u << s3cIrq::usbd));
+    return on;
+}
+
+// A state saved with the cable in, opened again without one: the bus goes quiet and the guest sees suspend.
+// Nothing is raised where there was no cable, and the cable going in raises nothing either.
+static void cableRestoreTests() {
+    auto a = make({loop});
+    assert(a->usbDevice.write(0x16c, 0x05) == S3cAccess::ok);
+    a->setUsbVbus(true);
+    assert(!suspended(*a));
+    std::vector<uint8_t> state;
+    std::string why;
+    assert(a->saveState(state, why));
+    auto b = make({loop});
+    assert(b->loadState(state.data(), state.size(), why));
+    assert(!suspended(*b));
+    assert(b->usbVbusOffAt() == UINT64_MAX);
+    b->setUsbVbus(false);
+    assert(suspended(*b) && b->usbVbusOffAt() == b->nanoseconds());
+    // Reopened with the cable still in: no suspend.
+    auto c = make({loop});
+    assert(c->loadState(state.data(), state.size(), why));
+    c->setUsbVbus(true);
+    assert(!suspended(*c));
+    // A machine that never had the cable, then the cable in and out live.
+    auto d = make({loop});
+    assert(d->usbDevice.write(0x16c, 0x05) == S3cAccess::ok);
+    d->setUsbVbus(false);
+    assert(!suspended(*d) && d->usbVbusOffAt() == UINT64_MAX);
+    d->setUsbVbus(true);
+    assert(!suspended(*d));
+    d->setUsbVbus(false);
+    assert(suspended(*d));
+}
+
 // UART bit rates from the FCLK/n clock WM5 picks, and a byte from the far end raising the receive interrupt.
 static void uartTests() {
     auto m = make(stores({{0x50000004, 0x4fc5}, {0x50000028, 15}, {0x50008000, 0x43}, {0x50008004, 0x8fc5},
@@ -802,6 +845,7 @@ int main() {
     powerOnResetTests();
     usbNotifyTests();
     vbusLoadTests();
+    cableRestoreTests();
     uartTests();
     sdTests();
     audioTests();

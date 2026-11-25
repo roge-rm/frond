@@ -41,6 +41,8 @@ class UsbHostBridge {
         std::function<void(const uint8_t*, size_t, uint64_t)> ethernetOut;
         std::function<void(uint64_t, const uint8_t*, uint32_t)> ethernetPoll;
         std::function<bool(std::vector<uint8_t>&)> ethernetIn;
+        // Optional: the earliest guest time the cable may go in, for a guest that has to see it out a while first.
+        std::function<uint64_t()> plugReadyAt;
     };
     bool Start(Backend backend, const Config& config, std::string& error);
     UsbHostBridge();

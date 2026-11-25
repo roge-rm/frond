@@ -212,6 +212,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             : QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
         installFiles(paths);
     });
+    connect(appsPanel, &AppsPanel::refreshInstalledPrograms, this, [this] {
+        if (send("winmo-apps")) appsPanel->loadingInstalledPrograms();
+    });
+    connect(&client, &DesktopClient::installedPrograms, appsPanel, &AppsPanel::showInstalledPrograms);
     connect(appsPanel, &AppsPanel::otherRequested, this, &MainWindow::otherDatabase);
     connect(appsPanel, &AppsPanel::launchRequested, this, [this](const QString& name) { send("launch-app", name); });
     connect(appsPanel, &AppsPanel::exportAllRequested, this, [this] {
@@ -1013,6 +1017,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             return;
         }
         if (command == "db-list") { databasesReply(ok, code, message); return; }
+        if (command == "winmo-apps") {
+            if (!ok) appsPanel->showInstalledPrograms(false, message);
+            return;
+        }
         if (command == "wifi-module-state") {
             if (ok) printerPanel->setModuleReadout(frondPrint::moduleReadout(message, printerPanel->moduleOn()));
             return;
@@ -1108,7 +1116,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         // Windows CE: install takes the SD card out and puts it back, so once the last file is done the core is
         // asked where the card is now. One request at a time, so not while the batch goes on.
-        if (command == "install" && frondFirmware::installsToCard(runningDevice)) {
+        if ((command == "install" || command == "install-copy") && frondFirmware::installsToCard(runningDevice)) {
             if (installTotal > 0 && installResult(ok, code, message)) {
                 if (installTotal == 0 && !stopping) send(cardCommand("state"));
                 return;
@@ -1119,7 +1127,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(cardCommand("state"));
             return;
         }
-        if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
+        if ((command == "install" || command == "install-copy") && installTotal > 0 && installResult(ok, code, message)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
@@ -1222,6 +1230,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             else send(storageSupported() ? cardCommand("state", 0) : "network-state");
             return;
         }
+        if (command == "hard-reset" && frondFirmware::installsToCard(currentDevice()))
+            appsPanel->setDatabases({});
         if ((command == "save" || command == "reset" || command == "hard-reset") && !stopping &&
             frondFirmware::profile(runningDevice).frontend.camera) cameraRead = true;
         if ((command == "hold" || command == "reset" || command == "hard-reset") &&
@@ -1675,7 +1685,7 @@ void MainWindow::refresh() {
     traits.syncManager = protocol != frondDesktopSync::Protocol::none;
     const bool guest = traits.guestServices;
     appsPanel->setEnabled(enabled && (guest || traits.cardInstall));
-    appsPanel->setInstallOnly(!guest);
+    appsPanel->setInstallOnly(!guest, !guest && traits.cardInstall);
     appsPanel->setToolTip(guest || traits.cardInstall ? QString() : reason);
     installBenchAction->setEnabled(enabled && guest);
     hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, traits));
@@ -3804,7 +3814,7 @@ bool MainWindow::installNext() {
     if (installQueue.isEmpty()) return true;
     installCurrent = installQueue.takeFirst();
     const int number = installTotal - installQueue.size();
-    if (send("install", installCurrent)) {
+    if (send(frondFirmware::installsToCard(runningDevice) ? "install-copy" : "install", installCurrent)) {
         notify(tr("Installing %1 of %2…").arg(number).arg(installTotal));
         return true;
     }

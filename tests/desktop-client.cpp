@@ -117,6 +117,42 @@ for line in s.makefile('rb'):
         QVERIFY(client.request("quit"));QTRY_COMPARE(finished.count(),1);
     }
 
+    void installedProgramsEvents() {
+        QTemporaryDir dir;
+        QFile fake(dir.filePath("core.py"));
+        QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write(R"PY(import socket,sys
+s=socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,command,arg=line.rstrip(b'\n').split(b'\t')
+    if command==b'quit':
+        s.sendall(i+b'\tok\tdone\t\n')
+        break
+    assert command==b'winmo-apps' and not arg
+    s.sendall(i+b'\tok\tpending\t\n')
+    for kind, payload in [(b'winmo-apps', 'Éditeur'), (b'winmo-apps-error', 'Connection closed')]:
+        s.sendall(b'0\tevent\t'+kind+b'\t'+payload.encode().hex().encode()+b'\n')
+)PY");
+        fake.close();
+
+        DesktopClient client;
+        QSignalSpy ready(&client, &DesktopClient::started), programs(&client, &DesktopClient::installedPrograms);
+        QSignalSpy error(&client, &DesktopClient::error), finished(&client, &DesktopClient::finished);
+        QVERIFY(client.start("/usr/bin/python3", {fake.fileName()}));
+        QTRY_COMPARE(ready.count(), 1);
+        QVERIFY(client.request("winmo-apps"));
+        QTRY_COMPARE(programs.count(), 2);
+        QVERIFY(programs[0][0].toBool());
+        QCOMPARE(programs[0][1].toString(), QString::fromUtf8("Éditeur"));
+        QVERIFY(!programs[1][0].toBool());
+        QCOMPARE(programs[1][1].toString(), "Connection closed");
+        QVERIFY(client.request("quit"));
+        QTRY_COMPARE(finished.count(), 1);
+        QCOMPARE(error.count(), 0);
+    }
+
     void attentionEvents() {
         // The guest's LED and vibrate state arrives as an "attention" event and reaches attentionState.
         QTemporaryDir dir;QFile fake(dir.filePath("core.py"));QVERIFY(fake.open(QIODevice::WriteOnly));

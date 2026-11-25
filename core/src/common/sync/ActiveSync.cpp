@@ -95,9 +95,48 @@ DeviceInfo Connect(SyncStream& control, SyncStream& rapi) {
     return info;
 }
 
+std::unique_ptr<FrondRapi, decltype(&FrondRapiClose)> OpenRapi(SyncStream& rapi) {
+    FrondRapiStream stream{
+        &rapi,
+        [](void* self, void* data, size_t size, int timeoutMs) {
+            return Read(*static_cast<SyncStream*>(self), data, size, timeoutMs);
+        },
+        [](void* self, const void* data, size_t size) {
+            return static_cast<SyncStream*>(self)->Write(static_cast<const uint8_t*>(data), size);
+        },
+        [](void* self) { static_cast<SyncStream*>(self)->Abort(); },
+    };
+    std::unique_ptr<FrondRapi, decltype(&FrondRapiClose)> client(FrondRapiOpen(stream), FrondRapiClose);
+    if (!client || !FrondRapiReady(client.get())) throw std::runtime_error("Windows Mobile did not answer RAPI.");
+    return client;
+}
+
 std::vector<uint16_t> WideAscii(const std::string& ascii) {
     std::vector<uint16_t> out(ascii.begin(), ascii.end());
     out.push_back(0);
+    return out;
+}
+
+std::string Utf8(const uint16_t* text) {
+    std::string out;
+    while (*text) {
+        uint32_t c = *text++;
+        if (c >= 0xd800 && c <= 0xdbff && *text >= 0xdc00 && *text <= 0xdfff)
+            c = 0x10000 + ((c - 0xd800) << 10) + (*text++ - 0xdc00);
+        else if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd;
+        if (c < 0x80) out.push_back(char(c));
+        else if (c < 0x800) {
+            out.push_back(char(0xc0 | (c >> 6)));
+            out.push_back(char(0x80 | (c & 0x3f)));
+        } else {
+            if (c >= 0x10000) {
+                out.push_back(char(0xf0 | (c >> 18)));
+                out.push_back(char(0x80 | ((c >> 12) & 0x3f)));
+            } else out.push_back(char(0xe0 | (c >> 12)));
+            out.push_back(char(0x80 | ((c >> 6) & 0x3f)));
+            out.push_back(char(0x80 | (c & 0x3f)));
+        }
+    }
     return out;
 }
 
@@ -240,7 +279,7 @@ std::string ActiveSyncSession::SyncPocketOutlook(FrondRapi* client, SyncProfile&
 ActiveSyncSession::~ActiveSyncSession() { Stop(); }
 
 void ActiveSyncSession::Start() {
-    SyncManager::Get().Update([this](SyncStatus& status) {
+    if (!listApplications) SyncManager::Get().Update([this](SyncStatus& status) {
         const auto count = status.syncs;
         status = {};
         status.syncs = count;
@@ -257,9 +296,32 @@ void ActiveSyncSession::Stop() {
     if (worker.joinable()) worker.join();
 }
 
+void ActiveSyncSession::ReadApplications(SyncStream& control, SyncStream& rapi) {
+    try {
+        Connect(control, rapi);
+        auto client = OpenRapi(rapi);
+        // Use the same read-only query as Remove Programs.
+        const auto query = WideAscii(
+            R"(<wap-provisioningdoc><characteristic-query type="UnInstall" recursive="false"/></wap-provisioningdoc>)");
+        std::vector<uint16_t> reply(32768);
+        if (!FrondRapiProvision(client.get(), query.data(), reply.data(), reply.size()))
+            throw std::runtime_error("Couldn't read the installed programs from Windows Mobile.");
+        applications = Utf8(reply.data());
+    } catch (const std::exception& error) {
+        applicationError = error.what();
+    }
+    control.Abort();
+    rapi.Abort();
+    running = false;
+}
+
 void ActiveSyncSession::Run() {
     auto& manager = SyncManager::Get();
     SyncPipe::End control(pipes[0]), rapi(pipes[1]);
+    if (listApplications) {
+        ReadApplications(control, rapi);
+        return;
+    }
     std::string message;
     bool ok = false;
     const auto progress = [&](const std::string& stage, int done, int total, const std::string& name) {
@@ -292,18 +354,7 @@ void ActiveSyncSession::Run() {
         const auto info = Connect(control, rapi);
         const auto key = machine.empty() ? "winmo:" + info.guid : machine;
 
-        FrondRapiStream stream{
-            &rapi,
-            [](void* self, void* data, size_t size, int timeoutMs) {
-                return Read(*static_cast<SyncStream*>(self), data, size, timeoutMs);
-            },
-            [](void* self, const void* data, size_t size) {
-                return static_cast<SyncStream*>(self)->Write(static_cast<const uint8_t*>(data), size);
-            },
-            [](void* self) { static_cast<SyncStream*>(self)->Abort(); },
-        };
-        std::unique_ptr<FrondRapi, decltype(&FrondRapiClose)> client(FrondRapiOpen(stream), FrondRapiClose);
-        if (!client || !FrondRapiReady(client.get())) throw std::runtime_error("Windows Mobile did not answer RAPI.");
+        auto client = OpenRapi(rapi);
 
         const auto current = library.FindAssignment(key);
         if (assigned && (!current || current->profileId != assigned->profileId))

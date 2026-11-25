@@ -245,6 +245,9 @@ public:
 
     // Host side. A bus reset puts the address and endpoints back and raises the reset interrupt.
     void busReset();
+    // The bus has gone quiet (VBUS gone with the cable out): SUSPEND_INT, which the manual sets after 3 ms with no
+    // bus activity. sc2440usbfn.dll takes it as the host going away.
+    void busSuspend();
     UsbPacketResult setup(const uint8_t* data);
     UsbPacketResult out(unsigned ep, const uint8_t* data, unsigned size);
     // take false only peeks (size of the packet ready).
