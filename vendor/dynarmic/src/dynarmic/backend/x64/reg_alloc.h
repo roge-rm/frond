@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include <span>
+
 #include <boost/container/small_vector.hpp>
 #include <mcl/stdint.hpp>
 #include <xbyak/xbyak.h>
@@ -41,17 +43,18 @@ public:
     void ReadLock();
     void WriteLock();
     void AddArgReference();
-    void ReleaseOne();
-    void ReleaseAll();
-
-    bool ContainsValue(const IR::Inst* inst) const;
+    void ReleaseOne(std::span<HostLoc> value_locations);
+    void ReleaseAll(std::span<HostLoc> value_locations);
     size_t GetMaxBitWidth() const;
 
-    void AddValue(IR::Inst* inst);
+    void AddValue(IR::Inst* inst, std::span<HostLoc> value_locations);
+    void RelocateValues(std::span<HostLoc> value_locations, HostLoc loc) const;
 
     void EmitVerboseDebuggingOutput(BlockOfCode& code, size_t host_loc_index) const;
 
 private:
+    void ClearValues(std::span<HostLoc> value_locations);
+
     // Current instruction state
     size_t is_being_used_count = 0;
     bool is_scratch = false;
@@ -108,7 +111,7 @@ class RegAlloc final {
 public:
     using ArgumentInfo = std::array<Argument, IR::max_arg_count>;
 
-    explicit RegAlloc(BlockOfCode& code, std::vector<HostLoc> gpr_order, std::vector<HostLoc> xmm_order);
+    explicit RegAlloc(BlockOfCode& code, std::vector<HostLoc> gpr_order, std::vector<HostLoc> xmm_order, unsigned last_name);
 
     ArgumentInfo GetArgumentInfo(IR::Inst* inst);
     void RegisterPseudoOperation(IR::Inst* inst);
@@ -156,12 +159,12 @@ private:
     std::vector<HostLoc> gpr_order;
     std::vector<HostLoc> xmm_order;
 
-    HostLoc SelectARegister(const std::vector<HostLoc>& desired_locations) const;
+    HostLoc SelectARegister(std::span<const HostLoc> desired_locations) const;
     std::optional<HostLoc> ValueLocation(const IR::Inst* value) const;
 
-    HostLoc UseImpl(IR::Value use_value, const std::vector<HostLoc>& desired_locations);
-    HostLoc UseScratchImpl(IR::Value use_value, const std::vector<HostLoc>& desired_locations);
-    HostLoc ScratchImpl(const std::vector<HostLoc>& desired_locations);
+    HostLoc UseImpl(IR::Value use_value, std::span<const HostLoc> desired_locations);
+    HostLoc UseScratchImpl(IR::Value use_value, std::span<const HostLoc> desired_locations);
+    HostLoc ScratchImpl(std::span<const HostLoc> desired_locations);
     void DefineValueImpl(IR::Inst* def_inst, HostLoc host_loc);
     void DefineValueImpl(IR::Inst* def_inst, const IR::Value& use_inst);
 
@@ -175,10 +178,11 @@ private:
     HostLoc FindFreeSpill() const;
 
     std::vector<HostLocInfo> hostloc_info;
-    // Frond: locations changed since the last EndOfAllocScope (ReleaseAll is a no-op on the
-    // rest), and one past the highest location ever changed (the rest are still empty).
+    // Indexed by IR instruction name. RSP marks a value with no location.
+    boost::container::small_vector<HostLoc, 128> value_locations;
+    std::span<HostLoc> ValueLocations() { return {value_locations.data(), value_locations.size()}; }
+    // Frond: locations changed since the last EndOfAllocScope (ReleaseAll is a no-op on the rest).
     std::array<u64, 2> touched_locs{};
-    size_t used_locs = NonSpillHostLocCount;
     HostLocInfo& LocInfo(HostLoc loc);
     const HostLocInfo& LocInfo(HostLoc loc) const;
 

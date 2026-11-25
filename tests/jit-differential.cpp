@@ -3646,6 +3646,60 @@ struct CpuSaver {
     void Load(SavestateLoader<ChunkType>& l) { cpuLoad(cpu, l); }
 };
 
+bool pxa270InterruptMasks(Engines& e) {
+    static constexpr uint32_t event = SLOW_PATH_REASON_EVENTS;
+    for (bool fiq : {false, true}) {
+        for (unsigned masks : {0u, 0x40u, 0x80u, 0xc0u}) {
+            ArmCpu* cpu = e.exact.cpu;
+            cpuSetReg(cpu, ARM_REG_NUM_CPSR, SVC | masks);
+            cpuIrq(cpu, fiq, true);
+            const bool take = !(masks & (fiq ? ARM_SR_F : ARM_SR_I));
+            if (bool(cpuGetSlowPathReason(cpu) & event) != take ||
+                !cpuHasPendingInterrupt(cpu) || cpuProcessPendingInterrupts(cpu) != take) {
+                printf("FAIL PXA270 %s masks %02x\n", fiq ? "FIQ" : "IRQ", masks);
+                return false;
+            }
+            cpuIrq(cpu, fiq, false);
+        }
+    }
+
+    ArmCpu* cpu = e.exact.cpu;
+    cpuSetReg(cpu, ARM_REG_NUM_CPSR, SVC | ARM_SR_I);
+    cpuSetSleeping(cpu);
+    cpuIrq(cpu, false, true);
+    cpuSetSlowPath(cpu, event);  // A state saved with the legacy masked-IRQ policy.
+    CpuSaver state{cpu};
+    Savestate<ChunkType> saved;
+    SavestateLoader<ChunkType> loader;
+    if (!saved.Save(state) || !loader.Load(saved.GetBuffer(), saved.GetSize(), state)) return false;
+    if (!cpuHasPendingInterrupt(cpu) || (cpuGetSlowPathReason(cpu) & (event | SLOW_PATH_REASON_SLEEP)) !=
+                                             SLOW_PATH_REASON_SLEEP) return false;
+    cpuWakeup(cpu);
+    if (!cpuHasPendingInterrupt(cpu) || (cpuGetSlowPathReason(cpu) & (event | SLOW_PATH_REASON_SLEEP))) return false;
+    cpuIrq(cpu, false, false);
+
+    for (bool fiq : {false, true}) {
+        const Directed d{fiq ? "enable pending FIQ" : "enable pending IRQ with F set",
+            {fiq ? 0xe321f053u : 0xe321f093u, fiq ? 0xe5840908u : 0xe5840900u,
+             0xe2811001, fiq ? 0xe321f093u : 0xe321f053u, 0xe2811001}, false, SVC,
+            {{1, 0}, {4, 0x2f000}},
+            {{Expect::REG, 1, 1}, {Expect::REG, 14, kCode + 20},
+             {Expect::CPSR, 0, fiq ? 0xd1u : 0xd2u, 0xff}}, 0x200, 1, {}, false, true};
+        Snapshot xs;
+        const Outcome result = runCase(e, directedCase(d, 1), &xs);
+        if (!result.ok || result.unstopped || !unexpected(d, xs).empty()) {
+            printf("FAIL %s\n", d.name);
+            for (const auto& message : result.diffs) printf("  %s\n", message.c_str());
+            if (!result.unstopped)
+                for (const auto& message : unexpected(d, xs)) printf("  %s\n", message.c_str());
+            return false;
+        }
+    }
+    puts("PXA270 IRQ/FIQ masks, wake state, restore and MSR delivery matched");
+    return true;
+}
+
+
 // moveOn: after the store the guest runs through another line (Z) before stopping, so
 // Exact's buffers no longer hold A's line; otherwise it stops in Y's line and Exact runs
 // the old word, the expected difference. wmmx: the rewrite is a WSTRW (the JIT's cp1 slot)
@@ -3801,6 +3855,7 @@ bool wmmxCompiles(Engines& e) {
 int main(int argc, char** argv) {
     uint64_t first = 1, last = 30001, one = 0;
     bool single = false, show = false, runDirected = true, open = false;
+    bool testPxaMasks = false;
     double duration = 0;
     setenv("FROND_JIT_HOT", "1", 1);
     cpuSetJitSync(true);
@@ -3830,18 +3885,25 @@ int main(int argc, char** argv) {
             gTrace = true;
         } else if (a == "--show") {
             show = true;
+        } else if (a == "--pxa270-irq") {
+            testPxaMasks = true;
         } else if (a == "--no-directed") {
             runDirected = false;
         } else {
             fprintf(stderr,
                     "usage: %s [--seed N [--show] [--trace]] [--seeds A:B] [--duration S] [--no-directed]\n"
-                    "       [--max-unchecked L] [--hot N] [--thread] [--verbose]\n",
+                    "       [--max-unchecked L] [--hot N] [--thread] [--verbose] [--pxa270-irq]\n",
                     argv[0]);
             return 2;
         }
     }
     setvbuf(stdout, nullptr, _IOLBF, 0);
+    if (testPxaMasks) setenv("FROND_PXA270_IRQ_MASK", "1", 1);
     Engines e{makeMachine(false), makeMachine(true)};
+    if (testPxaMasks) {
+        e.bound = cpuMaxOvershootCycles(e.fast.cpu);
+        return pxa270InterruptMasks(e) ? 0 : 1;
+    }
     e.bound = cpuMaxOvershootCycles(e.fast.cpu);
     if (cpuMaxOvershootCycles(e.exact.cpu) != 53 || e.bound <= 53 || e.bound == UINT32_MAX) {
         fprintf(stderr, "unexpected bounds: exact %u fast %u\n", cpuMaxOvershootCycles(e.exact.cpu), e.bound);

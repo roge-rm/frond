@@ -22,6 +22,7 @@
 #include "dynarmic/backend/x64/stack_layout.h"
 #include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/frontend/A64/a64_types.h"
+#include "dynarmic/ir/opt/passes.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/cond.h"
 #include "dynarmic/ir/microinstruction.h"
@@ -65,6 +66,7 @@ A64EmitX64::A64EmitX64(BlockOfCode& code, A64::UserConfig conf, A64::Jit* jit_in
 A64EmitX64::~A64EmitX64() = default;
 
 A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) {
+    Optimization::NamingPass(block);
     if (conf.very_verbose_debugging_output) {
         std::puts(IR::DumpBlock(block).c_str());
     }
@@ -85,7 +87,7 @@ A64EmitX64::BlockDescriptor A64EmitX64::Emit(IR::Block& block) {
         return gprs;
     }();
 
-    RegAlloc reg_alloc{code, gpr_order, any_xmm};
+    RegAlloc reg_alloc{code, gpr_order, any_xmm, block.empty() ? 0u : block.back().GetName()};
     A64EmitContext ctx{conf, reg_alloc, block};
 
     // Start emitting.

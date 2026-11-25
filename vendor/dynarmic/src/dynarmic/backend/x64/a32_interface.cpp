@@ -267,6 +267,7 @@ public:
                 QueueAhead(*job, 1);
                 return block.entrypoint;
             }
+            RetireRejectedBlock(*job);
             compile_thread->NoteStale();
         }
         if (compile_thread->IsPending(location)) {
@@ -369,10 +370,13 @@ public:
                         QueueAhead(*job, job->depth + 1);
                     }
                     compile_thread->KeepReady(std::move(job));
+                } else {
+                    RetireRejectedBlock(*job);
                 }
                 continue;
             }
             if (!compile_thread->StillValid(*job) || emitter.GetBasicBlock(job->location) || !conf.callbacks->CodeUnchanged(*job->snapshot)) {
+                RetireRejectedBlock(*job);
                 compile_thread->NoteStale();
                 continue;
             }
@@ -390,6 +394,13 @@ public:
             HaltExecution(HaltReason::CacheInvalidation);
         }
         return clear;
+    }
+
+    // With code_mutex held. A whole-cache clear may have reused this address.
+    void RetireRejectedBlock(const CompileThread::Job& job) {
+        if (job.epoch == compile_thread->Epoch()) {
+            emitter.RetirePatchOrigin({job.result.entrypoint, job.result.size});
+        }
     }
 
     s64 TicksRemainingNow() const { return block_of_code.TicksRemainingNow(); }
@@ -416,14 +427,14 @@ private:
     std::function<std::unique_ptr<A32::CodeSnapshot>(IR::LocationDescriptor)> snapshot_fn() {
         return [this](IR::LocationDescriptor location) {
             const A32::LocationDescriptor a32_location{location};
-            return conf.callbacks->SnapshotCodeAhead(a32_location.PC(), a32_location.TFlag(), compile_thread->Overflowed(location));
+            return conf.callbacks->SnapshotCodeAhead(a32_location.PC(), a32_location.TFlag(),
+                                                       compile_thread->Overflowed(location), a32_location.FPSCR().Value());
         };
     }
 
     IR::Block Translate(IR::LocationDescriptor descriptor, A32::TranslateCallbacks* tcb) {
         IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, tcb, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets, conf.psr_inline_interrupt_mask});
         Optimization::PolyfillPass(ir_block, polyfill_options);
-        Optimization::NamingPass(ir_block);
         if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {
             Optimization::A32GetSetElimination(ir_block, {.convert_nz_to_nzc = true, .memory_barriers = conf.check_halt_on_memory_access});
             Optimization::DeadCodeElimination(ir_block);

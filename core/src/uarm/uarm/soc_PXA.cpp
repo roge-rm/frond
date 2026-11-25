@@ -108,6 +108,11 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
                       : socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
                   socRev == 2 ? 0x0B1AA1AAUL : 0x0B16A16AUL, patchDispatch, pacePatch, systemState);
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+    if (deviceType == DeviceType5::deviceTypeTX && socRev == 2 && gdbPort < 0)
+        cpuSetAbortLogLimit(cpu, true);
+#endif
+
     // XScale cost model: the table, region and data cache charges; PwrClk sets the clocks.
     cpuSetCostModel(cpu, true, uint8_t(socRev == 2 ? cost::Core::pxa27x : cost::Core::pxa25x), true);
 
@@ -1348,7 +1353,7 @@ void SocPXA::RescheduleCB(void *ctx, uint32_t task) {
 // OS timer ticks elapsed in this batch with that many cycles in progress.
 uint32_t SocPXA::TimerElapsedAt(uint32_t cycles) const {
     if (PowerSleeping() && sleeping) return 0;
-    const uint64_t extra = runningCyclesPerSecond ? uint64_t(cycles) * 1_sec / runningCyclesPerSecond : 0;
+    const uint64_t extra = scheduler->ElapsedNsec(cycles, runningCyclesPerSecond);
     return scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
 }
 uint32_t SocPXA::TimerElapsedCB(void* ctx) {

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +20,10 @@
 #include <optional>
 #include <unordered_map>
 #include <vector>
+
+#if defined(__ANDROID__) && defined(__aarch64__)
+#include <boost/container/small_vector.hpp>
+#endif
 
 #include "CPU.h"
 #include "jit_fastmem_arena.h"
@@ -45,18 +50,31 @@ std::atomic<uint64_t> psrInterprets{0};
 
 // Counters for FROND_JIT_STATS=1.
 struct Stats {
+    uint64_t reuseSaved = 0, reuseEvicted = 0, reuseMatch = 0, reuseChanged = 0, reuseShort = 0;
+    bool profileReuse = std::getenv("FROND_JIT_REUSE_PROFILE") != nullptr;
+    struct MappingProfile {
+        uint64_t sameTable = 0, newTable = 0, pages = 0, moved = 0;
+        uint64_t stale[2][2] = {}; // same or different table, then fetch or word mismatch
+    } mapping[2]; // user and privileged
     uint64_t runs = 0, ran = 0, interpret = 0, halt = 0, fault = 0, aborts = 0, invalAll = 0, invalRange = 0, clears = 0;
     uint64_t cold = 0;  // runs ended at code not compiled yet
     uint64_t queued = 0;  // of those, at code waiting for the compile thread
     uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
     uint64_t psrInterpret = 0;  // MSR CPSRs the in-place check sent to the interpreter
     uint64_t cp15 = 0, cp15User = 0;  // MRC and MCR p15 c3 and c7 c5 1 calls, and those in user mode
+    struct InvalLineProfile {
+        uint64_t calls = 0, samples = 0, ns = 0, sameLine = 0, clockNs = 0;
+        uint32_t lastLine = 0, random = 0x9e3779b9, untilSample = 1;
+        std::array<uint64_t, 5> buckets{};
+    };
+    std::unordered_map<uint32_t, InvalLineProfile> invalLinePc;
+    bool profileInvalLine = std::getenv("FROND_JIT_INVAL_LINE_PROFILE") != nullptr;
     uint64_t icacheLine = 0;  // of those, MCR p15 c7 c5 1 (I-cache line invalidate)
     uint64_t privSwitches = 0;  // runs ended by a privilege change in generated code
     uint64_t swi = 0;  // SWIs taken from generated code
     uint64_t wmmx = 0;  // iWMMXt calls from generated code
     uint64_t wmmxXfer = 0, wmmxFaults = 0;  // of those, WLDR and WSTR, and those that failed
-    uint64_t cparWrites = 0, cparChanges = 0;  // CPAR writes, and those that dropped the code
+    uint64_t cparWrites = 0, cparChanges = 0;  // CPAR writes, and those changing iWMMXt permissions
     // Interpreter exits at cp0 and cp1 words (not SWI) by class: CDP, MCR/MRC, MCRR/MRRC,
     // LDC/STC, and cond NV forms of any of them. Counted with FROND_JIT_STATS only.
     uint64_t interpWmmx[5] = {};
@@ -170,6 +188,28 @@ struct Stats {
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
                 (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
+        for (unsigned level = 0; level < 2; ++level) {
+            const auto &m = mapping[level];
+            fprintf(stderr, "jit: mapping profile %s same-table %llu new-table %llu pages %llu moved %llu "
+                            "stale same-table fetch %llu word %llu new-table fetch %llu word %llu\n",
+                    level ? "privileged" : "user", (unsigned long long)m.sameTable,
+                    (unsigned long long)m.newTable, (unsigned long long)m.pages, (unsigned long long)m.moved,
+                    (unsigned long long)m.stale[0][0], (unsigned long long)m.stale[0][1],
+                    (unsigned long long)m.stale[1][0], (unsigned long long)m.stale[1][1]);
+        }
+        for (const auto &[pc, line] : invalLinePc)
+            fprintf(stderr, "jit: icache line pc %08x calls %llu same-line %llu samples %llu sampled-ns %llu "
+                            "clock-ns %llu bins-under-100ns/250ns/1us/10us/other %llu %llu %llu %llu %llu\n",
+                    pc, (unsigned long long)line.calls, (unsigned long long)line.sameLine,
+                    (unsigned long long)line.samples, (unsigned long long)line.ns, (unsigned long long)line.clockNs,
+                    (unsigned long long)line.buckets[0], (unsigned long long)line.buckets[1],
+                    (unsigned long long)line.buckets[2], (unsigned long long)line.buckets[3],
+                    (unsigned long long)line.buckets[4]);
+        if (profileReuse)
+            fprintf(stderr, "jit: reuse probe saved %llu evicted %llu match %llu changed %llu short %llu\n",
+                    (unsigned long long)reuseSaved, (unsigned long long)reuseEvicted,
+                    (unsigned long long)reuseMatch, (unsigned long long)reuseChanged,
+                    (unsigned long long)reuseShort);
         fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu suspendedMvaDrops %llu\n",
                 (unsigned long long)suspends, (unsigned long long)resumes, (unsigned long long)otherPidInstalls,
                 (unsigned long long)suspendedMvaDrops);
@@ -397,16 +437,28 @@ TickModel jitPrvTickModel(ArmCpu *cpu) {
     return m;
 }
 
+#if defined(__ANDROID__) && defined(__aarch64__)
+// Most snapshots fit inline and avoid repeated small allocations on the guest thread.
+template<typename T, size_t N>
+using SnapshotVector = boost::container::small_vector<T, N>;
+#else
+template<typename T, size_t N>
+using SnapshotVector = std::vector<T>;
+#endif
+
 struct Snapshot final : public A32::CodeSnapshot {
     uint32_t base = 0;  // the word holding the first instruction
-    std::vector<uint32_t> words;
-    std::vector<uint8_t> fetched, read;  // per word
-    std::vector<std::pair<uint32_t, bool>> plain;  // each instruction in order, and its check
+    SnapshotVector<uint32_t, 16> words;
+    SnapshotVector<uint8_t, 16> fetched, read;  // per word
+    SnapshotVector<std::pair<uint32_t, bool>, 24> plain;  // each instruction in order, and its check
     std::vector<uint32_t> marked;  // access pcs among them
     uint32_t splitAt = ~0u;  // the marked pc the snapshot stopped before (startBlocks), which ends the block
     size_t next = 0;
     bool arm920 = false;
     bool startBlocks = false;  // cpuJitAccessPcsStartBlocks when fetched: a marked pc only ever starts the block
+    uint32_t ttb = 0, firstPc = 0;
+    uint8_t permissionTag = 0;
+    bool thumb = false;
     uint32_t pid = 0;  // ARM920T: the FCSE PID the words were fetched under
     // ARM920T, fetched under a PID below 32 MB: each VA page's physical page and access then, for a check
     // at install when another PID runs and the slot isn't mapped (Env::CodeUnchanged).
@@ -457,6 +509,8 @@ struct Snapshot final : public A32::CodeSnapshot {
         return ok;
     }
 };
+
+constexpr uint32_t jitPrvTagFpscr(unsigned tag) { return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20); }
 
 struct Env final : public A32::UserCallbacks {
     ArmCpu *cpu = nullptr;
@@ -608,7 +662,7 @@ struct Env final : public A32::UserCallbacks {
     std::unordered_map<uint32_t, CodePage> code;
     std::unordered_map<uint8_t *, std::vector<uint32_t>> byHost;
     std::vector<uint32_t> unwatched;
-    uint32_t mapGen = 0;
+    uint32_t mapGen = 0, profileTtb = ~0u;
     // ARM920T Fast blocks: code pages (MVAs) of another PID's slot whose mapping a TLB flush found moved, by
     // slot. WinCE unmaps a process's slot while others run and maps it back the same before it runs again.
     // The pages' blocks below 32 MB run under that PID's tag only, so they can't be reached until the PID
@@ -975,6 +1029,14 @@ struct Env final : public A32::UserCallbacks {
     // of every page whose mapping moved (CheckPage).
     void CheckMappings() {
         stats.mapChecks++;
+        const uint64_t oldPages = stats.mapPagesChecked;
+        auto &profile = stats.mapping[privileged];
+        if (stats.on) {
+            const uint32_t ttb = cpuJitTtb(cpu);
+            if (ttb == profileTtb) ++profile.sameTable;
+            else ++profile.newTable;
+            profileTtb = ttb;
+        }
         std::vector<uint32_t> &moved = scratchMoved;
         moved.clear();
         const auto check = [&](uint32_t page, CodePage &c) { CheckPage(page, c, moved); };
@@ -992,6 +1054,10 @@ struct Env final : public A32::UserCallbacks {
                 if (c.suspended && !c.noted) continue;
                 check(page, c);
             }
+        }
+        if (stats.on) {
+            profile.pages += stats.mapPagesChecked - oldPages;
+            profile.moved += moved.size();
         }
         for (uint32_t page : moved) {
             stats.mapChanged++;
@@ -1193,12 +1259,17 @@ struct Env final : public A32::UserCallbacks {
         resetState = true;
     }
 
-    // Drops all translated code but keeps dynarmic's state, for a CPAR change made by the
-    // guest between runs.
+    // Drops translated code and keeps dynarmic's state between runs.
     void ClearCode() {
         ClearPages();
         jit->ClearCache();
         std::fill(heat.begin(), heat.end(), Heat{});
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (!contextHeat.empty()) {
+            std::fill(contextHeat.begin(), contextHeat.end(), ContextHeat{});
+            heatTtb = cpuJitTtb(cpu);
+        }
+#endif
         if (fillWatch)
             for (const auto &[page, c] : code) fillWatch[page] &= ~watchBit;
         code.clear();
@@ -1341,6 +1412,15 @@ struct Env final : public A32::UserCallbacks {
     static constexpr unsigned kHeatBits = 14;
     std::vector<Heat> heat = std::vector<Heat>(size_t(1) << kHeatBits);
     uint32_t hot = 1;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    struct ContextHeat {
+        uint64_t key = 0;
+        uint32_t count = 0;
+    };
+    std::vector<ContextHeat> contextHeat;
+    uint32_t heatTtb = 0;
+    bool chooseContextHeat = false;
+#endif
 
     bool ShouldCompile(A32::VAddr pc, bool thumb) override {
         if (pc < 0x02000000u && guard[pc >> 12]) {
@@ -1349,10 +1429,21 @@ struct Env final : public A32::UserCallbacks {
             return false;
         }
         if (hot <= 1) return true;
-        const uint32_t key = pc | uint32_t(thumb);  // PC is even
-        Heat &h = heat[(key * 0x9e3779b1u) >> (32 - kHeatBits)];
-        if (h.key != key) h = Heat{key, 0};
-        if (++h.count >= hot) return true;
+        const uint32_t pcKey = pc | uint32_t(thumb);  // PC is even
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (!contextHeat.empty()) {
+            const uint64_t key = (uint64_t(heatTtb) << 32) | pcKey;
+            const uint32_t hash = (pcKey ^ (heatTtb >> 14)) * 0x9e3779b1u;
+            ContextHeat &h = contextHeat[hash >> (32 - kHeatBits)];
+            if (h.key != key) h = ContextHeat{key, 0};
+            if (++h.count >= hot) return true;
+        } else
+#endif
+        {
+            Heat &h = heat[(pcKey * 0x9e3779b1u) >> (32 - kHeatBits)];
+            if (h.key != pcKey) h = Heat{pcKey, 0};
+            if (++h.count >= hot) return true;
+        }
         stats.cold++;
         jit->HaltExecution(kCold);
         return false;
@@ -1530,11 +1621,64 @@ struct Env final : public A32::UserCallbacks {
     // can't run, as the hook would.
     uint32_t maxInstructions = 0;
 
+    // Shadow cache of rejected jobs, bounded per guest privilege level.
+    struct ReuseProbe {
+        uint32_t ttb = 0, pc = 0;
+        uint8_t tag = 0;
+        bool thumb = false, occupied = false;
+        std::vector<uint32_t> words;
+        std::vector<uint8_t> read, fetched;
+        std::vector<std::pair<uint32_t, bool>> plain;
+    };
+    std::vector<ReuseProbe> reuseProbe;
+
+    ReuseProbe &ProbeSlot(const Snapshot &s) {
+        if (reuseProbe.empty()) reuseProbe.resize(4096);
+        const uint32_t key = (s.ttb >> 14) * 0x85ebca6bu ^ s.firstPc * 0x9e3779b1u ^
+                             (uint32_t(s.permissionTag) << 19) ^ uint32_t(s.thumb);
+        return reuseProbe[(key ^ (key >> 16)) & (reuseProbe.size() - 1)];
+    }
+
+    void ProbeReuse(const Snapshot &s) {
+        if (!stats.on || !stats.profileReuse || privileged || reuseProbe.empty()) return;
+        auto &slot = ProbeSlot(s);
+        if (!slot.occupied || slot.ttb != s.ttb || slot.pc != s.firstPc ||
+            slot.tag != s.permissionTag || slot.thumb != s.thumb) return;
+        slot.occupied = false;
+        if (s.words.size() < slot.words.size() || s.plain.size() < slot.plain.size()) {
+            ++stats.reuseShort;
+            return;
+        }
+        bool match = std::equal(slot.plain.begin(), slot.plain.end(), s.plain.begin());
+        for (size_t i = 0; match && i < slot.words.size(); ++i)
+            if (slot.read[i])
+                match = slot.fetched[i] == s.fetched[i] && (!slot.fetched[i] || slot.words[i] == s.words[i]);
+        if (match) ++stats.reuseMatch;
+        else ++stats.reuseChanged;
+    }
+
+    void ProbeRejected(const Snapshot &s) {
+        if (!stats.on || !stats.profileReuse || privileged || !cpuJitWmmx(cpu) || s.ttb == cpuJitTtb(cpu))
+            return;
+        auto &slot = ProbeSlot(s);
+        stats.reuseEvicted += slot.occupied;
+        ++stats.reuseSaved;
+        slot = ReuseProbe{s.ttb, s.firstPc, s.permissionTag, s.thumb, true,
+                          {s.words.begin(), s.words.end()}, {s.read.begin(), s.read.end()},
+                          {s.fetched.begin(), s.fetched.end()}, {s.plain.begin(), s.plain.end()}};
+    }
+
     std::unique_ptr<A32::CodeSnapshot> SnapshotCode(A32::VAddr pc, bool thumb, bool whole) override {
         auto s = std::make_unique<Snapshot>();
         s->arm920 = arm920;
         s->startBlocks = arm920 && cpuJitAccessPcsStartBlocks(cpu);
         s->pid = arm920 ? cpuGetPid(cpu) : 0;
+        if (stats.on) s->ttb = cpuJitTtb(cpu);
+        if (stats.on && stats.profileReuse) {
+            s->firstPc = pc;
+            s->permissionTag = tag;
+            s->thumb = thumb;
+        }
         s->model = model;
         s->base = pc & ~3u;
         const bool mapped = arm920 && pidTags && s->pid && pc < 0x02000000u;
@@ -1580,12 +1724,16 @@ struct Env final : public A32::UserCallbacks {
             at += size;
         }
         s->runnable = s->plain.front().second;
+        ProbeReuse(*s);
         return s;
     }
 
     // Ahead of need: as SnapshotCode, reading only RAM and ROM. Code that reaches anything
     // else isn't compiled ahead.
-    std::unique_ptr<A32::CodeSnapshot> SnapshotCodeAhead(A32::VAddr pc, bool thumb, bool whole) override {
+    std::unique_ptr<A32::CodeSnapshot> SnapshotCodeAhead(A32::VAddr pc, bool thumb, bool whole,
+                                                         uint32_t fpscr) override {
+        // A completed job can ask for a successor in a different guest context.
+        if (fpscr != jitPrvTagFpscr(tag)) return nullptr;
         // A guarded page can't be fetched now.
         if (pc < 0x02000000u && guard[pc >> 12]) return nullptr;
         cpuJitMemoryOnly(cpu, true);
@@ -1626,7 +1774,12 @@ struct Env final : public A32::UserCallbacks {
             const uint32_t mva = va | s.pid;
             bool ok = inSlot ? cpuJitFetchMva(cpu, mva, &w) : cpuJitFetch(cpu, va, &w);
             if (!ok && inSlot && s.fetched[i]) ok = FetchUnmapped(s, va, mva, &w);
-            if (ok != bool(s.fetched[i]) || (ok && w != s.words[i])) return false;
+            const bool fetchChanged = ok != bool(s.fetched[i]);
+            if (fetchChanged || (ok && w != s.words[i])) {
+                if (stats.on) ++stats.mapping[privileged].stale[s.ttb != cpuJitTtb(cpu)][!fetchChanged];
+                ProbeRejected(s);
+                return false;
+            }
         }
         if (otherPid) stats.otherPidInstalls++;
         for (size_t i = 0; i < s.words.size(); i++) {
@@ -1653,7 +1806,9 @@ struct Env final : public A32::UserCallbacks {
         return true;
     }
 
+    bool queuedExit = false;
     void CompileQueued(A32::VAddr, bool) override {
+        queuedExit = true;
         stats.cold++;
         stats.queued++;
         jit->HaltExecution(kCold);
@@ -1844,6 +1999,15 @@ struct Env final : public A32::UserCallbacks {
         return 0;
     }
 
+    // The privileged PXA270 line operations only update the data-cache model.
+    template <unsigned crm>
+    static std::uint64_t Cp15DataLine(void *arg, std::uint32_t value, std::uint32_t) {
+        Env &e = *static_cast<Env *>(arg);
+        stats.cp15++;
+        cpuCostCacheOp(e.cpu, crm, 1, value);
+        return 0;
+    }
+
     // The other p15 slot instructions, through the interpreter's coprocessor handler: the
     // result for an MRC, ignored for an MCR.
     static std::uint64_t Cp15Xfer(void *arg, std::uint32_t value, std::uint32_t) {
@@ -1870,6 +2034,30 @@ struct Env final : public A32::UserCallbacks {
             return 0;
         }
         stats.icacheLine++;
+        if (stats.on && stats.profileInvalLine) {
+            auto &profile = stats.invalLinePc[op.pc];
+            const uint32_t line = value & ~31u;
+            if (profile.calls && line == profile.lastLine) ++profile.sameLine;
+            profile.lastLine = line;
+            ++profile.calls;
+            if (!--profile.untilSample) {
+                profile.random = profile.random * 1664525u + 1013904223u;
+                profile.untilSample = 128 + (profile.random >> 24);
+                using Clock = std::chrono::steady_clock;
+                using Nanoseconds = std::chrono::nanoseconds;
+                const auto start = Clock::now();
+                cpuJitIcacheInvalLine(e.cpu, value);
+                const auto finish = Clock::now();
+                const auto controlStart = Clock::now();
+                const auto controlFinish = Clock::now();
+                const auto ns = std::chrono::duration_cast<Nanoseconds>(finish - start).count();
+                profile.ns += ns;
+                profile.clockNs += std::chrono::duration_cast<Nanoseconds>(controlFinish - controlStart).count();
+                ++profile.buckets[ns < 100 ? 0 : ns < 250 ? 1 : ns < 1000 ? 2 : ns < 10000 ? 3 : 4];
+                ++profile.samples;
+                return 0;
+            }
+        }
         cpuJitIcacheInvalLine(e.cpu, value);
         return 0;
     }
@@ -2023,8 +2211,8 @@ struct PsrCoprocessor final : public A32::Coprocessor {
     }
 };
 
-// p15 slot: only the words jitCp15SlotWord takes get here (cpuJitPlain). c3 and the
-// I-cache line invalidate have their own callbacks, the rest go through Cp15Xfer.
+// p15 slot: cpuJitPlain admits the words in jitCp15SlotWord. Domain access and I-cache line
+// invalidation have their own callbacks, as do the privileged PXA270 D-cache line operations.
 struct Cp15Coprocessor final : public A32::Coprocessor {
     Env *env;
     explicit Cp15Coprocessor(Env *e) : env(e) {}
@@ -2039,7 +2227,13 @@ struct Cp15Coprocessor final : public A32::Coprocessor {
         if (crn == A32::CoprocReg::C3) return Callback{&Env::Cp15Write, env->Cp15Current()};
         if (crn == A32::CoprocReg::C7 && crm == A32::CoprocReg::C5 && opc2 == 1)
             return Callback{&Env::Cp15InvalLine, env->Cp15Current()};
-        if (crn == A32::CoprocReg::C7) return Callback{&Env::Cp15Xfer, env->Cp15Current()};
+        if (crn == A32::CoprocReg::C7) {
+            if (opc2 == 1 && env->privileged && cpuJitWmmx(env->cpu)) {
+                if (crm == A32::CoprocReg::C6) return Callback{&Env::Cp15DataLine<6>, env};
+                if (crm == A32::CoprocReg::C10) return Callback{&Env::Cp15DataLine<10>, env};
+            }
+            return Callback{&Env::Cp15Xfer, env->Cp15Current()};
+        }
         return std::monostate{};
     }
     CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, A32::CoprocReg) override { return std::monostate{}; }
@@ -2152,6 +2346,7 @@ struct FrondJit {
     // [0] user, [1] privileged. Both are made by jitCreate.
     std::unique_ptr<Level> level[2];
     uint32_t maxUnchecked = 0, hot = 1;
+    unsigned queuedBranches = 1;
     bool singleStep = false;  // ARM920T probe diagnostic: one instruction per check, blocks end at each line
     A32::Jit::CompileThread mode{};
     unsigned ahead = 0;
@@ -2171,12 +2366,11 @@ struct FrondJit {
     std::unique_ptr<uint8_t[]> fillWatch;
 };
 
-// Tags ride in FPSCR bits that only VFP vector code reads, which the ARM920T has none of: Len (16-18) and
+// Tags ride in FPSCR bits that only VFP vector code reads: Len (16-18) and
 // Stride (20-21). Neither reaches the host (MXCSR on x64; the arm64 prelude masks them out of FPCR). AHP,
 // rounding mode, FZ and DN stay 0, as they would reach the host's FP state.
 constexpr unsigned kPidTags = 32;
 constexpr unsigned kAbsentTag = kPidTags - 1;  // not handed out (it was the absent tag)
-constexpr uint32_t jitPrvTagFpscr(unsigned tag) { return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20); }
 static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x00370000);
 
 
@@ -2281,6 +2475,14 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     e.pidTags = j->pidTags;
     e.privileged = privileged;
     e.hot = j->hot;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    static const bool pxaUserContextHeat = [] {
+        const char *value = std::getenv("FROND_PXA270_TTB_HEAT");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    e.chooseContextHeat = pxaUserContextHeat && !privileged &&
+                          j->mode == A32::Jit::CompileThread::On;
+#endif
     A32::UserConfig conf;
     conf.callbacks = &e;
     e.arm920 = cpuGetModel(j->cpu) == ArmCpuModel::arm920t;
@@ -2363,6 +2565,9 @@ FrondJit *jitCreate(ArmCpu *cpu, bool singleStep) {
     j->cpu = cpu;
     j->singleStep = singleStep;
     j->maxUnchecked = singleStep ? 1 : jitPrvMaxUnchecked();
+    const char *branches = getenv("FROND_QUEUED_BRANCHES");
+    if (branches && (strcmp(branches, "2") == 0 || strcmp(branches, "4") == 0))
+        j->queuedBranches = unsigned(branches[0] - '0');
     j->hot = cpuGetModel(cpu) == ArmCpuModel::arm920t && singleStep ? 1 : jitPrvHot();
     j->mode = jitPrvCompileThread();
     j->ahead = jitPrvAhead(j->mode);
@@ -2476,11 +2681,9 @@ void jitClear(FrondJit *j) {
     jitPrvEach(j, [](Env &e) { e.Clear(); });
 }
 
-void jitCparWritten(FrondJit *j, bool changed) {
+void jitCparWritten(bool changed) {
     stats.cparWrites++;
-    if (!changed) return;
-    stats.cparChanges++;
-    jitPrvEach(j, [](Env &e) { e.ClearCode(); });
+    stats.cparChanges += changed;
 }
 
 // Fields as dynarmic's decoder takes them from an ARM word with a condition other than NV.
@@ -2604,6 +2807,17 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     Level *l = j->level[privileged].get();
     if (!l) l = jitPrvMakeLevel(j, privileged);
     Env &e = l->env;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    if (e.chooseContextHeat) {
+        e.chooseContextHeat = false;
+        // The PXA270 coprocessor is attached after the JIT is created.
+        if (cpuJitWmmx(j->cpu)) {
+            e.hot = 16;
+            e.contextHeat.resize(size_t(1) << Env::kHeatBits);
+            e.heatTtb = cpuJitTtb(j->cpu);
+        }
+    }
+#endif
     A32::Jit &jit = *l->jit;
     if (e.resetState) {
         e.resetState = false;
@@ -2611,11 +2825,18 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         jit.ClearCache();  // Reset drops the pending cache clear's halt flag
         e.tag = 0;  // Reset sets FPSCR to 0
     }
-    const uint8_t tag = e.arm920 ? jitPrvPidTag(j) : 0;
+    // CPAR changes between runs. Blocks compiled with iWMMXt enabled can only
+    // be reached with the same permissions.
+    uint8_t tag = 0;
+    if (e.arm920) tag = jitPrvPidTag(j);
+    else if (cpuJitWmmx(j->cpu)) tag = cpuGetCPAR(j->cpu) & 3;
     e.CheckGen();
     e.AfterFill();
     if (const uint32_t g = cpuJitMapGen(e.cpu); g != e.mapGen) {
         e.mapGen = g;
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (!e.contextHeat.empty()) e.heatTtb = cpuJitTtb(e.cpu);
+#endif
         if (!e.code.empty()) e.CheckMappings();
     } else if (e.watchTables && e.TablesMoved()) {
         stats.tableMoves++;
@@ -2626,8 +2847,8 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         const uint32_t slot = cpuGetPid(j->cpu) >> 25;
         const bool left = !e.suspended[slot].empty() && e.Resume(slot);
         e.Guard(left ? slot : 0);
-        jitPrvSetTag(e, jit, tag);
     }
+    jitPrvSetTag(e, jit, tag);
     if (!j->remaskPa.empty() || !j->remaskHost.empty()) jitPrvRemask(j);
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));
     jit.SetCpsr(cpsr);
@@ -2645,6 +2866,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     e.undo = 0;
     e.dataAbort.set = false;
     j->running = &e;
+    e.queuedExit = false;
     const HaltReason hr = jit.Run();
     j->running = nullptr;
 #ifdef FROND_GUEST_MEMORY_PLATFORM
@@ -2680,11 +2902,13 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     else if (Has(hr, kSlowPath))
         stop = FROND_JIT_HALT;
     else if (Has(hr, kCold))
-        stop = FROND_JIT_COLD;
+        stop = e.queuedExit && j->queuedBranches > 1 && cpuJitWmmx(e.cpu) ? FROND_JIT_QUEUED : FROND_JIT_COLD;
     else
         stop = FROND_JIT_BUDGET;
     return clocks;
 }
+
+unsigned jitQueuedBranches(const FrondJit *j) { return j->queuedBranches; }
 
 uint32_t jitLastInstructions(const FrondJit *j) { return j->lastInstructions; }
 
