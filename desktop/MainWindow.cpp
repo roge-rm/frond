@@ -2751,6 +2751,7 @@ void MainWindow::startSession(const frondSessions::Info& info) {
         arguments << "--device" << frondFirmware::deviceId(device) << frondFirmware::storedNor(firmwareRoot(), device);
         if (!frondFirmware::storedNand(firmwareRoot(), device).isEmpty())
             arguments << "--nand" << frondFirmware::storedNand(firmwareRoot(), device);
+        if (frondFirmware::storedAnyFirmware(firmwareRoot(), device)) arguments << "--any-firmware";
     }
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
     // A new machine runs in its own folder, where cards above 128 MB live until the first save.

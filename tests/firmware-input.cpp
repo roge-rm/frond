@@ -97,6 +97,27 @@ class FirmwareInputTest : public QObject {
                  QStringLiteral("Choose the OS image (CEOS.nbf) for the HP iPAQ rx1950."));
         QCOMPARE(frondFirmware::validateFiles(rx1950, ceblPath, ceosPath),
                  QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."));
+        // Allow other firmware: HP's size is enough, and an empty NOR reuses the stored one.
+        {
+            QFile other(dir.filePath("other.nbf"));
+            QVERIFY(other.open(QIODevice::WriteOnly) && other.resize(264794));
+            other.close();
+            QFile wrong(dir.filePath("wrong.nbf"));
+            QVERIFY(wrong.open(QIODevice::WriteOnly) && wrong.resize(264793));
+            wrong.close();
+            const auto otherPath = other.fileName(), wrongPath = wrong.fileName();
+            QCOMPARE(frondFirmware::validateFiles(rx1950, otherPath, ceosPath, nullptr, true), QString());
+            QCOMPARE(frondFirmware::validateFiles(rx1950, wrongPath, ceosPath, nullptr, true),
+                     QStringLiteral("The NOR image must be a 264,794-byte CEBL.nbf."));
+            QCOMPARE(frondFirmware::validateFiles(rx1950, QString(), ceosPath, nullptr, true, otherPath), QString());
+            QCOMPARE(frondFirmware::validateFiles(rx1950, QString(), ceosPath, nullptr, true, dir.filePath("none")),
+                     QStringLiteral("Choose a NOR image (CEBL.nbf). There's no earlier one to reuse."));
+            QCOMPARE(frondFirmware::importWarning(rx1950, ceosPath, true), QString());
+            // Off: the same files fail as before.
+            QCOMPARE(frondFirmware::validateFiles(rx1950, otherPath, ceosPath),
+                     QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."));
+            QVERIFY(!frondFirmware::validateFiles(rx1950, QString(), ceosPath, nullptr, false, otherPath).isEmpty());
+        }
         QVERIFY(!frondFirmware::firmwareFileMatches(ceosPath, rx1950Ceos5));
         // The OS image: HP's by hash, any other .nbf that lays out, and the rest refused.
         QCOMPARE(int(frondFirmware::rx1950OsImage(ceosPath)), int(frondFirmware::Rx1950Os::other));

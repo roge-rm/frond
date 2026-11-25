@@ -72,6 +72,9 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     };
     nor = field(tr("NOR image"), "nor", &norLabel);
     nand = field(tr("NAND image (optional for the E2)"), "nand", &nandLabel);
+    anyFirmware = new QCheckBox(tr("Allow other firmware"), this);
+    anyFirmware->setObjectName("anyFirmware");
+    form->addRow(QString(), anyFirmware);
     // The Zire 72 has no NAND, and a 68k device takes one ROM file.
     auto nandShown = [this] {
         const auto selected = frondFirmware::deviceFromId(device->currentData().toString());
@@ -80,6 +83,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         if (auto* choose = findChild<QPushButton*>("nandChoose")) choose->setEnabled(!none);
         norLabel->setText(frondFirmware::runs68k(selected) ? tr("ROM image") : tr("NOR image"));
         const bool rx1950 = frondFirmware::profile(selected).board == DeviceBoard5::s3c2442Rx1950;
+        if (anyFirmware) anyFirmware->setVisible(rx1950);
         nandLabel->setText(rx1950 ? tr("OS image (CEOS.nbf)") : tr("NAND image (optional for the E2)"));
     };
     connect(device, &QComboBox::currentIndexChanged, this, nandShown);
@@ -95,7 +99,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
             return void(QMessageBox::critical(this, tr("Frond"), tr("Pick a different card for each slot.")));
         const auto error = importImages();
         if (error.isEmpty()) {
-            if (const auto warning = frondFirmware::importWarning(stored, nand->text()); !warning.isEmpty())
+            if (const auto warning = frondFirmware::importWarning(stored, nand->text(), anyFirmware->isChecked()); !warning.isEmpty())
                 QMessageBox::warning(this, tr("Frond"), warning);
             accept();
         } else QMessageBox::critical(this, tr("Frond"), error);
@@ -162,7 +166,8 @@ QStringList FirmwareDialog::chosenCards() const {
 }
 QString FirmwareDialog::importImages() {
     auto chosen = frondFirmware::deviceFromId(device->currentData().toString());
-    const auto error = frondFirmware::importImages(root, chosen, nor->text(), nand->isEnabled() ? nand->text() : QString(), &chosen);
+    const auto error = frondFirmware::importImages(root, chosen, nor->text(), nand->isEnabled() ? nand->text() : QString(), &chosen,
+                                                  anyFirmware->isVisibleTo(this) && anyFirmware->isChecked());
     if (error.isEmpty()) stored = chosen;
     return error;
 }
