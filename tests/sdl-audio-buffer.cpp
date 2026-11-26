@@ -71,6 +71,11 @@ int main() {
         while (audioQueuePendingSamples(queue) >= 512) callback();
         callback();
         for (auto sample : stream) assert(sample == 0);
+        // Running dry only counts once the sound carries on.
+        assert(driver.GetUnderrunCount() == 0);
+        push(100);
+        callback();
+        for (auto sample : stream) assert(sample == 0);
         assert(driver.GetUnderrunCount() == 1);
         // Refill before restarting after an underrun.
         audioQueueClear(queue);
@@ -140,12 +145,39 @@ int main() {
         std::vector<uint32_t> drained(audioQueuePendingSamples(queue));
         assert(audioQueuePopChunk(queue, drained.data(), drained.size()) == drained.size());
         callback();
-        assert(driver.GetUnderrunCount() == 1);
+        assert(driver.GetUnderrunCount() == 0);
         push(1600);
         callback();
+        assert(driver.GetUnderrunCount() == 1);
         for (auto sample : stream) assert(sample == 0x10001000);
+        // The end of a sound: what's left under a period plays once nothing has been pushed for 100 ms, and
+        // isn't an underrun.
+        while (audioQueuePendingSamples(queue) >= 512) callback();
+        audioQueuePush(queue, 0x20002000);
+        callback();
+        const size_t tail = audioQueuePendingSamples(queue);
+        assert(tail > 0 && tail < 512);
+        for (auto sample : stream) assert(sample == 0);
+        constexpr unsigned quietCallbacks = (4410 + 511) / 512;
+        unsigned calls = 0;
+        while (audioQueuePendingSamples(queue)) {
+            callback();
+            ++calls;
+        }
+        assert(calls == quietCallbacks);
+        for (size_t i = 0; i < 512; ++i) assert(stream[i] == (i < tail - 1 ? 0x10001000 : i == tail - 1 ? 0x20002000 : 0));
+        callback();
+        assert(driver.GetUnderrunCount() == 1);
+        // A sound shorter than the start threshold plays after the same quiet.
+        push(700);
+        callback();
+        for (auto sample : stream) assert(sample == 0);
+        for (unsigned i = 0; i < quietCallbacks; ++i) callback();
+        for (auto sample : stream) assert(sample == 0x10001000);
+        callback();
+        assert(!audioQueuePendingSamples(queue) && driver.GetUnderrunCount() == 1);
         driver.Pause();
         assert(!soc.PcmOutputEnabled());
     }
-    puts("PASS: SDL startup, bounded audio buffering, backpressure hysteresis and underrun recovery");
+    puts("PASS: SDL startup, bounded audio buffering, backpressure hysteresis, underrun recovery and sound ends");
 }
