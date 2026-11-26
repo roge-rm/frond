@@ -238,6 +238,8 @@ data class MachineSettings(
                 serial == InfraredChoice.KEYBOARD && !to.serialKeyboard -> InfraredChoice.OFF
                 else -> serial
             },
+            infrared = if (infrared == InfraredChoice.SYNC_MANAGER && !(to.infrared && SyncProtocol.forDevice(to) == SyncProtocol.HOT_SYNC))
+                InfraredChoice.OFF else infrared,
         )
 
     companion object {

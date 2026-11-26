@@ -89,7 +89,7 @@ open class CoreLink(
             val own = when {
                 choice == InfraredChoice.MODEM && modeCommand == "serial-mode" -> "modem"
                 choice == InfraredChoice.PPP && modeCommand == "serial-mode" -> "ppp"
-                choice == InfraredChoice.SYNC_MANAGER && modeCommand == "serial-mode" -> "sync"
+                choice == InfraredChoice.SYNC_MANAGER -> "sync"
                 choice == InfraredChoice.KEYBOARD && modeCommand == "serial-mode" -> "keyboard"
                 choice == InfraredChoice.PHONE && modeCommand == "irda-mode" -> "phone"
                 choice == InfraredChoice.PRINTER && modeCommand == "irda-mode" -> "printer"

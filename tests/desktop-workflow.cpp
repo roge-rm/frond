@@ -1296,7 +1296,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
     message={b'device-state':device,b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
     if cmd==b'irda-mode':
-        state=b'off' if arg==b'off' else arg+b' 127.0.0.1:'+arg.split(b':')[-1]+b' waiting'
+        state=b'off' if arg==b'off' else b'sync idle; waiting infrared' if arg==b'sync' else arg+b' 127.0.0.1:'+arg.split(b':')[-1]+b' waiting'
         s.sendall(b'0\tevent\tinfrared\t'+state.hex().encode()+b'\n');message=state
     if cmd==b'keyboard-attach':message=b'attached' if arg==b'on' else b'detached'
     if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
@@ -1316,6 +1316,13 @@ for line in s.makefile('rb'):
             QTRY_VERIFY(keyboard->isEnabled()); QTRY_COMPARE(state->text(),QString());
             keyboard->click(); QTRY_VERIFY(keyboard->isChecked() && !mode->isEnabled());
             QTRY_VERIFY(keyboard->isEnabled()); keyboard->click(); QTRY_VERIFY(mode->isEnabled());
+            // IR HotSync: the Sync Manager is in the list on HotSync devices; the Zire 72 has no Sync Manager.
+            const bool irSync=deviceId!="palm-zire-72";
+            auto* view=qobject_cast<QListView*>(mode->view()); QVERIFY(view); QCOMPARE(view->isRowHidden(mode->findData("sync")),!irSync);
+            if (irSync) {
+                mode->setCurrentIndex(mode->findData("sync")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+                QTRY_COMPARE(state->text(),QString("Infrared: Sync Manager")); QTRY_VERIFY(!keyboard->isEnabled());
+            }
             mode->setCurrentIndex(mode->findData("tcp")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
             QTRY_VERIFY(state->text().contains("waiting")); QTRY_VERIFY(!keyboard->isEnabled());
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);

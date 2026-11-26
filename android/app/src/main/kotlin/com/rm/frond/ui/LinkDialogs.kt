@@ -243,7 +243,10 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
     when (kind) {
         LinkKind.BEAM -> {
             val current = model.beam.choice
-            val choices = remember { InfraredChoice.infraredChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.irPhone) }
+            val choices = remember {
+                InfraredChoice.infraredChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.irPhone,
+                    sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC)
+            }
             // Leaving Printer with output that isn't saved asks first.
             var leaving by remember { mutableStateOf<String?>(null) }
             // The notification for a print that arrives in the background needs this on Android 13 and later.

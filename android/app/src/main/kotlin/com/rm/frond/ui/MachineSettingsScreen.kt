@@ -95,7 +95,8 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (draft.device.infrared || draft.device.serialPort || draft.device.bluetooth) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
                 val choices = remember(draft.device, draft.settings.infrared) {
-                    InfraredChoice.infraredChoices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)), draft.device.irPhone)
+                    InfraredChoice.infraredChoices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)), draft.device.irPhone,
+                        sync = SyncProtocol.forDevice(draft.device) == SyncProtocol.HOT_SYNC)
                 }
                 Choice("Infrared", draft.settings.infrared, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(infrared = it))

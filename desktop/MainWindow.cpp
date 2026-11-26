@@ -560,6 +560,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
     irda->addItem(tr("Printer"),"printer");
+    irda->addItem(tr("Sync Manager"),"sync");
     irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Pairing."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
@@ -1677,6 +1678,9 @@ void MainWindow::refresh() {
     if (usbNetwork) usbPort->setVisible(false);
     usb->setEnabled(editable && caps.usb);
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
+    // IR HotSync: the HotSync app's IR to a PC/Handheld, on a HotSync device with infrared.
+    offerMode(irda, "sync", hotSyncAvailable && caps.infrared);
+    if (!(hotSyncAvailable && caps.infrared) && irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
     irdaPort->setEnabled(caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp"); irdaPort->setReadOnly(!editable);
     irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
@@ -2840,6 +2844,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (syncMachineId.isEmpty()) {
         if (serial->currentData() == "sync") serial->setCurrentIndex(serial->findData("off"));
         if (usb->currentData() == "sync") usb->setCurrentIndex(usb->findData("off"));
+        if (irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     }
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     // A PTY for Modem Sync calls to the HotSync number, there whenever the modem is picked.
@@ -3093,6 +3098,12 @@ void MainWindow::showIrda(const QString& state) {
         const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
     }
     if (mode == "printer") { irdaState->setText(tr("Printer: ready")); refresh(); return; }
+    // "sync idle|linked|open; SYNC-STATE": the IR HotSync PC.
+    if (mode == "sync") {
+        const auto phase = parts.value(1).section(';', 0, 0);
+        irdaState->setText(phase == "idle" ? tr("Infrared: Sync Manager") : tr("Infrared: Sync Manager, linked"));
+        refresh(); return;
+    }
     if (mode == "phone") {
         const auto phase = parts.value(1);
         irdaState->setText(phase == "online" && parts.size() > 2 ? tr("Mobile phone: online at %1").arg(parts[2])

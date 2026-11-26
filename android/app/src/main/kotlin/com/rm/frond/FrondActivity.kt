@@ -339,7 +339,9 @@ open class FrondActivity : SDLActivity() {
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
         val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
         val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
-        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter
+        val infraredSync = machineSettings.infrared == InfraredChoice.SYNC_MANAGER && launchDevice().infrared &&
+            SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
+        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter || infraredSync
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
         val serialPpp = machineSettings.serial == InfraredChoice.PPP && launchDevice().runs68k && launchDevice().serialPort
         val serialSync = machineSettings.serial == InfraredChoice.SYNC_MANAGER &&
@@ -349,7 +351,7 @@ open class FrondActivity : SDLActivity() {
         val serialLink = serialWired || serialModem || serialPpp || serialSync || serialKeyboard
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
-            if ((infraredLink && !infraredPhone && !infraredPrinter) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
+            if ((infraredLink && !infraredPhone && !infraredPrinter && !infraredSync) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
             link.whenConnected {
                 Thread({
                     val session = Sessions.forPath(applicationContext, sessionPath)
