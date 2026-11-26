@@ -103,7 +103,8 @@ int main() {
     dcIn<EmRegsSzNaples>(dsp, 'P', 0x80, "Naples PP7 DC_IN");
 
     // Charging reaches the guest through the dock status patch or a modelled input, and nowhere else.
-    for (const char* id : {"PalmIIIx", "PalmM125", "PEG-N700C/N710C"})
+    // The Palm III runs on AAA cells.
+    for (const char* id : {"PalmIII", "PalmIIIx", "PalmM125", "PEG-N700C/N710C"})
         check(!EmDevice(id).BatteryChargingSupported(), id);
     for (const char* id : {"PalmIIIc", "PalmV", "PalmVx", "PalmM500", "PalmM130", "PalmM520", "AlphaSmartDana",
                            "DanaWireless", "PEG-T400", "NR70", "YSX1230"})

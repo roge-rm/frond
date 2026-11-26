@@ -1792,6 +1792,8 @@ bool EmDevice::IsClie() const {
 bool EmDevice::NeedsBatteryPatch() const { return Supports68328() || IsClie(); }
 
 bool EmDevice::BatteryChargingSupported() const {
+    // Two AAA cells; the cradle doesn't charge them.
+    if (fDeviceID == kDevicePalmIII) return false;
     if (!EmulatesDockStatus()) return true;
 
     switch (fDeviceID) {

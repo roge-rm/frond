@@ -23,6 +23,12 @@ class EmRegs328PalmPilot : public EmRegs328 {
     virtual Bool GetLineDriverState(EmUARTDeviceType);
 
     virtual uint8 GetPortInputValue(int);
+
+   private:
+    bool RunsIdDetect();
+
+    // -1 until the first port E read.
+    int fIdDetect{-1};
 };
 
 #endif /* EmRegs328PalmPilot_h */
