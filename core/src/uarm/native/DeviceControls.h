@@ -19,7 +19,7 @@ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, ri
                                trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
                                calendarGrid, menu, phoneEnd };
 enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350, m125, v, m100, m500,
-                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, treo650, zire31, pilot, n710c,
+                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, iii, treo650, zire31, pilot, n710c,
                                 nx70v };
 // Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
@@ -239,6 +239,10 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
                                                   DeviceControlStyle::iiie,0.5f,2};
     static const DeviceControlProfile iiixeProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
                                                    DeviceControlStyle::iiixe,0.5f,2};
+    // Palm III: the IIIx's keys, rocker and teal power key, in lighter grey plastic with the keys
+    // in raised collars.
+    static const DeviceControlProfile palmIIIProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
+                                                     DeviceControlStyle::iii,0.5f,2};
     // Palm m125 on a 160-wide screen, 2 units per pixel: four round black keys sunk in pockets in
     // the blue-grey face (Date Book, Address, To Do, Note Pad), the outer ones higher, either side
     // of two black scroll keys in a peanut-shaped well. Each app key hits its whole pocket. The
@@ -748,6 +752,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::m125: return m125Profile;
         case DeviceArt::iiie: return iiieProfile;
         case DeviceArt::iiixe: return iiixeProfile;
+        case DeviceArt::iii: return palmIIIProfile;
         case DeviceArt::m100: return m100Profile;
         case DeviceArt::m105: return m105Profile;
         case DeviceArt::v: return vProfile;
@@ -1222,7 +1227,7 @@ inline DanaLayout danaLayout(int viewWidth, int viewHeight, bool keyboard) {
 // rectangles only place the artwork.
 enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast, hotSync, pilotApplications };
 // E2 and Zire 72: two Graffiti areas between full-height lines; the 68k Palms: one rounded box.
-enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500, zire31, pilot };
+enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500, iii, zire31, pilot };
 struct SilkscreenButton {
     SDL_Rect bounds;
     const char* label;
@@ -1332,6 +1337,12 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     // IIIc: the IIIx's table, the same in the IIIc ROM, printed light on dark.
     static const DeviceSilkscreen iiicSilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
                                                  SilkscreenStyle::iiic,2};
+    // Palm III: the IIIx's table. The 3.0 ROM's pen button list (EvtGetPenBtnList) has the same Home,
+    // Menu, Calc and Find, EvtSysInit the same writing area (27,164,106,56), and GrfProcessStroke
+    // splits it at x 89 and opens the keyboards on taps below y 206 left of x 45 and right of x 115.
+    // Printed on a mint panel, with the Applications arrow for Home and a label round each disc.
+    static const DeviceSilkscreen palmIIISilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
+                                                    SilkscreenStyle::iii,2};
     // T415: the ROM's SilkScreenVenice 'silk' 10000 (19000 is the same), doubled from row 160 into
     // LCD pixels under the 320x320 screen. Calc and Find run to x 326 in the ROM; kept to the
     // panel's width here. The contrast spot is key 0x123 at the bottom left; the panel ends at
@@ -1412,6 +1423,7 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
         case DeviceArt::m125: case DeviceArt::m100: case DeviceArt::m105: case DeviceArt::m130: return m125Silkscreen;
         case DeviceArt::m505: case DeviceArt::m520: return m505Silkscreen;
         case DeviceArt::iiic: return iiicSilkscreen;
+        case DeviceArt::iii: return palmIIISilkscreen;
         case DeviceArt::v: case DeviceArt::vx: return vSilkscreen;
         case DeviceArt::m500: case DeviceArt::c500: return m500Silkscreen;
         case DeviceArt::t415: return t415Silkscreen;

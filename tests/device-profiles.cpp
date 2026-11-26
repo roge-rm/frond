@@ -21,6 +21,7 @@ static void zodiac2();
 static void danaInventory();
 static void danaWirelessInventory();
 static void ezProfiles();
+static void palmIiiProfile();
 static void vzProfiles();
 static void t415();
 static void rx1950();
@@ -118,7 +119,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 26 && names.size() == 29 && types.size() == 27);
+    assert(desktopCount == 27 && names.size() == 30 && types.size() == 28);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -126,7 +127,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, int(deviceTypeZodiac1) + 1, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, int(deviceTypePalmIII) + 1, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -429,7 +430,7 @@ int main() {
         }
         for (int type : {deviceTypeE2, deviceTypeTX, deviceTypeZire72, deviceTypeFrankenE2, deviceTypePV})
             assert(deviceProfileRunnerEligible5(type));
-        for (const char* name : {"palm-iiix", "palm-m515", "palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100",
+        for (const char* name : {"palm-iiix", "palm-iii", "palm-m515", "palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100",
                                   "palm-m105", "palm-m125", "palm-m500", "ibm-workpad-c500", "palm-iiic", "palm-m505",
                                   "palm-m130", "palm-m520", "sony-clie-t415", "hp-ipaq-210", "hp-ipaq-h4350"})
             assert(!deviceProfileRunnerEligible5(deviceProfileNamed5(name)->deviceType));
@@ -448,6 +449,7 @@ int main() {
 
     palmIIIx();
     ezProfiles();
+    palmIiiProfile();
     rx1950();
     vzProfiles();
     t415();
@@ -658,10 +660,10 @@ static void palmIIIx() {
         put32(arm, 0x84, 0x68737072);
         refused(arm, false);
     }
-    // 68328-only, RAM-only, header versions 2 and 6, a reset vector outside the ROM, other 4.1 IDs.
-    refused(rom68k(0x128000, 3, 0x0010, 0, 0, base + 0x822a, 0x128000), true);
+    // RAM-only, header versions 1 and 6, a reset vector outside the ROM, other 4.1 IDs. A ROM with no EZ flag
+    // and header version 2 to 5 is the Palm III's (palmIiiProfile).
     refused(rom68k(0x128000, 3, ez | 0x0001, 0, 0, base + 0x822a, 0x128000), true);
-    refused(rom68k(0x128000, 2, ez, 0, 0, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x128000, 1, 0, 0, 0, base + 0x822a, 0x128000), true);
     refused(rom68k(0x128000, 6, ez, palm, sumo, base + 0x822a, 0x128000), true);
     refused(rom68k(0x128000, 3, ez, 0, 0, 0x00c0822a, 0x128000), true);
     refused(rom68k(0x128000, 3, ez, 0, 0, base + 0x128000, 0x128000), true);
@@ -744,6 +746,51 @@ static void zodiac2() {
     assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), 1, false, false) == DeviceFirmwareError5::nandSize);
 }
 
+// The Palm III: the 68328 board, picked by a ROM with no EZ flag (OS 3.0 has header version 2, 3.3 version 3 and
+// 4.1 version 5 with the "rcky" HAL ID) and taking nothing else.
+static void palmIiiProfile() {
+    const auto* p = deviceProfileNamed5("palm-iii");
+    assert(p && p->deviceType == deviceTypePalmIII && deviceProfile5(deviceTypePalmIII) == p && p->art == DeviceArt::iii);
+    assert(p->support == DeviceSupport5::experimentalDesktop && p->frontend.available && p->detect == DeviceDetect5::romHeader68k);
+    assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
+    assert(p->minRam == (2u << 20) && p->maxRam == p->minRam && p->cpuHz == 16580608u);
+    assert(p->frontend.width == 160 && p->frontend.height == 160 && p->frontend.silkscreenHeight == 60);
+    assert(std::string(p->frontend.buttons) == "up|down|app1|app2|app3|app4|power");
+    const auto& caps = p->capabilities;
+    assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && caps.infrared && !caps.bluetooth &&
+           caps.sound && caps.modem && caps.irPhone && deviceProfileHasHotSyncButton5(p->deviceType));
+    constexpr uint32_t base = 0x10c00000, palm = 0x70616c6d, rcky = 0x72636b79, sumo = 0x73756d6f, ez = 0x0020;
+    const auto v30 = inspect68k(rom68k(0x200000, 2, 0, 0, 0, base + 0x8226, 0x200000));
+    const auto v33 = inspect68k(rom68k(0x148000, 3, 0x0010, 0, 0, base + 0x823c, 0x148000));
+    const auto v41 = inspect68k(rom68k(0x1a8000, 5, 0x0010, palm, rcky, base + 0xc6ee, 0x1a8000));
+    for (const auto* info : {&v30, &v33, &v41}) {
+        assert(info->profile == p && info->hasHeader);
+        assert(deviceProfileTakes68kRom5(*p, *info));
+        for (const char* other : {"palm-iiix", "palm-iiie", "palm-v", "palm-m100", "palm-iiic"})
+            assert(!deviceProfileTakes68kRom5(*deviceProfileNamed5(other), *info));
+    }
+    // Not the Palm III's: another 4.1 HAL, the RAM-only flag, a reset vector outside the ROM, over 2 MiB.
+    auto refused = [&](const std::vector<uint8_t>& rom) { assert(!inspect68k(rom).profile); };
+    refused(rom68k(0x1a8000, 5, 0x0010, palm, sumo, base + 0xc6ee, 0x1a8000));
+    refused(rom68k(0x200000, 2, 0x0001, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 2, 0, 0, 0, 0x00c08226, 0x200000));
+    refused(rom68k((2u << 20) + 0x1000, 2, 0, 0, 0, base + 0x8226, 0x200000));
+    // Other 68328 devices with Palm III-like headers: HandEra (v4, 0x0040), Palm VII (v4, 0x0010), Symbol (v2 0, v3 0x0010).
+    refused(rom68k(0x200000, 4, 0x0040, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 4, 0x0010, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 2, 0x0080, 0, 0, base + 0x8226, 0x200000));
+    for (const char* text : {"ScanMgr", "RAM NetIF"}) {
+        for (auto [version, flags] : {std::pair<int, int>{2, 0}, {3, 0x0010}}) {
+            auto rom = rom68k(0x200000, version, flags, 0, 0, base + 0x8226, 0x200000);
+            std::copy(text, text + strlen(text), rom.begin() + 0x1000);
+            refused(rom);
+        }
+    }
+    // An EZ ROM goes to the EZ devices only.
+    const auto v31 = inspect68k(rom68k(0x128000, 3, ez, 0, 0, base + 0x822a, 0x128000));
+    assert(v31.profile != p && !deviceProfileTakes68kRom5(*p, v31));
+}
+
 // The other EZ devices run on the IIIx's board and ROM format. Only the IIIx is told from its header; the others
 // are chosen, except an m100 series ROM, which carries its clock database.
 static void ezProfiles() {
@@ -817,11 +864,11 @@ static void ezProfiles() {
     auto v41 = rom68k(0x1a8000, 5, ez, palm, sumo, base + 0xc6ea, 0x1a8000);
     std::memcpy(v41.data() + 0x1000, "cclkPalmClock", 14);
     assert(inspect68k(v41).profile == iiix);
-    // Only the IIIx and the IIIc are detected from a header; no other EZ profile takes the detection.
+    // Only the IIIx, the IIIc and the Palm III are detected from a header; no other EZ profile takes the detection.
     unsigned detecting = 0;
     for (const auto& p : deviceProfiles5)
         if (p.detect == DeviceDetect5::romHeader68k && p.board == DeviceBoard5::ez328) ++detecting;
-    assert(detecting == 2);
+    assert(detecting == 3);
     // The IIIc: a colour panel, 8 MiB, the IIIx's peripherals and power key, told by its HAL ID.
     const auto* iiic = deviceProfileNamed5("palm-iiic");
     assert(iiic && iiic->deviceType == deviceTypeIIIc && iiic->art == DeviceArt::iiic && iiic->board == DeviceBoard5::ez328);

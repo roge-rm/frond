@@ -438,12 +438,37 @@ class FirmwareInputTest : public QObject {
             for (auto other : {Device::tx, Device::e2, Device::zire72})
                 QVERIFY2(frondFirmware::validateFiles(other, romPath, {}).contains("Choose Palm IIIx"), kind.name);
         }
-        // A 68328-only ROM, a header version 2 ROM and another 4.1 device's IDs have the header but can't run.
-        rom68k(rom, 0x128000, 3, 0x0010);
+        // A RAM-only ROM, a header version 1 ROM and another 4.1 device's IDs have the header but can't run.
+        rom68k(rom, 0x128000, 3, 0x0001);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
         QCOMPARE(frondFirmware::detectDevice(romPath), Device::automatic);
-        rom68k(rom, 0x128000, 2);
+        rom68k(rom, 0x128000, 1, 0);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        // A ROM with no EZ flag (OS 3.0 is header version 2, 3.3 version 3, 4.1 version 5 with the "rcky" HAL)
+        // is the Palm III's alone.
+        const auto iii = frondFirmware::deviceFromId("palm-iii");
+        QVERIFY(iii != Device::automatic);
+        for (int version : {2, 3, 5}) {
+            rom68k(rom, 0x200000, version, 0x0000, 0x70616c6d, 0x72636b79, 0x8226);
+            Device device = Device::automatic;
+            QVERIFY(frondFirmware::validateFiles(Device::automatic, romPath, {}, &device).isEmpty());
+            QCOMPARE(device, iii);
+            QCOMPARE(frondFirmware::detectDevice(romPath), iii);
+            QVERIFY(frondFirmware::validateFiles(iii, romPath, {}).isEmpty());
+            QVERIFY(!frondFirmware::validateFiles(iiix, romPath, {}).isEmpty());
+            QVERIFY(!frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-iiie"), romPath, {}).isEmpty());
+        }
+        // Not the Palm III's: HandEra (v4, 0x0040), Palm VII (v4, 0x0010), Symbol (v2 and v3 with ScanMgr).
+        auto refusedRom = [&](int version, quint16 flags, const char* text) {
+            rom68k(rom, 0x200000, version, flags);
+            if (text) { rom.seek(0x1000); rom.write(text); rom.flush(); }
+            QCOMPARE(frondFirmware::detectDevice(romPath), Device::automatic);
+            QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        };
+        refusedRom(4, 0x0040, nullptr);
+        refusedRom(4, 0x0010, "RAM NetIF");
+        refusedRom(2, 0x0000, "ScanMgr");
+        refusedRom(3, 0x0010, "ScanMgr");
         rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x12345678);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
         // Over the 2 MiB flash part, or truncated.
@@ -490,7 +515,7 @@ class FirmwareInputTest : public QObject {
                 for (auto other : {Device::tx, Device::e2, Device::zire72})
                     QVERIFY(!frondFirmware::validateFiles(other, romPath, {}).isEmpty());
             }
-            rom68k(rom, 0x178000, 3, 0x0010);
+            rom68k(rom, 0x178000, 3, 0x0001);
             QVERIFY(frondFirmware::validateFiles(device, romPath, {}).contains("can run"));
         }
         // An m100 series ROM names the m100, which the m105 may also be chosen for; a name only in the

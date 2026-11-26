@@ -277,6 +277,17 @@ object Firmware {
             }
             return@use Rom68kInfo(device, true)
         }
+        // The Palm III's ROMs have no EZ, VZ or 0x0080 flag: header version 2, 3 or 5, with its HAL ID from version 5.
+        // Symbol's scanner ROMs carry ScanMgr and the Palm VII's carry "RAM NetIF"; the Palm III has neither.
+        if ((version == 2 || version == 3 || version == 5) && flags and 0x00e1 == 0) {
+            val iii = devices.firstOrNull { it.id == PALM_III } ?: return@use header
+            if (version == 5 && (company != iii.companyId || hal != iii.halId)) return@use header
+            if (size > ROM68K_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
+            if (reset < ROM68K_EZ_BASE || reset - ROM68K_EZ_BASE >= size) return@use header
+            if (hasText(file, size, "ScanMgr".toByteArray(Charsets.US_ASCII)) ||
+                hasText(file, size, "RAM NetIF".toByteArray(Charsets.US_ASCII))) return@use header
+            return@use Rom68kInfo(iii, true)
+        }
         if (version !in 3..5 || flags and 0x0001 != 0 || flags and 0x0020 == 0) return@use header
         if (size > ROM68K_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
         if (reset < ROM68K_EZ_BASE || reset - ROM68K_EZ_BASE >= size) return@use header
@@ -284,7 +295,7 @@ object Firmware {
         // database only they carry (as in Cloudpilot), the m100 until the m105 is chosen.
         if (version < 5 && hasText(file, size, "cclkPalmClock".toByteArray(Charsets.US_ASCII)))
             return@use Rom68kInfo(devices.firstOrNull { it.id == "palm-m100" }, true)
-        val device = devices.firstOrNull { it.detectKind == 3 && isEz(it) && (version < 5 || (it.companyId == company && it.halId == hal)) }
+        val device = devices.firstOrNull { it.detectKind == 3 && isEz(it) && it.id != PALM_III && (version < 5 || (it.companyId == company && it.halId == hal)) }
         Rom68kInfo(device, true)
     }
 
@@ -309,6 +320,7 @@ object Firmware {
     // can't tell them all apart, so any of them takes their ROMs; frond-68k's full check decides. The IIIc
     // (its own HAL ID) takes only its own ROM and no other device takes it.
     private const val IIIC = "palm-iiic"
+    private const val PALM_III = "palm-iii"
     private fun isEz(device: Device) = device.cohort == "ez68k-rom"
     // The VZ Palms (m125, m500, WorkPad c500) take a ROM with their company and HAL IDs, so the c500 takes
     // the m500's.
@@ -448,7 +460,8 @@ object Firmware {
         if (info.device == null) return "This ROM isn't one the ${device.label} can run."
         // The Dana Wireless runs the Dana's ROM, whose header still says Dana.
         val danaRom = device.id == "alphasmart-dana-wireless" && info.device.id == "alphasmart-dana"
-        val ezRom = isEz(device) && isEz(info.device) && device.id != IIIC && info.device.id != IIIC
+        val ezRom = isEz(device) && isEz(info.device) && device.id != IIIC && info.device.id != IIIC &&
+            device.id != PALM_III && info.device.id != PALM_III
         val vzRom = isVzPalm(device) && isVzPalm(info.device) &&
             device.companyId == info.device.companyId && device.halId == info.device.halId
         if (info.device != device && !danaRom && !ezRom && !vzRom) return "This is a ${info.device.label} ROM. Choose ${info.device.label}."

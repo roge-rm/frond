@@ -191,6 +191,58 @@ uint16 EmSPISlaveADS784x::BatteryCount(const uint16_t (&curve)[11], UInt16 sysBa
     return result;
 }
 
+bool EmSPISlaveADS784x::TableBatteryCount(bool ads7846, uint16& count) {
+    CEnableFullAccess munge;
+
+    // Get a pointer to the system battery globals and determine
+    // what version table we're using.
+
+    emuptr sysBatteryDataP = EmLowMem_GetGlobal(sysBatteryDataP);
+
+    if (sysBatteryDataP) {
+        EmAliasSysBatteryDataStructV1<PAS> sysBatteryData(sysBatteryDataP);
+
+        UInt16 sysBattDataStructVersion = sysBatteryData.sysBattDataStructVersion;
+
+        if (sysBattDataStructVersion <= 3) {
+            uint16_t curve[11] = {};
+            UInt16 sysBattStepsPerVolt = 0;
+            Int16 sysBattVoltageStepOffset = 0;
+
+            // Fill out the above variables from the system battery globals,
+            // sorting out table version differences.
+
+            if (sysBattDataStructVersion == 1) {
+                EmAliasSysBatteryDataStructV1<PAS> sysBatteryDataV1(sysBatteryDataP);
+
+                for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV1.sysBattVoltageCurve[i];
+                sysBattStepsPerVolt = sysBatteryDataV1.sysBattStepsPerVolt;
+                sysBattVoltageStepOffset = sysBatteryDataV1.sysBattVoltageStepOffset;
+            } else if (sysBattDataStructVersion == 2) {
+                EmAliasSysBatteryDataStructV2<PAS> sysBatteryDataV2(sysBatteryDataP);
+
+                for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV2.sysBattVoltageCurve[i];
+                sysBattStepsPerVolt = sysBatteryDataV2.sysBattStepsPerVolt;
+                sysBattVoltageStepOffset = sysBatteryDataV2.sysBattVoltageStepOffset;
+            } else if (sysBattDataStructVersion == 3) {
+                EmAliasSysBatteryDataStructV3<PAS> sysBatteryDataV3(sysBatteryDataP);
+
+                for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV3.sysBattVoltageCurve[i];
+                sysBattStepsPerVolt = sysBatteryDataV3.sysBattStepsPerVolt;
+                sysBattVoltageStepOffset = sysBatteryDataV3.sysBattVoltageStepOffset;
+            } else {
+                EmAssert(false);
+            }
+
+            count = BatteryCount(curve, sysBattStepsPerVolt, sysBattVoltageStepOffset,
+                                 gBattery.Percent(), ads7846);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 uint16 EmSPISlaveADS784x::DoExchange(uint16 control, uint16 data) {
     PRINTF("");
     PRINTF("EmSPISlaveADS784x::DoExchange");
@@ -353,57 +405,7 @@ void EmSPISlaveADS784x::ProcessCommand(uint8 command) {
                     read sysBattVoltageCurve[10].
             */
 
-            CEnableFullAccess munge;
-
-            // Get a pointer to the system battery globals and determine
-            // what version table we're using.
-
-            emuptr sysBatteryDataP = EmLowMem_GetGlobal(sysBatteryDataP);
-
-            if (sysBatteryDataP) {
-                EmAliasSysBatteryDataStructV1<PAS> sysBatteryData(sysBatteryDataP);
-
-                UInt16 sysBattDataStructVersion = sysBatteryData.sysBattDataStructVersion;
-
-                if (sysBattDataStructVersion <= 3) {
-                    uint16_t curve[11] = {};
-                    UInt16 sysBattStepsPerVolt = 0;
-                    Int16 sysBattVoltageStepOffset = 0;
-
-                    // Fill out the above variables from the system battery globals,
-                    // sorting out table version differences.
-
-                    if (sysBattDataStructVersion == 1) {
-                        EmAliasSysBatteryDataStructV1<PAS> sysBatteryDataV1(sysBatteryDataP);
-
-                        for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV1.sysBattVoltageCurve[i];
-                        sysBattStepsPerVolt = sysBatteryDataV1.sysBattStepsPerVolt;
-                        sysBattVoltageStepOffset = sysBatteryDataV1.sysBattVoltageStepOffset;
-                    } else if (sysBattDataStructVersion == 2) {
-                        EmAliasSysBatteryDataStructV2<PAS> sysBatteryDataV2(sysBatteryDataP);
-
-                        for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV2.sysBattVoltageCurve[i];
-                        sysBattStepsPerVolt = sysBatteryDataV2.sysBattStepsPerVolt;
-                        sysBattVoltageStepOffset = sysBatteryDataV2.sysBattVoltageStepOffset;
-                    } else if (sysBattDataStructVersion == 3) {
-                        EmAliasSysBatteryDataStructV3<PAS> sysBatteryDataV3(sysBatteryDataP);
-
-                        for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV3.sysBattVoltageCurve[i];
-                        sysBattStepsPerVolt = sysBatteryDataV3.sysBattStepsPerVolt;
-                        sysBattVoltageStepOffset = sysBatteryDataV3.sysBattVoltageStepOffset;
-                    } else {
-                        EmAssert(false);
-                    }
-
-                    result = BatteryCount(curve, sysBattStepsPerVolt, sysBattVoltageStepOffset,
-                                          gBattery.Percent(),
-                                          fChannelUse[channel] == kChannelBattery7846);
-                } else {
-                    result = 0x0FFF;
-                }
-            } else {
-                result = 0x0FFF;
-            }
+            if (!TableBatteryCount(fChannelUse[channel] == kChannelBattery7846, result)) result = 0x0FFF;
 
             PRINTF("result = 0x%04X", result);
             break;

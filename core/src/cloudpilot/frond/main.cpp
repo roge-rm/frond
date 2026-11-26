@@ -290,6 +290,7 @@ string fourCc(uint32_t value) {
 // The Cloudpilot device ID for a 68k profile.
 const char* cloudpilotDevice(const DeviceProfile5& profile) {
     switch (profile.deviceType) {
+        case deviceTypePalmIII: return "PalmIII";
         case deviceTypeIIIx: return "PalmIIIx";
         case deviceTypeIIIe: return "PalmIIIe";
         case deviceTypeIIIxe: return "PalmIIIxe";

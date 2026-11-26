@@ -20,6 +20,8 @@
 #include "EmRegs.h"            // EmRegs
 #include "EmUARTDragonball.h"  // EmUARTDragonball::State
 
+class EmSPISlave;
+
 class EmRegs328 : public EmRegs, public EmHALHandler {
    public:
     EmRegs328(void);
@@ -75,6 +77,9 @@ class EmRegs328 : public EmRegs, public EmHALHandler {
     virtual void SetUARTSync(bool sync);
 
    protected:
+    // Whatever answers on SPIM right now; none by default.
+    virtual EmSPISlave* GetSPISlave(void);
+
     virtual uint8 GetKeyBits(void);
     virtual uint16 ButtonToBits(ButtonEvent::Button btn);
 
