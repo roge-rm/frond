@@ -385,7 +385,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             }
             "state" -> sendTo(c, snapshot())
             "rename" -> {
-                val name = op.optString("name").trim().take(64)
+                val name = LinkWire.name64(op.optString("name").trim())
                 if (name.isNotEmpty()) store.setName(name)
             }
             "peer-rename", "peer-address", "forget" -> {
@@ -393,7 +393,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                 store.find(hex) ?: return
                 when (op.optString("op")) {
                     "peer-rename" -> {
-                        val name = op.optString("name").trim().take(64)
+                        val name = LinkWire.name64(op.optString("name").trim())
                         if (name.isNotEmpty()) store.update(hex) { it.copy(name = name) }
                     }
                     "peer-address" -> {

@@ -32,6 +32,13 @@ class RelayAddressTest {
         assertNull(UsbLink.address("a host:5030"))
         assertNull(UsbLink.address("[]:5030"))
         assertNull(UsbLink.address("[fe80::1]5030"))
+        // Stray brackets (found by RelayAddressFuzzTest): the host wouldn't read back from hostPort.
+        assertNull(UsbLink.address("[[fe80::1]:5030"))
+        assertNull(UsbLink.address("[fe80[::1]:5030"))
+        assertNull(UsbLink.address("[fe80::1]]:5030"))
+        assertNull(UsbLink.address("desk]:5030"))
+        assertNull(UsbLink.address("desk[1]"))
+        assertNull(UsbLink.address("desk\u0000:5030"))
     }
 
     @Test

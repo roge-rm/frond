@@ -87,7 +87,7 @@ class LinkStore(val folder: File, private val keys: Keys = NativeKeys) {
         identity = readIdentity(folder) ?: run {
             val bad = File(folder, "identity.json")
             if (bad.exists() && !bad.renameTo(File(folder, "identity.json.bad"))) bad.delete()
-            Identity(keys.randomId(), defaultName.ifBlank { "Frond" }.take(64), keys.newSecret(), LinkWire.DEFAULT_PORT).also {
+            Identity(keys.randomId(), LinkWire.name64(defaultName.ifBlank { "Frond" }), keys.newSecret(), LinkWire.DEFAULT_PORT).also {
                 if (!saveIdentity(it)) { close(); return "Couldn't save the identity." }
             }
         }
@@ -176,7 +176,7 @@ class LinkStore(val folder: File, private val keys: Keys = NativeKeys) {
             val id = LinkWire.unhex(o.optString("id"), 16)
             val secret = LinkWire.unhex(o.optString("secret"), 32)
             if (o.optInt("version") != 1 || id == null || secret == null) null
-            else Identity(id, o.optString("name"), secret, o.optInt("port", LinkWire.DEFAULT_PORT))
+            else Identity(id, o.optString("name"), secret, o.optInt("port", LinkWire.DEFAULT_PORT).takeIf { it in 0..65535 } ?: LinkWire.DEFAULT_PORT)
         } catch (e: Exception) {
             null
         }
@@ -197,7 +197,7 @@ class LinkStore(val folder: File, private val keys: Keys = NativeKeys) {
                 val peerName = e.optString("peerName")
                 list += Peer(
                     id = id, name = e.optString("name").ifEmpty { peerName }, peerName = peerName, key = key,
-                    address = e.optString("address"), lastHost = e.optString("lastHost"), lastPort = e.optInt("lastPort"),
+                    address = e.optString("address"), lastHost = e.optString("lastHost"), lastPort = e.optInt("lastPort").takeIf { it in 0..65535 } ?: 0,
                     paired = e.optBoolean("paired", true), lastSeen = e.optLong("lastSeen"),
                     bluetoothRadio = if (e.optString("bluetoothRadio", "here") == "there") "there" else "here",
                     bluetoothRadioAt = e.optDouble("bluetoothRadioAt", 0.0).let { if (it.isNaN()) 0L else it.toLong() }, keyChanged = e.optBoolean("keyChanged", false),

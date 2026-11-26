@@ -468,7 +468,10 @@ abstract class NetRelay(
         // HOST:PORT, [IPv6]:PORT, or a host alone for defaultPort. Null when it can't be used.
         fun address(text: String, defaultPort: Int): Pair<String, Int>? {
             val t = text.trim()
-            if (t.isEmpty() || t.any { it.isWhitespace() }) return null
+            if (t.isEmpty() || t.any { it.isWhitespace() || it.isISOControl() }) return null
+            // Brackets only go round a whole IPv6 host, so hostPort's text reads back the same.
+            val brackets = if (t.startsWith("[")) 1 else 0
+            if (t.count { it == '[' } != brackets || t.count { it == ']' } != brackets) return null
             if (t.startsWith("[")) {
                 val close = t.indexOf(']')
                 if (close < 2) return null
