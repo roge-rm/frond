@@ -233,7 +233,7 @@ void usage() {
             "                 [--controller-map KEY:BUTTON,...|none]\n"
             "                 [--pa1-trace NEW_CSV (T415 development)]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem|ppp] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
-            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
+            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer|sync] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
@@ -1339,7 +1339,7 @@ class Runner {
             }
             if (link == &serialLink && (serialTransport->ModemMode() || serialTransport->DirectMode() || serialTransport->KeyboardMode()))
                 cout << name << ": " << serialTransport->Describe() << endl;
-            else if (link == &irLink && (irTransport->PhoneMode() || irTransport->PrinterMode())) cout << name << ": " << irTransport->Describe() << endl;
+            else if (link == &irLink && (irTransport->PeerMode())) cout << name << ": " << irTransport->Describe() << endl;
             else if (link->GetKind() != HostLink68k::Kind::off) cout << name << ": " << link->Describe() << endl;
         }
         if (options.usb != "off") {
@@ -1440,6 +1440,15 @@ class Runner {
             irLink.Close();
             return true;
         }
+        if (mode == "sync") {
+            if (!RomHasIrComm()) {
+                error = "IR HotSync needs Palm OS 3.3 or later";
+                return false;
+            }
+            irTransport->SetSyncMode(true);
+            irLink.Close();
+            return true;
+        }
         if (mode == "phone") {
             if (!profile->capabilities.irPhone) {
                 error = string(profile->displayName) + " has no infrared phone";
@@ -1457,11 +1466,12 @@ class Runner {
         uint16_t port;
         string path;
         if (!HostLink68k::Parse(mode, kind, port, &path) || kind == HostLink68k::Kind::syncManager) {
-            error = "use off, pty, tcp:PORT, unix:PATH, phone or printer";
+            error = "use off, pty, tcp:PORT, unix:PATH, phone, printer or sync";
             return false;
         }
         irTransport->SetPhoneMode(false, error);
         irTransport->SetPrinterMode(false);
+        irTransport->SetSyncMode(false);
         return irLink.Open(kind, port, error, path);
     }
 
@@ -1476,7 +1486,7 @@ class Runner {
     }
 
     string InfraredState() const {
-        return irTransport->PhoneMode() || irTransport->PrinterMode() ? irTransport->Describe()
+        return irTransport->PeerMode() ? irTransport->Describe()
                                                                       : LinkState(irLink, irTransport->Host());
     }
 
@@ -1763,7 +1773,7 @@ class Runner {
     void ServiceLinks() {
         if (serialLink.GetKind() == HostLink68k::Kind::off && irLink.GetKind() == HostLink68k::Kind::off &&
             !serialTransport->ModemMode() && !serialTransport->DirectMode() && !serialTransport->KeyboardMode() &&
-            !irTransport->PhoneMode() && !irTransport->PrinterMode())
+            !irTransport->PeerMode())
             return;
         const bool on = gSession->IsPowerOn();
         irLink.SetAsleep(!on);
@@ -2174,7 +2184,7 @@ class Runner {
             const bool serial = command == "serial-mode";
             string mode, error;
             if (!(words >> mode))
-                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|sync|modem|ppp|keyboard" : "|phone|printer") << endl);
+                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|sync|modem|ppp|keyboard" : "|phone|printer|sync") << endl);
             if (serial ? !SetSerial(mode, error) : !SetInfrared(mode, error))
                 return void(cout << (serial ? "serial: " : "infrared: ") << "error " << error << endl);
             cout << (serial ? "serial: " + SerialState() : "infrared: " + InfraredState()) << endl;
@@ -2188,7 +2198,7 @@ class Runner {
         } else if (command == "irda-state") {
             cout << "infrared: " << InfraredState() << endl;
         } else if (command == "irda-stats") {
-            cout << "infrared: " << (irTransport->PhoneMode() || irTransport->PrinterMode() ? irTransport->Stats() : "off") << endl;
+            cout << "infrared: " << (irTransport->PeerMode() ? irTransport->Stats() : "off") << endl;
         } else if (command == "keyboard-down" || command == "keyboard-up") {
             // The Palm Portable Keyboard key for a host key by SDL scancode name, quoted if it has a space.
             string name;
@@ -2500,7 +2510,7 @@ class Runner {
     }
 
     string InfraredDescription() const {
-        return irTransport->PhoneMode() || irTransport->PrinterMode() ? irTransport->Describe()
+        return irTransport->PeerMode() ? irTransport->Describe()
                                                                       : LinkDescription(irLink, infraredError);
     }
 
@@ -2853,13 +2863,14 @@ class Runner {
                 if (!SetInfrared(argument, infraredError)) return {false, "infrared", infraredError};
                 return {true, "infrared", InfraredDescription()};
             }
-            if (!serial && argument == "printer") {
+            if (!serial && (argument == "printer" || argument == "sync")) {
                 infraredError.clear();
+                if (argument == "sync" && !RomHasIrComm()) return {false, "unsupported", "IR HotSync needs Palm OS 3.3 or later."};
                 if (!SetInfrared(argument, infraredError)) return {false, "infrared", infraredError};
                 return {true, "infrared", InfraredDescription()};
             }
             if (!HostLink68k::Parse(argument, kind, port, &path) || (!serial && kind == HostLink68k::Kind::syncManager))
-                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH, sync, modem, ppp or keyboard." : "Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
+                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH, sync, modem, ppp or keyboard." : "Use off, pty, tcp:PORT, unix:PATH, phone, printer or sync."};
             HostLink68k& link = serial ? serialLink : irLink;
             string& error = serial ? serialError : infraredError;
             error.clear();
@@ -2868,6 +2879,7 @@ class Runner {
             } else {
                 irTransport->SetPhoneMode(false, error);
                 irTransport->SetPrinterMode(false);
+                irTransport->SetSyncMode(false);
                 // A failed open leaves the link off, and its state shows why.
                 if (!link.Open(kind, port, error, path)) return {false, "infrared", error};
             }
@@ -2882,7 +2894,7 @@ class Runner {
             return {true, "modem-sync", modemSyncLink.Describe()};
         }
         if (command == "irda-stats") {
-            if (irTransport->PhoneMode() || irTransport->PrinterMode()) return {true, "infrared", irTransport->Stats()};
+            if (irTransport->PeerMode()) return {true, "infrared", irTransport->Stats()};
             return {true, "infrared", "rx=" + to_string(irLink.Received()) + " tx=" + to_string(irLink.Sent()) +
                                           " port=" + (irTransport->Host().IsOpen() ? "open" : "closed")};
         }
@@ -3204,6 +3216,10 @@ class Runner {
         if (irTransport->PhoneMode() && !RomHasIrComm()) {
             irTransport->SetPhoneMode(false, infraredError);
             infraredError = "the infrared phone needs Palm OS 3.3 or later";
+        }
+        if (irTransport->SyncMode() && !RomHasIrComm()) {
+            irTransport->SetSyncMode(false);
+            infraredError = "IR HotSync needs Palm OS 3.3 or later";
         }
         cout << "loaded session " << path << endl;
     }
@@ -4114,8 +4130,8 @@ bool parseOptions(int argc, char** argv, Options& options) {
             uint16_t port;
             string path;
             if (!v || (!(arg == "--serial" && (string(v) == "modem" || string(v) == "ppp" || string(v) == "keyboard")) &&
-                       !(arg == "--irda" && (string(v) == "phone" || string(v) == "printer")) &&
-                       (!HostLink68k::Parse(v, kind, port, &path) || (arg == "--irda" && kind == HostLink68k::Kind::syncManager))))
+                       !(arg == "--irda" && (string(v) == "phone" || string(v) == "printer" || string(v) == "sync")) &&
+                       !HostLink68k::Parse(v, kind, port, &path)))
                 return false;
             (arg == "--serial" ? options.serial : options.irda) = v;
         } else if (arg == "--sync-network") {

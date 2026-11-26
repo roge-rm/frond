@@ -14,11 +14,12 @@
 #include "IrComm.h"
 #include "IrLap.h"
 #include "IrLmp.h"
+#include "IrPeer.h"
 #include "modem/HayesModem.h"
 
 namespace frondIr {
 
-class IrPhone : private IrCommPort {
+class IrPhone : public IrPeer, private IrCommPort {
    public:
     struct Options {
         IrLap::Options lap;
@@ -28,13 +29,13 @@ class IrPhone : private IrCommPort {
     explicit IrPhone(frondModem::ModemLine& line);
     IrPhone(frondModem::ModemLine& line, Options options);
 
-    void Write(const uint8_t* data, size_t size, uint64_t now) { lap.Receive(data, size, now); }
-    size_t Read(uint8_t* data, size_t max, uint64_t now) { return lap.Read(data, max, now); }
-    size_t Available(uint64_t now) const { return lap.Available(now); }
-    uint64_t ReadyAt() const { return lap.ReadyAt(); }
-    void Service(uint64_t now);
+    void Write(const uint8_t* data, size_t size, uint64_t now) override { lap.Receive(data, size, now); }
+    size_t Read(uint8_t* data, size_t max, uint64_t now) override { return lap.Read(data, max, now); }
+    size_t Available(uint64_t now) const override { return lap.Available(now); }
+    uint64_t ReadyAt() const override { return lap.ReadyAt(); }
+    void Service(uint64_t now) override;
     // After a session load: no link, no call.
-    void Drop(uint64_t now) { lap.Drop(now); }
+    void Drop(uint64_t now) override { lap.Drop(now); }
     // For a session save: the modem's settings while a call is up or being dialled, or empty.
     std::string SavedCall() const { return modem.SavedCall(); }
     // After loading a session saved mid-call: the call has dropped. When the guest next opens
@@ -42,9 +43,9 @@ class IrPhone : private IrCommPort {
     // carry a CD drop. False, and nothing kept, for text SavedCall didn't write.
     bool CallDropped(const std::string& saved);
     // phone idle, phone linked (IrLAP up), phone dialling or phone online SPEED.
-    std::string Describe() const;
+    std::string Describe() const override;
 
-    const IrLap& Lap() const { return lap; }
+    const IrLap& Lap() const override { return lap; }
     const IrComm& Comm() const { return comm; }
     const IasServer& Ias() const { return ias; }
     const frondModem::HayesModem& Modem() const { return modem; }

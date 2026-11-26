@@ -2,8 +2,8 @@
 #define FROND_SYNC_MANAGER_H
 
 // Frond's built-in HotSync desktop. A core process has one manager; its HotSync ports
-// (serial, USB, the modem's HotSync number, Network HotSync through the virtual router) set
-// to "sync" each run an endpoint, a thread that waits for the handheld to start a HotSync and
+// (serial, USB, the modem's HotSync number, Network HotSync through the virtual router, the IR
+// port's HotSync PC) set to "sync" each run an endpoint, a thread that waits for the handheld to start a HotSync and
 // runs it against the assigned profile. The frontends read Status() through the cores'
 // sync-state command and start a sync with sync-start, which presses the device's HotSync
 // button with a port routed here. Thread-safe.
@@ -22,7 +22,7 @@
 
 namespace frondSync {
 
-enum class Transport { serial, usb, modem, network };
+enum class Transport { serial, usb, modem, network, infrared };
 const char* TransportName(Transport transport);
 
 struct SyncOptions {

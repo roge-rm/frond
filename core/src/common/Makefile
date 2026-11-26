@@ -40,6 +40,7 @@ SOURCE_CXX = 						\
 	ir/IrComm.cpp					\
 	ir/IrPhone.cpp				\
 	ir/IrPrinter.cpp			\
+	ir/IrSync.cpp			\
 	sync/PimRecord.cpp			\
 	sync/PimSync.cpp				\
 	sync/PalmDb.cpp				\

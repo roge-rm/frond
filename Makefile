@@ -837,7 +837,7 @@ test-rndis-host: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 test: test-ir-peer
 test-ir-peer: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/ir-peer.cpp \
-		$(COMMON_LIB) -o $(OBJ_ROOT)/test-ir-peer
+		$(COMMON_LIB) -lpthread -o $(OBJ_ROOT)/test-ir-peer
 	$(OBJ_ROOT)/test-ir-peer
 
 .PHONY: test-ir-printer
