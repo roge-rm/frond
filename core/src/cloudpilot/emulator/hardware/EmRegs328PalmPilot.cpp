@@ -15,8 +15,9 @@
 
 #include "EmCommon.h"
 #include "EmRegs328Prv.h"
-#include "EmROMReader.h"
-#include "EmSession.h"  // GetDevice, GetRomImage
+#include "EmSession.h"  // GetDevice
+#include "EmBattery.h"  // gBattery
+#include "EmSPISlaveADS784x.h"
 #include "PalmPack.h"
 #define NON_PORTABLE
 #include "328Jerry/IncsPrv/HardwareTD1.h"  // hwrTD1PortFLCDEnableOn, etc.
@@ -54,20 +55,60 @@ Bool EmRegs328PalmPilot::GetLineDriverState(EmUARTDeviceType type) {
     return false;
 }
 
-// The Palm III on OS 3.x. OS 4.1's Rocky HAL reads the battery from the board, which isn't modelled,
-// so with the Rocky ID it turns itself off at once; it stays on the PalmPilot path.
+// The Palm III (Rocky board ID). Other 328 boards are left as they were.
 bool EmRegs328PalmPilot::RunsIdDetect() {
-    if (fIdDetect < 0) {
-        fIdDetect = 0;
-        if (gSession && gSession->GetDevice().HardwareID() == hwrMiscFlagIDRocky) {
-            const auto rom = gSession->GetRomImage();
-            EmROMReader reader(rom.second, rom.first);
-            int major = 0, minor, fix, stage, build;
-            if (reader.Read()) reader.Version(major, minor, fix, stage, build);
-            fIdDetect = major == 3;
-        }
-    }
+    if (fIdDetect < 0 && gSession)
+        fIdDetect = gSession->GetDevice().HardwareID() == hwrMiscFlagIDRocky ? 1 : 0;
     return fIdDetect == 1;
+}
+
+namespace {
+    // The Palm III's ADS7843: channel 2 is the battery. OS 3.0 has no sysBatteryData; its SysBatteryInfo takes
+    // 78 steps per volt and reads its alkaline cells as 1.60 V empty to 3.00 V full, so the setting follows that line.
+    class PalmIIIADC : public EmSPISlaveADS784x {
+       public:
+        PalmIIIADC()
+            : EmSPISlaveADS784x(kChannelUnused, kChannelPenY, kChannelVirtualInput, kChannelUnused,
+                                kChannelUnused, kChannelPenX, kChannelDockSerial, kChannelUnused) {}
+
+        uint16 ReadVirtualInput(unsigned) const override {
+            uint16 count;
+            if (TableBatteryCount(false, count)) return count;
+            const unsigned centivolts = 160 + 140 * gBattery.Percent() / 100;
+            return ((centivolts * 78 + 50) / 100) << 4;
+        }
+    };
+}  // namespace
+
+EmRegs328PalmPilot::EmRegs328PalmPilot() : fSPISlaveADC(new PalmIIIADC()) {}
+
+EmRegs328PalmPilot::~EmRegs328PalmPilot() = default;
+
+void EmRegs328PalmPilot::Reset(Bool hardwareReset) {
+    EmRegs328::Reset(hardwareReset);
+    if (hardwareReset) fSPISlaveADC->Reset();
+}
+
+void EmRegs328PalmPilot::Save(Savestate<ChunkType>& savestate) {
+    EmRegs328::Save(savestate);
+    if (RunsIdDetect()) fSPISlaveADC->Save(savestate);
+}
+
+void EmRegs328PalmPilot::Save(SavestateProbe<ChunkType>& savestate) {
+    EmRegs328::Save(savestate);
+    if (RunsIdDetect()) fSPISlaveADC->Save(savestate);
+}
+
+void EmRegs328PalmPilot::Load(SavestateLoader<ChunkType>& loader) {
+    EmRegs328::Load(loader);
+    if (RunsIdDetect()) fSPISlaveADC->Load(loader);
+}
+
+// The Palm III has a Burr-Brown ADS7843 on SPIM, selected by PF7 low. The HAL reads the battery from it;
+// pen positions come in through the pen patches. Other 328 boards keep the old pass-through.
+EmSPISlave* EmRegs328PalmPilot::GetSPISlave() {
+    if (RunsIdDetect() && (READ_REGISTER(portFData) & 0x80) == 0) return fSPISlaveADC.get();
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------

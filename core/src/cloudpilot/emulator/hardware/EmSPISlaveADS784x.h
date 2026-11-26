@@ -65,6 +65,9 @@ class EmSPISlaveADS784x : public EmSPISlave {
     static uint16 BatteryCount(const uint16_t (&curve)[11], UInt16 sysBattStepsPerVolt,
                                Int16 sysBattVoltageStepOffset, unsigned percent, bool ads7846);
 
+    // BatteryCount for the battery setting's level from the ROM's sysBatteryData. False when the ROM has none.
+    static bool TableBatteryCount(bool ads7846, uint16& count);
+
    protected:
     virtual uint16 ReadVirtualInput(unsigned channel) const { return 0; }
     void ProcessCommand(uint8);

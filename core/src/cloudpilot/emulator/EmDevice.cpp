@@ -1789,7 +1789,11 @@ bool EmDevice::IsClie() const {
     }
 }
 
-bool EmDevice::NeedsBatteryPatch() const { return Supports68328() || IsClie(); }
+bool EmDevice::NeedsBatteryPatch() const {
+    // The Palm III's battery ADC is modelled, so its ROM reads the level itself.
+    if (fDeviceID == kDevicePalmIII) return false;
+    return Supports68328() || IsClie();
+}
 
 bool EmDevice::BatteryChargingSupported() const {
     // Two AAA cells; the cradle doesn't charge them.
