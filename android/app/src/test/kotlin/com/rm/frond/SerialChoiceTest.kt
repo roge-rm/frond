@@ -52,6 +52,42 @@ class SerialChoiceTest {
         if (rx1950 != null) assertEquals("off", MachineSettings(infrared = choice).forDevice(iii, rx1950).infrared)
     }
 
+    @Test fun irHotSyncOnInfraredOnlyBoards() {
+        // The Zire 72 and TG50 have no cradle HotSync in Frond, but sync over infrared from the HotSync app.
+        val tg50 = requireNotNull(Device.byId("sony-clie-tg50"))
+        for (device in listOf(Device.ZIRE72, tg50)) {
+            assertEquals(device.id, SyncProtocol.HOT_SYNC, SyncProtocol.forDevice(device))
+            assertEquals(device.id, false, SyncProtocol.cradleHotSync(device))
+            assertEquals(device.id, false, SyncProtocol.startsFromBar(device))
+            assertEquals(device.id, false, device.supportsNetworkHotSync())
+            assertEquals(device.id, true, InfraredChoice.offerIrSync(device, MachineSettings()))
+        }
+        assertEquals(true, SyncProtocol.cradleHotSync(Device.TX) && SyncProtocol.startsFromBar(Device.TX))
+        // The Dana's ROM has no IR connection for HotSync.
+        assertEquals(null, SyncProtocol.forDevice(requireNotNull(Device.byId("alphasmart-dana"))))
+        val choice = InfraredChoice.SYNC_MANAGER
+        assertEquals(choice, MachineSettings(infrared = choice).forDevice(Device.TX, Device.ZIRE72).infrared)
+        // Serial Sync Manager stays on cradle HotSync devices.
+        assertEquals("off", MachineSettings(serial = choice).forDevice(Device.TX, tg50).serial)
+        assertEquals(choice, MachineSettings(serial = choice).forDevice(Device.TX, Device.E2).serial)
+    }
+
+    @Test fun irHotSyncFollowsTheRomTheMachineLastRan() {
+        val iii = requireNotNull(Device.byId("palm-iii"))
+        assertEquals(true, InfraredChoice.offerIrSync(iii, MachineSettings()))
+        assertEquals(true, InfraredChoice.offerIrSync(iii, MachineSettings(irSync = true)))
+        assertEquals(false, InfraredChoice.offerIrSync(iii, MachineSettings(irSync = false)))
+        for (value in listOf(null, true, false)) {
+            val s = MachineSettings(irSync = value)
+            assertEquals(s, MachineSettings.from(s.json()))
+        }
+        assertEquals(false, MachineSettings().json().has("irSync"))
+        // Another device's ROM isn't known yet.
+        val iiix = requireNotNull(Device.byId("palm-iiix"))
+        assertEquals(null, MachineSettings(irSync = false).forDevice(iii, iiix).irSync)
+        assertEquals(false, MachineSettings(irSync = false).forDevice(iii, iii).irSync)
+    }
+
     @Test fun portableKeyboardIsOnlyOfferedWhereTheDeviceTakesIt() {
         val keyboard = InfraredChoice.KEYBOARD
         assertEquals(keyboard, MachineSettings.from(MachineSettings(serial = keyboard).json()).serial)

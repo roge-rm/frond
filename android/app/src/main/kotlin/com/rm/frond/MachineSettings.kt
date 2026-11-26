@@ -152,6 +152,9 @@ data class MachineSettings(
     val midiDevice: String = "",
     // A device with a voice or record key: the phone key held to record.
     val recordKey: RecordKey = RecordKey.NONE,
+    // 68k: whether the machine's ROM takes IR HotSync, as frond-68k said when it last ran (irda-sync-support); null
+    // until it has run. The home settings can't ask the core, so they hide Infrared Sync Manager on false.
+    val irSync: Boolean? = null,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
@@ -167,7 +170,8 @@ data class MachineSettings(
         if (musicOutput != MusicOutput.FM) it.put("musicOutput", musicOutput.arg)
         if (soundFont.isNotEmpty()) it.put("soundFont", soundFont)
         if (midiDevice.isNotEmpty()) it.put("midiDevice", midiDevice)
-        if (recordKey != RecordKey.NONE) it.put("recordKey", recordKey.arg) }
+        if (recordKey != RecordKey.NONE) it.put("recordKey", recordKey.arg)
+        irSync?.let { on -> it.put("irSync", on) } }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -235,11 +239,13 @@ data class MachineSettings(
             engine = if (engine == from.defaultEngine) to.defaultEngine else engine,
             serial = when {
                 serial == InfraredChoice.PPP && !(to.runs68k && to.serialPort) -> InfraredChoice.OFF
+                serial == InfraredChoice.SYNC_MANAGER && !(to.serialPort && SyncProtocol.cradleHotSync(to)) -> InfraredChoice.OFF
                 serial == InfraredChoice.KEYBOARD && !to.serialKeyboard -> InfraredChoice.OFF
                 else -> serial
             },
             infrared = if (infrared == InfraredChoice.SYNC_MANAGER && !(to.infrared && SyncProtocol.forDevice(to) == SyncProtocol.HOT_SYNC))
                 InfraredChoice.OFF else infrared,
+            irSync = if (from == to) irSync else null,
         )
 
     companion object {
@@ -290,6 +296,7 @@ data class MachineSettings(
                 soundFont = json.optString("soundFont", ""),
                 midiDevice = json.optString("midiDevice", ""),
                 recordKey = RecordKey.byArg(json.optString("recordKey")),
+                irSync = if (json.has("irSync")) json.optBoolean("irSync") else fallback.irSync,
             )
         }
     }

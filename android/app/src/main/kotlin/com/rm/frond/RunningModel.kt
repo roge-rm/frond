@@ -989,14 +989,14 @@ class RunningModel(
         private set
 
     fun acceptSyncRoute(port: String, state: String) {
-        if (SyncProtocol.forDevice(device) != SyncProtocol.HOT_SYNC) return
+        if (!SyncProtocol.cradleHotSync(device)) return
         val attached = state == "sync" || state.startsWith("sync ")
         if (port == "serial") serialSync = attached
         if (port == "usb") usbSync = attached
     }
 
     fun readSyncPorts() {
-        if (SyncProtocol.forDevice(device) != SyncProtocol.HOT_SYNC) return
+        if (!SyncProtocol.cradleHotSync(device)) return
         val l = link ?: return
         activity.lifecycleScope.launch {
             for ((port, supported) in listOf("serial" to device.serialPort, "usb" to device.usb)) {

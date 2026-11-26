@@ -462,6 +462,11 @@ object InfraredChoice {
             if (phone) it.add(1, PHONE to "Mobile phone")
         }
 
+    // Infrared Sync Manager in a machine's settings: a HotSync device with infrared, unless frond-68k said the ROM
+    // can't (before Palm OS 3.3) when the machine last ran.
+    fun offerIrSync(device: Device, settings: MachineSettings): Boolean =
+        device.infrared && SyncProtocol.forDevice(device) == SyncProtocol.HOT_SYNC && settings.irSync != false
+
     // A link to a connection that's gone acts as Off.
     fun active(value: String, paired: List<Pair<String, String>>): String? = linkId(value)?.takeIf { id -> paired.any { it.first == id } }
 

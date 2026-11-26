@@ -340,7 +340,7 @@ open class FrondActivity : SDLActivity() {
         IrLink.syncWorks = true
         if (launchDevice().runs68k && launchDevice().infrared && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC &&
             machineSettings.infrared != InfraredChoice.SYNC_MANAGER)
-            link.whenConnected { Thread { IrLink.checkSync(link) }.apply { isDaemon = true }.start() }
+            link.whenConnected { Thread { checkIrSync() }.apply { isDaemon = true }.start() }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
         val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
         val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
@@ -350,7 +350,7 @@ open class FrondActivity : SDLActivity() {
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
         val serialPpp = machineSettings.serial == InfraredChoice.PPP && launchDevice().runs68k && launchDevice().serialPort
         val serialSync = machineSettings.serial == InfraredChoice.SYNC_MANAGER &&
-            launchDevice().serialPort && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
+            launchDevice().serialPort && SyncProtocol.cradleHotSync(launchDevice())
         val serialWired = InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort
         val serialKeyboard = machineSettings.serial == InfraredChoice.KEYBOARD && launchDevice().serialKeyboard
         val serialLink = serialWired || serialModem || serialPpp || serialSync || serialKeyboard
@@ -361,7 +361,7 @@ open class FrondActivity : SDLActivity() {
                 Thread({
                     val session = Sessions.forPath(applicationContext, sessionPath)
                     val name = session?.name ?: launchDevice().label
-                    if (infraredSync && launchDevice().runs68k && !IrLink.checkSync(link)) Log.w(TAG, "infrared: IR HotSync needs Palm OS 3.3 or later")
+                    if (infraredSync && launchDevice().runs68k && !checkIrSync()) Log.w(TAG, "infrared: IR HotSync needs Palm OS 3.3 or later")
                     else if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
                         ?.let { Log.w(TAG, "infrared: $it") }
                     if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label,
@@ -795,6 +795,19 @@ open class FrondActivity : SDLActivity() {
             padAttached = on
             palmButtons?.padAttached = on
         }
+    }
+
+    // Asks frond-68k whether the ROM takes IR HotSync and keeps the answer in the machine's settings for the
+    // home settings, which can't ask. Runs off the main thread.
+    private fun checkIrSync(): Boolean {
+        val works = IrLink.checkSync(link)
+        if (machineSettings.irSync != works) try {
+            val id = Sessions.forPath(applicationContext, sessionPath)?.id ?: return works
+            Sessions.updateSettings(applicationContext, id) { it.copy(irSync = works) }
+        } catch (e: Exception) {
+            Log.w(TAG, "IR HotSync setting: ${e.message}")
+        }
+        return works
     }
 
     // The pad state the core reports (RunningMenu.gamepadState): the buttons follow it, and an
@@ -1280,6 +1293,7 @@ open class FrondActivity : SDLActivity() {
         bar.recordKey = RunningBar.recordKey(device)
         bar.syncMachine = session?.id
         bar.syncProtocol = session?.let { SyncProtocol.forDevice(device) }
+        bar.syncButton = SyncProtocol.startsFromBar(device)
         val owner = BarOwner().also { it.create() }
         barOwner = owner
         val results = BarResults(this)
@@ -1365,7 +1379,7 @@ open class FrondActivity : SDLActivity() {
     }
 
     private fun startSync() {
-        val protocol = bar.syncProtocol ?: return
+        val protocol = bar.syncProtocol?.takeIf { bar.syncButton } ?: return
         val machine = bar.syncMachine ?: return
         val scope = barOwner?.lifecycleScope ?: return
         if (bar.syncStarting || bar.syncRunning || menuModel?.busy != null || leaving) return

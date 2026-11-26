@@ -94,18 +94,19 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (rows.engine && draft.device.zodiac) MachineDirectStickRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (draft.device.infrared || draft.device.serialPort || draft.device.bluetooth) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
-                val choices = remember(draft.device, draft.settings.infrared) {
+                val choices = remember(draft.device, draft.settings.infrared, draft.settings.irSync) {
                     InfraredChoice.infraredChoices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)), draft.device.irPhone,
-                        sync = SyncProtocol.forDevice(draft.device) == SyncProtocol.HOT_SYNC)
+                        sync = InfraredChoice.offerIrSync(draft.device, draft.settings))
                 }
-                Choice("Infrared", draft.settings.infrared, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
+                val current = draft.settings.infrared.takeIf { value -> choices.any { it.first == value } } ?: InfraredChoice.OFF
+                Choice("Infrared", current, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(infrared = it))
                 }
             }
             if (draft.device.serialPort) {
                 val choices = remember(draft.device, draft.settings.serial) {
                     InfraredChoice.serialChoices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)),
-                        draft.device.modem, SyncProtocol.forDevice(draft.device) == SyncProtocol.HOT_SYNC, ppp = draft.device.runs68k,
+                        draft.device.modem, SyncProtocol.cradleHotSync(draft.device), ppp = draft.device.runs68k,
                         keyboard = draft.device.serialKeyboard)
                 }
                 val current = draft.settings.serial.takeIf { value -> choices.any { it.first == value } } ?: InfraredChoice.OFF
