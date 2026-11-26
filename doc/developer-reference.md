@@ -906,7 +906,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `FROND_ZIRE_EVIDENCE` | Folder those runs write screenshots to. |
 | `FROND_ARM_SESSION` | ARM session for `tests/core-control.py`. Default the palm-tx smoke machine. |
 | `FROND_LINK_PRINT` | `1` makes `make test-link-protocol` print its pinned values instead of only checking them. |
-| `FROND_LINK_ALLOW_NETWORK=1` | Allow incoming desktop Frond links on network interfaces and enable UDP discovery. The default binds TCP to loopback and leaves network discovery off. |
+| `FROND_LINK_ALLOW_NETWORK=1` | Allow incoming desktop Frond links on network interfaces and enable UDP discovery, whatever the Connections setting says (`0` forces it off). Without it the Connections setting decides, off by default: TCP binds to loopback and network discovery is off. |
 | `FROND_LINK_SOCKET`, `FROND_LINK_PORT`, `FROND_LINK_DISCOVERY_PORT`, `FROND_LINK_DISCOVERY_BIND`, `FROND_LINK_BEACON_TO`, `FROND_LINK_IDLE_EXIT_MS`, `FROND_LINK_PAIR_CODE_MS`, `FROND_LINK_HUB` | Link hub hooks for tests: hub socket, TCP port (0 for an ephemeral one), UDP discovery port (0 turns it off), the address the beacon socket binds, host:port beacon targets (comma list) instead of broadcast, idle exit in ms (default 30000), the pairing code's life in ms (default and most 120000) and the hub program a window starts. |
 | `XDG_RUNTIME_DIR` | Holds `frond/` (mode 0700) with the link hub's socket and the cores' link sockets. |
 | `FROND_DESKTOP`, `FROND_IR_PROBE` | `frond-desktop` and the IR probe PRC for `tests/link-irda-cores.py`. Defaults `out/frond-desktop` and a probe built with pilrc and the SDK. |

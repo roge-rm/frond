@@ -24,10 +24,11 @@ sealed class BeamMode {
     data class Listen(val port: Int, val allowNetwork: Boolean = false) : BeamMode()
     data class Connect(val host: String, val port: Int) : BeamMode()
 
-    // Stored as off, listen:PORT, listen-network:PORT or connect:HOST:PORT.
+    // Stored as off, listen-local:PORT, listen-network:PORT or connect:HOST:PORT. listen:PORT is what older
+    // versions saved, when listening took network peers.
     fun encode(): String = when (this) {
         Off -> "off"
-        is Listen -> if (allowNetwork) "listen-network:$port" else "listen:$port"
+        is Listen -> if (allowNetwork) "listen-network:$port" else "listen-local:$port"
         is Connect -> "connect:${NetRelay.hostPort(host, port)}"
     }
 
@@ -35,7 +36,8 @@ sealed class BeamMode {
         fun decode(text: String?): BeamMode? = when {
             text == null -> null
             text == "off" -> Off
-            text.startsWith("listen:") -> NetRelay.port(text.removePrefix("listen:"))?.let { Listen(it) }
+            text.startsWith("listen:") -> NetRelay.port(text.removePrefix("listen:"))?.let { Listen(it, allowNetwork = true) }
+            text.startsWith("listen-local:") -> NetRelay.port(text.removePrefix("listen-local:"))?.let { Listen(it) }
             text.startsWith("listen-network:") -> NetRelay.port(text.removePrefix("listen-network:"))?.let { Listen(it, allowNetwork = true) }
             // Saved modes always carry a port; the 1 never applies.
             text.startsWith("connect:") -> NetRelay.address(text.removePrefix("connect:"), 1)?.let { Connect(it.first, it.second) }

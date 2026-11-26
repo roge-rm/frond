@@ -35,7 +35,8 @@ import com.rm.frond.UsbLink
 
 internal fun relayText(s: NetRelay.Status): String = when (s.phase) {
     NetRelay.Phase.OFF -> s.error?.let { "Off. $it" } ?: "Off"
-    NetRelay.Phase.WAITING -> "Waiting for a peer at ${s.listenAddresses}"
+    NetRelay.Phase.WAITING -> "Waiting for a peer at ${s.listenAddresses}" +
+        if ((s.mode as? BeamMode.Listen)?.allowNetwork == false) ", network connections are off" else ""
     NetRelay.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) }}"
     NetRelay.Phase.CONNECTED -> "Connected to ${s.peer ?: "a peer"}"
     NetRelay.Phase.DISCONNECTED -> s.error ?: "Disconnected"

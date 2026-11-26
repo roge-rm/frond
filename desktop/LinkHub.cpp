@@ -154,11 +154,8 @@ QString Hub::start() {
     bool ok = false;
     const int envPort = qEnvironmentVariableIntValue("FROND_LINK_PORT", &ok);
     const quint16 wantPort = ok ? quint16(envPort) : store.port;
-    allowNetwork = qEnvironmentVariableIntValue("FROND_LINK_ALLOW_NETWORK") == 1;
-    const QHostAddress address(allowNetwork ? QHostAddress::Any : QHostAddress::LocalHost);
-    if (!listener.listen(address, wantPort) && !listener.listen(address, 0))
-        return listener.errorString();
-    if (!allowNetwork) ipv6Listener.listen(QHostAddress::LocalHostIPv6, listener.serverPort());
+    allowNetwork = effectiveNetwork();
+    if (const auto error = listen(wantPort); !error.isEmpty()) return error;
     for (auto* tcp : {&listener, &ipv6Listener}) {
         tcp->setMaxPendingConnections(kMaxPending);
         connect(tcp, &QTcpServer::newConnection, this, [this, tcp] { incoming(*tcp); });
@@ -172,9 +169,8 @@ QString Hub::start() {
         const auto port = quint16(item.section(':', 1).toUInt());
         if (!host.isNull() && port) beaconTargets.push_back({host, port});
     }
-    if (allowNetwork && discoveryPort && !bindTo.isNull() &&
-        udp.bind(bindTo, discoveryPort, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint))
-        connect(&udp, &QUdpSocket::readyRead, this, &Hub::datagrams);
+    discoveryBind = bindTo;
+    bindDiscovery();
     if (const int idle = qEnvironmentVariableIntValue("FROND_LINK_IDLE_EXIT_MS", &ok); ok && idle > 0) idleExitMs = idle;
     // Test hook: a shorter life for the code shown while someone pairs with us.
     if (const int life = qEnvironmentVariableIntValue("FROND_LINK_PAIR_CODE_MS", &ok); ok && life > 0)
@@ -187,6 +183,42 @@ QString Hub::start() {
 }
 
 // ---- Clients ----
+
+// The setting in the store, unless FROND_LINK_ALLOW_NETWORK is set: 1 allows the network, anything else doesn't.
+bool Hub::effectiveNetwork() const {
+    if (qEnvironmentVariableIsSet("FROND_LINK_ALLOW_NETWORK")) return qEnvironmentVariableIntValue("FROND_LINK_ALLOW_NETWORK") == 1;
+    return store.allowNetwork;
+}
+
+QString Hub::listen(quint16 wantPort) {
+    const QHostAddress address(allowNetwork ? QHostAddress::Any : QHostAddress::LocalHost);
+    if (!listener.listen(address, wantPort) && !listener.listen(address, 0)) return listener.errorString();
+    if (!allowNetwork) ipv6Listener.listen(QHostAddress::LocalHostIPv6, listener.serverPort());
+    return {};
+}
+
+void Hub::bindDiscovery() {
+    if (allowNetwork && discoveryPort && !discoveryBind.isNull() &&
+        udp.bind(discoveryBind, discoveryPort, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint) && !udpConnected) {
+        connect(&udp, &QUdpSocket::readyRead, this, &Hub::datagrams);
+        udpConnected = true;
+    }
+}
+
+// Moves the listeners and discovery between loopback and the network without dropping links that are up.
+void Hub::setNetwork(bool on) {
+    store.allowNetwork = on;
+    store.saveIdentity();
+    const bool want = effectiveNetwork();
+    if (want == allowNetwork) return;
+    allowNetwork = want;
+    const auto port = listener.serverPort();
+    listener.close();
+    ipv6Listener.close();
+    udp.close();
+    listen(port);
+    bindDiscovery();
+}
 
 void Hub::newClient() {
     while (auto* s = server.nextPendingConnection()) {
@@ -240,6 +272,8 @@ void Hub::handle(Client* c, const QJsonObject& op) {
         else if (!watchers() && code) endPairRequest("cancelled");
     } else if (type == "state") {
         sendTo(c, snapshot());
+    } else if (type == "network") {
+        setNetwork(op.value("on").toBool());
     } else if (type == "rename") {
         const auto name = op.value("name").toString().trimmed().left(64);
         if (!name.isEmpty()) store.setName(name);
@@ -1246,7 +1280,7 @@ QJsonObject Hub::snapshot() const {
     for (auto it = nearby.begin(); it != nearby.end(); ++it)
         near.append(QJsonObject{{"id", it.key()}, {"name", it->name}, {"address", it->address.toString()}, {"port", int(it->port)}});
     return {{"type", "state"}, {"id", hexId(store.local().id)}, {"name", store.name()}, {"port", int(listener.serverPort())},
-            {"connections", list}, {"nearby", near}, {"local", peerChannels("local")}, {"listen", listenAddresses()}};
+            {"connections", list}, {"nearby", near}, {"local", peerChannels("local")}, {"listen", listenAddresses()}, {"network", allowNetwork}};
 }
 
 void Hub::tick() {

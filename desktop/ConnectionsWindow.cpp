@@ -1,4 +1,5 @@
 #include "ConnectionsWindow.h"
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -103,6 +104,9 @@ ConnectionsWindow::ConnectionsWindow(LinkClient* link, QWidget* parent) : QDialo
     top->addWidget(header, 1);
     top->addWidget(rename);
     layout->addLayout(top);
+    allowNetwork = new QCheckBox(tr("Allow incoming Frond links over the network"), this);
+    allowNetwork->setObjectName("allowNetwork");
+    layout->addWidget(allowNetwork);
     auto heading = [this](const QString& text) {
         auto* label = new QLabel(text, this);
         auto font = label->font();
@@ -150,6 +154,7 @@ ConnectionsWindow::ConnectionsWindow(LinkClient* link, QWidget* parent) : QDialo
         const auto address = QInputDialog::getText(this, tr("Add by address"), tr("Address"), QLineEdit::Normal, {}, &ok).trimmed();
         if (ok && !address.isEmpty()) startPair({{"op", "pair"}, {"address", address}}, address);
     });
+    connect(allowNetwork, &QCheckBox::toggled, this, [this](bool on) { client->send({{"op", "network"}, {"on", on}}); });
     connect(rename, &QPushButton::clicked, this, [this] {
         bool ok = false;
         const auto name = QInputDialog::getText(this, tr("Rename"), tr("Name"), QLineEdit::Normal,
@@ -169,6 +174,11 @@ void ConnectionsWindow::hideEvent(QHideEvent* event) {
     QDialog::hideEvent(event);
 }
 
+static QJsonObject withNetwork(QJsonObject c, bool on) {
+    c.insert("network", on);
+    return c;
+}
+
 QString ConnectionsWindow::status(const QJsonObject& c) {
     if (c.value("keyChanged").toBool()) return tr("Key changed, pair again");
     if (c.value("forgotten").toBool()) return tr("Not paired on %1, pair again").arg(c.value("peerName").toString());
@@ -178,6 +188,7 @@ QString ConnectionsWindow::status(const QJsonObject& c) {
         return text;
     }
     if (!c.value("seen").toString().isEmpty()) return tr("Seen at %1").arg(c.value("seen").toString());
+    if (!c.value("network").toBool(true)) return tr("Not seen, network connections are off");
     return tr("Not seen");
 }
 
@@ -186,6 +197,10 @@ void ConnectionsWindow::showState(const QJsonObject& s) {
     const auto name = tr("This Frond: %1").arg(s.value("name").toString());
     const auto addresses = s.value("listen").toString();
     header->setText(addresses.isEmpty() ? name : name + "\n" + tr("Listening at %1").arg(addresses));
+    {
+        const QSignalBlocker block(allowNetwork);
+        allowNetwork->setChecked(s.value("network").toBool());
+    }
     const auto selected = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
     list->clear();
     auto* local = new QListWidgetItem(marker(!s.value("local").toString().isEmpty(), palette()),
@@ -194,7 +209,7 @@ void ConnectionsWindow::showState(const QJsonObject& s) {
     local->setData(Qt::UserRole, "local");
     for (const auto& value : s.value("connections").toArray()) {
         const auto c = value.toObject();
-        auto* item = new QListWidgetItem(marker(c.value("up").toBool(), palette()), c.value("name").toString() + "\n" + status(c), list);
+        auto* item = new QListWidgetItem(marker(c.value("up").toBool(), palette()), c.value("name").toString() + "\n" + status(withNetwork(c, s.value("network").toBool(true))), list);
         item->setData(Qt::UserRole, c.value("id").toString());
         item->setData(Qt::UserRole + 1, c.value("name").toString());
         item->setData(Qt::UserRole + 2, c.value("address").toString());

@@ -137,6 +137,7 @@ class ConnectionsModel(private val context: Context) {
                     keyChanged = it.optBoolean("keyChanged"), forgotten = it.optBoolean("forgotten"),
                     seen = it.optString("seen"), channels = it.optString("channels"),
                     bluetoothRadio = if (it.optString("bluetoothRadio") == "there") "there" else "here",
+                    network = e.optBoolean("network", true),
                 )
             }
         }

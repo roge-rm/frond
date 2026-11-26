@@ -6202,7 +6202,7 @@ for line in s.makefile('rb'):
             QVERIFY(cw->nearbyEmpty->isVisible() && !cw->pairButton->isEnabled());
             typeInto("Desk");
             cw->rename->click();
-            QTRY_COMPARE_WITH_TIMEOUT(cw->header->text(), QString("This Frond: Desk"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(cw->header->text().startsWith("This Frond: Desk"), 5000);
             // Add by address, then the code Bee shows.
             b.got.clear();
             typeInto("127.0.0.1:" + hb.env.value("FROND_LINK_PORT"));
@@ -8132,7 +8132,56 @@ for line in s.makefile('rb'):
         }
         QUdpSocket udp;
         QVERIFY(udp.bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress));
+        udp.close();
+        // The Connections switch moves the listener to the network and is saved.
+        const auto identity = [&hub] {
+            QFile f(hub.store() + "/identity.json");
+            return f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).object() : QJsonObject();
+        };
+        QVERIFY(!identity().value("network").toBool(true));
+        QVERIFY(!state.value("network").toBool(true));
+        user.client.send({{"op", "network"}, {"on", true}});
+        QTRY_VERIFY_WITH_TIMEOUT(user.last("state").value("network").toBool(), 10000);
+        QVERIFY(identity().value("network").toBool());
+        for (const auto& address : QNetworkInterface::allAddresses()) {
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback())
+                QVERIFY(reaches(address));
+        }
+        QVERIFY(QUdpSocket().bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress) == false);
         killHub(user);
+    }
+
+    // An identity saved before the setting existed keeps network links when it has paired peers.
+    void linkNetworkMigration() {
+        for (const bool paired : {false, true}) {
+            QTemporaryDir dir(QDir::currentPath() + "/build/lkm-XXXXXX");
+            TestHub hub(dir.path(), "m", freePort());
+            {
+                HubUser user(hub);
+                user.client.setSticky("watch", {{"op", "watch"}});
+                QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+                killHub(user);
+            }
+            QFile f(hub.store() + "/identity.json");
+            QVERIFY(f.open(QIODevice::ReadWrite));
+            auto o = QJsonDocument::fromJson(f.readAll()).object();
+            o.remove("network");
+            f.resize(0);
+            f.write(QJsonDocument(o).toJson());
+            f.close();
+            if (paired) {
+                QFile list(hub.store() + "/connections.json");
+                QVERIFY(list.open(QIODevice::WriteOnly));
+                const QString key(64, 'a'), id(32, 'b');
+                list.write(QJsonDocument(QJsonObject{{"version", 1}, {"entries", QJsonArray{QJsonObject{
+                    {"id", id}, {"name", "Old"}, {"key", key}, {"paired", true}}}}}).toJson());
+            }
+            HubUser user(hub);
+            user.client.setSticky("watch", {{"op", "watch"}});
+            QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+            QCOMPARE(user.last("state").value("network").toBool(), paired);
+            killHub(user);
+        }
     }
 
     // Pairing by an IPv6 loopback address.

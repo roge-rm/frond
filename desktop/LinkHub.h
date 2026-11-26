@@ -102,6 +102,10 @@ class Hub : public QObject {
     // TCP
     void incoming(QTcpServer& server);
     QString listenAddresses() const;
+    bool effectiveNetwork() const;
+    QString listen(quint16 wantPort);
+    void bindDiscovery();
+    void setNetwork(bool on);
     Conn* makeConn(QTcpSocket* s, bool outgoing);
     void connInput(Conn* c);
     void afterLink(Conn* c);
@@ -185,6 +189,8 @@ class Hub : public QObject {
     QTcpServer listener;
     QTcpServer ipv6Listener;
     bool allowNetwork{false};
+    bool udpConnected{false};
+    QHostAddress discoveryBind;
     QUdpSocket udp;
     quint16 discoveryPort{defaultPort};
     QList<QPair<QHostAddress, quint16>> beaconTargets;  // FROND_LINK_BEACON_TO, else broadcast

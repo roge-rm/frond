@@ -326,7 +326,7 @@ Open Pairing… from the File menu on Linux or Connections from the Home ⋮ men
 
 - Connected, with the round trip time and what it carries, for example "Connected · 4 ms · Infrared: Palm TX – Tungsten E2".
 - Seen at 192.168.1.20, which means it's on the network but nothing is using the link.
-- Not seen.
+- Not seen. When network connections are off it says "Not seen, network connections are off".
 - Key changed, pair again, see below.
 - Not paired on <name>, pair again, which means that install forgot you.
 
@@ -334,7 +334,7 @@ On Linux "This computer" is the first row. It joins machines running in differen
 
 A row's menu (right-click on Linux, ⋮ on Android) has Rename, Address…, Bluetooth radio and Forget. Rename is only your name for it. Address… sets an address to try when the install isn't found by itself, and Forget removes the pairing, after which the other install shows "pair again".
 
-Connections listens on loopback by default. To accept incoming links and use Nearby across the network, turn on **Allow incoming Frond links over the network** in Android Settings, or start the desktop with `FROND_LINK_ALLOW_NETWORK=1`. On Android close Connections and stop any machines using it before reopening. On desktop exit any running link service before changing the environment variable. Connections shows the listening addresses.
+Connections only takes links from this computer or phone unless you allow the network. To accept incoming links and use Nearby across the network, turn on **Allow incoming Frond links over the network**, in Settings on Android or at the top of Connections on Linux. On Android it applies when the link service next starts, so close Connections and stop any machines using it before reopening. On Linux it applies at once. Connections shows the listening addresses. Installs that already had paired connections before this setting existed keep it on, and new installs start with it off. On Linux `FROND_LINK_ALLOW_NETWORK=1` (or `0`) overrides the setting.
 
 To pair, open Connections on both. The other install shows up under Nearby, and Pair (or Add by address… if it isn't listed, with an address like `192.168.1.20`) asks it for a code. It shows a 6-digit code, for example "dan-laptop wants to pair. Code 482 913", and you type that code in on the first one ("Enter the code shown on Pixel 8"). The code lasts 2 minutes. After 3 wrong tries, or once the code runs out, that install won't take a new pairing for a minute. Pairing swaps keys, and every later link checks them. If an install's key doesn't match, the row says "Key changed, pair again" and Frond doesn't link until you pair again. That happens after a reinstall, and it can also mean someone else is using that address.
 
@@ -373,7 +373,7 @@ Without a connection, serial, USB HotSync and infrared beaming have an endpoint 
 
 The choice is saved with each machine. A status line shows the endpoint and whether a peer is connected. Changing the choice while the machine runs closes the old connection. Nothing from the host is saved in a session, and reset, true sleep and loading a session close the connection.
 
-On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server all go over the network, to another Frond or to the link tools below on a computer.
+On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server all go over the network, to another Frond or to the link tools below on a computer. Wait for a peer on Android has an Allow network peers switch. Without it the port only takes connections from the device itself, and the status line says "network connections are off". A Wait for a peer saved before the switch existed keeps taking network peers.
 
 Android has no PTYs. Its USB HotSync row has Off, Wait for a peer (all addresses, port 5034, and it shows the phone's address) and Connect to an address, to reach a link tool on a computer. Infrared, serial and Bluetooth on Android use connections only.
 

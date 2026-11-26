@@ -46,7 +46,8 @@ class RelayAddressTest {
             assertEquals(mode, BeamMode.decode(mode.encode()))
         }
         assertEquals("off", BeamMode.Off.encode())
-        assertEquals("listen:5030", BeamMode.Listen(5030).encode())
+        assertEquals("listen-local:5030", BeamMode.Listen(5030).encode())
+        assertEquals("listen-network:5030", BeamMode.Listen(5030, allowNetwork = true).encode())
         assertEquals("connect:10.0.2.2:5031", BeamMode.Connect("10.0.2.2", 5031).encode())
         assertNull(BeamMode.decode(null))
         assertNull(BeamMode.decode("listen:0"))

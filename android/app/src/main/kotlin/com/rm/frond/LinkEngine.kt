@@ -1757,7 +1757,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         val near = JSONArray()
         for ((id, n) in nearby) near.put(JSONObject().put("id", id).put("name", n.name).put("address", n.address.hostAddress).put("port", n.port))
         return JSONObject().put("type", "state").put("id", store.identity.hex).put("name", store.identity.name).put("port", listenPort)
-            .put("connections", list).put("nearby", near).put("listen", listenAddresses)
+            .put("connections", list).put("nearby", near).put("listen", listenAddresses).put("network", host.allowNetwork)
     }
 
     private fun tick() {

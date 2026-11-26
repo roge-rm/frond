@@ -2,6 +2,8 @@ package com.rm.frond
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
+import java.io.File
 import android.content.pm.ActivityInfo
 
 // How the device fills the phone screen. arg is the core's --window-fit value.
@@ -89,9 +91,20 @@ data class Settings(
                 debugger = p.getBoolean(EXTRA_DEBUGGER, false),
                 debuggerPort = NetRelay.port(p.getInt(EXTRA_DEBUGGER_PORT, DebugLink.DEFAULT_PORT).toString()) ?: DebugLink.DEFAULT_PORT,
                 debuggerNetwork = p.getBoolean(EXTRA_DEBUGGER_NETWORK, false),
-                linkNetwork = p.getBoolean(LINK_NETWORK, false),
+                linkNetwork = linkNetwork(p, context.filesDir),
             )
         }
+
+        // Before this setting existed the link service took network peers, so an install that has paired links
+        // keeps that until the switch is turned off. Anyone else starts with it off.
+        private fun linkNetwork(p: SharedPreferences, filesDir: File): Boolean {
+            if (p.contains(LINK_NETWORK)) return p.getBoolean(LINK_NETWORK, false)
+            val value = legacyLinkNetwork(filesDir)
+            p.edit().putBoolean(LINK_NETWORK, value).apply()
+            return value
+        }
+
+        internal fun legacyLinkNetwork(filesDir: File) = LinkStore.readPeers(LinkStore.folder(filesDir)).any { it.paired }
 
         // Low-latency audio per device. Read at each start: the core takes it as a start-up argument.
         @Suppress("DEPRECATION")
