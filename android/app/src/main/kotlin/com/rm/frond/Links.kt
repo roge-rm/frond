@@ -474,7 +474,7 @@ object BluetoothChoice {
         else -> OFF
     }
 
-    // Off, This Frond, the paired connections by name, then the current value as Unknown connection if it names
+    // Off, This Frond, Mobile phone, the paired connections by name, then the current value as Unknown connection if it names
     // one that's gone.
     fun choices(current: String, paired: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
         add(OFF to "Off")
