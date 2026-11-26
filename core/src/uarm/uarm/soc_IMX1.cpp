@@ -950,9 +950,12 @@ bool SocIMX1::RunToStop(uint64_t ticks) {
     const auto start = imx1MachineGetStatus(machine);
     auto now = start;
     Imx1MachineBounds bounds;
+    // Fast runs to the stops through the lean path and the JIT (the stops are code hooks there), in slices as
+    // long as Run's.
+    const bool fast = imx1MachineFastEngine(machine);
     for (;;) {
-        bounds.retired = 4000;
-        bounds.work = 20000;
+        bounds.retired = fast ? 200000 : 4000;
+        bounds.work = fast ? 1000000 : 20000;
         bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
         const auto run = imx1MachineRunBounded(machine, bounds);
         now = run.total;
