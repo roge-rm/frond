@@ -19,6 +19,8 @@ static UInt8 result[32];
 static IrDeviceAddr peer;
 // The callback's last event, handled by the main loop.
 static volatile Int16 event = -1;
+// Every event since the last reset, one bit each, so a later one can't hide the one waited for.
+static volatile UInt32 seen = 0;
 static volatile Int16 queried = 0;
 
 static void show(const Char* text) {
@@ -59,6 +61,7 @@ static void callback(IrConnect* c, IrCallBackParms* parms) {
     if (parms->event == LEVENT_DISCOVERY_CNF && parms->deviceList && parms->deviceList->nItems)
         peer = parms->deviceList->dev[0].hDevice;
     event = parms->event;
+    if (parms->event < 32) seen |= 1UL << parms->event;
 }
 
 static void queried_cb(IrStatus status) { queried = 1; }
@@ -68,7 +71,7 @@ static Boolean wait(Int16 want, Int32 ticks) {
     EventType e;
     UInt32 end = TimGetTicks() + ticks;
     while (TimGetTicks() < end) {
-        if (event == want) return true;
+        if (event == want || (want >= 0 && (seen & (1UL << want)))) return true;
         if (want != LEVENT_LAP_DISCON_IND && (event == LEVENT_LAP_DISCON_IND || event == LEVENT_LM_DISCON_IND)) return false;
         if (want == -2 && queried) return true;
         EvtGetEvent(&e, 2);
@@ -91,6 +94,7 @@ static void print(void) {
     // The media reads busy for a moment after the stack opens; try again for up to 5 s.
     for (tries = 0; tries < 10; tries++) {
         event = -1;
+        seen = 0;
         status = IrDiscoverReq(ref, &con);
         if (status != IR_STATUS_MEDIA_BUSY) break;
         wait(-3, 50);
@@ -100,6 +104,7 @@ static void print(void) {
     if (status != IR_STATUS_PENDING || !wait(LEVENT_DISCOVERY_CNF, 1000) || !peer.u32) { show("no printer found"); goto unbind; }
     step("found", peer.u32);
     event = -1;
+    seen = 0;
     status = IrConnectIrLap(ref, peer);
     if (status != IR_STATUS_PENDING || !wait(LEVENT_LAP_CON_CNF, 1000)) { step("irlap failed", status); goto unbind; }
     show("irlap");
@@ -119,17 +124,20 @@ static void print(void) {
     packet.buff = 0;
     packet.len = 0;
     event = -1;
+    seen = 0;
     status = IrConnectReq(ref, &con, &packet, 0);
-    if (status != IR_STATUS_PENDING || !wait(LEVENT_LM_CON_CNF, 1000)) { step("connect failed", status); goto disconnect; }
+    if (status != IR_STATUS_PENDING || !wait(LEVENT_LM_CON_CNF, 1000)) { step("connect failed", status); step("events", seen); goto disconnect; }
     show("connected");
     packet.buff = (UInt8*)JOB;
     packet.len = StrLen(JOB);
     event = -1;
+    seen = 0;
     status = IrDataReq(ref, &con, &packet);
     if (status != IR_STATUS_PENDING || !wait(LEVENT_PACKET_HANDLED, 1000)) { step("send failed", status); goto disconnect; }
     step("sent", packet.len);
 disconnect:
     event = -1;
+    seen = 0;
     status = IrDisconnectIrLap(ref);
     wait(LEVENT_LAP_DISCON_IND, 500);
     step("disconnect", status);
