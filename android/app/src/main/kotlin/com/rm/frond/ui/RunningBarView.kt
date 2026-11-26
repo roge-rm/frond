@@ -91,6 +91,8 @@ class RunningBarState {
     // The controls editor behind the Controls sheet.
     var controls by mutableStateOf<ControlsEditor?>(null)
     internal var syncProtocol by mutableStateOf<SyncProtocol?>(null)
+    // The bar's sync button: off on a device that only syncs over infrared, started from the guest.
+    internal var syncButton by mutableStateOf(false)
     internal var syncMachine by mutableStateOf<String?>(null)
     internal var syncStatus by mutableStateOf<String?>(null)
     internal var syncStarting by mutableStateOf(false)
@@ -189,7 +191,7 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
                 }
                 else -> Unit
             }
-            state.syncProtocol?.let { protocol ->
+            state.syncProtocol?.takeIf { state.syncButton }?.let { protocol ->
                 LaunchedEffect(state.model) { state.model?.readCradle() }
                 IconButton(actions.startSync, Modifier.size(button), enabled = !state.syncStarting && !state.syncRunning && state.model?.busy == null && state.model?.outOfCradle != true) {
                     Icon(painterResource(if (protocol == SyncProtocol.ACTIVE_SYNC) R.drawable.ic_activesync else R.drawable.ic_hotsync), contentDescription = protocol.label)

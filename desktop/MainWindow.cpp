@@ -1671,7 +1671,8 @@ void MainWindow::refresh() {
             if (auto* item = model->item(row)) item->setEnabled(on);
         if (auto* view = qobject_cast<QListView*>(combo->view())) view->setRowHidden(row, !on);
     };
-    const bool hotSyncAvailable = syncAvailable && protocol == frondDesktopSync::Protocol::hotSync;
+    // Serial and USB Sync Manager need a cradle HotSync; IR HotSync only a HotSync device with infrared.
+    const bool hotSyncAvailable = syncAvailable && frondDesktopSync::cradleHotSync(currentDevice());
     offerMode(serial, "sync", hotSyncAvailable);
     if (!hotSyncAvailable && serial->currentData() == "sync") serial->setCurrentIndex(serial->findData("off"));
     serial->setEnabled(editable && caps.serial);
@@ -1691,7 +1692,7 @@ void MainWindow::refresh() {
     usb->setEnabled(editable && caps.usb);
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
     // IR HotSync: the HotSync app's IR to a PC/Handheld, on a HotSync device with infrared.
-    const bool irSyncAvailable = hotSyncAvailable && caps.infrared && irSyncWorks;
+    const bool irSyncAvailable = syncAvailable && protocol == frondDesktopSync::Protocol::hotSync && caps.infrared && irSyncWorks;
     offerMode(irda, "sync", irSyncAvailable);
     if (!irSyncAvailable && irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
@@ -1832,7 +1833,8 @@ void MainWindow::refresh() {
                                                 : runningRules::cardIcon(supported, known, primaryPresent,
                                                                          cardInserted || palmWifiInserted),
                       caps.sound && runningPreferences.audio, modes);
-    const auto syncLabel = protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
+    const bool syncButton = frondDesktopSync::startsFromBar(currentDevice());
+    const auto syncLabel = !syncButton ? QString() : protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
                            protocol == frondDesktopSync::Protocol::activeSync ? tr("ActiveSync") : QString();
     runningBar->setSyncButton(syncLabel, protocol == frondDesktopSync::Protocol::activeSync ? "activesync" : "hotsync",
                               syncAvailable && !syncRunning && enabled && !outOfCradle());
@@ -2507,7 +2509,7 @@ void MainWindow::editSession(const QString& path) {
     {
         const auto protocol = frondDesktopSync::protocol(device);
         const bool hotSync = frondDesktopSync::available(protocol) && protocol == frondDesktopSync::Protocol::hotSync;
-        dialog.controls->offerSync(hotSync, hotSync && !irSyncRefused.contains(canonicalSession(path)));
+        dialog.controls->offerSync(frondDesktopSync::cradleHotSync(device), hotSync && !irSyncRefused.contains(canonicalSession(path)));
     }
     if (frondDesktopSync::available(frondDesktopSync::protocol(device))) {
         auto* sync = new QPushButton(tr("Sync settings…"), &dialog);
@@ -3220,14 +3222,15 @@ bool MainWindow::editSyncSettings(const QString& session, QWidget* parent) {
     }
     const auto device = client.running() ? runningDevice : frondFirmware::deviceFromId(infoFor(session).device);
     if (!frondDesktopSync::editMachine(parent, id, frondDesktopSync::protocol(device),
-                                       deviceProfileNetworkHotSync5(frondFirmware::profile(device)))) return false;
+                                       frondDesktopSync::cradleHotSync(device) &&
+                                           deviceProfileNetworkHotSync5(frondFirmware::profile(device)))) return false;
     if (syncWindow) syncWindow->refresh();
     return true;
 }
 
 void MainWindow::startSync() {
     if (!client.available() || busy || stopping || syncRunning || exchangeStage != ExchangeStage::None ||
-        !frondDesktopSync::available(frondDesktopSync::protocol(runningDevice))) return;
+        !frondDesktopSync::startsFromBar(runningDevice)) return;
     if (syncMachineId.isEmpty()) return failure(syncMachineError);
     frondSync::SyncLibrary library;
     QString error;

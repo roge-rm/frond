@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""IR HotSync on a Palm T|X: the core runs with --irda sync, the HotSync app's Local list is set to IR to a
+"""IR HotSync on a Palm T|X, Zire 72 or CLIE TG50 (--device): the core runs with --irda sync, the HotSync app's Local list is set to IR to a
 PC/Handheld and the HotSync icon tapped, and the Sync Manager backs the T|X up over infrared. Runs Uncapped. By
 default it passes once the user, personal data and the first --databases databases have gone over IR (a couple of
 minutes); --full waits for the whole sync, about half an hour for a T|X, as a session that hasn't synced gets a new
-user each run and backs everything up. Needs a T|X session (private)."""
+user each run and backs everything up. Needs a session for the device (private)."""
 import argparse
 from pathlib import Path
 import re
@@ -12,12 +12,22 @@ import shutil
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# Per device: the list under the HotSync icon, its IR to a PC/Handheld row, then the icon.
+TAPS = {
+    "palm-tx": [(150, 229), (150, 251), (160, 165)],
+    "palm-zire-72": [(150, 229), (150, 251), (160, 165)],
+    "sony-clie-tg50": [(150, 229), (150, 251), (160, 165)],
+}
+# Taps before HotSync opens: the Zire 72 smoke session wakes to a setup reminder (OK).
+BEFORE = {"palm-zire-72": [(45, 280)]}
+NAMES = {"palm-tx": "T|X", "palm-zire-72": "Zire 72", "sony-clie-tg50": "TG50"}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("session", type=Path)
     parser.add_argument("evidence", type=Path)
+    parser.add_argument("--device", choices=sorted(TAPS), default="palm-tx")
     parser.add_argument("--full", action="store_true", help="wait for the whole sync to finish")
     parser.add_argument("--databases", type=int, default=10, help="databases to back up before passing (default 10)")
     parser.add_argument("--timeout", type=int, help="seconds to wait (default 600, or 3300 with --full)")
@@ -57,13 +67,19 @@ def main():
         state = client.ok("irda-state")
         assert state == "sync idle; waiting infrared", state
         client.ok("speed", "uncapped")
+        for point in BEFORE.get(args.device, []):
+            time.sleep(2)
+            tap(*point)
         client.ok("launch-app", "HotSync")
         time.sleep(4)
         # The list under the icon, IR to a PC/Handheld, then the HotSync icon.
-        tap(150, 229)
-        tap(150, 251)
+        frame("hotsync.png")
+        pick, row, icon = TAPS[args.device]
+        tap(*pick)
+        frame("list.png")
+        tap(*row)
         frame("ir-chosen.png")
-        tap(160, 165)
+        tap(*icon)
         seen = []
         timeout = args.timeout or (3300 if args.full else 600)
         end = time.monotonic() + timeout
@@ -87,7 +103,7 @@ def main():
         if not args.full and backup and "done infrared" not in state:
             frame("backing-up.png")
             assert "sync open" in seen, f"IR HotSync: {state}; link went {' > '.join(seen)}"
-            print(f"PASS T|X IR HotSync: {state.split('; ', 1)[1]}; link went {' > '.join(seen)}")
+            print(f"PASS {NAMES[args.device]} IR HotSync: {state.split('; ', 1)[1]}; link went {' > '.join(seen)}")
             client.quit()
             return
         # The HotSync app shows its result once it has cleaned up.
@@ -96,7 +112,7 @@ def main():
         assert "done infrared" in state and "sync open" in seen, f"IR HotSync: {state}; link went {' > '.join(seen)}"
         counts = re.search(r"(\d+) installed, (\d+) backed up", state)
         assert counts, state
-        print(f"PASS T|X IR HotSync: {state.split('; ', 1)[1]}; link went {' > '.join(seen)}")
+        print(f"PASS {NAMES[args.device]} IR HotSync: {state.split('; ', 1)[1]}; link went {' > '.join(seen)}")
         client.quit()
     finally:
         client.close()

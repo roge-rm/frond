@@ -1316,13 +1316,17 @@ for line in s.makefile('rb'):
             QTRY_VERIFY(keyboard->isEnabled()); QTRY_COMPARE(state->text(),QString());
             keyboard->click(); QTRY_VERIFY(keyboard->isChecked() && !mode->isEnabled());
             QTRY_VERIFY(keyboard->isEnabled()); keyboard->click(); QTRY_VERIFY(mode->isEnabled());
-            // IR HotSync: the Sync Manager is in the list on HotSync devices; the Zire 72 has no Sync Manager.
-            const bool irSync=deviceId!="palm-zire-72";
-            auto* view=qobject_cast<QListView*>(mode->view()); QVERIFY(view); QCOMPARE(view->isRowHidden(mode->findData("sync")),!irSync);
-            if (irSync) {
-                mode->setCurrentIndex(mode->findData("sync")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
-                QTRY_COMPARE(state->text(),QString("Infrared: Sync Manager")); QTRY_VERIFY(!keyboard->isEnabled());
-            }
+            // IR HotSync: the Sync Manager is in the list on every Palm OS device with infrared. The Zire 72 has no
+            // cradle HotSync, so no HotSync button on the bar and no Sync Manager on the serial port.
+            const bool cradle=deviceId!="palm-zire-72";
+            auto* view=qobject_cast<QListView*>(mode->view()); QVERIFY(view); QVERIFY(!view->isRowHidden(mode->findData("sync")));
+            auto* serialMode=window.findChild<QComboBox*>("serialMode"); QVERIFY(serialMode);
+            if (auto* serialView=qobject_cast<QListView*>(serialMode->view()); serialView && serialMode->findData("sync")>=0)
+                QCOMPARE(serialView->isRowHidden(serialMode->findData("sync")),!cradle);
+            auto* barSync=window.findChild<RunningBar*>("runningBar")->findChild<QAction*>("barSync"); QVERIFY(barSync);
+            QTRY_COMPARE(barSync->isVisible(),cradle);
+            mode->setCurrentIndex(mode->findData("sync")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+            QTRY_COMPARE(state->text(),QString("Infrared: Sync Manager")); QTRY_VERIFY(!keyboard->isEnabled());
             mode->setCurrentIndex(mode->findData("tcp")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
             QTRY_VERIFY(state->text().contains("waiting")); QTRY_VERIFY(!keyboard->isEnabled());
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);

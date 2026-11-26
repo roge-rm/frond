@@ -308,7 +308,20 @@ Protocol protocol(frondFirmware::Device device) {
     if (device == frondFirmware::Device::automatic) return Protocol::none;
     if (int(device) == deviceTypeRx1950) return Protocol::activeSync;
     const auto caps = frondFirmware::capabilities(device);
-    return frondFirmware::hasHotSyncButton(device) && (caps.serial || caps.usb) ? Protocol::hotSync : Protocol::none;
+    // The Dana's ROM has no IR connection for HotSync.
+    const bool irHotSync = frondFirmware::palmOs(device) && caps.infrared && !frondFirmware::isDana(device);
+    return cradleHotSync(device) || irHotSync ? Protocol::hotSync : Protocol::none;
+}
+
+bool cradleHotSync(frondFirmware::Device device) {
+    if (device == frondFirmware::Device::automatic || !frondFirmware::palmOs(device)) return false;
+    const auto caps = frondFirmware::capabilities(device);
+    return frondFirmware::hasHotSyncButton(device) && (caps.serial || caps.usb);
+}
+
+bool startsFromBar(frondFirmware::Device device) {
+    const auto kind = protocol(device);
+    return kind == Protocol::activeSync || cradleHotSync(device);
 }
 
 bool available(Protocol protocol) {

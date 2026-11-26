@@ -273,7 +273,7 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             }
         }
         LinkKind.SERIAL -> {
-            val sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC
+            val sync = SyncProtocol.cradleHotSync(model.device)
             val current = if (model.serialSync) InfraredChoice.SYNC_MANAGER else model.serial.choice
             val choices = remember(current, sync) {
                 InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem, sync,
@@ -286,7 +286,7 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
                 onDismiss(); model.changeUsbCable(it == "on")
             }
         else {
-            val sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC
+            val sync = SyncProtocol.cradleHotSync(model.device)
             RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
                 model.usb.mode, onDismiss, syncAttached = model.usbSync,
                 useSync = if (sync) ({ onDismiss(); model.changeUsbSync() }) else null,
