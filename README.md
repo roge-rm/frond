@@ -65,7 +65,7 @@ Dan
 | Sony CLIÉ TG50 | 5.0 | 320×320 colour | Memory Stick | yes | yes | yes | | USB, serial |
 | Tapwave Zodiac 1 and 2 | 5.2 | 480×320 colour | two SD | yes | yes | yes | | USB, serial |
 | **Palm OS 3 and 4, 68k** | | | | | | | | |
-| Palm III | 3.0 | 160×160 grey | | piezo | yes | | PPP | serial |
+| Palm III | 3.0, 3.3 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIx | 3.1, 3.5 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIe | 3.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIxe | 3.5 | 160×160 grey | | piezo | yes | | PPP | serial |

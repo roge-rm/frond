@@ -623,6 +623,8 @@ def iii_setup(core, root):
     rows = core.wait_frame(frame, lambda rows: iii_launcher(rows) or iii_prefs(rows) or iiix_target(rows, 10, 10), 120)
     if iii_launcher(rows):
         return
+    if not iiix_target(rows, 10, 10):
+        return iiix_setup(core, root)
     if iiix_target(rows, 10, 10):
         iiix_calibrate(core, root, frame)
         core.wait_frame(frame, iii_prefs, 60)

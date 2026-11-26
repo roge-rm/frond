@@ -21,7 +21,7 @@ The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by 
 
 Which ROM each 68k device and the Zodiac take:
 
-- The Palm III takes its OS 3.0 ROM (2 MiB, retail or debug). The ROM files for 3.3 and 4.1 are accepted too, but only 3.0 is checked so far. The IIIx and the rest take no Palm III ROM.
+- The Palm III takes its OS 3.0, 3.3 or 4.1 ROM (2, 1.3 and 1.7 MB, retail or debug). Pick 3.0 for the OS it shipped with, 3.3 for the last 3.x one and 4.1 for the newest, which boots like the IIIx 4.1. 3.3 and 4.1 have the setup pages, 3.0 goes straight to Preferences. The IIIx and the rest take no Palm III ROM.
 - The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. For a IIIe, select Palm IIIe when importing the IIIx retail OS 3.1 ROM (1,212,416 bytes).
 - The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes).
 - The m100 and m105 take the OS 3.5.1 ROM (2 MiB). Frond offers the m100 when it sees one, so choose the m105 yourself.
