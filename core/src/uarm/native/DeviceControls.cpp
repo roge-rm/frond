@@ -197,6 +197,25 @@ float iconDistance(DeviceControlIcon icon, float x, float y) {
             d=std::fabs(box(x,y,-4.5f,-7.5f,4.5f,7.5f));
             line(-4.5f,-4.6f,4.5f,-4.6f);line(-4.5f,4.4f,4.5f,4.4f);
             break;
+        case DeviceControlIcon::menu: {
+            // A pull-down: a title bar with a small arrow cut out, over three lines.
+            const std::array<std::array<float,2>,3> arrow{{{3.4f,-6.4f},{6.6f,-6.4f},{5,-4.6f}}};
+            d=std::max(box(x,y,-7.5f,-7.5f,7.5f,-3.5f),-polygon(x,y,arrow));
+            for(float row:{-0.5f,2.8f,6.1f})line(-6,row,6,row);
+            break;
+        }
+        case DeviceControlIcon::phoneEnd: {
+            // A handset with the power mark over its upper left.
+            const float cx=8.4f,cy=-3.4f,r=10.8f;
+            d=arc(x,y,cx,cy,r,degrees(105),degrees(165))-0.8f;
+            for(float a:{degrees(105),degrees(165)}) {
+                const float ex=cx+r*std::cos(a),ey=cy+r*std::sin(a);
+                d=std::min(d,segment(x,y,ex,ey,ex-std::cos(a)*2.6f,ey-std::sin(a)*2.6f)-1.7f);
+            }
+            d=std::min(d,arc(x,y,-3.2f,-3.6f,3.6f,degrees(-60),degrees(240)));
+            line(-3.2f,-8.4f,-3.2f,-4);
+            break;
+        }
         case DeviceControlIcon::calendarGrid:
             // A month grid, five columns by four rows.
             d=std::fabs(box(x,y,-7.5f,-6,7.5f,6));
@@ -2660,6 +2679,190 @@ void paintH4350Controls(Canvas& canvas, const DeviceControlProfile& profile, int
     }
 }
 
+// What's printed on each Treo 650 keyboard key, in treoKey order: the face, the Alt character at
+// its upper right, a drawn mark and whether the key is one of the dark number keys.
+enum class TreoMark { none, sun, backspace, enter, shiftFind, shift };
+struct TreoLegend { const char* face; const char* alt; TreoMark mark; bool dark; };
+const TreoLegend treo650Legends[35]={
+    {"Q","/",TreoMark::none,false},{"W","+",TreoMark::none,false},{"E","1",TreoMark::none,true},
+    {"R","2",TreoMark::none,true},{"T","3",TreoMark::none,true},{"Y","(",TreoMark::none,false},
+    {"U",")",TreoMark::none,false},{"I","@",TreoMark::none,false},{"O","\"",TreoMark::none,false},
+    {"P","",TreoMark::sun,false},
+    {"A","&",TreoMark::none,false},{"S","-",TreoMark::none,false},{"D","4",TreoMark::none,true},
+    {"F","5",TreoMark::none,true},{"G","6",TreoMark::none,true},{"H","$",TreoMark::none,false},
+    {"J","!",TreoMark::none,false},{"K",":",TreoMark::none,false},{"L","'",TreoMark::none,false},
+    {"","",TreoMark::backspace,false},
+    {"","",TreoMark::none,true},{"Z","*",TreoMark::none,false},{"X","7",TreoMark::none,true},
+    {"C","8",TreoMark::none,true},{"V","9",TreoMark::none,true},{"B","#",TreoMark::none,false},
+    {"N","?",TreoMark::none,false},{"M",",",TreoMark::none,false},{".","",TreoMark::none,false},
+    {"","",TreoMark::enter,false},
+    {"","",TreoMark::shiftFind,false},{"0","",TreoMark::none,true},{"","",TreoMark::none,false},
+    {"Alt","",TreoMark::none,false},{"","",TreoMark::shift,false},
+};
+
+// Treo 650: silver-grey metal, the light screen surround, then a chrome band whose lower edge
+// dips under the five-way, holding silver keys with navy icons (the Phone handset green, End
+// red). Below it the keyboard: pearl letter keys with black legends and navy number keys with
+// white ones, each Alt character small at its upper right. Hidden, the strip ends under the band.
+void paintTreo650Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed,
+                          const DeviceControlView& view) {
+    const float H=view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
+    const float W=width;
+    const int ox=(width-profile.width)/2;
+    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+    // Body with rounded lower corners under the keyboard.
+    const float corner=view.keyboard ? 34 : 14;
+    auto body=[&](float x,float y) {
+        const SDL_Rect r{0,-int(corner)-2,int(W),int(H+corner)+2};
+        return deviceRoundedDistance(r,corner,x,y);
+    };
+    canvas.paint(0,0,W,H,[](float,float) {return 1.f;},[](float,float,Rgb) {return Rgb{18,19,22};});
+    canvas.paint(0,0,W,H,[&](float x,float y) {return canvas.edge(body(x,y));},[&](float x,float y,Rgb) {
+        Rgb c=mix(Rgb{156,162,170},Rgb{112,118,128},clamp01(y/profile.height));
+        c=c+Rgb{2.5f,2.5f,2.5f}*std::sin(y*7.9f+std::sin(x*0.27f)*0.8f);
+        const float t=std::fabs(x-W*0.5f)/(W*0.5f);
+        return c*(1-0.14f*t*t)*(1-0.3f*clamp01(1+body(x,y)/5));
+    });
+    // The light grey screen surround, its edge against the screen and its rounded lower lip.
+    const float cx=W*0.5f;
+    auto surroundBottom=[&](float x) {const float u=(x-cx)/(W*0.5f);return 22-6*u*u;};
+    canvas.paint(0,0,W,24,[&](float x,float y) {return canvas.edge(y-surroundBottom(x));},[&](float x,float y,Rgb) {
+        return mix(Rgb{214,217,220},Rgb{184,188,193},clamp01(y/22))+Rgb{3,3,3}*speckle(x,y);
+    });
+    canvas.paint(0,0,W,3,[&](float,float y) {return canvas.edge(y-1.4f);},[](float,float,Rgb) {return Rgb{40,42,46};});
+    // Chrome band: bright along its top, a dark reflection across the middle, lit again below.
+    auto bandBottom=[&](float x) {return 93+12*std::exp(-std::pow((x-cx)/64,2.f));};
+    auto band=[&](float x,float y) {return std::max(surroundBottom(x)-y,y-bandBottom(x));};
+    const float bandEnd=std::min(H,110.f);
+    canvas.paint(0,10,W,bandEnd,[&](float x,float y) {return canvas.edge(band(x,y))*canvas.edge(body(x,y));},[&](float x,float y,Rgb) {
+        const float t=clamp01((y-surroundBottom(x))/(bandBottom(x)-surroundBottom(x)));
+        Rgb c=mix(Rgb{236,239,243},Rgb{150,156,166},t);
+        c=c*(1-0.38f*std::exp(-std::pow((t-0.52f)/0.13f,2.f)));
+        c=c+Rgb{24,24,26}*std::exp(-std::pow((t-0.86f)/0.07f,2.f));
+        return c+Rgb{3,3,3}*std::sin(x*0.9f+y*0.2f);
+    });
+    // Dark seams above and below the band.
+    canvas.paint(0,10,W,bandEnd,[&](float x,float y) {
+        return std::max(canvas.edge(std::fabs(y-surroundBottom(x))-0.5f)*0.7f,canvas.edge(std::fabs(y-bandBottom(x))-0.6f)*0.8f);
+    },[](float,float,Rgb) {return Rgb{56,60,68};});
+
+    const SilverKeyLook silver{Rgb{70,74,84},Rgb{246,248,251},Rgb{176,182,192},Rgb{14,14,16},Rgb{250,251,253},
+                               Rgb{40,50,84},Rgb{36,42,66},1.3f,0.7f,0.12f};
+    for(size_t i=0;i<profile.count;++i) {
+        const auto& b=profile.buttons[i];
+        if(b.section!=DeviceControlSection::main || deviceNavigatorButton(profile,b))continue;
+        const SDL_Rect r=shifted(b.bounds);
+        const bool held=down(b.key);
+        auto dk=[&](float x,float y) {return deviceRoundedDistance(r,deviceButtonCorner(profile,b),x,y);};
+        canvas.paint(r.x-4,r.y-2,r.x+r.w+4,r.y+r.h+6,[&](float x,float y) {return clamp01((3-dk(x,y-2.2f))/5)*0.35f;},
+                     [](float,float,Rgb) {return Rgb{0,0,0};});
+        paintSilverKey(canvas,r,deviceButtonCorner(profile,b),held,b.icon,1,silver,false);
+        const Rgb ink=b.key==keyIdHard1 ? Rgb{36,150,64} : b.key==keyIdPower ? Rgb{206,36,36} : silver.ink;
+        const float k=r.h<24 ? 0.8f : 1.05f,kcx=r.x+r.w*0.5f,kcy=r.y+r.h*0.5f+(held ? 0.7f : 0);
+        canvas.paint(kcx-11*k,kcy-11*k,kcx+11*k,kcy+11*k,[&](float x,float y) {
+            const float w=b.icon==DeviceControlIcon::phone || b.icon==DeviceControlIcon::phoneEnd ? 0.9f : 0.6f;
+            return canvas.edge(iconDistance(b.icon,(x-kcx)/k,(y-kcy)/k)*k-w*k);
+        },[&](float,float,Rgb) {return held ? ink*0.7f : ink;});
+    }
+    // Five-way: a silver ring with printed navy arrows round a chrome oval select key.
+    paintNavigator(canvas,profile,ox,pressed,{Rgb{60,64,74},Rgb{250,251,253},Rgb{170,176,188},Rgb{208,212,220},
+                                              Rgb{168,174,184},Rgb{255,255,255},7,0.4f,0.25f,0.7f,
+                                              Rgb{40,44,54},Rgb{226,230,236},Rgb{110,116,128},Rgb{255,255,255}});
+    {
+        SDL_Rect n=profile.navigator;n.x+=ox;
+        const float ncx=n.x+n.w*0.5f,ncy=n.y+n.h*0.5f;
+        const struct {float x,y,a;} arrows[]={{ncx,n.y+7.f,-1.5708f},{ncx,n.y+n.h-7.f,1.5708f},
+                                               {n.x+8.f,ncy,3.14159f},{n.x+n.w-8.f,ncy,0}};
+        const KeyId keys[]={keyIdUp,keyIdDown,keyIdLeft,keyIdRight};
+        for(int i=0;i<4;++i) {
+            const auto& a=arrows[i];
+            const float ca=std::cos(a.a),sa=std::sin(a.a);
+            const Rgb ink=down(keys[i]) ? Rgb{30,40,80} : Rgb{40,56,120};
+            canvas.paint(a.x-5,a.y-5,a.x+5,a.y+5,[&](float x,float y) {
+                const float px=(x-a.x)*ca+(y-a.y)*sa,py=-(x-a.x)*sa+(y-a.y)*ca;
+                return canvas.edge(std::max(-px-1.8f,px*0.5f+std::fabs(py)*0.87f-1.4f)-0.1f);
+            },[&](float,float,Rgb) {return ink;});
+        }
+    }
+    if(!view.keyboard)return;
+
+    const SilverKeyLook pearl{Rgb{58,62,70},Rgb{248,246,240},Rgb{204,202,196},Rgb{10,10,10},Rgb{176,182,192},
+                              Rgb{20,22,28},Rgb{20,22,28},1.1f,0.72f,0.14f};
+    const SilverKeyLook navy{Rgb{30,34,44},Rgb{62,78,112},Rgb{22,30,52},Rgb{26,30,40},Rgb{150,158,172},
+                             Rgb{236,240,246},Rgb{236,240,246},1.1f,0.65f,0.14f};
+    for(size_t i=0;i<profile.count;++i) {
+        const auto& b=profile.buttons[i];
+        const int index=b.key-keyIdKeyboard;
+        if(b.section!=DeviceControlSection::keyboard || index<0 || index>=35)continue;
+        const auto& legend=treo650Legends[index];
+        const auto& look=legend.dark ? navy : pearl;
+        const SDL_Rect r=shifted(b.bounds);
+        const bool held=down(b.key);
+        const float kc=deviceButtonCorner(profile,b);
+        auto dk=[&](float x,float y) {return deviceRoundedDistance(r,kc,x,y);};
+        canvas.paint(r.x-4,r.y-2,r.x+r.w+4,r.y+r.h+6,[&](float x,float y) {return clamp01((3-dk(x,y-2.2f))/5)*0.45f;},
+                     [](float,float,Rgb) {return Rgb{0,0,0};});
+        paintSilverKey(canvas,r,kc,held,b.icon,1,look,false);
+        const float sink=held ? 0.7f : 0,kx=r.x+r.w*0.5f,ky=r.y+r.h*0.5f+sink;
+        const Rgb ink=held ? look.ink*0.8f+look.faceBottom*0.2f : look.ink;
+        auto text=[&](const char* t,float gx,float gy,float size,float weight) {
+            const float hw=tg50TextWidth(t,size)*0.5f+2,ty=gy-3*size;
+            canvas.paint(gx-hw,ty-2*size-1,gx+hw,ty+8*size+1,[&](float x,float y) {
+                return canvas.edge(tg50TextDistance(t,x-gx,y-ty,size)-weight);
+            },[&](float,float,Rgb) {return ink;});
+        };
+        auto mark=[&](float gx,float gy,float reach,auto distance) {
+            canvas.paint(gx-reach,gy-reach,gx+reach,gy+reach,[&](float x,float y) {
+                return canvas.edge(distance(x-gx,y-gy));
+            },[&](float,float,Rgb) {return ink;});
+        };
+        // An outlined up arrow, for Shift.
+        auto upArrow=[&](float u,float v) {
+            const std::array<std::array<float,2>,7> a{{{0,-5},{4.6f,-0.4f},{1.8f,-0.4f},{1.8f,4},{-1.8f,4},{-1.8f,-0.4f},{-4.6f,-0.4f}}};
+            return std::fabs(polygon(u,v,a))-0.55f;
+        };
+        const bool word=std::strlen(legend.face)>1;
+        if(word)text(legend.face,kx,ky+0.5f,1.05f,0.6f);
+        else if(!std::strcmp(legend.face,"."))mark(kx,ky+4,3,[](float u,float v) {return std::hypot(u,v)-1.6f;});
+        else if(*legend.face)text(legend.face,*legend.alt || legend.mark==TreoMark::sun ? kx-2.5f : kx,ky+1.5f,1.55f,0.8f);
+        if(*legend.alt)text(legend.alt,kx+7,ky-6.5f,0.85f,0.5f);
+        switch(legend.mark) {
+            case TreoMark::sun:
+                mark(kx+7,ky-7,6,[&](float u,float v) {
+                    float d=ring(u,v,0,0,1.6f)-0.45f;
+                    for(int n=0;n<8;++n) {
+                        const float c=std::cos(degrees(45*n)),sn=std::sin(degrees(45*n));
+                        d=std::min(d,segment(u,v,2.8f*c,2.8f*sn,4.2f*c,4.2f*sn)-0.4f);
+                    }
+                    return d;
+                });
+                break;
+            case TreoMark::backspace:
+                mark(kx,ky,10,[&](float u,float v) {
+                    return std::min({segment(u,v,-6,0,6,0),segment(u,v,-6,0,-2.6f,-3),segment(u,v,-6,0,-2.6f,3)})-0.9f;
+                });
+                break;
+            case TreoMark::enter:
+                mark(kx,ky,10,[&](float u,float v) {
+                    return std::min({segment(u,v,5,-5,5,2),segment(u,v,5,2,-5,2),segment(u,v,-5,2,-2,-1),segment(u,v,-5,2,-2,5)})-0.9f;
+                });
+                break;
+            case TreoMark::shift:
+                mark(kx,ky,8,upArrow);
+                break;
+            case TreoMark::shiftFind:
+                // Shift's arrow, and Find's magnifier beside it.
+                mark(kx-7,ky,8,upArrow);
+                mark(kx+7,ky,8,[&](float u,float v) {
+                    return std::min(ring(u,v,1.2f,-1.2f,3.2f)-0.6f,segment(u,v,-1.2f,1.2f,-4.6f,4.6f)-0.9f);
+                });
+                break;
+            default: break;
+        }
+    }
+}
+
 // iPAQ 210: gloss black, a thin strip of four flat keys split by seams, each with a lighter
 // lip along its bottom, and a polished chrome shield five-way with a recessed select key.
 void paintIpaq210Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
@@ -3255,6 +3458,7 @@ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& prof
         case DeviceControlStyle::ipaq210: paintIpaq210Controls(canvas,profile,width*u,pressed);break;
         case DeviceControlStyle::rx1950: paintRx1950Controls(canvas,profile,width*u,pressed,stick);break;
         case DeviceControlStyle::h4350: paintH4350Controls(canvas,profile,width*u,pressed,view);break;
+        case DeviceControlStyle::treo650: paintTreo650Controls(canvas,profile,width*u,pressed,view);break;
         case DeviceControlStyle::t415: paintT415Controls(canvas,profile,beside ? profile.width : width*u,pressed,false,beside);break;
         default: paintTxControls(canvas,profile,width*u,pressed);
     }

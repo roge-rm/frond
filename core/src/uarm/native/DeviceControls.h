@@ -17,9 +17,9 @@
 enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
                                media, music, phone, memo, graffiti, back, legend, stick, action, function,
                                trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
-                               calendarGrid };
+                               calendarGrid, menu, phoneEnd };
 enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350, m125, v, m100, m500,
-                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415 };
+                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, treo650 };
 // Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
 // it (around), and only the current arrangement's keys are shown.
@@ -146,6 +146,10 @@ inline DeviceArt deviceArt(const char* name) {
 }
 // h4350 thumb keyboard key n, 0-38 from the top left, in the keyboard id range.
 constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
+// Treo 650 thumb keyboard key n, 0-34 from the top left, and its Menu key (35), in the keyboard id
+// range until a board maps them.
+constexpr KeyId treoKey(int n) { return KeyId(keyIdKeyboard + n); }
+constexpr int treoKeyCount=36;
 // The PEGA-GC10 game controller's keys.
 constexpr bool clieGamepadKey(KeyId key) { return key>=keyIdPadUp && key<=keyIdPadHold; }
 // gamepad picks the profile with the PEGA-GC10 attached on a CLIE that takes it.
@@ -537,6 +541,62 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     };
     static const DeviceControlProfile h4350Profile{480,324,h4350,std::size(h4350),{190,32,100,76},26,{222,54,36,32},
                                                    DeviceControlStyle::h4350,0.5f,2,10,208};
+    // Treo 650 under its 320x320 screen, 1 unit per pixel: a chrome band holding the round green
+    // Phone and red End keys at the ends, Calendar and Mail inside them, the Home and Menu pills
+    // above those and the oval five-way in the middle, then the thumb keyboard in four rows that
+    // curve up at the ends. End is also the power key. The real keyboard is wider than the screen,
+    // so it is pulled in to fit.
+    static const DeviceButton treo650[] = {
+        {keyIdHard1, {13,49,32,34}, "Phone", DeviceControlIcon::phone, 15},
+        {keyIdHard2, {55,63,28,32}, "Calendar", DeviceControlIcon::calendar, 13},
+        {keyIdHome, {46,36,50,20}, "Home", DeviceControlIcon::home, 10},
+        {treoKey(35), {218,36,50,20}, "Menu", DeviceControlIcon::menu, 10},
+        {keyIdHard3, {237,63,28,32}, "Mail", DeviceControlIcon::inbox, 13},
+        {keyIdPower, {275,49,32,34}, "End and power", DeviceControlIcon::phoneEnd, 15},
+        {keyIdUp, {145,38,20,14}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {145,90,20,14}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {104,61,18,20}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {188,61,18,20}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {135,58,40,26}, "Select", DeviceControlIcon::select},
+        // Keys 27x28 on a 31.6-unit pitch; legends are in treo650Legends, in this order.
+        {treoKey(0), {4,110,27,28}, "Q", DeviceControlIcon::legend, 0, kb},
+        {treoKey(1), {35,112,27,28}, "W", DeviceControlIcon::legend, 0, kb},
+        {treoKey(2), {67,114,27,28}, "E", DeviceControlIcon::legend, 0, kb},
+        {treoKey(3), {98,115,27,28}, "R", DeviceControlIcon::legend, 0, kb},
+        {treoKey(4), {130,116,27,28}, "T", DeviceControlIcon::legend, 0, kb},
+        {treoKey(5), {162,116,27,28}, "Y", DeviceControlIcon::legend, 0, kb},
+        {treoKey(6), {193,115,27,28}, "U", DeviceControlIcon::legend, 0, kb},
+        {treoKey(7), {225,114,27,28}, "I", DeviceControlIcon::legend, 0, kb},
+        {treoKey(8), {256,112,27,28}, "O", DeviceControlIcon::legend, 0, kb},
+        {treoKey(9), {288,110,27,28}, "P", DeviceControlIcon::legend, 0, kb},
+        {treoKey(10), {4,145,27,28}, "A", DeviceControlIcon::legend, 0, kb},
+        {treoKey(11), {35,147,27,28}, "S", DeviceControlIcon::legend, 0, kb},
+        {treoKey(12), {67,149,27,28}, "D", DeviceControlIcon::legend, 0, kb},
+        {treoKey(13), {98,150,27,28}, "F", DeviceControlIcon::legend, 0, kb},
+        {treoKey(14), {130,151,27,28}, "G", DeviceControlIcon::legend, 0, kb},
+        {treoKey(15), {162,151,27,28}, "H", DeviceControlIcon::legend, 0, kb},
+        {treoKey(16), {193,150,27,28}, "J", DeviceControlIcon::legend, 0, kb},
+        {treoKey(17), {225,149,27,28}, "K", DeviceControlIcon::legend, 0, kb},
+        {treoKey(18), {256,147,27,28}, "L", DeviceControlIcon::legend, 0, kb},
+        {treoKey(19), {288,145,27,28}, "Backspace", DeviceControlIcon::legend, 0, kb},
+        {treoKey(20), {4,180,27,28}, "Option", DeviceControlIcon::legend, 0, kb},
+        {treoKey(21), {35,182,27,28}, "Z", DeviceControlIcon::legend, 0, kb},
+        {treoKey(22), {67,184,27,28}, "X", DeviceControlIcon::legend, 0, kb},
+        {treoKey(23), {98,185,27,28}, "C", DeviceControlIcon::legend, 0, kb},
+        {treoKey(24), {130,186,27,28}, "V", DeviceControlIcon::legend, 0, kb},
+        {treoKey(25), {162,186,27,28}, "B", DeviceControlIcon::legend, 0, kb},
+        {treoKey(26), {193,185,27,28}, "N", DeviceControlIcon::legend, 0, kb},
+        {treoKey(27), {225,184,27,28}, "M", DeviceControlIcon::legend, 0, kb},
+        {treoKey(28), {256,182,27,28}, "Full stop", DeviceControlIcon::legend, 0, kb},
+        {treoKey(29), {288,180,27,28}, "Enter", DeviceControlIcon::legend, 0, kb},
+        {treoKey(30), {35,219,46,24}, "Shift and Find", DeviceControlIcon::legend, 0, kb},
+        {treoKey(31), {90,221,32,24}, "0", DeviceControlIcon::legend, 0, kb},
+        {treoKey(32), {130,222,69,24}, "Space", DeviceControlIcon::legend, 0, kb},
+        {treoKey(33), {207,221,32,24}, "Alt", DeviceControlIcon::legend, 0, kb},
+        {treoKey(34), {246,219,38,24}, "Shift", DeviceControlIcon::legend, 0, kb},
+    };
+    static const DeviceControlProfile treo650Profile{320,252,treo650,std::size(treo650),{102,36,106,70},35,{135,58,40,26},
+                                                     DeviceControlStyle::treo650,0.42f,1,0,144};
     // CLIE PEG-T415 under its 320-wide screen, 1 unit per pixel: four wide, flat chrome slats
     // edge to edge (Date Book, Address, To Do, Memo Pad) either side of a narrow rocker split
     // across its middle, under a dark metal strip with the keys' icons stamped on it. The Jog
@@ -575,6 +635,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::iiic: return iiicProfile;
         case DeviceArt::tg50: return gamepad ? tg50GamepadProfile : tg50Profile;
         case DeviceArt::t415: return t415Profile;
+        case DeviceArt::treo650: return treo650Profile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
         case DeviceArt::hpIpaqRx1950: return rx1950Profile;
