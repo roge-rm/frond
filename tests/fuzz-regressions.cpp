@@ -1,6 +1,8 @@
 // Hand-written inputs that once broke parsers found by the fuzz targets (make fuzz): a savestate string
 // with no end, a ZIP member that declares a huge size, ZIP names left allocated, session files that declare
-// more than they hold, and a session written again after it was read. Built with ASan and LSan.
+// more than they hold, a session written again after it was read, the Android link library's JNI calls
+// with a length or offset outside the array, and (with QtCore) a memory stick header whose size
+// overflows and store JSON numbers past 64 bits. Built with ASan and LSan.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +13,14 @@
 #include "savestate/Chunk.h"
 #include "session/session_file5.h"
 #include "zip/miniz.h"
+#ifdef FROND_FUZZ_JNI
+#include "FakeJni.h"
+#include "../android/app/src/main/cpp/LinkJni.cpp"
+#endif
+#ifdef FROND_FUZZ_QT
+void stickHeader();  // fuzz-regressions-qt.cpp
+void storeNumbers();
+#endif
 
 static void check(bool ok, const char* what, int line) {
     if (ok) return;
@@ -110,10 +120,47 @@ static void sessionFiles() {
     CHECK(!liar.Deserialize(lie.size(), lie.data()));
 }
 
+#ifdef FROND_FUZZ_JNI
+#define J(name) Java_com_rm_frond_LinkNative_##name
+
+static void linkJniLengths() {
+    fakeJni::Env env;
+    JNIEnv* e = env.Jni();
+    const std::array<uint8_t, 32> secret{1}, peerKey{2};
+    const std::array<uint8_t, 16> id{3}, peer{4};
+    const auto s = env.Bytes(secret), i = env.Bytes(id), name = env.Bytes(std::string("A"));
+    const jlong link = J(linkDialUtf8)(e, nullptr, s, i, name, env.Bytes(peer), env.Bytes(peerKey), 0);
+    CHECK(link != 0);
+    // Lengths past the 4-byte array read nothing (ASan stops the old code here).
+    const auto four = env.Bytes(std::string("FRL1"));
+    J(linkReceive)(e, nullptr, link, four, 4096, 1);
+    CHECK(J(linkState)(e, nullptr, link) == jint(LinkState::Handshake));
+    CHECK(J(muxSend)(e, nullptr, link, 1, four, -2, 4) == 0);
+    CHECK(J(muxSend)(e, nullptr, link, 1, four, 2, 3) == 0);
+    J(muxConsumed)(e, nullptr, link, 1, -1);
+    J(linkFree)(e, nullptr, link);
+
+    const jlong pair = J(pairDialUtf8)(e, nullptr, s, i, name, env.Bytes(std::string("123456")), 0);
+    CHECK(pair != 0);
+    J(pairReceive)(e, nullptr, pair, four, 70000, 1);
+    J(pairReceive)(e, nullptr, pair, nullptr, 4, 1);
+    CHECK(J(pairResult)(e, nullptr, pair) == jint(PairResult::Pending));
+    J(pairFree)(e, nullptr, pair);
+}
+#endif
+
+
 int main() {
     savestateStrings();
     zipMembers();
     sessionFiles();
+#ifdef FROND_FUZZ_JNI
+    linkJniLengths();
+#endif
+#ifdef FROND_FUZZ_QT
+    stickHeader();
+    storeNumbers();
+#endif
     std::puts("fuzz regressions: ok");
     return 0;
 }

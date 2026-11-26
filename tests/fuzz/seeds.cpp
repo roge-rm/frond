@@ -138,6 +138,7 @@ std::string Hex(const std::string& text) {
 }  // namespace
 
 void StorageSeeds(const std::function<void(const std::string&, const std::vector<uint8_t>&)>& seed);
+void HostSeeds(const std::function<void(const std::string&, const std::vector<uint8_t>&)>& seed);
 
 int main(int argc, char** argv) {
     using namespace frondSync;
@@ -504,6 +505,7 @@ int main(int argc, char** argv) {
     }
 
     StorageSeeds([](const std::string& target, const Bytes& bytes) { Seed(target, bytes); });
+    HostSeeds([](const std::string& target, const Bytes& bytes) { Seed(target, bytes); });
 
     {
         // A Tapwave-style update made here: a PRC whose ROMZ id 2 is gzip of 64 zero bytes, alone and in a zip.

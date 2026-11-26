@@ -1754,15 +1754,24 @@ device-session-probe: out/frond
 		tests/device-session.cpp @$(OBJ_ROOT)/device-session-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-device-session
 
+# With QtCore the desktop store cases are in too, and with a JDK's jni.h the link JNI case.
+FUZZ_REGRESSIONS_QT = $(if $(shell pkg-config --exists Qt6Core && echo yes),-fPIC -Idesktop -Icore/src/uarm/native $(shell pkg-config --cflags Qt6Core))
+FUZZ_REGRESSIONS_QT_LIBS = $(if $(FUZZ_REGRESSIONS_QT),$(shell pkg-config --libs Qt6Core) -lz)
 .PHONY: test-fuzz-regressions
 test: test-fuzz-regressions
 test-fuzz-regressions: prepare
 	$(CC) -std=gnu99 -O1 -g -fsanitize=address -Icore/src/common -c core/src/common/zip/miniz.c -o $(OBJ_ROOT)/miniz-fuzz-regressions.o
 	$(CC) -std=gnu99 -O1 -g -fsanitize=address -Icore/src/common -c core/src/common/zip/zip.c -o $(OBJ_ROOT)/zip-fuzz-regressions.o
+	$(CC) -std=c99 -O1 -g -fsanitize=address -c link/monocypher/monocypher.c -o $(OBJ_ROOT)/monocypher-fuzz-regressions.o
+	$(if $(FUZZ_REGRESSIONS_QT),$(CXX) -std=c++17 -O1 -g -fsanitize=address -Icore/src/common $(FUZZ_REGRESSIONS_QT) \
+		-c tests/fuzz-regressions-qt.cpp -o $(OBJ_ROOT)/fuzz-regressions-qt.o && \
+		$(CXX) -std=c++17 -O1 -g -fsanitize=address $(FUZZ_REGRESSIONS_QT) -c desktop/LinkStore.cpp -o $(OBJ_ROOT)/linkstore-fuzz-regressions.o)
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address -Wall -Wextra -Werror -Icore/src/common -Icore/src/common/savestate \
+		-Itests/fuzz -Ilink $(if $(FUZZ_JNI_INCLUDE),-DFROND_FUZZ_JNI -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux) $(if $(FUZZ_REGRESSIONS_QT),-DFROND_FUZZ_QT) \
 		tests/fuzz-regressions.cpp core/src/common/ZipfileWalker.cpp core/src/common/session/session_file5.cpp \
-		core/src/common/savestate/Chunk.cpp core/src/common/Logging.cpp $(OBJ_ROOT)/miniz-fuzz-regressions.o \
-		$(OBJ_ROOT)/zip-fuzz-regressions.o -o $(OBJ_ROOT)/test-fuzz-regressions
+		core/src/common/savestate/Chunk.cpp core/src/common/Logging.cpp $(LINK_SOURCES) $(OBJ_ROOT)/miniz-fuzz-regressions.o \
+		$(OBJ_ROOT)/zip-fuzz-regressions.o $(OBJ_ROOT)/monocypher-fuzz-regressions.o $(if $(FUZZ_REGRESSIONS_QT),$(OBJ_ROOT)/fuzz-regressions-qt.o $(OBJ_ROOT)/linkstore-fuzz-regressions.o) $(FUZZ_REGRESSIONS_QT_LIBS) \
+		-o $(OBJ_ROOT)/test-fuzz-regressions
 	$(OBJ_ROOT)/test-fuzz-regressions
 
 .PHONY: test-gdbstub-68k-stop
@@ -3374,13 +3383,13 @@ test-sony-ma2-fm:
 # make fuzz builds them all in FUZZ_ROOT with seed corpora from tests/fuzz/seeds.cpp;
 # make fuzz-run FUZZ_TIME=120 (after make fuzz) runs each for that many seconds (FUZZ_ONLY picks some), logs and
 # crashes to FUZZ_OUT; FUZZ_FLAGS adds libFuzzer options. wifi-router and slirp-ip run in their own network
-# namespace (unshare -rn), as libslirp opens host sockets for what the guest sends, and refuse to run outside one. The core's common library is built again with the
+# namespace (unshare -rn), as libslirp opens host sockets for what the guest sends (netlib too, for NetLib's internet mode), and refuse to run outside one. The core's common library is built again with the
 # sanitizers in FUZZ_ROOT; after changing FUZZ_CFLAGS delete FUZZ_ROOT/core and FUZZ_ROOT/link.
 FUZZ_TARGETS := hayes-modem ppp-server irda-phone netsync-wakeup hotsync-link hotsync-session dlp activesync-connect rapi \
 	wbxml airsync-http link-wire link-mux link-pairing link-handshake \
 	palm-db pim-record installer session-file rom-info gunzip zip rx1950-nand sync-profile \
 	wifi-router slirp-ip rndis-host usb-bus-host gdbstub-arm gdbstub-68k desktop-channel \
-	savestate card-container fat-image zodiac-rom zodiac-smf
+	savestate card-container fat-image zodiac-rom zodiac-smf bluetooth-hci conduit-ipc netlib jni-link jni-sync
 FUZZ_CC ?= $(or $(shell command -v clang-19 2>/dev/null),clang)
 FUZZ_CXX ?= $(or $(shell command -v clang++-19 2>/dev/null),clang++)
 FUZZ_ROOT = $(OBJ_ROOT)/fuzz
@@ -3416,15 +3425,32 @@ FUZZ_EXTRA_gdbstub-68k = -DEMULATION_LEVEL=EMULATION_UNIX -Wno-multichar -Wno-pr
 	-I$(FUZZ_68K_PLATFORM)/Incs/Libraries -Icore/src/cloudpilot/emulator/suspend -Icore/src/cloudpilot/native \
 	core/src/cloudpilot/native/GdbStub.cpp
 FUZZ_EXTRA_zodiac-rom = -Izodiac-rom zodiac-rom/ZodiacRom.cpp -lz
+FUZZ_EXTRA_bluetooth-hci = core/src/uarm/uarm/BluetoothBackend.cpp
+FUZZ_EXTRA_netlib = -Icore/src/uarm core/src/uarm/uarm/HostNetwork.cpp -pthread
+# The JNI targets build the Android sources against the JDK's jni.h.
+FUZZ_JNI_INCLUDE ?= $(firstword $(wildcard /usr/lib/jvm/default-java/include /usr/lib/jvm/*/include))
+FUZZ_EXTRA_jni-link = -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux
+FUZZ_EXTRA_jni-sync = -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux -Icore/src/common/sync/vendor/arduinojson
+$(FUZZ_ROOT)/fuzz-conduit-ipc: core/src/common/sync/PalmConduit.cpp core/src/common/sync/PalmConduitProcess.h installer-shims/PalmConduitProtocol.h
+$(FUZZ_ROOT)/fuzz-netlib: core/src/uarm/uarm/NetworkSimulation.cpp core/src/uarm/uarm/HostNetwork.cpp
+$(FUZZ_ROOT)/fuzz-bluetooth-hci: core/src/uarm/uarm/BluetoothBackend.cpp
+$(FUZZ_ROOT)/fuzz-jni-link: android/app/src/main/cpp/LinkJni.cpp
+$(FUZZ_ROOT)/fuzz-jni-sync: android/app/src/main/cpp/SyncJni.cpp
 $(FUZZ_ROOT)/fuzz-wifi-router $(FUZZ_ROOT)/fuzz-slirp-ip: $(FUZZ_SLIRP_LIB) core/src/common/net/WifiRouter.cpp \
 	core/src/common/net/SlirpIp.cpp $(wildcard core/src/common/net/*.h)
 # The desktop's Qt parsers, against QtCore only (no GUI), when Qt 6 is there.
 FUZZ_QT := $(shell pkg-config --exists Qt6Core && echo yes)
-FUZZ_QT_TARGETS := $(if $(FUZZ_QT),qt-firmware-input qt-desktop-client)
+FUZZ_QT_TARGETS := $(if $(FUZZ_QT),qt-firmware-input qt-desktop-client qt-session-store qt-link-store qt-link-lines)
 FUZZ_TARGETS += $(FUZZ_QT_TARGETS)
 FUZZ_QT_FLAGS = -fPIC -Idesktop $(shell pkg-config --cflags Qt6Core)
 FUZZ_EXTRA_qt-firmware-input = $(FUZZ_QT_FLAGS) $(shell pkg-config --libs Qt6Core)
 FUZZ_EXTRA_qt-desktop-client = $(FUZZ_QT_FLAGS) -I$(FUZZ_ROOT)/moc $(shell pkg-config --cflags --libs Qt6Network)
+FUZZ_EXTRA_qt-session-store = $(FUZZ_QT_FLAGS) -Icore/src/uarm/native $(shell pkg-config --libs Qt6Core) -lz
+FUZZ_EXTRA_qt-link-store = $(FUZZ_QT_FLAGS) desktop/LinkStore.cpp $(shell pkg-config --libs Qt6Core)
+FUZZ_EXTRA_qt-link-lines = $(FUZZ_QT_FLAGS) desktop/LinkLines.cpp $(shell pkg-config --libs Qt6Core)
+$(FUZZ_ROOT)/fuzz-qt-session-store: $(wildcard desktop/*Store.h desktop/Dana*.h desktop/FolderCard.h desktop/CardStorage.h desktop/FirmwareInput.h)
+$(FUZZ_ROOT)/fuzz-qt-link-store: desktop/LinkStore.cpp desktop/LinkStore.h
+$(FUZZ_ROOT)/fuzz-qt-link-lines: desktop/LinkLines.cpp desktop/LinkLines.h
 FUZZ_MOC ?= $(or $(wildcard /usr/lib/qt6/libexec/moc),moc)
 $(FUZZ_ROOT)/moc/DesktopClient.moc.cpp: desktop/DesktopClient.h
 	mkdir -p $(dir $@)
@@ -3457,8 +3483,8 @@ $(FUZZ_ROOT)/fuzz-%: tests/fuzz/%.cpp $(wildcard tests/fuzz/*.h) $(FUZZ_COMMON_L
 	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) -fsanitize=fuzzer $(FUZZ_INCLUDE) $< $(FUZZ_EXTRA_$*) $(FUZZ_LIBS) -o $@
 
 # Seeds are written again on each build; the runs keep their own corpus in FUZZ_OUT.
-$(FUZZ_ROOT)/.seeds: tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp tests/fuzz/SeedFdp.h $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
-	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) $(FUZZ_INCLUDE) tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp $(FUZZ_LIBS) -o $(FUZZ_ROOT)/fuzz-seeds
+$(FUZZ_ROOT)/.seeds: tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp tests/fuzz/seeds-host.cpp tests/fuzz/SeedFdp.h $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
+	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) $(FUZZ_INCLUDE) tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp tests/fuzz/seeds-host.cpp $(FUZZ_LIBS) -o $(FUZZ_ROOT)/fuzz-seeds
 	rm -rf $(FUZZ_ROOT)/seeds && ASAN_OPTIONS=detect_leaks=0 $(FUZZ_ROOT)/fuzz-seeds $(FUZZ_ROOT)/seeds
 	touch $@
 
@@ -3466,7 +3492,7 @@ fuzz-run:
 	umask 077 && mkdir -p $(FUZZ_OUT)/scratch && chmod 700 $(FUZZ_OUT) && ulimit -c 0 && \
 	for t in $(or $(FUZZ_ONLY),$(FUZZ_TARGETS)); do \
 		mkdir -p $(FUZZ_OUT)/corpus/$$t $(FUZZ_OUT)/crashes/$$t; \
-		case $$t in wifi-router|slirp-ip) wrap="unshare -rn";; *) wrap=;; esac; \
+		case $$t in wifi-router|slirp-ip|netlib) wrap="unshare -rn";; *) wrap=;; esac; \
 		FROND_FUZZ_SCRATCH=$(abspath $(FUZZ_OUT))/scratch $$wrap $(FUZZ_ROOT)/fuzz-$$t -max_total_time=$(FUZZ_TIME) \
 			-artifact_prefix=$(FUZZ_OUT)/crashes/$$t/ -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 $(FUZZ_FLAGS) \
 			$(FUZZ_OUT)/corpus/$$t $(FUZZ_ROOT)/seeds/$$t > $(FUZZ_OUT)/$$t-$(FUZZ_TIME)s.log 2>&1; \

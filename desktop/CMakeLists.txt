@@ -30,7 +30,7 @@ endif()
 add_library(frond-linkproto STATIC ../link/crypto.cpp ../link/noise.cpp ../link/wire.cpp ../link/pairing.cpp
   ../link/messages.cpp ../link/mux.cpp ../link/link.cpp ../link/monocypher/monocypher.c)
 set_target_properties(frond-linkproto PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
-add_library(frond-hub STATIC LinkStore.cpp LinkHub.cpp LinkClient.cpp ConnectionsWindow.cpp)
+add_library(frond-hub STATIC LinkStore.cpp LinkLines.cpp LinkHub.cpp LinkClient.cpp ConnectionsWindow.cpp)
 target_link_libraries(frond-hub PUBLIC frond-linkproto Qt6::Network Qt6::Widgets)
 target_include_directories(frond-hub PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(frond-client STATIC DesktopClient.cpp DanaViewController.cpp)
