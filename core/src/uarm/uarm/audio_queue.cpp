@@ -129,7 +129,7 @@ size_t audioQueuePendingSamples(struct AudioQueue* audioQueue) {
 
 AudioQueueState audioQueueGetState(struct AudioQueue* audioQueue) {
     AUDIO_QUEUE_LOCK;
-    return {audioQueue->pending, audioQueue->generation};
+    return {audioQueue->pending, audioQueue->generation, audioQueue->accounting.committed};
 }
 
 size_t audioQueuePopChunkIfGeneration(struct AudioQueue* audioQueue, uint32_t* destination,

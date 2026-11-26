@@ -92,6 +92,8 @@ uint64_t SdlAudioDriver::GetUnderrunCount() const {
 }
 
 void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
+    // 100 ms with nothing pushed: the guest's sound has stopped.
+    constexpr uint64_t quietFlushFrames = 44100 / 10;
     size_t samplesRemaining = len >> 2;
     const auto queueState = audioQueueGetState(audioQueue);
     size_t samplesPending = queueState.pendingSamples;
@@ -100,6 +102,13 @@ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
         audioBuffering = true;
         starting = true;
         audioBackpressure = false;
+        drained = false;
+    }
+    if (queueState.committed != lastCommitted) {
+        lastCommitted = queueState.committed;
+        quietFrames = 0;
+    } else if (quietFrames < quietFlushFrames) {
+        quietFrames += samplesRemaining;
     }
 
     if (audioBuffering && samplesPending > (starting ? bufferThresholdStartup : bufferThresholdStop)) {
@@ -109,19 +118,29 @@ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
 
     if (!audioBuffering && samplesPending < bufferThresholdStart) {
         audioBuffering = true;
+        drained = true;
+        drainedCommitted = queueState.committed;
+    }
+    // Running dry is an underrun when the guest's sound carries on; when it has stopped, it's just the end.
+    if (drained && queueState.committed != drainedCommitted) {
+        drained = false;
         underrunCount.fetch_add(1, std::memory_order_relaxed);
     }
+    // Once the guest's sound has stopped, play what's left: the end of a sound, or a sound shorter than the
+    // start threshold, that would otherwise wait for the next one.
+    const bool flushing = audioBuffering && samplesPending && quietFrames >= quietFlushFrames;
+    if (flushing) drained = false;
 
     if (!audioBackpressure && samplesPending > backpressureThresholdStart) audioBackpressure = true;
     if (audioBackpressure && samplesPending < backpressureThresholdStop) audioBackpressure = false;
 
-    // While buffering nothing is popped, and the span gives the guest time of the next frame.
+    // While buffering nothing is popped, unless flushing, and the span gives the guest time of the next frame.
     const bool mixing = mixerOn.load();
     AudioQueueSpan span;
-    if (!audioBuffering || mixing) {
+    if (!audioBuffering || mixing || flushing) {
         samplesRemaining -=
             audioQueuePopChunkIfGeneration(audioQueue, reinterpret_cast<uint32_t*>(stream),
-                                          audioBuffering ? 0 : samplesRemaining, queueGeneration,
+                                          audioBuffering && !flushing ? 0 : samplesRemaining, queueGeneration,
                                           mixing ? &span : nullptr);
     }
 

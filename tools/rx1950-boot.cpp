@@ -391,7 +391,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S [X]", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "power" (sleep, backlight and LEDs), "intclog N", "hard-reset" (store erased from the MBR's block, then power on), "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S [X]", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "power" (sleep, backlight and LEDs), "intclog N", "ram NAME" (SDRAM to NAME.ram), "hard-reset" (store erased from the MBR's block, then power on), "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -600,6 +600,15 @@ int main(int argc, char** argv) {
                         machine->intc.intsubmsk, machine->pwm.tcon, machine->pwm.timers[3].buffer, machine->idleCycles(), machine->cycles());
         } else if (c == "shot" && std::sscanf(line, "%*s %63s", word) == 1) {
             saveScreen(std::string(word) + ".ppm");
+        } else if (c == "ram" && std::sscanf(line, "%*s %63s", word) == 1) {
+            // The whole SDRAM, physical order, to WORD.ram.
+            FILE* f = std::fopen((out + "/" + word + ".ram").c_str(), "wb");
+            for (uint32_t pa = 0x30000000; f; pa += 1u << 20) {
+                const uint8_t* span = machine->sdramSpan(pa, 1u << 20);
+                if (!span) break;
+                std::fwrite(span, 1, 1u << 20, f);
+            }
+            if (f) std::fclose(f);
         } else {
             std::printf("error: %s", line);
             continue;

@@ -79,6 +79,10 @@ class SdlAudioDriver {
     bool lowLatencyStartup;
     uint16_t periodFrames;
     uint64_t queueGeneration{0};  // owned by the SDL callback thread
+    // Also the callback thread's: the frames pushed at the last callback, the frames called for since then with
+    // none pushed, and the pushed count when the queue last ran dry (drained).
+    uint64_t lastCommitted{0}, quietFrames{0}, drainedCommitted{0};
+    bool drained{false};
 
     uint32_t bufferThresholdStart{0};
     uint32_t bufferThresholdStop{0};
