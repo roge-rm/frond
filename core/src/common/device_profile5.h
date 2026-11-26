@@ -513,6 +513,13 @@ inline bool deviceProfileNetworkHotSync5(const DeviceProfile5& profile) {
     return profile.deviceType == deviceTypeTX || caps.modem || caps.irPhone || caps.usbWifi || caps.builtInWifi;
 }
 
+// The Palm Portable Keyboard for the Palm III series fits the Palm III, IIIx, IIIe, IIIxe and IIIc
+// cradle port (frond-68k's serial-mode keyboard).
+inline bool deviceProfileSerialKeyboard5(int32_t deviceType) {
+    return deviceType == deviceTypePalmIII || deviceType == deviceTypeIIIx || deviceType == deviceTypeIIIe ||
+           deviceType == deviceTypeIIIxe || deviceType == deviceTypeIIIc;
+}
+
 inline bool deviceProfileHasPalmSdioWifi5(int32_t deviceType) {
     return deviceType == deviceTypeZire72 || deviceProfileIsE2Board5(deviceType);
 }

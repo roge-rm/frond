@@ -95,6 +95,8 @@ data class Device internal constructor(
     val wifiOnlyNetwork: Boolean = false,
     // Takes the CLIE game controller (PEGA-GC10) on its interface connector, run by the core.
     val clieGamepad: Boolean = false,
+    // The Palm Portable Keyboard on the serial port (the serial choice "keyboard"), run by the core.
+    val serialKeyboard: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,

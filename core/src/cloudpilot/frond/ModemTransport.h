@@ -8,6 +8,7 @@
 // so a session load (which moves the cycle count) doesn't upset its timers. All on the
 // emulator thread.
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -16,6 +17,7 @@
 #include "modem/LineSwitch.h"
 #include "modem/PppServer.h"
 #include "net/SlirpIp.h"
+#include "serial/PortableKeyboard.h"
 
 class ModemTransport68k : public EmTransportSerial {
    public:
@@ -26,6 +28,25 @@ class ModemTransport68k : public EmTransportSerial {
     const HostTransport68k& Host() const { return host; }
     bool ModemMode() const { return engine && !engine->direct; }
     bool DirectMode() const { return engine && engine->direct; }
+    bool KeyboardMode() const { return keyboard.Attached(); }
+    frondKeyboard::PortableKeyboard& Keyboard() { return keyboard; }
+    frondKeyboard::PortableKeyboardTypist& Typist() { return typist; }
+
+    // The Palm Portable Keyboard plugged into the serial port or taken out. It takes the place of
+    // the host link, the modem and direct PPP.
+    void SetKeyboardMode(bool on) {
+        if (on == KeyboardMode()) return;
+        typist.Clear();
+        if (!on) {
+            keyboard.Detach();
+            return;
+        }
+        engine.reset();
+        keyboard.Attach(rtsHigh && powered, Now());
+        keyboardCredit.Restart();
+    }
+    // A key from the host. Fn keys come with Fn held around them.
+    bool KeyboardKey(uint8_t code, bool down) { return keyboard.Key(code, down, Now()); }
 
     // Modem mode on or off. Turning it on starts slirp and fails if slirp can't start.
     bool SetNetworkMode(bool modem, bool direct, std::string& error) {
@@ -52,6 +73,7 @@ class ModemTransport68k : public EmTransportSerial {
 
     // modem idle, modem dialling or modem online SPEED.
     std::string Describe() const {
+        if (KeyboardMode()) return std::string("keyboard ") + keyboard.Describe();
         if (!engine) return "off";
         if (DirectMode()) {
             if (engine->ppp.IpcpOpen()) return "ppp online";
@@ -93,6 +115,12 @@ class ModemTransport68k : public EmTransportSerial {
     }
 
     bool Read(long& count, void* data) override {
+        if (KeyboardMode()) {
+            const long n = long(std::min<size_t>(size_t(std::max(0L, count)), KeyboardReadable()));
+            count = long(keyboard.Read(static_cast<uint8_t*>(data), size_t(n)));
+            keyboardCredit -= count;
+            return true;
+        }
         if (!engine) return host.Read(count, data);
         const long n = std::max(0L, std::min(count, credit.Take(config.fBaud)));
         auto* bytes = static_cast<uint8_t*>(data);
@@ -102,6 +130,8 @@ class ModemTransport68k : public EmTransportSerial {
         return true;
     }
     bool Write(long& count, const void* data) override {
+        // The keyboard has no line from the Palm but RTS.
+        if (KeyboardMode()) return true;
         if (!engine) return host.Write(count, data);
         if (!powered || count <= 0) return true;
         const auto* bytes = static_cast<const uint8_t*>(data);
@@ -120,11 +150,13 @@ class ModemTransport68k : public EmTransportSerial {
         return true;
     }
     bool CanRead() override {
+        if (KeyboardMode()) return KeyboardReadable() > 0;
         if (!engine) return host.CanRead();
         return powered && Available() && credit.Take(config.fBaud) > 0;
     }
-    bool CanWrite() override { return engine ? powered : host.CanWrite(); }
+    bool CanWrite() override { return KeyboardMode() ? powered : engine ? powered : host.CanWrite(); }
     size_t BytesPending() override {
+        if (KeyboardMode()) return KeyboardReadable();
         if (!engine) return host.BytesPending();
         return powered ? std::min<size_t>(Available(), size_t(credit.Take(config.fBaud))) : 0;
     }
@@ -133,7 +165,12 @@ class ModemTransport68k : public EmTransportSerial {
         EmTransportSerial::SetConfig(next);
         host.SetConfig(next);
     }
-    void SetRTS(RTSControl control) override { host.SetRTS(control); }
+    // Auto is RTS driven by the receive FIFO, which is high while it has room.
+    void SetRTS(RTSControl control) override {
+        rtsHigh = control != kRTSOff;
+        if (KeyboardMode()) KeyboardRts();
+        host.SetRTS(control);
+    }
     void SetDTR(bool dtr) override {
         host.SetDTR(dtr);
         if (!ModemMode()) return;
@@ -154,6 +191,20 @@ class ModemTransport68k : public EmTransportSerial {
     // Called between slices with the guest's line driver for this side, which a session load
     // doesn't report.
     void Service(bool lineDriverOn) {
+        if (KeyboardMode()) {
+            powered = lineDriverOn;
+            KeyboardRts();
+            const uint64_t now = Now();
+            typist.Service(keyboard, now);
+            keyboard.Service(now);
+            // The RS-232 receiver is off with the line driver, so what the keyboard sends is lost.
+            if (!powered) keyboard.Drop();
+            for (int pulses = keyboard.TakePulses(); pulses > 0; --pulses) {
+                gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::press));
+                gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::release));
+            }
+            return;
+        }
         if (!engine) {
             powered = lineDriverOn;
             return host.Service(lineDriverOn);
@@ -184,6 +235,12 @@ class ModemTransport68k : public EmTransportSerial {
     // line has dropped since, so the guest gets NO CARRIER and has to dial again. Without one the
     // modem is idle. A call saved outside modem mode waits for modem mode to come on.
     void SessionLoaded(const std::string& call) {
+        // A plugged-in keyboard powers up again, as after a reset of the Palm.
+        if (KeyboardMode()) {
+            typist.Clear();
+            keyboard.Attach(rtsHigh && powered, Now());
+            keyboardCredit.Restart();
+        }
         droppedCall.clear();
         if (!ModemMode()) droppedCall = call;
         else if (call.empty() || !engine->modem.LineDropped(call, Now())) engine->modem.Drop(Now());
@@ -205,11 +262,36 @@ class ModemTransport68k : public EmTransportSerial {
         unsigned dtrRises{0}, dtrDrops{0};
     };
 
+    // The keyboard sees RTS through the line driver: with the port closed the line is low, so
+    // opening the port with RTS on is the rising edge that gets the ID.
+    void KeyboardRts() {
+        const bool high = rtsHigh && powered;
+        // The ID starts a byte time after RTS rises.
+        if (high && !keyboard.Awake()) keyboardCredit.Reset(KeyboardCycles());
+        keyboard.SetRts(high, Now());
+    }
+
+    // Bytes the guest can take now: the keyboard sends at 9600 baud and a UART set to another rate
+    // gets nothing it can use.
+    size_t KeyboardReadable() {
+        // Credit only builds while bytes wait, so they go out a byte time apart.
+        if (!keyboard.Available()) {
+            keyboardCredit.Reset(KeyboardCycles());
+            return 0;
+        }
+        if (!powered || std::labs(config.fBaud - frondKeyboard::PortableKeyboard::kBaud) > 200) return 0;
+        return std::min<size_t>(keyboard.Available(), size_t(keyboardCredit.Take(frondKeyboard::PortableKeyboard::kBaud, KeyboardCycles())));
+    }
+
+    static uint64_t KeyboardCycles() { return gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles(); }
+
     size_t Available() const { return DirectMode() ? engine->ppp.Available() : engine->modem.Available(); }
 
-    // Guest nanoseconds, carried on across a load that moves the cycle count back.
+    // Guest nanoseconds, carried on across a load that moves the cycle count back. The keyboard
+    // reads the CPU's own count, which moves mid-slice, as drivers wait for its ID in a busy loop.
     uint64_t Now() {
-        const uint64_t cycles = gSession->GetSystemCycles();
+        const uint64_t cycles =
+            KeyboardMode() && gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles();
         if (cycles > cycleMark) clock += double(cycles - cycleMark) * 1e9 / gSession->GetClocksPerSecond();
         cycleMark = cycles;
         return uint64_t(clock);
@@ -251,6 +333,11 @@ class ModemTransport68k : public EmTransportSerial {
     std::string droppedCall;
     bool powered{false};
     BaudCredit68k credit;
+    frondKeyboard::PortableKeyboard keyboard;
+    frondKeyboard::PortableKeyboardTypist typist;
+    BaudCredit68k keyboardCredit;
+    // The guest's RTS as last set; low until it sets it.
+    bool rtsHigh{false};
     uint64_t cycleMark{0};
     double clock{0};
 };

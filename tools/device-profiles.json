@@ -102,6 +102,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -196,6 +197,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": [
         {
           "id": "e2-denvfs",
@@ -303,6 +305,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -379,6 +382,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -473,6 +477,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -566,6 +571,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": true,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -642,6 +648,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": true,
       "firmware_variants": []
     },
     {
@@ -718,6 +725,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": true,
       "firmware_variants": []
     },
     {
@@ -794,6 +802,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": true,
       "firmware_variants": []
     },
     {
@@ -870,6 +879,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": true,
       "firmware_variants": []
     },
     {
@@ -946,6 +956,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1022,6 +1033,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1098,6 +1110,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1174,6 +1187,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1287,6 +1301,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1400,6 +1415,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1513,6 +1529,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1589,6 +1606,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": true,
       "firmware_variants": []
     },
     {
@@ -1702,6 +1720,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1815,6 +1834,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -1928,6 +1948,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2041,6 +2062,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2190,6 +2212,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2339,6 +2362,7 @@
       "built_in_wifi": true,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2450,6 +2474,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2561,6 +2586,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2654,6 +2680,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2730,6 +2757,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2824,6 +2852,7 @@
       "built_in_wifi": false,
       "wifi_only_network": true,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     },
     {
@@ -2900,6 +2929,7 @@
       "built_in_wifi": false,
       "wifi_only_network": false,
       "clie_gamepad": false,
+      "serial_keyboard": false,
       "firmware_variants": []
     }
   ]
