@@ -4,7 +4,6 @@
 #include "ZipfileWalker.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* bytes, size_t size) {
-    if (!size) return 0;  // ZipfileWalker memcpys from the null data of an empty buffer
     std::vector<uint8_t> copy(bytes, bytes + size);
     ZipfileWalker walker(copy.size(), copy.data());
     walker.GetTotalEntries();

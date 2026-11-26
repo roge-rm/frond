@@ -1,6 +1,7 @@
 #include "Chunk.h"
 
 #include <cstring>
+#include <vector>
 
 #include "CPEndian.h"
 #include "Logging.h"
@@ -194,10 +195,17 @@ double Chunk::GetDouble() {
 }
 
 string Chunk::GetString(size_t maxLength) {
-    char* buffer = static_cast<char*>(alloca(maxLength + 1));
-    GetBuffer(buffer, maxLength + 1);
+    // The stored string has to end inside its maxLength + 1 bytes; a missing NUL or a short chunk is an error.
+    std::vector<char> buffer(maxLength + 1, 0);
+    GetBuffer(buffer.data(), maxLength + 1);
+    if (error) return string();
 
-    return buffer;
+    if (!std::memchr(buffer.data(), 0, buffer.size())) {
+        error = true;
+        return string();
+    }
+
+    return string(buffer.data());
 }
 
 bool Chunk::HasError() const { return error; }

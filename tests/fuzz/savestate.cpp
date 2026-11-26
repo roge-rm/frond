@@ -32,7 +32,7 @@ struct Target {
             uint64_t v64;
             bool flag;
             double real;
-            for (unsigned i = 0; i < 4; ++i) switch ((r.kind + i) % 13) {
+            for (unsigned i = 0; i < 4; ++i) switch ((r.kind + i) % 14) {
                 case 0: chunk->Get8(); break;
                 case 1: chunk->Get16(); break;
                 case 2: chunk->Get32(); break;
@@ -42,8 +42,12 @@ struct Target {
                 case 6: chunk->GetBuffer16(reinterpret_cast<uint16_t*>(buffer.data()), r.size); break;
                 case 7: chunk->GetBuffer32(reinterpret_cast<uint32_t*>(buffer.data()), r.size); break;
                 case 8: chunk->GetBuffer64(reinterpret_cast<uint64_t*>(buffer.data()), r.size); break;
-                // GetString and DoString are left out: they read past a string with no terminating zero
-                // (build/fuzzing/findings/savestate-getstring-unterminated, for F3).
+                case 12: {
+                    std::string text;
+                    chunk->GetString(r.size & 0xff);
+                    helper.DoString(text, r.size >> 8);
+                    break;
+                }
                 case 9: chunk->GetBool(); break;
                 case 10: helper.Do8(v8).Do16(v16).Do32(v32).Do64(v64).DoBool(flag).DoDouble(real); break;
                 case 11: helper.DoBuffer(buffer.data(), r.size); break;

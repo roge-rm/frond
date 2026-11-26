@@ -122,6 +122,25 @@ static void bringUpTests() {
     assert(!s.Up() && s.GetState() == RndisHost::State::init);
     command(s, RndisHost::initMsg, 5 * ms);
 
+    // A QUERY completion cut off after its status has no length or offset fields: it fails the bring-up,
+    // and a length or offset that points past the message does too.
+    for (int variant = 0; variant < 3; ++variant) {
+        RndisHost t;
+        t.Start(64, 0);
+        id = command(t, RndisHost::initMsg, 0);
+        answer(t, initDone(id), ms);
+        id = command(t, RndisHost::queryMsg, ms);
+        Bytes rest;
+        if (variant) {
+            put32(rest, variant == 1 ? 6 : 0xfffffff0);  // length
+            put32(rest, variant == 1 ? 0xfffffff0 : 16);  // offset
+        }
+        const Bytes cut = completion(4, id, 0, rest);
+        assert(cut.size() == (variant ? 24u : 16u));
+        answer(t, cut, 2 * ms);
+        assert(!t.Up() && t.GetState() == RndisHost::State::init);
+    }
+
     // No notification: GET_ENCAPSULATED_RESPONSE after 100 ms anyway; an empty answer waits another 100 ms.
     RndisHost w;
     w.Start(64, 0);

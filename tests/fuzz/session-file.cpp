@@ -10,6 +10,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* bytes, size_t size) {
     if (session.Deserialize(size, bytes)) {
         session.GetDeviceName();
         session.GetMediaCount();
+        // Written again, the sections it read stay valid; kept to small ones.
+        if (session.GetMemorySize() + session.GetNorSize() + session.GetNandSize() + session.GetSavestateSize() <
+            (1u << 20)) {
+            session.Serialize();
+            const auto* memory = static_cast<const uint8_t*>(session.GetMemory());
+            for (size_t i = 0; memory && i < session.GetMemorySize(); i += 64) (void)memory[i];
+        }
     }
     bool ok = false;
     const size_t chunk = rle_get_chunk_size(size, bytes, ok);

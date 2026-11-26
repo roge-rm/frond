@@ -800,8 +800,8 @@ test-modem: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 .PHONY: test-rndis-host
 test: test-rndis-host
 test-rndis-host: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -UNDEBUG -Icore/src/common tests/rndis-host.cpp \
-		$(COMMON_NET_LIB) $(COMMON_LIB) \
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address -Wall -Wextra -Wno-unused-parameter -UNDEBUG -Icore/src/common tests/rndis-host.cpp \
+		core/src/common/RndisHost.cpp $(COMMON_NET_LIB) $(COMMON_LIB) \
 		$(shell pkg-config --cflags --libs slirp) -o $(OBJ_ROOT)/test-rndis-host
 	$(OBJ_ROOT)/test-rndis-host
 
@@ -1737,6 +1737,24 @@ device-session-probe: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/device-session.cpp @$(OBJ_ROOT)/device-session-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-device-session
+
+.PHONY: test-fuzz-regressions
+test: test-fuzz-regressions
+test-fuzz-regressions: prepare
+	$(CC) -std=gnu99 -O1 -g -fsanitize=address -Icore/src/common -c core/src/common/zip/miniz.c -o $(OBJ_ROOT)/miniz-fuzz-regressions.o
+	$(CC) -std=gnu99 -O1 -g -fsanitize=address -Icore/src/common -c core/src/common/zip/zip.c -o $(OBJ_ROOT)/zip-fuzz-regressions.o
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address -Wall -Wextra -Werror -Icore/src/common -Icore/src/common/savestate \
+		tests/fuzz-regressions.cpp core/src/common/ZipfileWalker.cpp core/src/common/session/session_file5.cpp \
+		core/src/common/savestate/Chunk.cpp core/src/common/Logging.cpp $(OBJ_ROOT)/miniz-fuzz-regressions.o \
+		$(OBJ_ROOT)/zip-fuzz-regressions.o -o $(OBJ_ROOT)/test-fuzz-regressions
+	$(OBJ_ROOT)/test-fuzz-regressions
+
+.PHONY: test-gdbstub-68k-stop
+test: test-gdbstub-68k-stop
+test-gdbstub-68k-stop: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wno-unused-parameter -Icore/src/common $(FUZZ_EXTRA_gdbstub-68k) tests/gdbstub-68k-stop.cpp core/src/common/Logging.cpp \
+		-o $(OBJ_ROOT)/test-gdbstub-68k-stop
+	$(OBJ_ROOT)/test-gdbstub-68k-stop
 
 .PHONY: test-savestate-layout
 test: test-savestate-layout
@@ -3363,8 +3381,8 @@ FUZZ_LIBS = $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB) -lpthread -ldl -lm
 FUZZ_EXTRA_rx1950-nand = core/src/uarm/uarm/rx1950_nand_image.cpp core/src/uarm/uarm/s3c2442_nand.cpp
 # libslirp is built from its pinned source with the sanitizers so its guest input is covered too;
 # FUZZ_SLIRP_TARBALL is the archive android/build-network.py fetches (checked against its SHA-256).
-FUZZ_SLIRP_VERSION = libslirp-v4.9.1
-FUZZ_SLIRP_SHA256 = 3caff6e2de445f4995629d4929c55419f661b2b1d14f12481e155a71c1e8f811
+FUZZ_SLIRP_VERSION = libslirp-v4.9.7
+FUZZ_SLIRP_SHA256 = 363dfacf2821758c52388303b691093030b43ce8fd63142a55e878cbeb9a889c
 FUZZ_SLIRP_TARBALL ?= android/build/net/sources/$(FUZZ_SLIRP_VERSION).tar.bz2
 FUZZ_SLIRP_LIB = $(FUZZ_ROOT)/slirp/build/libslirp.a
 FUZZ_SLIRP = -Wno-deprecated-declarations -I$(FUZZ_ROOT)/slirp/$(FUZZ_SLIRP_VERSION)/src -I$(FUZZ_ROOT)/slirp/build $(FUZZ_SLIRP_LIB) \
@@ -3404,12 +3422,11 @@ $(FUZZ_COMMON_LIB):
 	$(MAKE) -C core/src/common FROND_CORE_OBJ=$(abspath $(FUZZ_ROOT))/core CC_NATIVE=$(FUZZ_CC) CXX_NATIVE=$(FUZZ_CXX) \
 		CFLAGS_NATIVE="$(FUZZ_CFLAGS)" bin
 
-# shift-base is off for libslirp: ip_icmp.c shifts 0xf by 28 as an int on every ICMP error it sends.
 $(FUZZ_SLIRP_LIB):
 	echo "$(FUZZ_SLIRP_SHA256)  $(FUZZ_SLIRP_TARBALL)" | sha256sum -c --quiet
 	rm -rf $(FUZZ_ROOT)/slirp && mkdir -p $(FUZZ_ROOT)/slirp
 	tar -xjf $(FUZZ_SLIRP_TARBALL) -C $(FUZZ_ROOT)/slirp
-	CC=$(FUZZ_CC) CFLAGS="$(FUZZ_CFLAGS) -fno-sanitize=shift-base" meson setup --default-library=static --buildtype=plain \
+	CC=$(FUZZ_CC) CFLAGS="$(FUZZ_CFLAGS)" meson setup --default-library=static --buildtype=plain \
 		$(FUZZ_ROOT)/slirp/build $(FUZZ_ROOT)/slirp/$(FUZZ_SLIRP_VERSION)
 	ninja -C $(FUZZ_ROOT)/slirp/build libslirp.a
 

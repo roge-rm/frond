@@ -259,6 +259,7 @@ void RndisHost::HandleControl(const uint8_t* m, size_t size, uint64_t now) {
             return Next(now);
         }
         case queryMsg: {
+            if (length < 24) return Fail("short QUERY completion");
             const uint32_t n = get32(m + 16), offset = get32(m + 20);
             if (8ull + offset + n > length) return Fail("bad QUERY completion");
             const uint8_t* info = m + 8 + offset;
