@@ -238,12 +238,50 @@ void zire31(const std::string& out) {
     for(KeyId key:{keyIdPower,keyIdHard1,keyIdHard2,keyIdSelect,keyIdUp,keyIdRight})checkHeld(d,key,2);
     renders(d,out,keyIdHard1);
 }
+
+void pilot(const std::string& out) {
+    const Device d{"pilot-professional",DeviceArt::pilotProfessional,160,160};
+    const auto& p=deviceControls(d.art);
+    const auto& silk=deviceSilkscreen(d.art);
+    assert(p.width==320 && p.height==96 && p.unit==2 && p.count==7 && p.style==DeviceControlStyle::pilot);
+    assert(silk.count==6 && silk.unit==2 && silk.height==120 && silkRows(d)==60 && silk.style==SilkscreenStyle::pilot);
+    checkKeys(d);
+    // Window pixels: the strip starts under the 160 LCD rows and the 60 silkscreen rows.
+    const int top=220;
+    assert(deviceControlsHeight(p,160)==48);
+    assert(keyAt(d,20,top+20)==keyIdHard1 && keyAt(d,50,top+20)==keyIdHard2 && keyAt(d,110,top+20)==keyIdHard3);
+    assert(keyAt(d,140,top+20)==keyIdHard4 && keyAt(d,80,top+15)==keyIdUp && keyAt(d,80,top+37)==keyIdDown);
+    assert(keyAt(d,3,top+24)==keyIdPower);
+    // Between the scroll bars, round the round keys' corners and under the row.
+    assert(keyAt(d,80,top+26)==keyInvalid && keyAt(d,10,top+10)==keyInvalid && keyAt(d,80,top+46)==keyInvalid);
+
+    // Colours at 2x: pale print with dark discs and light glyphs, the charcoal body, dark round
+    // keys with light icons and the teal power key.
+    Image image(320,imageHeight(d,2));
+    drawDevice(image,d,2,0);
+    auto pixel=[&](float x,float y) {return image.at(int(x*2),int(y*2));};
+    assert(brightness(pixel(80,165))>450 && brightness(pixel(13,182))<250 && brightness(pixel(150,211))<250);
+    const auto body=pixel(80,top+4);
+    assert(brightness(body)>100 && brightness(body)<260);
+    assert(brightness(pixel(13,top+20.5f))<250);
+    int teal=0,light=0;
+    for(int y=(top+16)*2;y<(top+33)*2;++y)for(int x=0;x<14;++x) {
+        const auto c=image.at(x,y);
+        if(c.g>c.r+60 && c.b>c.r+50)++teal;
+    }
+    for(int y=(top+14)*2;y<(top+27)*2;++y)for(int x=28;x<52;++x)if(brightness(image.at(x,y))>500)++light;
+    assert(teal>20 && light>10);
+
+    for(KeyId key:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdUp,keyIdDown,keyIdPower})checkHeld(d,key,2);
+    renders(d,out,keyIdUp);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::string out=argc>1 ? argv[1] : "";
     treo650(out);
     zire31(out);
+    pilot(out);
     std::puts("palm candidate art ok");
     return 0;
 }

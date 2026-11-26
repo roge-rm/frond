@@ -19,7 +19,7 @@ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, ri
                                trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
                                calendarGrid, menu, phoneEnd };
 enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350, m125, v, m100, m500,
-                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, treo650, zire31 };
+                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, treo650, zire31, pilot };
 // Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
 // it (around), and only the current arrangement's keys are shown.
@@ -613,6 +613,21 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     };
     static const DeviceControlProfile zire31Profile{320,112,zire31,std::size(zire31),{114,8,92,96},30,{140,42,40,28},
                                                     DeviceControlStyle::zire31,0.3f,2};
+    // Pilot Professional on a 160-wide screen, 2 units per pixel: four round dark keys in round
+    // collars (Date Book, Address, To Do, Memo Pad) either side of two flat scroll bars, one
+    // over the other. The teal power key sits outside the screen's width on the real one, so
+    // it's pulled in to the far left.
+    static const DeviceButton pilot[] = {
+        {keyIdHard1, {17,18,46,46}, "Date Book", DeviceControlIcon::calendar},
+        {keyIdHard2, {77,18,46,46}, "Address", DeviceControlIcon::phone},
+        {keyIdUp, {136,20,48,20}, "Up", DeviceControlIcon::up, 10},
+        {keyIdDown, {136,64,48,20}, "Down", DeviceControlIcon::down, 10},
+        {keyIdHard3, {197,18,46,46}, "To Do", DeviceControlIcon::tasks},
+        {keyIdHard4, {257,18,46,46}, "Memo Pad", DeviceControlIcon::memo},
+        {keyIdPower, {1,32,13,34}, "Power", DeviceControlIcon::power, 3},
+    };
+    static const DeviceControlProfile pilotProfile{320,96,pilot,std::size(pilot),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::pilot,0.5f,2};
     // CLIE PEG-T415 under its 320-wide screen, 1 unit per pixel: four wide, flat chrome slats
     // edge to edge (Date Book, Address, To Do, Memo Pad) either side of a narrow rocker split
     // across its middle, under a dark metal strip with the keys' icons stamped on it. The Jog
@@ -653,6 +668,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::t415: return t415Profile;
         case DeviceArt::treo650: return treo650Profile;
         case DeviceArt::zire31: return zire31Profile;
+        case DeviceArt::pilotProfessional: return pilotProfile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
         case DeviceArt::hpIpaqRx1950: return rx1950Profile;
@@ -1107,9 +1123,9 @@ inline DanaLayout danaLayout(int viewWidth, int viewHeight, bool keyboard) {
 
 // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
 // rectangles only place the artwork.
-enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast, hotSync };
+enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast, hotSync, pilotApplications };
 // E2 and Zire 72: two Graffiti areas between full-height lines; the 68k Palms: one rounded box.
-enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500, zire31 };
+enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500, zire31, pilot };
 struct SilkscreenButton {
     SDL_Rect bounds;
     const char* label;
@@ -1249,6 +1265,18 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     };
     static const DeviceSilkscreen zire31Silkscreen{320,128,zire31,std::size(zire31),{54,4,124,112},{178,4,88,112},
                                                    SilkscreenStyle::zire31,2};
+    // Pilot Professional: the ROM's pen button list (at 0x1da8e) has the IIIx's rectangles, with
+    // Applications in place of Home. The keyboard areas are the IIIx's too.
+    static const SilkscreenButton pilot[] = {
+        {{0,8,54,56}, "Applications", SilkscreenIcon::pilotApplications},
+        {{0,64,54,56}, "Menu", SilkscreenIcon::menu},
+        {{266,8,54,56}, "Calculator", SilkscreenIcon::calc},
+        {{266,64,54,56}, "Find", SilkscreenIcon::find},
+        {{54,92,36,28}, "Letter keyboard", SilkscreenIcon::letters},
+        {{230,92,36,28}, "Number keyboard", SilkscreenIcon::numbers},
+    };
+    static const DeviceSilkscreen pilotSilkscreen{320,120,pilot,std::size(pilot),{54,8,124,112},{178,8,88,112},
+                                                  SilkscreenStyle::pilot,2};
     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
     switch(art) {
         case DeviceArt::e2: return e2Silkscreen;
@@ -1263,6 +1291,7 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
         case DeviceArt::m500: case DeviceArt::c500: return m500Silkscreen;
         case DeviceArt::t415: return t415Silkscreen;
         case DeviceArt::zire31: return zire31Silkscreen;
+        case DeviceArt::pilotProfessional: return pilotSilkscreen;
         default: return none;
     }
 }

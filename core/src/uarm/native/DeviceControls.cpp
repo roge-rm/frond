@@ -1230,9 +1230,11 @@ struct SilkscreenLook {
 };
 
 void paintT415Silkscreen(Canvas& canvas, const DeviceSilkscreen& silk);
+void paintPilotSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk);
 
 void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
     if(silk.style==SilkscreenStyle::t415)return paintT415Silkscreen(canvas,silk);
+    if(silk.style==SilkscreenStyle::pilot)return paintPilotSilkscreen(canvas,silk);
     const float W=silk.width,H=silk.height;
     // E2: dark grey print with light grey discs. Zire 72: a bluer grey with silver discs.
     // m515: light grey-green print with pale discs and one Graffiti box. IIIx: pale speckled
@@ -1600,6 +1602,80 @@ float tg50TextWidth(const char* text, float size) {
     float total=0;
     for(const char* c=text;*c;++c)total+=tg50Glyph(*c).advance;
     return (total-1.8f)*size;
+}
+
+// Pilot silkscreen, 2 units per LCD pixel: pale speckled grey-green print with dark discs and
+// light glyphs, each disc's name arcing over it, one Graffiti box split by triangles and small
+// slanted abc and 123 labels with dots in its lower corners.
+void paintPilotSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
+    const float W=silk.width,H=silk.height;
+    const Rgb panelTop{176,186,166},panelBottom{164,174,154},ink{40,44,40},discTop{62,66,64},discBottom{34,37,36},
+              glyph{190,198,180};
+    canvas.paint(0,0,W,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        const float t=std::fabs(x-W*0.5f)/(W*0.5f);
+        return (mix(panelTop,panelBottom,y/H)+Rgb{10,10,10}*speckle(x,y))*(1-0.07f*t*t);
+    });
+    canvas.paint(0,0,W,3,[&](float,float y) {return canvas.edge(y-1.2f);},[](float,float,Rgb) {return Rgb{60,64,58};});
+    const float bx0=silk.letters.x+7,bx1=silk.numbers.x+silk.numbers.w-7,by0=3,by1=H-3;
+    const SDL_Rect frame{int(bx0),int(by0),int(bx1-bx0),int(by1-by0)};
+    const float split=silk.numbers.x;
+    const std::array<std::array<float,2>,3> top{{{split-4.5f,by0},{split+4.5f,by0},{split,by0+6}}};
+    const std::array<std::array<float,2>,3> bottom{{{split-4.5f,by1},{split+4.5f,by1},{split,by1-6}}};
+    canvas.paint(0,0,W,H,[&](float x,float y) {
+        return canvas.edge(std::min({std::fabs(deviceRoundedDistance(frame,6,x,y))-0.8f,polygon(x,y,top),polygon(x,y,bottom)}));
+    },[&](float,float,Rgb) {return ink;});
+    for(size_t i=0;i<silk.count;++i) {
+        const auto& button=silk.buttons[i];
+        const SDL_Rect& r=button.bounds;
+        const float cx=r.x+r.w*0.5f;
+        if(button.icon==SilkscreenIcon::letters || button.icon==SilkscreenIcon::numbers) {
+            const bool letters=button.icon==SilkscreenIcon::letters;
+            const float k=0.85f,tx=letters ? bx0+15 : bx1-15,base=by1-7;
+            const float slant=degrees(letters ? 24 : -24),cs=std::cos(slant),sn=std::sin(slant);
+            canvas.paint(tx-14*k,base-12*k,tx+14*k,base+6*k,[&](float x,float y) {
+                const float u=(x-tx)*cs+(y-base)*sn,v=-(x-tx)*sn+(y-base)*cs;
+                return canvas.edge(textDistance(letters ? "abc" : "123",u/k,v/k)*k-0.75f*k);
+            },[&](float,float,Rgb) {return ink;});
+            const float dx=letters ? bx0+7 : bx1-7,dy=by1-4.5f;
+            canvas.paint(dx-3,dy-3,dx+3,dy+3,[&](float x,float y) {return canvas.edge(std::hypot(x-dx,y-dy)-1.8f);},
+                         [&](float,float,Rgb) {return ink;});
+            continue;
+        }
+        // A dark disc low in its rectangle with a light glyph, and its name arcing over it.
+        const float cy=r.y+r.h*0.5f+3,R=16;
+        canvas.paint(cx-R-1,cy-R-1,cx+R+1,cy+R+1,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-cy)-R);},
+                     [&](float x,float y,Rgb) {return mix(discTop,discBottom,clamp01((y-cy+R)/(2*R)))*(1-0.05f*clamp01((x-cx)/R));});
+        canvas.paint(cx-R,cy-R,cx+R,cy+R,[&](float x,float y) {
+            const float u=(x-cx)*19/R,v=(y-cy)*19/R;
+            float d;
+            if(button.icon==SilkscreenIcon::pilotApplications) {
+                // A swoosh curving up to the right into an arrowhead.
+                const float a1=degrees(318),c=std::cos(a1),s=std::sin(a1);
+                const std::array<std::array<float,2>,3> head{{{2+11*c-6*s,5+11*s+6*c},{2+17*c,5+17*s},{2+5*c,5+5*s}}};
+                d=std::min(arc(u,v,2,5,11,degrees(150),a1)-2.4f,polygon(u,v,head));
+            } else {
+                d=silkscreenDiscGlyph(button.icon,u,v);
+            }
+            return canvas.edge(d*R/19);
+        },[&](float,float,Rgb) {return glyph;});
+        // Upper-case label, each letter turned to sit on a circle round the disc.
+        const char* label=button.label;
+        const float size=0.52f,base=R+2.2f;
+        float total=0;
+        for(const char* c=label;*c;++c)total+=tg50Glyph(*c).advance*size;
+        const float reach=base+6*size+1;
+        canvas.paint(cx-reach,cy-reach,cx+reach,cy,[&](float x,float y) {
+            float d=1e9f,pen=-total*0.5f;
+            for(const char* c=label;*c;++c) {
+                const float adv=tg50Glyph(*c).advance*size,a=degrees(-90)+(pen+adv*0.5f)/base;
+                pen+=adv;
+                const float nx=std::cos(a),ny=std::sin(a),qx=x-cx,qy=y-cy;
+                const char one[2]={char(std::toupper(*c)),0};
+                d=std::min(d,tg50TextDistance(one,-qx*ny+qy*nx,6*size-(qx*nx+qy*ny-base),size));
+            }
+            return canvas.edge(d-0.45f);
+        },[&](float,float,Rgb) {return ink;});
+    }
 }
 
 // What's printed on and under each TG50 keyboard key, in tg50Key order (drive 2-7, column
@@ -2936,6 +3012,62 @@ void paintZire31Controls(Canvas& canvas, const DeviceControlProfile& profile, in
                                                   Rgb{4,4,6},Rgb{64,66,74},Rgb{26,27,32},Rgb{120,124,136}});
 }
 
+// Pilot Professional: speckled charcoal plastic with a curved seam where the front meets the
+// back, round dark keys in darker collars, two flat scroll bars and the teal power key.
+void paintPilotControls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+    const float H=profile.height;
+    const int ox=(width-profile.width)/2;
+    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+    auto all=[&](float,float) {return 1.f;};
+    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+    const Rgb body{60,62,63};
+    auto seam=[&](float x) {const float t=(x-width*0.5f)/(width*0.5f);return H-5-9*t*t;};
+    canvas.paint(0,0,width,H,all,[&](float x,float y,Rgb) {
+        Rgb c=mix(body*1.08f,body*0.8f,std::pow(y/H,1.2f))+Rgb{8,8,8}*speckle(x,y);
+        if(y>seam(x))c=c*0.72f;
+        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
+        return c*(1-0.16f*t*t);
+    });
+    canvas.paint(0,H-16,width,H,[&](float x,float y) {return canvas.edge(std::fabs(y-seam(x))-0.6f);},
+                 [](float,float,Rgb) {return Rgb{18,19,19};});
+    canvas.paint(0,H-16,width,H,[&](float x,float y) {return canvas.edge(std::fabs(y-seam(x)+1.4f)-0.5f)*0.5f;},
+                 [](float,float,Rgb) {return Rgb{112,116,114};});
+    canvas.paint(0,0,width,3,[&](float,float y) {return canvas.edge(y-1.2f);},[](float,float,Rgb) {return Rgb{18,19,18};});
+    canvas.paint(0,0,width,9,[&](float,float y) {return canvas.edge(std::fabs(y-3.6f)-1.2f)*0.5f;},
+                 [](float,float,Rgb) {return Rgb{108,112,110};});
+
+    const SilverKeyLook keyLook{Rgb{14,14,15},Rgb{88,90,92},Rgb{40,42,44},Rgb{14,14,14},Rgb{108,110,112},
+                                Rgb{208,212,206},Rgb{150,154,150},1.4f,0.7f,0.3f};
+    const SilverKeyLook barLook{Rgb{16,16,17},Rgb{92,94,96},Rgb{54,56,58},Rgb{10,10,10},Rgb{104,106,108},
+                                Rgb{196,200,196},Rgb{140,144,140},1.4f,0.72f};
+    const DeviceButton* power=nullptr;
+    for(size_t i=0;i<profile.count;++i) {
+        const auto& button=profile.buttons[i];
+        if(button.key==keyIdPower) {power=&button;continue;}
+        const SDL_Rect key=shifted(button.bounds);
+        const float corner=deviceButtonCorner(profile,button);
+        if(button.key==keyIdUp || button.key==keyIdDown) {
+            const bool held=down(button.key),up=button.key==keyIdUp;
+            paintSilverKey(canvas,key,corner,held,button.icon,1,barLook,false);
+            // A small printed triangle pointing up or down.
+            const float tx=key.x+key.w*0.5f,ty=key.y+key.h*0.5f+(held ? 0.7f : 0),s=up ? -1 : 1;
+            const std::array<std::array<float,2>,3> tri{{{tx-5,ty-2.5f*s},{tx+5,ty-2.5f*s},{tx,ty+3.5f*s}}};
+            canvas.paint(tx-7,ty-6,tx+7,ty+6,[&](float x,float y) {return canvas.edge(polygon(x,y,tri));},
+                         [&](float,float,Rgb) {return held ? barLook.inkHeld : barLook.ink;});
+            continue;
+        }
+        // The collar is the hit area; the key sits 5 units inside it.
+        canvas.paint(key.x-2,key.y-2,key.x+key.w+2,key.y+key.h+3,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(key,corner,x,y));
+        },[&](float x,float y,Rgb) {return mix(Rgb{30,31,32},Rgb{18,19,19},clamp01((y-key.y)/key.h))+Rgb{4,4,4}*speckle(x,y);});
+        canvas.paint(key.x-2,key.y-2,key.x+key.w+2,key.y+key.h+3,[&](float x,float y) {
+            return canvas.edge(std::fabs(deviceRoundedDistance(key,corner,x,y)-0.8f)-0.5f)*clamp01((y-key.y)/key.h-0.2f)*0.7f;
+        },[](float,float,Rgb) {return Rgb{106,110,108};});
+        paintSilverKey(canvas,key,corner,down(button.key),button.icon,1.05f,keyLook,true,5);
+    }
+    if(power)paintTealPower(canvas,profile,power,ox,pressed);
+}
+
 // iPAQ 210: gloss black, a thin strip of four flat keys split by seams, each with a lighter
 // lip along its bottom, and a polished chrome shield five-way with a recessed select key.
 void paintIpaq210Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
@@ -3533,6 +3665,7 @@ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& prof
         case DeviceControlStyle::h4350: paintH4350Controls(canvas,profile,width*u,pressed,view);break;
         case DeviceControlStyle::treo650: paintTreo650Controls(canvas,profile,width*u,pressed,view);break;
         case DeviceControlStyle::zire31: paintZire31Controls(canvas,profile,width*u,pressed);break;
+        case DeviceControlStyle::pilot: paintPilotControls(canvas,profile,width*u,pressed);break;
         case DeviceControlStyle::t415: paintT415Controls(canvas,profile,beside ? profile.width : width*u,pressed,false,beside);break;
         default: paintTxControls(canvas,profile,width*u,pressed);
     }
