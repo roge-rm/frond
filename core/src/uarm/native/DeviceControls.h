@@ -19,7 +19,7 @@ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, ri
                                trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
                                calendarGrid };
 enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350, m125, v, m100, m500,
-                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415 };
+                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, n710c };
 // Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
 // it (around), and only the current arrangement's keys are shown.
@@ -566,6 +566,21 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     };
     static const DeviceControlProfile t615cProfile{320,104,t615c,std::size(t615c),{0,0,0,0},0,{0,0,0,0},
                                                    DeviceControlStyle::t415,0.5f,1,0,0,clieJogTab(-416,208),clieJogWidth,0,0,120};
+    // CLIE PEG-N710C under its 320-wide screen, 1 unit per pixel: a chrome band, then a dark well
+    // with four oval keys (Date Book, Address, To Do, Memo Pad) either side of an hourglass rocker
+    // split across its waist. The Jog Dial and Back are on the left side, below the headphone and
+    // remote jack and above the Hold slide. Power is below the bar, so it isn't drawn.
+    static const DeviceButton n710c[] = {
+        {keyIdHard1, {34,44,46,30}, "Date Book", DeviceControlIcon::calendar, 15},
+        {keyIdHard2, {88,44,46,30}, "Address", DeviceControlIcon::phone, 15},
+        {keyIdHard3, {186,44,46,30}, "To Do", DeviceControlIcon::tasks, 15},
+        {keyIdHard4, {240,44,46,30}, "Memo Pad", DeviceControlIcon::memo, 15},
+        {keyIdUp, {140,36,40,23}, "Up", DeviceControlIcon::up, 6, DeviceControlSection::main, {140,36,40,46}},
+        {keyIdDown, {140,59,40,23}, "Down", DeviceControlIcon::down, 6, DeviceControlSection::main, {140,36,40,46}},
+        clieJogKey(0,-424),clieJogKey(1,-424),clieJogKey(2,-424),clieJogKey(3,-424),
+    };
+    static const DeviceControlProfile n710cProfile{320,100,n710c,std::size(n710c),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::n710c,0.5f,1,0,0,clieJogTab(-424,208),clieJogWidth,0,0,144};
     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
     switch(art) {
         case DeviceArt::tx: return txProfile;
@@ -589,6 +604,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::tg50: return gamepad ? tg50GamepadProfile : tg50Profile;
         case DeviceArt::t415: return t415Profile;
         case DeviceArt::t615c: return t615cProfile;
+        case DeviceArt::n710c: return n710cProfile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
         case DeviceArt::hpIpaqRx1950: return rx1950Profile;
@@ -1184,6 +1200,20 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     };
     static const DeviceSilkscreen t615cSilkscreen{320,120,t615c,std::size(t615c),{54,14,118,94},{174,14,88,94},
                                                   SilkscreenStyle::t415,1};
+    // N710C: the 4.1 ROM's own 'silk' 10000, doubled from row 160, printed like the T415's with the
+    // Brightness spot (key 0x122) under Menu. abc and 123 sit below the writing area, at Palm OS
+    // row 220, and the panel ends at row 232, just below them.
+    static const SilkscreenButton n710c[] = {
+        {{8,10,38,38}, "Home", SilkscreenIcon::home},
+        {{8,64,38,40}, "Menu", SilkscreenIcon::menu},
+        {{272,10,38,38}, "Calc", SilkscreenIcon::calc},
+        {{272,64,38,40}, "Find", SilkscreenIcon::find},
+        {{52,120,24,22}, "Letter keyboard", SilkscreenIcon::letters},
+        {{256,120,20,22}, "Number keyboard", SilkscreenIcon::numbers},
+        {{8,108,16,16}, "Brightness", SilkscreenIcon::brightness},
+    };
+    static const DeviceSilkscreen n710cSilkscreen{320,144,n710c,std::size(n710c),{54,10,116,112},{174,10,90,112},
+                                                  SilkscreenStyle::t415,1};
     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
     switch(art) {
         case DeviceArt::e2: return e2Silkscreen;
@@ -1198,6 +1228,7 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
         case DeviceArt::m500: case DeviceArt::c500: return m500Silkscreen;
         case DeviceArt::t415: return t415Silkscreen;
         case DeviceArt::t615c: return t615cSilkscreen;
+        case DeviceArt::n710c: return n710cSilkscreen;
         default: return none;
     }
 }

@@ -233,11 +233,51 @@ void t615c(const std::string& out) {
         checkHeld(d,key,1,besideLcd);
     checkHeld(d,keyIdJogDown,1,besideButtons);
 }
+void n710c(const std::string& out) {
+    const Device d{"n710c",DeviceArt::n710c,320,320};
+    const auto& p=profileOf(d);
+    const auto& silk=deviceSilkscreen(d.art);
+    assert(p.width==320 && p.height==100 && p.unit==1 && p.style==DeviceControlStyle::n710c && p.count==10);
+    assert(p.silkscreenHeight==144 && p.sideTabWidth==clieJogWidth);
+    assert(silk.count==7 && silk.width==320 && silk.height==144 && silk.unit==1 && silk.style==SilkscreenStyle::t415);
+    for(size_t i=0;i<silk.count;++i) {
+        const auto& r=silk.buttons[i].bounds;
+        assert(r.x>=0 && r.y>=0 && r.x+r.w<=silk.width && r.y+r.h<=silk.height);
+    }
+    checkViews(d);
+    renders(d,out,keyIdHard3);
+    // The jog sits in the upper half of the LCD's side: jog press from LCD row 78.
+    for(size_t i=0;i<p.count;++i)if(p.buttons[i].key==keyIdJogPress)
+        assert(deviceButtonRect(p,p.buttons[i],320,464,besideLcd).y==78);
+    const int top=464,l=clieJogWidth;
+    assert(keyAt(d,l+57,top+59,besideLcd)==keyIdHard1 && keyAt(d,l+263,top+59,besideLcd)==keyIdHard4);
+    assert(keyAt(d,l+160,top+45,besideLcd)==keyIdUp && keyAt(d,l+160,top+72,besideLcd)==keyIdDown);
+    assert(keyAt(d,l+84,top+59,besideLcd)==keyInvalid && keyAt(d,l+160,top+15,besideLcd)==keyInvalid);
+    assert(keyAt(d,l+20,top+59,besideLcd)==keyInvalid && keyAt(d,l+160,top+96,besideLcd)==keyInvalid);
+
+    // Colours at 2x: the black silkscreen with pale tiles and the light brightness mark, the
+    // chrome band, the dark well, blue icons on the keys and the silver body and side.
+    Image image(imageWidth(d,2,besideLcd),imageHeight(d,2,besideLcd));
+    drawDevice(image,d,2,0,besideLcd);
+    auto pixel=[&](float x,float y) {return image.at(int((x+l)*2),int(y*2));};
+    assert(brightness(pixel(110,380))<120 && brightness(pixel(12,333))>400 && brightness(pixel(276,333))>400);
+    assert(count(image,{l+11,431,10,10},2,[](SDL_Color c) {return brightness(c)>450;})>4);
+    assert(brightness(pixel(160,top+12))>450 && brightness(pixel(84,top+80))<150);
+    assert(count(image,{l+34,top+44,46,30},2,[](SDL_Color c) {return c.b>c.r+40;})>10);
+    assert(brightness(pixel(160,top+97))>400 && brightness(image.at(8,600))>400);
+    // The jack's dark hole by the top of the side.
+    assert(brightness(image.at(38,32))<100);
+
+    for(KeyId key:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdUp,keyIdDown,keyIdJogUp,keyIdJogPress,keyIdBack})
+        checkHeld(d,key,1,besideLcd);
+    checkHeld(d,keyIdBack,1,besideButtons);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::string out=argc>1 ? argv[1] : "";
     t615c(out);
+    n710c(out);
     std::puts("sony candidate art ok");
     return 0;
 }

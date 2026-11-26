@@ -2286,17 +2286,17 @@ void paintT415Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
                  [&](float,float,Rgb) {return Rgb{150,148,146};});
 }
 
-// T415 side tab beside the silkscreen and strip, in side tab units: the black body they sit in,
+// T415 and N710C side tab beside the silkscreen and strip, in side tab units: the black body they sit in,
 // with the silkscreen's dark top edge, then the strip's metal foot under one rounded bottom
 // corner. stripTop is the strip's top on this canvas and k its window pixels per strip unit.
 void paintT415BesideTab(Canvas& canvas, const DeviceControlProfile& profile, DeviceKeyMask pressed,
-                        float stripTop, float k) {
+                        float stripTop, float k, Rgb body=t415Body) {
     const float left=-canvas.originX,right=canvas.w/canvas.s-canvas.originX;
     const float top=-canvas.originY,bottom=canvas.h/canvas.s-canvas.originY;
     const float H=profile.height;
     canvas.paint(left,top,right,bottom,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
         const float sy=(y-stripTop)/k;
-        Rgb c=mix(t415Body,t415Body*0.84f,std::pow(clamp01(sy/H),1.3f));
+        Rgb c=mix(body,body*0.84f,std::pow(clamp01(sy/H),1.3f));
         return c+Rgb{4,4,4}*speckle(x*0.05f,sy*1.5f)+Rgb{2,2,2}*std::sin(sy*5.3f+std::sin(x*0.07f)*1.4f);
     });
     // The surround as on the strip, its bottom at strip row 92, open to the right and above.
@@ -2319,6 +2319,120 @@ void paintT415BesideTab(Canvas& canvas, const DeviceControlProfile& profile, Dev
                  [](float,float,Rgb) {return Rgb{86,88,94};});
     if(profile.sideTabWidth>0) {
         paintClieJog(canvas,profile,0,pressed);
+    }
+}
+
+// CLIE PEG-N710C: satin silver lit from above. Under the silkscreen the black surround (as on the
+// T415, ending at strip row 92) holds a chrome band, then a dark well with four oval silver keys
+// in chrome collars round an hourglass rocker. The side tab canvas (sidebar) is the same metal
+// beside the LCD, with the headphone and remote jack above the Jog Dial and the Hold slide below
+// Back.
+const Rgb n710cBody{198,200,204};
+
+void paintN710cControls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed,
+                        bool sidebar=false, bool besideTab=false) {
+    const float H=profile.height;
+    const int ox=(width-profile.width)/2;
+    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+    const float left=-canvas.originX,right=canvas.w/canvas.s-canvas.originX;
+    const float top=-canvas.originY,bottom=canvas.h/canvas.s-canvas.originY;
+    canvas.paint(left,top,right,bottom,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        Rgb c=sidebar ? n710cBody*(0.9f+0.1f*clamp01((x-left)/16))
+                      : mix(n710cBody,n710cBody*0.84f,std::pow(clamp01(y/H),1.3f));
+        return c+Rgb{4,4,4}*speckle(x*0.05f,y*1.5f)+Rgb{2,2,2}*std::sin(y*5.3f+std::sin(x*0.07f)*1.4f);
+    });
+    if(sidebar) {
+        canvas.paint(right-3,top,right,bottom,[&](float x,float) {return canvas.edge(std::fabs(x-right+1)-0.8f)*0.7f;},
+                     [](float,float,Rgb) {return Rgb{58,60,64};});
+        if(profile.sideTabWidth<=0)return;
+        const float cx=ox+profile.sideTab.x+profile.sideTab.w*0.5f;
+        // The jack, near the top of the side: a dark hole in a bright ring.
+        const float jy=top+16;
+        canvas.paint(cx-9,jy-9,cx+9,jy+9,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-jy)-6.5f);},
+                     [&](float,float y,Rgb) {return mix(Rgb{244,245,248},Rgb{132,134,140},clamp01((y-jy+6)/12));});
+        canvas.paint(cx-9,jy-9,cx+9,jy+9,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-jy)-3.8f);},
+                     [](float,float,Rgb) {return Rgb{14,14,16};});
+        // Hold: a dark slot under Back with its light knob at the top, unlocked.
+        const float hy=float(profile.sideTab.y+184);
+        const SDL_Rect slot{int(cx-4),int(hy),8,20},knob{int(cx-5),int(hy),10,10};
+        canvas.paint(cx-7,hy-2,cx+7,hy+23,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(slot,4,x,y));},
+                     [](float,float,Rgb) {return Rgb{40,40,44};});
+        canvas.paint(cx-7,hy-2,cx+7,hy+13,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(knob,3,x,y));},
+                     [&](float x,float y,Rgb) {
+            const Rgb c=mix(Rgb{240,240,244},Rgb{150,152,158},clamp01((y-hy)/10));
+            return c*(1-0.25f*float(std::fmod(std::fabs(y-hy),2.5f)<0.8f && std::fabs(x-cx)<3.4f));
+        });
+        paintClieJog(canvas,profile,ox,pressed);
+        return;
+    }
+    // The black surround from round the silkscreen, rounded at its foot, with a bright chamfer.
+    const SDL_Rect surround=besideTab ? SDL_Rect{ox-40,-20,profile.width+40,112} : SDL_Rect{ox,-20,profile.width,112};
+    auto ds=[&](float x,float y) {return deviceRoundedDistance(surround,12,x,y);};
+    canvas.paint(left,0,right,H,[&](float x,float y) {
+        return canvas.edge(std::fabs(ds(x,y)-1.2f)-0.8f)*clamp01((y-60)/20);
+    },[](float,float,Rgb) {return Rgb{240,241,243};});
+    canvas.paint(left,0,right,H,[&](float x,float y) {return canvas.edge(ds(x,y));},[&](float x,float y,Rgb) {
+        return Rgb{20,20,22}+Rgb{3,3,3}*speckle(x,y);
+    });
+    // Chrome band: bright ridges along it, plain where the real one carries the logo.
+    const SDL_Rect band{ox+6,3,profile.width-12,27};
+    canvas.paint(band.x,band.y,band.x+band.w,band.y+band.h,[&](float x,float y) {
+        return canvas.edge(deviceRoundedDistance(band,2,x,y));
+    },[&](float x,float y,Rgb) {
+        const float v=t415Chrome(clamp01((y-band.y)/band.h));
+        const float e=std::fabs(x-ox-profile.width*0.5f)/(profile.width*0.5f);
+        return (Rgb{236,238,242}*clamp01(0.25f+0.8f*v)+Rgb{0,2,6}*(1-v))*(1-0.25f*std::pow(e,4.f));
+    });
+    // The well the keys sit in, shaded under its top edge.
+    const SDL_Rect well{ox+6,33,profile.width-12,55};
+    canvas.paint(well.x,well.y,well.x+well.w,well.y+well.h,[&](float x,float y) {
+        return canvas.edge(deviceRoundedDistance(well,8,x,y));
+    },[&](float,float y,Rgb) {return mix(Rgb{6,6,7},Rgb{30,30,34},clamp01((y-well.y)/well.h));});
+
+    // Oval keys in bright collars, with blue icons.
+    const SilverKeyLook keys{Rgb{18,18,20},Rgb{238,240,244},Rgb{168,172,180},Rgb{16,16,18},Rgb{110,112,118},
+                             Rgb{64,74,170},Rgb{44,52,130},1.0f,0.7f,0.3f};
+    for(size_t i=0;i<profile.count;++i) {
+        const auto& b=profile.buttons[i];
+        if(b.section!=DeviceControlSection::main || b.key==keyIdUp || b.key==keyIdDown)continue;
+        const SDL_Rect r=shifted(b.bounds);
+        const SDL_Rect collar{r.x-3,r.y-3,r.w+6,r.h+6};
+        canvas.paint(collar.x-1,collar.y-1,collar.x+collar.w+1,collar.y+collar.h+1,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(collar,collar.h*0.5f,x,y));
+        },[&](float,float y,Rgb) {
+            return Rgb{226,228,232}*(0.45f+0.55f*t415Chrome(clamp01((y-collar.y)/collar.h)));
+        });
+        paintSilverKey(canvas,r,r.h*0.5f,down(b.key),b.icon,0.85f,keys);
+    }
+
+    // The rocker: an hourglass of chrome split at its waist, an arrow on each half; a held half
+    // darkens.
+    const DeviceButton* up=nullptr;
+    for(size_t i=0;i<profile.count;++i)if(profile.buttons[i].key==keyIdUp)up=&profile.buttons[i];
+    if(!up)return;
+    const SDL_Rect shape=shifted(up->shape);
+    const float x0=shape.x,x1=shape.x+shape.w,y0=shape.y,y1=shape.y+shape.h,ym=y0+shape.h*0.5f,pinch=7;
+    for(int half=0;half<2;++half) {
+        const std::array<std::array<float,2>,4> part=half
+            ? std::array<std::array<float,2>,4>{{{x0+pinch,ym+0.7f},{x1-pinch,ym+0.7f},{x1,y1},{x0,y1}}}
+            : std::array<std::array<float,2>,4>{{{x0,y0},{x1,y0},{x1-pinch,ym-0.7f},{x0+pinch,ym-0.7f}}};
+        const bool held=down(half ? keyIdDown : keyIdUp);
+        const float a=half ? ym : y0,b=half ? y1 : ym;
+        canvas.paint(x0-1,a-1,x1+1,b+1,[&](float x,float y) {return canvas.edge(polygon(x,y,part)+0.3f);},
+                     [&](float x,float y,Rgb) {
+            const float t=clamp01((y-a)/(b-a)),v=half ? 0.35f+0.6f*t415Chrome(t*0.5f+0.45f) : 0.4f+0.6f*t415Chrome(t*0.55f);
+            Rgb c=Rgb{236,238,242}*v;
+            c=mix(c*0.62f,c,clamp01(-polygon(x,y,part)/1.6f));
+            return held ? c*0.66f : c;
+        });
+        const float cy=half ? ym+(y1-ym)*0.5f+1 : y0+(ym-y0)*0.5f-1,dir=half ? 1.f : -1.f,sink=held ? 0.7f : 0;
+        const float mx=x0+shape.w*0.5f;
+        canvas.paint(x0,a,x1,b,[&](float x,float y) {
+            y-=sink;
+            return canvas.edge(std::min(segment(x,y,mx-5,cy-dir*2.4f,mx,cy+dir*2.4f),
+                                        segment(x,y,mx+5,cy-dir*2.4f,mx,cy+dir*2.4f))-0.8f);
+        },[&](float,float,Rgb) {return Rgb{40,44,56};});
     }
 }
 
@@ -3257,6 +3371,7 @@ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& prof
         case DeviceControlStyle::rx1950: paintRx1950Controls(canvas,profile,width*u,pressed,stick);break;
         case DeviceControlStyle::h4350: paintH4350Controls(canvas,profile,width*u,pressed,view);break;
         case DeviceControlStyle::t415: paintT415Controls(canvas,profile,beside ? profile.width : width*u,pressed,false,beside);break;
+        case DeviceControlStyle::n710c: paintN710cControls(canvas,profile,beside ? profile.width : width*u,pressed,false,beside);break;
         default: paintTxControls(canvas,profile,width*u,pressed);
     }
     if (stick.lampShown) {
@@ -3309,8 +3424,9 @@ void drawDeviceSidebar(SDL_Renderer* renderer, const DeviceControlProfile& profi
         tab.pixels.resize(size_t(tab.w)*tab.h);
         tab.originX=tabWidth*u;
         tab.originY=(lcdBottom-screenHeight-transform.sidebarTop)*-u;
-        if(profile.style==DeviceControlStyle::t415)
-            paintT415BesideTab(tab,profile,pressed,float((transform.top-transform.sidebarTop)*u),transform.scale*u);
+        if(profile.style==DeviceControlStyle::t415 || profile.style==DeviceControlStyle::n710c)
+            paintT415BesideTab(tab,profile,pressed,float((transform.top-transform.sidebarTop)*u),transform.scale*u,
+                               profile.style==DeviceControlStyle::n710c ? n710cBody : t415Body);
         else paintTg50Controls(tab,profile,profile.width,pressed,view,transform,true);
         if(auto* texture=canvasTexture(renderer,tab)) {
             const SDL_Rect dest{0,int(std::lround(lcdBottom*scale)),tab.w,tab.h};
@@ -3388,6 +3504,7 @@ void drawDeviceSidebar(SDL_Renderer* renderer, const DeviceControlProfile& profi
     canvas.originY=screenHeight*profile.unit;
     const DeviceControlTransform transform(profile,screenWidth,view);
     if(profile.style==DeviceControlStyle::t415)paintT415Controls(canvas,profile,screenWidth*profile.unit,pressed,true);
+    else if(profile.style==DeviceControlStyle::n710c)paintN710cControls(canvas,profile,screenWidth*profile.unit,pressed,true);
     else paintTg50Controls(canvas,profile,profile.width,pressed,view,transform,true);
     if(auto* texture=canvasTexture(renderer,canvas)) {
         const SDL_Rect dest{0,0,canvas.w,canvas.h};
