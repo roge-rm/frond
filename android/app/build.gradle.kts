@@ -276,6 +276,12 @@ dependencies {
     implementation(libs.compose.material.icons)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
+    // The JUnit 4 tests run on the JUnit Platform through the vintage engine, beside Jazzer's @FuzzTest ones.
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testImplementation(libs.jazzer.junit)
+    testRuntimeOnly(libs.junit.vintage)
+    testRuntimeOnly(libs.junit.launcher)
     testImplementation("org.json:json:20250517")
 }
 
@@ -303,7 +309,22 @@ val buildHostStorage = tasks.register<Exec>("buildHostStorage") {
         "-I\"$jdk/include\" -I\"$jdk/include/linux\" -I\"$common\" \"$jni\" \"$hostStorage/miniz.o\" " +
         "-o \"$hostStorage/libfrondcard.so\"")
 }
+// -Pfrond.fuzz=CLASS fuzzes that @FuzzTest class for frond.fuzzTime (default 5m) instead of only
+// replaying its seeds, with JAZZER_FUZZ as Jazzer reads it. Jazzer fuzzes one test per run, so
+// -Pfrond.fuzz also takes CLASS.method. Findings go in build/fuzzing-f6/findings/ of the repo.
+val fuzzTarget = providers.gradleProperty("frond.fuzz").orNull
+val fuzzTime = providers.gradleProperty("frond.fuzzTime").getOrElse("5m")
 tasks.withType<Test>().configureEach {
     dependsOn(buildHostStorage, copyLicences)
     systemProperty("java.library.path", hostStorage.absolutePath)
+    useJUnitPlatform()
+    // Jazzer attaches its agent at run time.
+    jvmArgs("-XX:+EnableDynamicAgentLoading")
+    if (fuzzTarget != null) {
+        environment("JAZZER_FUZZ", "1")
+        systemProperty("jazzer.max_duration", fuzzTime)
+        systemProperty("jazzer.internal.basedir", File(repoRoot, "build/fuzzing-f6").absolutePath)
+        filter.includeTestsMatching("com.rm.frond.$fuzzTarget")
+        outputs.upToDateWhen { false }
+    }
 }
