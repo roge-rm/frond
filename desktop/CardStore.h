@@ -27,6 +27,7 @@
 #include <QUuid>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -85,6 +86,11 @@ inline bool validKey(const QString& key) {
     static const QRegularExpression hex(QStringLiteral("^[0-9a-f]{32}$"));
     return hex.match(key).hasMatch();
 }
+// A JSON number as a whole qint64; 0 for one outside its range, where the cast is undefined.
+inline qint64 jsonInt64(const QJsonValue& value) {
+    const double d = value.toDouble();
+    return d > -9.2e18 && d < 9.2e18 ? qint64(d) : 0;
+}
 inline bool readCard(const QString& dir, Card* card) {
     QFile file(dir + "/card.json");
     if (!file.open(QIODevice::ReadOnly)) return false;
@@ -93,7 +99,7 @@ inline bool readCard(const QString& dir, Card* card) {
     const auto kind = o.value("kind").toString();
     if (kind != "sd" && kind != "ms" && kind != "ms-pro") return false;
     *card = {o.value("id").toString(), o.value("name").toString(), kind, o.value("created").toString(),
-             o.value("machine").toString(), qint64(o.value("bytes").toDouble()),
+             o.value("machine").toString(), jsonInt64(o.value("bytes")),
              QByteArray::fromHex(o.value("identity").toString().toLatin1()), o.value("writeProtected").toBool()};
     card->identity = card->identity.leftJustified(32, '\0', true);
     card->type = kind == "sd" && o.value("type").toString() == "mmc" ? QStringLiteral("mmc") : QStringLiteral("sd");
@@ -283,8 +289,10 @@ inline bool cardHeader(const QString& path, quint64* counter, qint64* logical) {
     }
     if (h.left(8) == QByteArray("FRONDMS\0", 8)) {
         if (counter) *counter = le64(h, 32);
-        // Each MB is 2048 pages of 512 bytes plus 9.
-        if (logical) *logical = qint64(le32(h, 12)) * le32(h, 16) * 512;
+        // Each MB is 2048 pages of 512 bytes plus 9. A size past 63 bits isn't a card file.
+        const auto pages = quint64(le32(h, 12)) * le32(h, 16);
+        if (pages > quint64(std::numeric_limits<qint64>::max()) / 512) return false;
+        if (logical) *logical = qint64(pages * 512);
         return true;
     }
     return false;
