@@ -6242,14 +6242,21 @@ bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, 
     return true;
 }
 
-int cpuJitPageWords(ArmCpu *cpu, uint32_t va, const uint8_t *hostPage, bool write, const uint8_t **words) {
+int cpuJitPageWords(ArmCpu *cpu, uint32_t va, const uint8_t *hostPage, bool write, const uint8_t **words,
+                    uint32_t *pas) {
     if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return -1;
     ArmMmu *mmu = cpu->memorySystem.mmu;
     if (mmuGetTTP(mmu) == MMU_DISABLED_TTP) return 0;
     MmuCodeWalkMemo memo;
     uint32_t access;
-    const MMUTranslateResult r = mmuWalkPageMemo(mmu, cpuPrvMva(cpu, va), &access, &memo, cpuPrvTableWord, cpu);
+    const uint32_t mva = cpuPrvMva(cpu, va);
+    const MMUTranslateResult r = mmuWalkPageMemo(mmu, mva, &access, &memo, cpuPrvTableWord, cpu);
     if (!MMU_TRANSLATE_RESULT_OK(r) || memo.n == 0xff || !mmuAccessWhollyAllows(mmu, access, cpu->privileged, write))
+        return -1;
+    // The entry is listed by the TLB entry's domain and AP (cpuJitPageClientAccess), so those have to be the walk's.
+    uint32_t tlbAccess, tlbPa;
+    if (mmuTlbEntryAccess(mmu, mva, &tlbAccess, &tlbPa) &&
+        (tlbAccess != access || tlbPa != (MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu)))
         return -1;
     bool counted;
     const uint8_t *page = cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, false, &counted);
@@ -6260,6 +6267,7 @@ int cpuJitPageWords(ArmCpu *cpu, uint32_t va, const uint8_t *hostPage, bool writ
         for (int k = 0; k < n; k++) seen |= words[k] == memo.word[i];
         if (seen) continue;
         if (n == kJitPageWords) return -1;
+        pas[n] = memo.pa[i];
         words[n++] = memo.word[i];
     }
     return n;
@@ -6344,11 +6352,12 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
     return (uint8_t *)romGetPeepholeBuffer(rom) + (data - (uint8_t *)romGetData(rom));
 }
 
-void cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa) {
-    if (!cpu->jitCode) return;
+bool cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa) {
+    if (!cpu->jitCode) return false;
     // A newly marked page loses its host TLB entries, so its stores come through cpuPrvArm920Stored.
     if (cpu->jitCode->note(pa, false)) hostTlbFlush(&cpu->mem->hostTlb);
     cpu->jitCode->noteWord(pa);
+    return true;
 }
 
 void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa) {

@@ -79,6 +79,9 @@ bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged);
 // isn't plain memory). access as mmuTranslateCodeAccess gives it. The MMU must be on.
 MMUTranslateResult mmuWalkPageMemo(ArmMmu*, uint32_t va, uint32_t* access, MmuCodeWalkMemo* memo,
                                    const uint8_t* (*host)(void*, uint32_t pa), void* ctx);
+// The live TLB entry for va's page: its access as mmuTranslateCodeAccess gives it and its physical page. False when
+// the TLB doesn't hold the page or the MMU is off.
+bool mmuTlbEntryAccess(struct ArmMmu *mmu, uint32_t va, uint32_t *access, uint32_t *pa);
 // Whether every subpage of a page with that access is mapped and allows the access now in this mode.
 bool mmuAccessWhollyAllows(struct ArmMmu *mmu, uint32_t access, bool privileged, bool write);
 // hook(ctx) runs when the TLB, domains, S or R change.

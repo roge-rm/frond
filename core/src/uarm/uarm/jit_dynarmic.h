@@ -151,8 +151,8 @@ bool cpuJitTlbLive(ArmCpu *cpu, uint32_t va);
 void cpuJitSetFillWatch(ArmCpu *cpu, const uint8_t *pages);
 uint32_t cpuJitWatchedFills(ArmCpu *cpu, const uint32_t **pages);
 // ARM920T Fast blocks: marks the page table word at pa in the code map, so a store to it from any path comes
-// back through jitCodeWrittenPa.
-void cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa);
+// back through jitCodeWrittenPa. False if there is no code map to mark.
+bool cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa);
 // Whether code from a page with that access may be fetched now, in the current mode.
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
 // Domains, S and R: what cpuJitAccessReadable depends on besides the access and the
@@ -187,10 +187,12 @@ uint64_t cpuJitPageGen(ArmCpu *cpu);
 void cpuJitSoftFlushes(ArmCpu *cpu, uint32_t *epoch, uint32_t *pid, uint32_t *tlb);
 // ARM920T Fast blocks: the host addresses of the table words a walk of va's page reads now, into words, for a JIT
 // page table entry at hostPage that is kept over PID changes and guest TLB invalidations while those words hold.
-// The count, 0 with the MMU off, or -1 when the walk doesn't give hostPage with the access allowed (an entry from
-// a stale TLB entry), a word isn't plain RAM or there are more than kJitPageWords.
+// Their physical addresses go in pas. The count, 0 with the MMU off, or -1 when the walk doesn't give hostPage with
+// the access allowed, or a live TLB entry for the page differs from the walk in domain, AP or page (an entry from a
+// stale TLB entry), a word isn't plain RAM or there are more than kJitPageWords.
 constexpr int kJitPageWords = 4;
-int cpuJitPageWords(ArmCpu *cpu, uint32_t va, const uint8_t *hostPage, bool write, const uint8_t **words);
+int cpuJitPageWords(ArmCpu *cpu, uint32_t va, const uint8_t *hostPage, bool write, const uint8_t **words,
+                    uint32_t *pas);
 // The MMU TLB entry for va: domain << 2 and what it allows while its domain is a client
 // (mmuPageClientAccess). -1 if the TLB doesn't hold va.
 int cpuJitPageClientAccess(ArmCpu *cpu, uint32_t va, bool privileged);

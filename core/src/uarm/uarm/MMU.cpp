@@ -481,6 +481,14 @@ MMUTranslateResult mmuWalkPageMemo(ArmMmu* mmu, uint32_t addr, uint32_t* access,
     return codeAccessWalk(mmu, addr, access, memo, host, ctx);
 }
 
+bool mmuTlbEntryAccess(struct ArmMmu *mmu, uint32_t va, uint32_t *access, uint32_t *pa) {
+    const struct TlbEntry &entry = mmu->tlb[va >> 12];
+    if (mmu->transTablPA == MMU_DISABLED_TTP || entry.gen != mmu->gen) return false;
+    *access = (uint32_t(entry.domain) << 8) | (entry.ap * 0x55u);
+    *pa = uint32_t(entry.pa) << 12;
+    return true;
+}
+
 bool mmuAccessWhollyAllows(struct ArmMmu *mmu, uint32_t access, bool privileged, bool write) {
     if (access == MMU_ACCESS_ANY) return true;
     if (access & 0xf000u) return false;
