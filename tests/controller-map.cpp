@@ -24,7 +24,9 @@ static PadReading buttons(std::initializer_list<PadKey> keys) {
     return pad;
 }
 static GamepadInput apply(const ControllerMap& map, PadReading pad, bool zodiac, bool attached = false) {
-    return gamepadInput(map, padKeysHeld(pad), pad.leftX, pad.leftY, zodiac, attached);
+    int16_t x, y;
+    padStickAxes(pad, map, x, y);
+    return gamepadInput(map, padKeysHeld(pad), x, y, zodiac, attached);
 }
 
 static void text() {
@@ -140,6 +142,97 @@ static void zodiacDefaults() {
     moved.assign(PalmKey::app1, PadKey::dpadUp);
     const auto pressed = apply(moved, buttons({PadKey::dpadUp}), true);
     assert(pressed.keys == deviceKeyBit(keyIdHard1) && !pressed.stick.held);
+}
+
+// Which controller stick moves the Zodiac's stick: left by default, right or none from the map.
+static void zodiacStick() {
+    const auto& zodiac = named("tapwave-zodiac-2");
+    const auto defaults = controllerDefaults(zodiac);
+    assert(defaults.preset() == PadStick::left && defaults.encode().find(",stick:") == std::string::npos);
+    assert(palmKeyLabel(PalmKey::stickPress, zodiac) == "Stick press (centre)");
+    // Saved as an entry of its own, which a core without it skips as an unknown key.
+    ControllerMap right = defaults;
+    right.setStick(PadStick::right);
+    assert(right.preset() == PadStick::right && right != defaults);
+    for (auto key : {PadKey::rightLeft, PadKey::rightRight, PadKey::rightUp, PadKey::rightDown})
+        assert(!right.keys.count(key));
+    assert(right.encode().find("stick:right") != std::string::npos);
+    assert(decodeControllerMap(right.encode(), zodiac) == right);
+    assert(decodeControllerMap("stick:none", zodiac).preset() == PadStick::none);
+    assert(decodeControllerMap("stick:none", zodiac).keys.empty());
+    assert(decodeControllerMap("a:app1,stick:sideways", zodiac).preset() == PadStick::left);
+    ControllerMap none;
+    none.setStick(PadStick::none);
+    assert(none.encode() == "stick:none");
+    // Right: the right stick moves it over its range and the left stick does nothing.
+    PadReading pad;
+    pad.rightX = 32767; pad.rightY = -32768;
+    auto input = apply(right, pad, true);
+    assert(input.stick.held && input.stick.x == 1 && input.stick.y == -1 && input.keys == 0);
+    pad = {};
+    pad.leftX = 32767;
+    assert(!apply(right, pad, true).stick.held);
+    // Left keeps the old behaviour; none leaves the stick to the d-pad.
+    assert(apply(defaults, pad, true).stick.held && apply(defaults, pad, true).stick.x == 1);
+    ControllerMap off = defaults;
+    off.setStick(PadStick::none);
+    assert(!apply(off, pad, true).stick.held);
+    pad.rightX = 32767;
+    assert(apply(off, pad, true).keys == deviceKeyBit(keyIdHard2));
+    pad.buttons = uint32_t(1) << int(PadKey::dpadLeft);
+    assert(apply(off, pad, true).stick.held && apply(off, pad, true).stick.x == -1);
+}
+
+// Each stick axis from any controller axis, with invert; presets and old saved values load as before.
+static void zodiacStickAxes() {
+    const auto& zodiac = named("tapwave-zodiac-2");
+    // Old saved values: nothing, "stick:right" and "stick:none" are the presets they were.
+    assert(decodeControllerMap("none", zodiac).preset() == PadStick::left);
+    assert(decodeControllerMap("a:app1", zodiac).stickX == StickAxis({PadAxis::leftX, false}));
+    const auto right = decodeControllerMap("a:app1,stick:right", zodiac);
+    assert(right.stickX == StickAxis({PadAxis::rightX, false}) && right.stickY == StickAxis({PadAxis::rightY, false}));
+    assert(decodeControllerMap("stick:none", zodiac).stickX.axis == PadAxis::none);
+    // A custom pair: right stick X, left stick Y upside down. The keys at those axes' ends come off.
+    ControllerMap map = controllerDefaults(zodiac);
+    map.assign(PalmKey::app1, PadKey::rightLeft);
+    map.assign(PalmKey::app2, PadKey::leftUp);
+    map.setStickAxis(false, PadAxis::rightX, false);
+    map.setStickAxis(true, PadAxis::leftY, true);
+    assert(map.preset() == PadStick::custom && !map.keys.count(PadKey::rightLeft) && !map.keys.count(PadKey::leftUp));
+    const std::string text = map.encode();
+    assert(text.find("stickx:rightx") != std::string::npos && text.find("sticky:-lefty") != std::string::npos);
+    assert(text.find(",stick:") == std::string::npos);
+    assert(decodeControllerMap(text, zodiac) == map);
+    PadReading pad;
+    pad.rightX = -32768; pad.leftY = -20000; pad.leftX = 32767;
+    auto input = apply(map, pad, true);
+    assert(input.stick.held && input.stick.x == -1 && input.stick.y > 0.5f && input.stick.y < 0.7f);
+    // Invert at the end of travel stays in range.
+    pad = {};
+    pad.leftY = -32768;
+    input = apply(map, pad, true);
+    assert(input.stick.held && input.stick.y == 1);
+    // A trigger can be an axis; the other axis can be none.
+    map.setStickAxis(false, PadAxis::none, true);
+    map.setStickAxis(true, PadAxis::rightTrigger, false);
+    assert(map.stickX == StickAxis({PadAxis::none, false}) && map.usesAxis(PadAxis::rightTrigger) && !map.usesAxis(PadAxis::none));
+    assert(!map.keys.count(PadKey::rightTrigger));
+    assert(decodeControllerMap(map.encode(), zodiac) == map);
+    pad = {};
+    pad.rightTrigger = 32767;
+    input = apply(map, pad, true);
+    assert(input.stick.held && input.stick.x == 0 && input.stick.y == 1);
+    // Choosing a preset afterwards resets both axes; bad axis names are skipped.
+    map.setStick(PadStick::left);
+    assert(map.preset() == PadStick::left);
+    assert(decodeControllerMap("stickx:sideways,sticky:-", zodiac).preset() == PadStick::left);
+    // Keys at an axis the text binds come off, whichever comes first in the text.
+    for (const char* text : {"lefty-:app2,lefty+:app3,leftx-:app1,stickx:rightx,sticky:lefty",
+                             "stickx:rightx,sticky:lefty,lefty-:app2,lefty+:app3,leftx-:app1"}) {
+        const auto decoded = decodeControllerMap(text, zodiac);
+        assert(!decoded.keys.count(PadKey::leftUp) && !decoded.keys.count(PadKey::leftDown));
+        assert(decoded.keys.count(PadKey::leftLeft));
+    }
 }
 
 static void clieDefaults() {
@@ -270,6 +363,8 @@ int main() {
     text();
     lists();
     zodiacDefaults();
+    zodiacStick();
+    zodiacStickAxes();
     clieDefaults();
     triggers();
     devices68k();

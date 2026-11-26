@@ -1020,6 +1020,32 @@ class SessionStoreTest : public QObject {
         QVERIFY(readPreferences(path, &loaded));
         QCOMPARE(loaded.musicOutput, QString("fm"));
     }
+    void directStickPreferences() {
+        const auto path = filePath(folder(), "Zodiac Stick");
+        write(path, header(6, "tapwave-zodiac-2"));
+        // Settings from before Direct stick read it as on, and it goes to the core in Fast only.
+        write(preferencesPath(path), R"({"version":1,"scale":4,"smooth":false,"audio":true,"fastAudio":false,"engine":"fast"})");
+        Preferences prefs;
+        QVERIFY(readPreferences(path, &prefs));
+        QVERIFY(prefs.directStick);
+        QCOMPARE(directStickArguments(prefs), QStringList{"--direct-stick"});
+        prefs.fastEngine = false;
+        QVERIFY(directStickArguments(prefs).isEmpty());
+        // On is the default and isn't written; off is kept.
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        {
+            QFile file(preferencesPath(path));
+            QVERIFY(file.open(QIODevice::ReadOnly));
+            QVERIFY(!file.readAll().contains("directStick"));
+        }
+        prefs.fastEngine = true;
+        prefs.directStick = false;
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        Preferences loaded;
+        QVERIFY(readPreferences(path, &loaded));
+        QVERIFY(!loaded.directStick && loaded.fastEngine);
+        QVERIFY(directStickArguments(loaded).isEmpty());
+    }
     void controllerMapPreferences() {
         const auto path = filePath(folder(), "Controller Map");
         write(path, header(6, "palm-tx"));

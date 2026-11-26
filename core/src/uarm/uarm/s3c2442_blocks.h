@@ -456,11 +456,19 @@ class S3cRtc {
     // The start time: decimal fields the registers get in BCD, day of week 1-7, and year the raw BCDYEAR
     // byte, which the board's OS reads its own way (see rx1950RtcStart).
     void reset(const Time& start);
+    // Sets the time registers only, as the OS setting the clock would; the second's phase, the tick and the
+    // alarm go on as they were.
+    void setTime(const Time& time);
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
     void advance(uint64_t ticks32k, S3cIntc& intc);
     // 32 kHz ticks until the next tick interrupt (tick) or alarm check (alarmCheck), UINT64_MAX with none due.
     uint64_t ticksToEvent(bool tick = true, bool alarmCheck = true) const;
+
+    // Board setting, not state: the year byte is a binary count of years from baseYear (rx1950's WM5) and not the
+    // manual's two BCD digits.
+    bool binaryYear = false;
+    unsigned baseYear = 1950;
 
     uint32_t rtccon, ticnt, rtcalm, rtcrst, alarm[6], bcd[7];
     uint64_t secondPhase, tickPhase;

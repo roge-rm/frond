@@ -337,6 +337,7 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
             AudioRow.MICROPHONE -> MicrophoneRow(model)
             AudioRow.AUDIO_PREVIEW -> MachineAudioPreviewRow(device, model.settings, true, APPLIES_AT_NEXT_START) { model.changeSettings(it) }
             AudioRow.RUMBLE -> MachineRumbleRow(device, model.settings, true) { model.changeSettings(it) }
+            AudioRow.RECORD_KEY -> MachineRecordKeyRow(model.settings, true) { model.changeSettings(it) }
         }
         RunningSheets.Group.GAME_CONTROLLER -> {
             val context = androidx.compose.ui.platform.LocalContext.current

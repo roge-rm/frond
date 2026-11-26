@@ -652,6 +652,129 @@ void TestRapiDeadlines() {
     FrondRapiClose(client);
 }
 
+void ConnectActiveSync(Handheld& control, Handheld& rapi) {
+    control.Put(Words({0}));
+    CHECK(control.Bytes6(4) == Words({3}));
+    Bytes deviceInfo(16);
+    deviceInfo.front() = 1;
+    PutWords(deviceInfo, {5, 1, 1});
+    deviceInfo.insert(deviceInfo.end(), {'P', 0, 0, 0});
+    PutWords(deviceInfo, {0, 0, 0, 42, 0, 2});
+    deviceInfo.insert(deviceInfo.end(), {'P', 0});
+    PutWords(deviceInfo, {2});
+    deviceInfo.insert(deviceInfo.end(), {'C', 0, 0});
+    PutWords(deviceInfo, {0, 0});
+    control.Put(Words({4, uint32_t(deviceInfo.size())}));
+    control.Put(deviceInfo);
+    CHECK(control.Bytes6(12) == Words({5, 4, 1}));
+    rapi.Put(Words({1}));
+    CHECK(RapiReply(rapi, 0x43, Words({0, 1, 16, 16, 5, 1, 0})));
+}
+
+// With a frontend there, a device with no partnership and no saved answer waits at the question.
+// A guest stores "declined" and isn't asked again; Set up pairs; a stop while asking stores nothing.
+void TestActiveSyncQuestion(const std::string& root) {
+    std::string error;
+    SyncLibrary library;
+    CHECK(library.Open(root, error));
+    ProfileInfo info;
+    CHECK(library.CreateProfile("Partnership question", info, error));
+    const auto key = MachineDeviceKey("wm-ask");
+    CHECK(library.Assign(key, info.id, error, "winmo"));
+    SyncProfile profile;
+    CHECK(profile.Open(library.ProfilePath(info), error));
+    auto& manager = SyncManager::Get();
+    SyncOptions options;
+    options.root = root;
+    options.machineKey = "wm-ask";
+    options.askPartnership = true;
+    manager.Configure(options);
+    const auto asked = [&] {
+        for (unsigned i = 0; i < 5000; ++i) {
+            if (manager.Status().stage == "partnership-question") return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    };
+    const auto finish = [](ActiveSyncSession& session) {
+        for (unsigned i = 0; i < 30000 && session.Running(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        CHECK(!session.Running());
+    };
+    CHECK(!manager.AnswerPartnership(true));
+
+    {
+        // The question holds the connection well past the RAPI deadlines; stopping ends it.
+        ActiveSyncSession stopped;
+        stopped.Start();
+        Handheld control{stopped.Pipe(0)}, rapi{stopped.Pipe(1)};
+        ConnectActiveSync(control, rapi);
+        CHECK(asked());
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(stopped.Running() && manager.Status().state == SyncStatus::State::syncing);
+        stopped.Stop();
+        CHECK(!stopped.Running());
+        CHECK(manager.Status().state == SyncStatus::State::failed);
+        CHECK(!manager.AnswerPartnership(false));
+        CHECK(profile.DeviceValue(key, "activesync-pair").empty());
+    }
+    {
+        ActiveSyncSession guest;
+        guest.Start();
+        Handheld control{guest.Pipe(0)}, rapi{guest.Pipe(1)};
+        ConnectActiveSync(control, rapi);
+        CHECK(asked());
+        CHECK(manager.AnswerPartnership(false));
+        CHECK(!manager.AnswerPartnership(true));
+        finish(guest);
+        CHECK(manager.Status().state == SyncStatus::State::done);
+        CHECK(manager.Status().message.find("Connected as a guest.") != std::string::npos);
+        CHECK(profile.DeviceValue(key, "activesync-pair").empty());
+        CHECK(profile.ActiveSyncPairing(key).empty());
+    }
+    {
+        // Declined: no question, no partnership.
+        ActiveSyncSession again;
+        again.Start();
+        Handheld control{again.Pipe(0)}, rapi{again.Pipe(1)};
+        ConnectActiveSync(control, rapi);
+        finish(again);
+        CHECK(manager.Status().state == SyncStatus::State::done);
+        CHECK(manager.Status().message.find("guest") == std::string::npos);
+        CHECK(profile.DeviceValue(key, "activesync-pair").empty());
+    }
+    {
+        // Set up pairs in the same sync; the device refusing here is noted and asked again next time.
+        CHECK(profile.ForgetActiveSyncPairing(key, error));
+        ActiveSyncSession setUp;
+        setUp.Start();
+        Handheld control{setUp.Pipe(0)}, rapi{setUp.Pipe(1)};
+        ConnectActiveSync(control, rapi);
+        CHECK(asked());
+        CHECK(manager.AnswerPartnership(true));
+        CHECK(RapiReply(rapi, 0x0e, Words({5, 0x80004005})));
+        finish(setUp);
+        CHECK(manager.Status().state == SyncStatus::State::done);
+        CHECK(manager.Status().message.find("Couldn't set up a desktop partnership") != std::string::npos);
+        CHECK(profile.DeviceValue(key, "activesync-pair").empty());
+    }
+    {
+        // Pair on next sync doesn't ask.
+        CHECK(profile.RequestActiveSyncPairing(key, true, error));
+        ActiveSyncSession requested;
+        requested.Start();
+        Handheld control{requested.Pipe(0)}, rapi{requested.Pipe(1)};
+        ConnectActiveSync(control, rapi);
+        CHECK(RapiReply(rapi, 0x0e, Words({5, 0x80004005})));
+        finish(requested);
+        CHECK(manager.Status().state == SyncStatus::State::failed);
+        CHECK(profile.ActiveSyncPairing(key) == "requested");
+    }
+    options.askPartnership = false;
+    manager.Configure(options);
+    profile.Close();
+}
+
 void TestActiveSync(const std::string& root) {
     std::string error;
     SyncLibrary library;
@@ -672,6 +795,15 @@ void TestActiveSync(const std::string& root) {
     std::copy_n("MSCF", 4, cab.begin());
     CHECK(!profile.QueueInstall("", "Test.CAB", pdb, cabItem, error, "cab"));
     CHECK(profile.QueueInstall("", "Test.CAB", cab, cabItem, error, "cab"));
+    CHECK(InstallItemFitsKind(cabItem, "winmo") && !InstallItemFitsKind(cabItem, "palm") && InstallItemFitsKind(cabItem, ""));
+    CHECK(InstallItemFitsKind(palmItem, "palm") && !InstallItemFitsKind(palmItem, "winmo") && InstallItemFitsKind(palmItem, ""));
+    // Nothing chosen pairs on the next sync; this first run cancels it.
+    CHECK(profile.ActiveSyncPairing(key) == "requested");
+    CHECK(profile.RequestActiveSyncPairing(key, false, error));
+    CHECK(profile.ActiveSyncPairing(key).empty());
+    // An older store's cancelled "" and a pending "requested" read as they did before.
+    CHECK(profile.SetDeviceValue(key, "activesync-pair", "requested", &error) && profile.ActiveSyncPairing(key) == "requested");
+    CHECK(profile.SetDeviceValue(key, "activesync-pair", "", &error) && profile.ActiveSyncPairing(key).empty());
     profile.Close();
 
     SyncOptions options;
@@ -682,24 +814,7 @@ void TestActiveSync(const std::string& root) {
     ActiveSyncSession session;
     session.Start();
     Handheld control{session.Pipe(0)}, rapi{session.Pipe(1)};
-    const auto connectRapi = [&](Handheld& control, Handheld& rapi) {
-        control.Put(Words({0}));
-        CHECK(control.Bytes6(4) == Words({3}));
-        Bytes deviceInfo(16);
-        deviceInfo.front() = 1;
-        PutWords(deviceInfo, {5, 1, 1});
-        deviceInfo.insert(deviceInfo.end(), {'P', 0, 0, 0});
-        PutWords(deviceInfo, {0, 0, 0, 42, 0, 2});
-        deviceInfo.insert(deviceInfo.end(), {'P', 0});
-        PutWords(deviceInfo, {2});
-        deviceInfo.insert(deviceInfo.end(), {'C', 0, 0});
-        PutWords(deviceInfo, {0, 0});
-        control.Put(Words({4, uint32_t(deviceInfo.size())}));
-        control.Put(deviceInfo);
-        CHECK(control.Bytes6(12) == Words({5, 4, 1}));
-        rapi.Put(Words({1}));
-        CHECK(RapiReply(rapi, 0x43, Words({0, 1, 16, 16, 5, 1, 0})));
-    };
+    const auto connectRapi = [](Handheld& control, Handheld& rapi) { ConnectActiveSync(control, rapi); };
     const auto acceptCab = [&](Handheld& rapi) {
         CHECK(RapiReply(rapi, 0x16, Words({0, 1})));
         CHECK(RapiReply(rapi, 0x18, Words({0, 1, uint32_t(cab.size())})));
@@ -831,10 +946,13 @@ void TestActiveSync(const std::string& root) {
                 "<characteristic type=\"Registry\"><nocharacteristic type=\"" + path +
                 "\"/></characteristic>")));
         }
+        // It sets the partnership up again at once; a refusal there doesn't fail the sync.
+        CHECK(RapiReply(rapi, 0x0e, Words({5, 0x80004005})));
         finish(afterReset);
         CHECK(manager.Status().state == SyncStatus::State::done);
         CHECK(manager.Status().message.find("Desktop partnership missing.") != std::string::npos);
-        CHECK(profile.ActiveSyncPairing(key).empty());
+        CHECK(manager.Status().message.find("Couldn't set up a desktop partnership") != std::string::npos);
+        CHECK(profile.ActiveSyncPairing(key) == "requested");
         CHECK(profile.RequestActiveSyncPairing(key, true, error));
         CHECK(profile.ActiveSyncPairing(key) == "requested");
         CHECK(profile.RequestActiveSyncPairing(key, false, error));
@@ -1203,6 +1321,7 @@ int main(int argc, char** argv) {
     TestFailedPalmSyncKeepsUser(argv[1]);
     TestRapiDeadlines();
     TestActiveSync(argv[1]);
+    TestActiveSyncQuestion(argv[1]);
     TestActiveSyncProfileFiles(argv[1]);
     std::filesystem::remove_all(argv[1]);
     if (failures) return std::printf("sync-engine: %d failed\n", failures), 1;

@@ -140,18 +140,21 @@ Click or tap the buttons under the screen and the silkscreen areas. Click and ho
 
 Keys, with the infrared keyboard detached (attached, they go to the Palm's keyboard driver instead, see [Infrared keyboard](#infrared-keyboard)):
 
-| Key | T\|X | E2 / E3 | Zire 72 | TG50 | 68k Palms |
-|---|---|---|---|---|---|
-| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | scroll rocker (up and down) |
-| F1 | Home | Calendar | Calendar | Date Book | Date Book |
-| F2 | Calendar | Contacts | Contacts | Address | Address |
-| F3 | Contacts | Tasks | Music | To Do | To Do List |
-| F4 | Web | Note Pad | Camera | Memo Pad | Memo Pad |
-| F5 | | | Voice button (hold to record) | Voice button | |
-| F6 | | | | Home | |
-| Escape | Power | E2: Power | Power | Power | Power |
+| Key | T\|X | E2 / E3 | Zire 72 | TG50 | Zodiac | 68k Palms |
+|---|---|---|---|---|---|---|
+| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | pushes the stick, Enter presses its centre | scroll rocker (up and down) |
+| F1 | Home | Calendar | Calendar | Date Book | Action 1 (bottom) | Date Book |
+| F2 | Calendar | Contacts | Contacts | Address | Action 2 (right) | Address |
+| F3 | Contacts | Tasks | Music | To Do | Action 3 (left) | To Do List |
+| F4 | Web | Note Pad | Camera | Memo Pad | Action 4 (top) | Memo Pad |
+| F5 | | | Voice button (hold to record) | Voice button | | |
+| F6 | | | | Home | Home | |
+| F7 | | | | | Function | |
+| F8, F9 | | | | | Left and right triggers | |
+| F10 | | | | | Stick centre | |
+| Escape | Power | E2: Power | Power | Power | | Power |
 
-On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
+On the Zodiac, F1 to F4 are the Action buttons and Enter and F10 press the stick's centre. On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
 
 **Game controller** (TG50, in the Machine menu on Linux and the corner menu on Android) plugs Sony's CLIÉ game controller into the connector or takes it out while the machine runs. It's drawn in place of the keyboard, and after Rotate its grips sit either side of the upright screen. The TG50's own driver runs it. It's saved for each machine; a session loaded later brings its own state. It's greyed while serial, infrared or USB has the connector. While it's in, the arrows are its arrows, Z and X are A and B, A and S are X and Y, Q is Home, W is Menu and H moves the Hold slide, and these keys no longer type. A game controller works it too: the d-pad or left stick, A, B, X and Y, Start for Home, Back for Menu and the right shoulder button for Hold. On Android, a game controller's d-pad, A, B, X, Y, Start (Home), Select (Menu) and R3 (Hold) press the CLIÉ controller's buttons while it's in, and the CLIÉ's own Home and Menu while it's out, and Settings → Controller → Set controls lists them for the TG50.
 
@@ -537,7 +540,7 @@ Documents To Go needs a first desktop run for the handheld’s Palm user. HotSyn
 
 ### ActiveSync
 
-On the rx1950, click **ActiveSync** in the top bar to connect to the assigned profile. It uses USB by default. Choose **Serial** under **Connection** in the machine’s sync settings to use the serial cable. Use **Sync Manager** to queue a Windows Mobile CAB. ActiveSync sends one CAB at a time to the installer on the device, where you can finish the installation. Contacts, calendar, tasks and contact pictures sync. ActiveSync is available on Windows, Linux, macOS and Android.
+On the rx1950, click **ActiveSync** in the top bar to connect to the assigned profile. It uses USB by default. Choose **Serial** under **Connection** in the machine’s sync settings to use the serial cable. Use **Sync Manager** to queue a Windows Mobile CAB. ActiveSync sends one CAB at a time to the installer on the device, where you can finish the installation. Contacts, calendar, tasks and contact pictures sync. The first time a device connects, Frond asks whether to set up a partnership, like desktop ActiveSync. **Set up** pairs it in that sync, so its ActiveSync app shows the last sync. **Connect as guest** skips the partnership and Pocket Outlook, while queued CABs and Files still go, and isn't asked again. Use **Pair on next sync** or **Cancel request** next to **Partnership** in the sync settings to change it later. ActiveSync is available on Windows, Linux, macOS and Android.
 
 Enable **Files** in the sync settings, or run `frond-sync files PROFILE` to make and print the profile’s Files folder. ActiveSync exchanges files in it with `My Documents\Frond Sync` on the device. It exchanges files up to 16 MB with portable ASCII names. Once both copies match, edits and deletions go both ways. If both sides change before the next sync, Frond keeps both versions and reports the difference in the sync log. Make the two copies match to resolve the difference. Previous copies of files Frond replaces or removes are kept in the `.frond-recovery` subfolder on the side that received the change.
 

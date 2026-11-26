@@ -39,6 +39,19 @@ internal enum class SyncProtocol(val label: String, val startCommand: String) {
     }
 }
 
+// ActiveSync's first-connect question: the core waits at this stage until the app answers.
+internal object PartnershipQuestion {
+    const val START_ARGUMENT = "ask"
+    const val ANSWER_COMMAND = "activesync-answer"
+
+    fun open(syncState: String): Boolean {
+        val words = syncState.substringBefore("; profile ").split(' ')
+        return words.size >= 3 && words[0] == "syncing" && words[2] == "partnership-question"
+    }
+
+    fun answer(setUp: Boolean) = if (setUp) "set-up" else "guest"
+}
+
 internal fun Device.supportsNetworkHotSync() =
     SyncProtocol.forDevice(this) == SyncProtocol.HOT_SYNC &&
         (id == "palm-tx" || modem || irPhone || usbWifi || builtInWifi)

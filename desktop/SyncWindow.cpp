@@ -639,6 +639,15 @@ SyncWindow::SyncWindow(QWidget* parent) : QDialog(parent) {
     resize(760, 510);
 }
 
+void SyncWindow::setDeviceKind(const std::string& newKind) {
+    deviceKind = newKind;
+    tabs->setTabVisible(1, deviceKind != "winmo");
+    if (!tabs->isTabVisible(tabs->currentIndex())) tabs->setCurrentIndex(0);
+    if (library.Root().empty()) return;
+    showPalmConduits();
+    showQueue();
+}
+
 PimKind SyncWindow::kind() const { return PimKind(recordKind->currentIndex()); }
 
 void SyncWindow::refresh() {
@@ -929,6 +938,7 @@ void SyncWindow::showQueue() {
     if (!profile.IsOpen()) return;
     const auto assignments = library.Assignments();
     for (const auto& item : profile.InstallQueue()) {
+        if (!frondSync::InstallItemFitsKind(item, deviceKind)) continue;
         const auto state = item.state == "queued" ? tr("Queued") : item.state == "done" ? tr("Installed") : tr("Failed");
         addRow(queue, {text(item.fileName), deviceName(machineNames, assignments, item.deviceKey), state, text(item.message)},
                QVariant::fromValue<qlonglong>(item.id));
@@ -961,7 +971,7 @@ void SyncWindow::queueFiles() {
 void SyncWindow::showPalmConduits() {
     const QSignalBlocker blocked(palmConduits);
     const auto info = profile.IsOpen() ? library.FindProfile(profileId) : std::nullopt;
-    if (!info) {
+    if (!info || deviceKind == "winmo") {
         palmConduits->hide();
         return;
     }

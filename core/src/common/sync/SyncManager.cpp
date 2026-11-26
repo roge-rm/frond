@@ -103,6 +103,33 @@ void SyncManager::Update(const std::function<void(SyncStatus&)>& change) {
     if (tell) tell(line);
 }
 
+std::optional<bool> SyncManager::AskPartnership(const std::function<bool()>& ended) {
+    {
+        std::lock_guard lock(questionMutex);
+        questionOpen = true;
+        answer.reset();
+    }
+    Update([](SyncStatus& value) {
+        value.stage = "partnership-question";
+        value.done = value.total = 0;
+        value.item.clear();
+    });
+    std::unique_lock lock(questionMutex);
+    while (!answer && !ended()) questionChanged.wait_for(lock, std::chrono::milliseconds(100));
+    const auto result = answer;
+    questionOpen = false;
+    answer.reset();
+    return result;
+}
+
+bool SyncManager::AnswerPartnership(bool setUp) {
+    std::lock_guard lock(questionMutex);
+    if (!questionOpen || answer) return false;
+    answer = setUp;
+    questionChanged.notify_all();
+    return true;
+}
+
 void SyncManager::EndpointOpened(Transport transport) {
     {
         std::lock_guard lock(mutex);

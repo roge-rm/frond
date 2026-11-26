@@ -77,12 +77,12 @@ inline PalmKey clieDetachedKey(PalmKey key) {
 }
 
 // What the controllers hold on the device, from the controller keys held (padKeysHeld over every
-// controller) through the map. On the Zodiac (zodiac) the left stick (leftX, leftY) is the analogue
-// stick over its whole range, and Up, Down, Left and Right push it to full travel on their axis,
+// controller) through the map. On the Zodiac (zodiac) the map's stick (its axes as stickX, stickY,
+// padStickAxes) is the analogue stick over its whole range, and Up, Down, Left and Right push it to full travel on their axis,
 // winning over the left stick there, the one pressed last if both are held. The CLIÉ game controller's
 // buttons reach it only while it is attached (padAttached); detached, its arrows, Home, X, Y and Hold
 // press the CLIÉ's own Up, Down, Home and second to fourth app buttons, as on Android.
-inline GamepadInput gamepadInput(const ControllerMap& map, PadKeyMask held, int16_t leftX, int16_t leftY, bool zodiac,
+inline GamepadInput gamepadInput(const ControllerMap& map, PadKeyMask held, int16_t stickX, int16_t stickY, bool zodiac,
                                  bool padAttached, GamepadDirections* directions = nullptr) {
     GamepadInput input;
     const uint64_t pressed = map.pressed(held);
@@ -98,7 +98,7 @@ inline GamepadInput gamepadInput(const ControllerMap& map, PadKeyMask held, int1
         if (const KeyId id = palmKeyToKeyId(key)) input.keys |= deviceKeyBit(id);
     }
     if (!zodiac) return input;
-    const float x = std::max(leftX / 32767.0f, -1.0f), y = std::max(leftY / 32767.0f, -1.0f);
+    const float x = std::max(stickX / 32767.0f, -1.0f), y = std::max(stickY / 32767.0f, -1.0f);
     const float length = std::hypot(x, y);
     float sx = 0, sy = 0;
     if (length > gamepadStickRest) {

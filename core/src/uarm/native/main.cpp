@@ -144,6 +144,7 @@ struct Options {
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
+    bool directStick;        // --direct-stick
     optional<string> controllerMap;  // --controller-map
     bool headphonesIn;       // --headphones-in
     BatteryPower battery{};  // --battery
@@ -170,6 +171,8 @@ bool gFastEngineMissing = false;
     bool nandFromMalloc = false;
     // The session was made with --any-firmware (its metadata says so).
     bool sessionAnyFirmware = false;
+    // The host's time when the session was saved, in Unix seconds, if its metadata has it.
+    std::optional<int64_t> sessionSavedAt;
     // Guest time awake between the eject and the insert, so the card driver handles the removal
     // first, and for an SD card until SoC::SdRemovalHandled says it has where the board can tell. A
     // guest the eject doesn't wake, or that never handles it, gets the card after swapInsertLimit.
@@ -286,7 +289,9 @@ bool gFastEngineMissing = false;
             cerr << "separate NAND image cannot be used with session file" << endl;
             return false;
         }
-        sessionAnyFirmware = std::string(contents.metadata.begin(), contents.metadata.end()) == frondNative::anyFirmwareRecord;
+        const auto records = frondNative::parseSessionMetadata(contents.metadata);
+        sessionAnyFirmware = records.anyFirmware;
+        sessionSavedAt = records.savedAt;
         ramSize = contents.ramSize;
         if (ramSize == 0) ramSize = ramSizeFromMemorySize(contents.memory.size());
         displayMode = static_cast<DisplayMode>(contents.displayMode);
@@ -815,6 +820,7 @@ bool gFastEngineMissing = false;
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << deviceProfile5(deviceType)->displayName << ": the Fast engine is not available here, running Exact" << endl;
+            if (options.directStick) static_cast<SocIMX1*>(soc)->SetDirectStick(true);
             // With a SoundFont or a MIDI out taking the events, the hooks don't print them.
             if (options.musicHooks || options.musicSoundFont || options.musicMidiOut)
                 static_cast<SocIMX1*>(soc)->SetMusicHooks(true, !options.musicSoundFont && !options.musicMidiOut);
@@ -924,6 +930,14 @@ bool gFastEngineMissing = false;
         if (!soc->Load(savestate.size, savestate.data)) {
             cerr << "failed to restore savestate" << endl;
             return false;
+        }
+        if (savestate.size && savestate.data) {
+            // A saved machine opened again: its clock moves on by the time it was closed, as a device asleep that
+            // long. Runs on guest time, timed runs (--run-for) and scripts keep the saved one so they repeat, as do
+            // sessions saved without the time.
+            const int64_t now = int64_t(std::time(nullptr));
+            if (sessionSavedAt && !options.emulatedTime && !options.runFor && !options.script && now > *sessionSavedAt)
+                soc->ForwardClock(uint64_t(now - *sessionSavedAt));
         }
         // A swapped slot is ejected now and its card goes in later, in the guest loop below. The
         // stick's detect line drops here, after the restore, so a guest asleep at the save wakes
@@ -1140,7 +1154,9 @@ bool gFastEngineMissing = false;
                 musicSynth->setClock(&musicClock);
                 musicSynth->setSongDelay(zodiac_music::dalTickNs);
                 musicSynth->start();
-                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                audioDriver.SetMixer([synth = musicSynth.get(), sink = &zodiacMusic->PcmSink()](
+                                         int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                    synth->setDeviceGain(sink->gain.load(std::memory_order_relaxed));
                     synth->mix(frames, count, span, GuestAudioClock::steadyNs());
                 });
             }
@@ -2147,6 +2163,11 @@ int main(int argc, char** argv) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--direct-stick")
+        .help("Zodiac, Fast engine only: the ROM takes each stick sample as it is, without its filter")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--no-sound", "-q")
         .help("start with audio off")
         .default_value(false)
@@ -2417,6 +2438,7 @@ int main(int argc, char** argv) {
                        .fastEngine = program.get("--engine") == "fast",
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),
+                       .directStick = program.get<bool>("--direct-stick"),
                        .controllerMap = program.present("--controller-map"),
                        .headphonesIn = program.get<bool>("--headphones-in"),
                        .anyFirmware = program.get<bool>("--any-firmware")};

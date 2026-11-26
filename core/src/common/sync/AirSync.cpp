@@ -1918,6 +1918,7 @@ Bytes AirSyncServer::Sync(const AirSyncRequest& frame, int& status) {
                     profile.DeviceValue(scope, "airsync-synckey") == std::to_string(std::stoll(key) + 1)) {
                     const auto offset = identity.size();
                     response.assign(prior.begin() + offset + 3, prior.end());
+                    estimatedEmpty.erase(folder->kind);
                     if (prior[offset] == actionCode) {
                         settled[folder->kind] = prior[offset + 1] == '1';
                         overwriteQueued[folder->kind] = prior[offset + 2] == '1';
@@ -1930,6 +1931,7 @@ Bytes AirSyncServer::Sync(const AirSyncRequest& frame, int& status) {
                 }
                 CollectionSync sync(profile, deviceKey, *folder, counts, timeZone, action,
                                     overwriteQueued[folder->kind]);
+                estimatedEmpty.erase(folder->kind);
                 settled[folder->kind] = sync.Run(collection, result, replayable);
                 if (result.Text(pageAirSync, as::Status) != "1") continue;
                 if (!prior.empty()) Must(profile.SetDeviceValue(scope, replayKey, "", &error), error);
@@ -1985,7 +1987,13 @@ Bytes AirSyncServer::Estimate(const Bytes& body, int& status) {
                 item.Add(pageEstimate, ge::CollectionId, folder->id);
                 CollectionSync sync(profile, deviceKey, *folder, counts, timeZone, Action(folder->kind),
                                     overwriteQueued[folder->kind]);
-                item.Add(pageEstimate, ge::Estimate, std::to_string(sync.Pending()));
+                const auto pending = sync.Pending();
+                item.Add(pageEstimate, ge::Estimate, std::to_string(pending));
+                // With nothing to send and no changes of its own, WM5 sends no Sync for the folder
+                // after this, so the estimate is its last word on it.
+                const auto key = profile.DeviceValue("airsync:" + deviceKey + "/" + folder->className, "airsync-synckey");
+                if (!pending && !key.empty() && key != "0") estimatedEmpty.insert(folder->kind);
+                else estimatedEmpty.erase(folder->kind);
             }
         }
         change.Commit();
@@ -2068,9 +2076,12 @@ void AirSyncServer::Stop() {
 bool AirSyncServer::Finished() const {
     std::lock_guard lock(mutex);
     if (syncEnd) return true;
+    // A folder whose estimate was empty is done once the guest has stayed quiet a while longer,
+    // in case its own changes are still on the way.
+    const bool quiet = Clock::now() - last > emptyEstimateQuiet;
     for (const auto kind : kinds) {
         auto it = settled.find(kind);
-        if (it == settled.end() || !it->second) return false;
+        if ((it == settled.end() || !it->second) && !(quiet && estimatedEmpty.count(kind))) return false;
     }
     return !kinds.empty();
 }

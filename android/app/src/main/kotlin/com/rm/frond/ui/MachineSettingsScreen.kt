@@ -60,9 +60,7 @@ fun MachineSettingsScreen(model: HomeModel) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-            if (!editing) Choice("Device", draft.device, Device.shown.sortedBy { it.label.lowercase() }, { it.listLabel }) {
-                model.chooseMachine(it)
-            }
+            if (!editing) DeviceChoice("Device", draft.device) { model.chooseMachine(it) }
             // A card for each slot of a two-slot machine.
             if (!editing && com.rm.frond.Cards.hasSlot(draft.device, 1)) {
                 Header("Cards")
@@ -86,12 +84,14 @@ fun MachineSettingsScreen(model: HomeModel) {
                 MachineAudioPreviewRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             }
             if (draft.device.vibrate) MachineRumbleRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
+            if (draft.device.voiceKey) MachineRecordKeyRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (draft.device.zodiac) MachineMusicRows(draft.settings, { model.changeMachineSettings(it) }) { model.importSoundFont(it) }
             Header("Battery", Modifier.padding(top = 16.dp))
             MachineBatteryRows(draft.settings, false, null) { model.changeMachineSettings(it) }
             if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
             if (rows.speed) MachineSpeedRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
+            if (rows.engine && draft.device.zodiac) MachineDirectStickRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (draft.device.infrared || draft.device.serialPort || draft.device.bluetooth) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
                 val choices = remember(draft.device, draft.settings.infrared) {

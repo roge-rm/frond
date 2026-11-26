@@ -51,6 +51,36 @@ static void rom68k(QFile& rom, qint64 size, quint16 version, quint16 flags = 0x0
 class FirmwareInputTest : public QObject {
     Q_OBJECT
  private slots:
+    // Each group lists its devices oldest first; the Zodiac 1 comes before the Zodiac 2, the E3 straight after the E2.
+    void pickerGroupOrder() {
+        const auto ids = [](DeviceGroup5 group) {
+            QStringList result;
+            for (auto d : frondFirmware::devicesInGroup(group)) result << frondFirmware::deviceId(d);
+            return result;
+        };
+        QCOMPARE(ids(DeviceGroup5::palmOs5), QStringList({"palm-zire-72", "palm-e2", "palm-e2-franken", "palm-tx"}));
+        QCOMPARE(ids(DeviceGroup5::palmClassic), QStringList({"palm-iiix", "palm-v", "palm-iiie", "palm-vx", "palm-iiixe", "palm-iiic",
+            "palm-m100", "palm-m105", "palm-m500", "palm-m505", "palm-m125", "palm-m515", "palm-m130", "palm-m520"}));
+        QCOMPARE(ids(DeviceGroup5::sonyClie), QStringList({"sony-clie-t415", "sony-clie-tg50"}));
+        QCOMPARE(ids(DeviceGroup5::tapwave), QStringList({"tapwave-zodiac-1", "tapwave-zodiac-2"}));
+        QCOMPARE(ids(DeviceGroup5::hp), QStringList({"hp-ipaq-rx1950"}));
+        QCOMPARE(ids(DeviceGroup5::alphaSmart), QStringList({"alphasmart-dana", "alphasmart-dana-wireless"}));
+        QCOMPARE(ids(DeviceGroup5::ibm), QStringList({"ibm-workpad-c500"}));
+        size_t total = 0;
+        for (auto group : deviceGroups5) total += frondFirmware::devicesInGroup(group).size();
+        QCOMPARE(total, frondFirmware::devices.size());
+    }
+    // The last 3 devices, newest first; a repeat moves to the front.
+    void recentDevices() {
+        QStringList recent;
+        for (const char* id : {"palm-tx", "palm-e2", "palm-v"}) recent = frondFirmware::pushRecentDevice(recent, id);
+        QCOMPARE(recent, QStringList({"palm-v", "palm-e2", "palm-tx"}));
+        recent = frondFirmware::pushRecentDevice(recent, "palm-tx");
+        QCOMPARE(recent, QStringList({"palm-tx", "palm-v", "palm-e2"}));
+        recent = frondFirmware::pushRecentDevice(recent, "palm-m515");
+        QCOMPARE(recent, QStringList({"palm-m515", "palm-tx", "palm-v"}));
+        QCOMPARE(frondFirmware::pushRecentDevice(recent, QString()), recent);
+    }
     void zodiac() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());

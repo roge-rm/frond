@@ -155,10 +155,24 @@ fun MachineRumbleRow(device: Device, settings: MachineSettings, listStyle: Boole
     }
 }
 
+// The phone key held to record, for a device with a voice or record key.
+@Composable
+fun MachineRecordKeyRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineChoiceRow("Record key", settings.recordKey, com.rm.frond.RecordKey.entries, { it.label }, listStyle) { onChange(settings.copy(recordKey = it)) }
+}
+
 // Exact or Fast, for ARM devices.
 @Composable
 fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Engine", settings.engine, Engine.entries, { it.label }, listStyle) { onChange(settings.copy(engine = it)) }
+}
+
+// Zodiac only; the core uses it in Fast only, so it's greyed in Exact.
+@Composable
+fun MachineDirectStickRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineSwitchRow("Direct stick", settings.directStick, listStyle, enabled = settings.engine == Engine.FAST) {
+        onChange(settings.copy(directStick = it))
+    }
 }
 
 // The LCD contrast, 0 to 100. The change is saved when the slider is let go.

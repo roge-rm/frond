@@ -151,6 +151,14 @@ class RunningRulesTest : public QObject {
         QVERIFY(!buttons(tx, s).powerEnabled && !buttons(tx, s).soundEnabled);
         s.keyboardAttached = true;
         QVERIFY(buttons(tx, s).keyboard);
+        // Record shows for the three devices with a voice or record key.
+        for (const auto* id : {"palm-zire-72", "sony-clie-tg50", "hp-ipaq-rx1950"}) {
+            const auto t = traitsFor(named(id));
+            State ready; ready.ready = true;
+            QVERIFY2(t.voiceKey && buttons(t, ready).record && buttons(t, ready).recordEnabled, id);
+            QVERIFY(!buttons(t, State()).recordEnabled);
+        }
+        QVERIFY(!buttons(tx, s).record && !buttons(iiix, s).record);
     }
     void databaseFilesAreNamedByKind() {
         QCOMPARE(databaseFile({"Memos-PMem", "appl", "memo", true}), QString("Memos-PMem.prc"));

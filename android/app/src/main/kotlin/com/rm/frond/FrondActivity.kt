@@ -259,6 +259,7 @@ open class FrondActivity : SDLActivity() {
         // The core names a new machine's file on its first save, so an older path may not be the one in use.
         sessionPath = Sessions.resolve(this, intent?.getStringExtra(EXTRA_SESSION))
         machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
+        recordKey = machineSettings.recordKey
         val device = launchDevice()
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
@@ -298,6 +299,8 @@ open class FrondActivity : SDLActivity() {
         setCoreTestEnvironment()
         HostDns.start(applicationContext)
         super.onCreate(savedInstanceState)
+        UnbufferedInput.request(window.decorView)
+        InputTrace.followFrames()
         // After the core's library loads, which ZodiacMidi tells when the device fails.
         midiOutId?.let { zodiacMidi = ZodiacMidi(this, it) }
         fitInsideSystemBars()
@@ -410,6 +413,7 @@ open class FrondActivity : SDLActivity() {
         arguments += listOf("--battery", battery.launchSpec())
         if (launchDevice().zodiac) {
             arguments += machineSettings.musicArguments(File(machineSettings.soundFont).isFile, midiOutId)
+            arguments += machineSettings.directStickArguments()
         }
         arguments += listOf("--window-background", BACKGROUND_HEX)
         // The core turns the Zodiac's view with its OS only when the app turns with it too.
@@ -655,6 +659,7 @@ open class FrondActivity : SDLActivity() {
     override fun onBackPressed() = back()
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        InputTrace.key(event)
         if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
             if (event.action == android.view.KeyEvent.ACTION_UP) back()
             return true
@@ -670,6 +675,12 @@ open class FrondActivity : SDLActivity() {
                 editor.assign(event.keyCode)
                 assignedKey = event.keyCode
             }
+            return true
+        }
+        // The phone key chosen for Record is held down for as long as it is, and is used up here.
+        if (recordKey.matches(event.keyCode) && !leaving) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) holdRecord(true)
+            else if (event.action == android.view.KeyEvent.ACTION_UP) holdRecord(false)
             return true
         }
         // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
@@ -693,7 +704,15 @@ open class FrondActivity : SDLActivity() {
     private val rightStick = RightStickAxes()
     private val captureSticks = StickKeys()
     private val captureRight = RightStickAxes()
+    private val captureHat = HatKeys()
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        InputTrace.motion("touch", event)
+        UnbufferedInput.touch(window.decorView, event)
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK)) InputTrace.motion("joystick", event)
         val editor = bar.controls
         if (editor != null && event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             // A stick pushed past half travel is assigned; the Palm gets nothing while a button waits.
@@ -704,6 +723,8 @@ open class FrondActivity : SDLActivity() {
             captureSticks.update(event.deviceId, ControllerMap.STICK_RIGHT,
                 captureRight.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
                 captureRight.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)), assign)
+            captureHat.update(event.deviceId, event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
+                event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y), assign)
             if (capture) return true
         }
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
@@ -1246,6 +1267,7 @@ open class FrondActivity : SDLActivity() {
         bar.soundKey = RunningBar.soundKey(device)
         bar.sound = sound
         bar.powerKey = RunningBar.powerKey(device)
+        bar.recordKey = RunningBar.recordKey(device)
         bar.syncMachine = session?.id
         bar.syncProtocol = session?.let { SyncProtocol.forDevice(device) }
         val owner = BarOwner().also { it.create() }
@@ -1274,11 +1296,12 @@ open class FrondActivity : SDLActivity() {
             setContent {
                 androidx.compose.runtime.CompositionLocalProvider(androidx.activity.compose.LocalActivityResultRegistryOwner provides results) {
                     com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
-                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
+                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() }, record = { holdRecord(it) },
                         keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) }, autoHide = { setBarShown(false, remember = false) },
                         openMenu = { openMenu() }, menuRow = { menuRow(it) },
                         openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
                         startSync = ::startSync, syncMachines = { Sessions.list(this@FrondActivity) },
+                        answerPartnership = ::answerPartnership,
                     ))
                 }
             }
@@ -1348,6 +1371,8 @@ open class FrondActivity : SDLActivity() {
                         val connection = SyncNative.call(this@FrondActivity, "hotsync-transport",
                             "profile" to assigned, "device" to SyncNative.deviceKey(machine)).getString("connection")
                         link.request(protocol.startCommand, connection, timeoutSeconds = 10)
+                    } else if (protocol == SyncProtocol.ACTIVE_SYNC) {
+                        link.request(protocol.startCommand, PartnershipQuestion.START_ARGUMENT, timeoutSeconds = 10)
                     } else link.request(protocol.startCommand, timeoutSeconds = 10)
                 }
                 if (reply == null) bar.syncAssignment = true
@@ -1363,11 +1388,31 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    // Answered once per question; the core moving on (or the session ending) closes it.
+    private var partnershipAnswered = false
+
+    private fun answerPartnership(setUp: Boolean) {
+        if (!bar.partnershipQuestion) return
+        bar.partnershipQuestion = false
+        partnershipAnswered = true
+        val scope = barOwner?.lifecycleScope ?: return
+        scope.launch {
+            val reply = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                link.request(PartnershipQuestion.ANSWER_COMMAND, PartnershipQuestion.answer(setUp), timeoutSeconds = 10)
+            }
+            if (!reply.ok && reply.code != "none") menuModel?.note = reply.message
+        }
+    }
+
     private fun syncState(raw: String) {
         val state = raw.substringBefore("; profile ")
         val label = bar.syncProtocol?.label ?: return
         bar.syncRunning = state.startsWith("syncing ")
+        val question = PartnershipQuestion.open(state)
+        if (!question) partnershipAnswered = false
+        bar.partnershipQuestion = question && !partnershipAnswered
         bar.syncStatus = when {
+            question -> "Waiting for an answer"
             bar.syncRunning -> state.removePrefix("syncing ")
             state.startsWith("waiting ") && bar.syncStatus != null -> "Waiting for $label"
             else -> null
@@ -1555,6 +1600,31 @@ open class FrondActivity : SDLActivity() {
             }
             runOnUiThread { if (!leaving) applySound() }
         }, "FrondBarSound").apply { isDaemon = true }.start()
+    }
+
+    // The phone key held to record, from the machine's settings.
+    private var recordKey = RecordKey.NONE
+    private var recordHeld = false
+    // Key changes go to the core one at a time, in order.
+    private val recordSender = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "FrondRecordKey").apply { isDaemon = true } }
+
+    fun applyRecordKey() {
+        val key = Sessions.forPath(this, sessionPath)?.settings?.recordKey ?: return
+        runOnUiThread {
+            // Letting go of a key that is no longer the record key must not leave the Palm's key down.
+            if (key != recordKey) holdRecord(false)
+            recordKey = key
+        }
+    }
+
+    // Holds the Palm's voice or record key down or lets it go; a repeat of the same state is ignored.
+    private fun holdRecord(down: Boolean) {
+        if (down == recordHeld) return
+        recordHeld = down
+        recordSender.execute {
+            val reply = link.request("voice-key", if (down) "d" else "u", timeoutSeconds = 10)
+            if (!reply.ok) Log.w(TAG, "record: ${reply.code} ${reply.message}")
+        }
     }
 
     // Presses and releases the Palm's power key by key replay on the control link.

@@ -58,3 +58,36 @@ inline WindowLayout fitWindowLayout(WindowFit fit, int deviceWidth, int deviceHe
     layout.y = (windowHeight - layout.height) / 2;
     return layout;
 }
+
+// The window size in the units the layout is made in, and output pixels per unit on each axis.
+struct WindowMetrics {
+    int width{0}, height{0};
+    float pixelsX{1}, pixelsY{1};
+};
+
+// SDL's window size and its renderer's output size can disagree when a window is resized from outside
+// (embedded in another toolkit's window, or a DPI scale applied to one of them). When the two agree on one
+// ratio, that ratio is used for both axes. When they don't, the output size is the one that is drawn on, so
+// it becomes the window size and one unit is one pixel. That keeps the device's scale equal on both axes.
+inline WindowMetrics consistentWindowMetrics(int windowWidth, int windowHeight, int outputWidth, int outputHeight) {
+    WindowMetrics m;
+    if (outputWidth <= 0 || outputHeight <= 0) {
+        m.width = windowWidth;
+        m.height = windowHeight;
+        return m;
+    }
+    if (windowWidth > 0 && windowHeight > 0) {
+        const float rx = float(outputWidth) / windowWidth, ry = float(outputHeight) / windowHeight;
+        // Rounding of a fractional DPI scale moves a size by under a pixel on each axis.
+        const float slackX = (0.5f * rx + 1.f) / outputWidth, slackY = (0.5f * ry + 1.f) / outputHeight;
+        if (std::fabs(rx - ry) <= std::max(rx, ry) * std::max(slackX, slackY) + 1e-4f) {
+            m.width = windowWidth;
+            m.height = windowHeight;
+            m.pixelsX = m.pixelsY = std::min(rx, ry);
+            return m;
+        }
+    }
+    m.width = outputWidth;
+    m.height = outputHeight;
+    return m;
+}

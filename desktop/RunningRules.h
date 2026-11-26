@@ -30,6 +30,8 @@ struct Traits {
     bool syncManager{false};
     // Has buttons a game controller map can press (ControllerMap.h).
     bool controls{false};
+    // Has a voice or record key (keyIdVoice).
+    bool voiceKey{false};
 };
 
 inline Traits traitsFor(frondFirmware::Device device) {
@@ -51,6 +53,7 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
     t.gamepad = profile.frontend.clieGamepad;
     t.controls = !controllerPalmKeys(profile).empty();
+    t.voiceKey = frondFirmware::hasVoiceKey(device);
     return t;
 }
 
@@ -254,7 +257,7 @@ inline CardIcon cardIcon(bool slot, bool known, bool present, bool inserted) {
 
 // What the toolbar shows beyond the menu's rows.
 struct Buttons {
-    bool card{false}, power{false}, keyboard{false}, applications{true};
+    bool card{false}, power{false}, keyboard{false}, applications{true}, record{false}, recordEnabled{false};
     bool soundEnabled{false}, powerEnabled{false}, cardEnabled{false};
 };
 inline Buttons buttons(const Traits& t, const State& s) {
@@ -263,6 +266,8 @@ inline Buttons buttons(const Traits& t, const State& s) {
     b.card = true;
     b.applications = true;
     b.power = t.powerKey;
+    b.record = t.voiceKey;
+    b.recordEnabled = s.ready && t.voiceKey;
     b.keyboard = s.keyboardAttached;
     b.soundEnabled = s.ready && t.sound;
     b.powerEnabled = s.ready && t.powerKey;

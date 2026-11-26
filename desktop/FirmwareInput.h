@@ -7,6 +7,8 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QString>
+#include <QStringList>
+#include <algorithm>
 #include <vector>
 #include "device_profile5.h"
 
@@ -22,6 +24,28 @@ inline const auto devices = [] {
         if (p.frontend.available) result.push_back(static_cast<Device>(p.deviceType));
     return result;
 }();
+
+inline const DeviceProfile5& profile(Device device);
+// The devices of a picker group, oldest release first; the Zodiac 2 follows the Zodiac 1 and the table order breaks any other tie.
+inline std::vector<Device> devicesInGroup(DeviceGroup5 group) {
+    std::vector<Device> result;
+    for (auto device : devices)
+        if (deviceProfile5(int(device))->group == group) result.push_back(device);
+    std::stable_sort(result.begin(), result.end(), [](Device a, Device b) {
+        const auto &pa = *deviceProfile5(int(a)), &pb = *deviceProfile5(int(b));
+        return pa.released != pb.released ? pa.released < pb.released
+                                           : deviceProfilePickerRank5(int(a)) < deviceProfilePickerRank5(int(b));
+    });
+    return result;
+}
+// The ids of the last 3 devices a machine was made for, newest first: `id` goes to the front.
+inline QStringList pushRecentDevice(QStringList recent, const QString& id) {
+    if (id.isEmpty()) return recent;
+    recent.removeAll(id);
+    recent.prepend(id);
+    while (recent.size() > 3) recent.removeLast();
+    return recent;
+}
 
 inline const DeviceProfile5& profile(Device device) {
     const auto* p = deviceProfile5(int(device));
@@ -150,6 +174,9 @@ inline QString importWarning(Device device, const QString& nandPath, bool anyFir
 inline bool serialAbsent(Device device) { return device == Device::zire72; }
 // The connector or cradle has a separate HotSync button on these boards.
 inline bool hasHotSyncButton(Device device) { return deviceProfileHasHotSyncButton5(int(device)); }
+
+// A voice or record key the Record button holds down.
+inline bool hasVoiceKey(Device device) { return deviceProfileHasVoiceKey5(int(device)); }
 
 // A 68k ROM's big-endian card header, read the way frond-68k reads it before its own full check.
 inline Device68kRomInfo5 inspectRom68k(QFile& rom) {

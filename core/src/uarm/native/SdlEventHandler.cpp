@@ -81,6 +81,12 @@ namespace {
         return false;
     }
 
+    // Enter is Select, or on a device with an analogue stick (the Zodiac, which has no Select) the stick's press.
+    KeyId hostKey(SDL_Keycode keysym, const DeviceControlProfile& controls) {
+        const KeyId key = mapKey(keysym);
+        return key == keyIdSelect && hasStick(controls) ? keyIdStickPress : key;
+    }
+
     // Arrow keys stand in for the stick on devices that have one: bits for up, down, left, right.
     uint8_t stickKeyBit(KeyId key) {
         switch (key) {
@@ -231,7 +237,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     }
                     break;
                 }
-                enum KeyId key = mapKey(event.key.keysym.sym);
+                enum KeyId key = hostKey(event.key.keysym.sym, *inputControls);
                 if (key >= keyIdFunction && !hasKey((*inputControls), key)) break;
                 if (stickKeyBit(key) && hasStick(*inputControls)) {
                     stickKeys |= stickKeyBit(key);
@@ -268,7 +274,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     if (--codeHolds[code] == 0) soc->KeyboardKey(code, false);
                     break;
                 }
-                enum KeyId key = mapKey(event.key.keysym.sym);
+                enum KeyId key = hostKey(event.key.keysym.sym, *inputControls);
                 if (stickKeyBit(key) && hasStick(*inputControls)) {
                     stickKeys &= uint8_t(~stickKeyBit(key));
                     UpdateStick();
@@ -300,15 +306,17 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
             case SDL_CONTROLLERAXISMOTION: {
                 PadReading& one = pads[event.caxis.which];
                 const int16_t value = event.caxis.value;
+                PadAxis moved = PadAxis::none;
                 switch (event.caxis.axis) {
-                    case SDL_CONTROLLER_AXIS_LEFTX: one.leftX = value; lastStickPad = event.caxis.which; break;
-                    case SDL_CONTROLLER_AXIS_LEFTY: one.leftY = value; lastStickPad = event.caxis.which; break;
-                    case SDL_CONTROLLER_AXIS_RIGHTX: one.rightX = value; break;
-                    case SDL_CONTROLLER_AXIS_RIGHTY: one.rightY = value; break;
-                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: one.leftTrigger = value; break;
-                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: one.rightTrigger = value; break;
+                    case SDL_CONTROLLER_AXIS_LEFTX: one.leftX = value; moved = PadAxis::leftX; break;
+                    case SDL_CONTROLLER_AXIS_LEFTY: one.leftY = value; moved = PadAxis::leftY; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTX: one.rightX = value; moved = PadAxis::rightX; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTY: one.rightY = value; moved = PadAxis::rightY; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: one.leftTrigger = value; moved = PadAxis::leftTrigger; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: one.rightTrigger = value; moved = PadAxis::rightTrigger; break;
                     default: break;
                 }
+                if (controllerMap.usesAxis(moved)) lastStickPad = event.caxis.which;
                 UpdateGamepad();
                 break;
             }
@@ -543,7 +551,21 @@ void SdlEventHandler::ReleaseInputs() {
     stickKeys = 0;
     // The controllers' buttons are let go with the built-in holds below. Their sticks are only
     // taken off the device: the axes stay, so a stick still pushed is back when focus returns.
-    for (auto& entry : pads) { PadReading kept; kept.leftX = entry.second.leftX; kept.leftY = entry.second.leftY; entry.second = kept; }
+    for (auto& entry : pads) {
+        PadReading kept;
+        for (const PadAxis axis : {controllerMap.stickX.axis, controllerMap.stickY.axis}) {
+            switch (axis) {
+                case PadAxis::leftX: kept.leftX = entry.second.leftX; break;
+                case PadAxis::leftY: kept.leftY = entry.second.leftY; break;
+                case PadAxis::rightX: kept.rightX = entry.second.rightX; break;
+                case PadAxis::rightY: kept.rightY = entry.second.rightY; break;
+                case PadAxis::leftTrigger: kept.leftTrigger = entry.second.leftTrigger; break;
+                case PadAxis::rightTrigger: kept.rightTrigger = entry.second.rightTrigger; break;
+                default: break;
+            }
+        }
+        entry.second = kept;
+    }
     padFocused = false;
     padKeys = 0;
     padStick = {};
@@ -630,8 +652,7 @@ void SdlEventHandler::SetControllerMap(const ControllerMap& map) {
                 SDL_GameControllerOpen(i);
     UpdateGamepad();
 }
-// A controller key is held if any controller holds it. The Zodiac's stick is the one moved last, or
-// while that one is at rest or gone, the first controller with its stick pushed.
+// A controller key is held if any controller holds it. The Zodiac's stick (the map's stick axes) is the one moved last, or while that one is at rest or gone, the first controller with it pushed.
 // A key the controller holds counts with the built-in holds, so a key held some other way too goes
 // down once and comes up when the last of them lets go.
 void SdlEventHandler::UpdateGamepad() {
@@ -639,13 +660,22 @@ void SdlEventHandler::UpdateGamepad() {
     if (!zodiac && controllerMap.keys.empty() && !padKeys) return;
     if (!padFocused) return;
     PadKeyMask held = 0;
-    const PadReading* stickPad = nullptr;
-    if (auto it = pads.find(lastStickPad); it != pads.end() && (it->second.leftX || it->second.leftY)) stickPad = &it->second;
+    int16_t stickX = 0, stickY = 0;
+    auto pushed = [&](const PadReading& pad) {
+        int16_t x, y;
+        padStickAxes(pad, controllerMap, x, y);
+        if (!x && !y) return false;
+        stickX = x;
+        stickY = y;
+        return true;
+    };
+    bool found = false;
+    if (auto it = pads.find(lastStickPad); it != pads.end()) found = pushed(it->second);
     for (auto& entry : pads) {
         held |= padKeysHeld(entry.second);
-        if (!stickPad && (entry.second.leftX || entry.second.leftY)) stickPad = &entry.second;
+        if (!found) found = pushed(entry.second);
     }
-    const GamepadInput input = gamepadInput(controllerMap, held, stickPad ? stickPad->leftX : 0, stickPad ? stickPad->leftY : 0,
+    const GamepadInput input = gamepadInput(controllerMap, held, stickX, stickY,
                                             zodiac, soc->GamepadAttached(), &padDirections);
     for (unsigned key = 1; key < keyIdCount; ++key) {
         const DeviceKeyMask bit = deviceKeyBit(KeyId(key));

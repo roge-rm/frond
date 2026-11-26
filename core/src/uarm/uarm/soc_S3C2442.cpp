@@ -547,6 +547,7 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
     soc->battery = battery;
     S3c2442Options options;
     options.rtcStart = rx1950RtcStart;
+    options.rtcBinaryYear = true;
     // No serial cable.
     options.pinLevels[rx1950CablePort] &= ~(1u << rx1950CableBit);
     rx1950BatteryPins(soc->battery, options);
@@ -958,6 +959,12 @@ bool SocS3C2442::SetBattery(const BatteryPower& value) {
     battery = value;
     if (machine) rx1950ApplyBattery(*machine, battery);
     return true;
+}
+
+void SocS3C2442::ForwardClock(uint64_t seconds) {
+    if (!seconds || halted) return;
+    if (!rx1950RtcForward(machine->rtc, machine->intc, seconds))
+        std::cerr << "rx1950: the clock was left as saved, its registers don't hold a time" << std::endl;
 }
 
 // The charge and notification LED, stepped by the board's blinker in guest time. No vibrate motor.

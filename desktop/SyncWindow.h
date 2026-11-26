@@ -30,6 +30,8 @@ class SyncWindow : public QDialog {
  public:
     explicit SyncWindow(QWidget* parent = nullptr);
     void refresh();
+    // The device the window is for: palm or winmo. Empty shows the whole profile.
+    void setDeviceKind(const std::string& kind);
     QHash<QString, QString> machineNames;
 
  private:
@@ -59,6 +61,7 @@ class SyncWindow : public QDialog {
     frondSync::SyncLibrary library;
     frondSync::SyncProfile profile;
     int64_t profileId{0};
+    std::string deviceKind;
     QComboBox *profiles, *recordKind, *backupDevice, *recoveryCopy;
     QTabWidget* tabs;
     QCheckBox *showPrivate, *showArchived, *palmConduits;

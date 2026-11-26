@@ -313,7 +313,7 @@ out/frond-sync: $(COMMON_LIB) core/src/common/sync/SyncTool.cpp
 	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common/sync core/src/common/sync/SyncTool.cpp \
 		$(COMMON_LIB) -lpthread -o out/frond-sync$(EXE_SUFFIX)
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-window-layout test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
 
 # The checks that used to be recipe lines of test: itself, each a target so it is recorded.
 .PHONY: test-battery-power test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
@@ -852,6 +852,11 @@ test-scheduler: prepare
 	$(CXX) -std=c++17 -O2 -Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common tests/scheduler-order.cpp -o $(OBJ_ROOT)/test-scheduler-order
 	$(OBJ_ROOT)/test-scheduler-order
 
+.PHONY: test-window-layout
+test-window-layout: prepare
+	g++ -std=c++17 -O1 -Wall -Wextra -Icore/src/uarm/native tests/window-layout.cpp -o $(OBJ_ROOT)/test-window-layout
+	$(OBJ_ROOT)/test-window-layout
+
 .PHONY: test-device-controls
 test-device-controls: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/controls-core-objects.rsp
@@ -1080,6 +1085,12 @@ test-native-budget:
 test-frond-arm-big-install: out/frond
 	python3 tests/frond-arm-big-install.py
 
+# 13 installs in a row on the T|X over the socket, timed (12 small, one 2 MB with 521 resources),
+# then all listed. Same sessions as above.
+.PHONY: test-frond-arm-batch-install
+test-frond-arm-batch-install: out/frond
+	python3 tests/frond-arm-batch-install.py
+
 # A guest-ready check wakes nothing; a host call wakes the T|X's UI task, and a refused one on the Zire 72
 # wakes it at most once (GDB breakpoint on EvtWakeup). Same sessions as above.
 .PHONY: test-host-call-wake
@@ -1104,6 +1115,11 @@ test-battery-control: out/frond out/frond-68k
 
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
+# The top bar's HotSync on a T|X with USB HotSync up presses without replugging; needs the T|X smoke machine, else skipped.
+.PHONY: test-tx-hotsync-top-bar
+test-tx-hotsync-top-bar: out/frond
+	@session=build/smoke/machines/palm-tx; if [ -e $$session ]; then rm -rf build/tx-hotsync-top-bar && python3 tests/tx-hotsync-top-bar.py $$session build/tx-hotsync-top-bar; else echo "tx-hotsync-top-bar: no T|X smoke machine, skipped"; fi
+
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
 # that side is skipped.
 .PHONY: test-core-control

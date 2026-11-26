@@ -27,11 +27,13 @@ static void rx1950();
 // The VZ Palms: the m125, m500 and WorkPad c500, on the Dana's board.
 static bool vzPalm(const DeviceProfile5& p) { return p.board == DeviceBoard5::vz328 && !deviceTypeIsDana5(p.deviceType); }
 static void originalHz();
+static void pickerGroups();
 
 int main() {
     static_assert(int(DisplayMode::mode_320x320) == 5 && int(DisplayMode::mode_320x480) == 6);
     static_assert(int(DisplayMode::mode_480x720) == 8 && int(DisplayMode::mode_480x320) == 10);
     zodiac2();
+    pickerGroups();
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
@@ -238,8 +240,11 @@ int main() {
                    (other.deviceType == deviceTypeTX || other.deviceType == deviceTypeE2 ||
                     other.deviceType == deviceTypeFrankenE2 || other.board == DeviceBoard5::imx1Zodiac ||
                     other.board == DeviceBoard5::ez328 || vzPalm(other)));
+        assert(deviceProfileHasVoiceKey5(deviceTypeZire72) && deviceProfileHasVoiceKey5(deviceTypeTG50) &&
+               deviceProfileHasVoiceKey5(deviceTypeRx1950) && !deviceProfileHasVoiceKey5(deviceTypeTX) &&
+               !deviceProfileHasVoiceKey5(deviceTypeE2));
         for (int unknown : {-1, 99}) {
-            assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown));
+            assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown) && !deviceProfileHasVoiceKey5(unknown));
         }
         assert(p->norSize == (8u << 20) && p->headerOffset == 0x20000 && p->legacySessionNor);
         for (size_t size : {size_t(256), size_t(4u << 20), size_t((8u << 20) - 1), size_t((8u << 20) + 1), size_t(16u << 20)}) {
@@ -1101,4 +1106,28 @@ static void t415() {
     assert(!inspect68k(rom68k(0x200000, 5, vz, palm, sumo, base + 0x2a2, 0x8000)).profile);
     assert(inspect68k(rom68k(0x200000, 5, ez, palm, sumo, 0x10c002a2, 0x8000)).profile == deviceProfileNamed5("palm-iiix"));
     std::cout << "PASS: Sony CLIE T415 profile and ROM header detection\n";
+}
+
+// Every available profile has a group the picker lists and a release year and month; the picker orders a group by them.
+static void pickerGroups() {
+    std::set<DeviceGroup5> known(std::begin(deviceGroups5), std::end(deviceGroups5));
+    std::set<DeviceGroup5> used;
+    for (const auto& p : deviceProfiles5) {
+        if (!p.frontend.available) continue;
+        if (!known.count(p.group) || !*deviceGroupName5(p.group)) {
+            std::cerr << p.name << " has no picker group\n";
+            assert(false);
+        }
+        const unsigned year = p.released / 100, month = p.released % 100;
+        if (year < 1998 || year > 2010 || month < 1 || month > 12) {
+            std::cerr << p.name << " has no release date\n";
+            assert(false);
+        }
+        used.insert(p.group);
+    }
+    assert(used == known);
+    // The Zodiac 1 comes before the Zodiac 2, and the E3 is Frond's patched E2.
+    assert(deviceProfileNamed5("tapwave-zodiac-1")->released == deviceProfileNamed5("tapwave-zodiac-2")->released);
+    assert(deviceProfilePickerRank5(deviceTypeZodiac1) < deviceProfilePickerRank5(deviceTypeZodiac2));
+    assert(deviceProfileNamed5("palm-e2-franken")->released == deviceProfileNamed5("palm-e2")->released);
 }

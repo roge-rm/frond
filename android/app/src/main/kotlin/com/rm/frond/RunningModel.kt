@@ -771,6 +771,7 @@ class RunningModel(
                 if (next.barMode != old.barMode) s = s.copy(barMode = next.barMode)
                 if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
                 if (next.rumble != old.rumble) s = s.copy(rumble = next.rumble)
+                if (device.voiceKey && next.recordKey != old.recordKey) s = s.copy(recordKey = next.recordKey)
                 if (next.batteryMode != old.batteryMode) s = s.copy(batteryMode = next.batteryMode)
                 if (next.batteryLevel != old.batteryLevel) s = s.copy(batteryLevel = next.batteryLevel)
                 if (next.batteryCharging != old.batteryCharging) s = s.copy(batteryCharging = next.batteryCharging)
@@ -783,6 +784,7 @@ class RunningModel(
             FrondActivity.running?.applyMips()
             FrondActivity.running?.applyBarMode()
             FrondActivity.running?.applyRumble()
+            FrondActivity.running?.applyRecordKey()
             FrondActivity.running?.battery?.changed(settings)
             if (settings.headphonesIn != old.headphonesIn) FrondActivity.running?.applyHeadphones()
         } catch (e: Exception) {

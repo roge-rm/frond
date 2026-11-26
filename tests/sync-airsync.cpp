@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <thread>
 
 #include "ActiveSyncPartnership.h"
 #include "AirSync.h"
@@ -435,6 +436,32 @@ PimRecord Save(SyncProfile& profile, PimKind kind, std::map<std::string, std::st
 }
 
 int Live(SyncProfile& profile, PimKind kind) { return int(profile.PimRecords(kind).size()); }
+
+// WM5 sends no Sync after an empty estimate when it has nothing of its own: the folder is done
+// once the guest stays quiet. A Sync after the estimate takes over.
+void TestEmptyEstimateFinishes(SyncLibrary& library) {
+    SyncProfile profile;
+    OpenProfile(library, "Empty estimate", profile);
+    AirSyncServer server(profile, "machine:empty", {PimKind::calendar});
+    server.SetEmptyEstimateQuiet(std::chrono::milliseconds(200));
+    Client client{server};
+    // The first estimate, before the key is set up, doesn't count.
+    CHECK(TextOf(client.Post("GetItemEstimate", Hex(estimate)), 6, 0x0c) == "0");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(!server.Finished());
+    auto key = NextKey(client.Post("Sync", Hex(calendarStart)));
+    CHECK(!server.Finished());
+    CHECK(TextOf(client.Post("GetItemEstimate", Hex(estimate)), 6, 0x0c) == "0");
+    CHECK(!server.Finished());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(server.Finished());
+    // A Sync after the estimate takes over: one that doesn't settle isn't done however quiet it stays.
+    CHECK(TextOf(client.Sync(calendarChanges, "99"), 0, Status) == "3");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(!server.Finished());
+    NextKey(client.Sync(calendarChanges, key));
+    CHECK(server.Finished());
+}
 
 // A profile event with no date is never sent and doesn't stop device adds.
 void TestDatelessEvent(SyncLibrary& library) {
@@ -1505,6 +1532,7 @@ int main(int argc, char** argv) {
 
     TestTimeZoneRead();
     TestKnownZone(library);
+    TestEmptyEstimateFinishes(library);
     TestDatelessEvent(library);
     TestFirstUpload(library);
     TestZoneAcrossRequests(library);

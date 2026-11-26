@@ -2362,6 +2362,45 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    // The device picker is a menu: Detect, Recent when there are any, then a submenu for each group.
+    void devicePickerMenu() {
+        QSettings().clear();
+        QTemporaryDir root;
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic);
+            auto* menu = dialog.findChild<QPushButton*>("deviceButton")->menu();
+            auto* device = dialog.findChild<QComboBox*>("device");
+            emit menu->aboutToShow();
+            QStringList top;
+            for (auto* a : menu->actions()) top << a->text();
+            QCOMPARE(top, QStringList({"Detect from the NOR image", "Palm OS 5", "Palm classic", "Sony CLIÉ", "Tapwave", "HP", "AlphaSmart", "IBM"}));
+            QStringList tapwave;
+            QAction* zodiac1 = nullptr;
+            for (auto* a : menu->actions())
+                if (a->text() == "Tapwave") for (auto* b : a->menu()->actions()) { tapwave << b->text(); if (b->data() == "tapwave-zodiac-1") zodiac1 = b; }
+            QCOMPARE(tapwave, QStringList({"Tapwave Zodiac 1", "Tapwave Zodiac 2"}));
+            QVERIFY(zodiac1);
+            zodiac1->trigger();
+            QCOMPARE(device->currentData().toString(), QString("tapwave-zodiac-1"));
+            QCOMPARE(dialog.findChild<QPushButton*>("deviceButton")->text(), QString("Tapwave Zodiac 1"));
+            menu->actions().first()->trigger();
+            QVERIFY(device->currentData().toString().isEmpty());
+        }
+        // Recent lists the stored devices, newest first, after Detect.
+        QSettings().setValue("recentDevices", QStringList({"palm-tx", "palm-e2", "unknown-device"}));
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic);
+            auto* menu = dialog.findChild<QPushButton*>("deviceButton")->menu();
+            emit menu->aboutToShow();
+            QCOMPARE(menu->actions().at(1)->text(), QString("Recent"));
+            QStringList recent;
+            for (auto* a : menu->actions().at(1)->menu()->actions()) recent << a->text();
+            QCOMPARE(recent, QStringList({"Palm TX", "Tungsten E2"}));
+            menu->actions().at(1)->menu()->actions().at(1)->trigger();
+            QCOMPARE(dialog.findChild<QComboBox*>("device")->currentData().toString(), QString("palm-e2"));
+        }
+        QSettings().clear();
+    }
     // A new Zodiac starts on Fast and the T|X, Zire 72 too, and other new machines on Exact, until the Engine is changed by hand; an
     // existing Zodiac keeps the engine it has, and Fast starts its core with --engine fast.
     void zodiacEngineDefault() {
@@ -2374,24 +2413,35 @@ for line in s.makefile('rb'):
             auto* device = dialog.findChild<QComboBox*>("device");
             auto* engine = dialog.machineSettings->engine;
             const auto pick = [&](const char* id) { device->setCurrentIndex(device->findData(QString(id))); };
+            auto* directStick = dialog.machineSettings->directStick;
             pick("tapwave-zodiac-2");
             QVERIFY(engine->isEnabled() && engine->currentData().toBool() && dialog.machineSettings->values().fastEngine);
+            // Direct stick: Zodiac only, on by default, greyed in Exact.
+            QVERIFY(!directStick->isHidden() && directStick->isEnabled() && directStick->isChecked());
             pick("palm-e2");
-            QVERIFY(!engine->currentData().toBool());
+            QVERIFY(!engine->currentData().toBool() && directStick->isHidden());
             pick("tapwave-zodiac-2");
-            QVERIFY(engine->currentData().toBool());
+            QVERIFY(engine->currentData().toBool() && !directStick->isHidden() && directStick->isEnabled());
             // Exact chosen by hand stays when the device changes.
             engine->setCurrentIndex(engine->findData(false));
             emit engine->activated(engine->currentIndex());
+            QVERIFY(!directStick->isEnabled());
             pick("palm-e2"); pick("tapwave-zodiac-2");
             QVERIFY(!engine->currentData().toBool() && !dialog.machineSettings->values().fastEngine);
+            QVERIFY(!directStick->isEnabled() && dialog.machineSettings->values().directStick);
+            engine->setCurrentIndex(engine->findData(true));
+            QVERIFY(directStick->isEnabled());
+            directStick->setChecked(false);
+            QVERIFY(!dialog.machineSettings->values().directStick);
         }
         {
             MachineSettingsDialog dialog(zodiac, fresh);
             QVERIFY(dialog.controls->engine->isEnabled() && !dialog.controls->values().fastEngine);
-            auto fast = fresh; fast.fastEngine = true;
+            QVERIFY(!dialog.controls->directStick->isEnabled() && dialog.controls->directStick->isChecked());
+            auto fast = fresh; fast.fastEngine = true; fast.directStick = false;
             MachineSettingsDialog fastDialog(zodiac, fast);
-            QVERIFY(fastDialog.controls->values().fastEngine);
+            QVERIFY(fastDialog.controls->values().fastEngine && !fastDialog.controls->values().directStick);
+            QVERIFY(fastDialog.controls->directStick->isEnabled() && !fastDialog.controls->directStick->isChecked());
         }
     }
     void zodiacCradle() {
@@ -3467,6 +3517,14 @@ def emitcam():
         except OSError: continue
         cam=text; s.sendall(b'0\tevent\tcamera\t'+text.hex().encode()+b'\n')
 threading.Thread(target=emitcam,daemon=True).start()
+# The text put in the "emitsync" file goes to the app as a sync event.
+def emitsync():
+    while True:
+        time.sleep(0.02)
+        try: text=open(here+'/emitsync','rb').read(); os.remove(here+'/emitsync')
+        except OSError: continue
+        s.sendall(b'0\tevent\tsync\t'+text.hex().encode()+b'\n')
+threading.Thread(target=emitsync,daemon=True).start()
 mic=b'off'
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
@@ -3495,6 +3553,13 @@ for line in s.makefile('rb'):
         s.sendall(b'0\tevent\tsync\t'+b'syncing usb backup 1/2 Memo'.hex().encode()+b'\n')
         time.sleep(0.3)
         s.sendall(b'0\tevent\tsync\t'+b'done usb: Backup complete'.hex().encode()+b'\n')
+    # ActiveSync waits at the partnership question until the app answers.
+    if cmd==b'activesync-start':
+        s.sendall(b'0\tevent\tsync\t'+b'syncing usb partnership-question'.hex().encode()+b'\n')
+    if cmd==b'activesync-answer':
+        s.sendall(b'0\tevent\tsync\t'+b'syncing usb files'.hex().encode()+b'\n')
+        time.sleep(0.2)
+        s.sendall(b'0\tevent\tsync\t'+b'done usb: Windows Mobile connected.'.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY").replace("DEVICE", device));
         core.close();
@@ -3909,12 +3974,15 @@ for line in s.makefile('rb'):
         const auto path = library.ProfilePath(profile);
         const auto device = frondSync::MachineDeviceKey("active-test");
         frondSync::SyncProfile storage;
-        QVERIFY(act("Pair on next sync", true));
+        // A device that hasn't chosen pairs on its next sync.
+        QVERIFY(act("Cancel request", true));
+        QVERIFY(storage.Open(path, problem));
+        QVERIFY(storage.ActiveSyncPairing(device).empty());
+        QVERIFY(!frondSync::ActiveSyncFilesFolder(path).empty());
+        storage.Close();
+        QVERIFY(act("Pair on next sync", false));
         QVERIFY(storage.Open(path, problem));
         QCOMPARE(QString::fromStdString(storage.ActiveSyncPairing(device)), QString("requested"));
-        QVERIFY(!frondSync::ActiveSyncFilesFolder(path).empty());
-        QVERIFY(act("Cancel request", false));
-        QVERIFY(storage.ActiveSyncPairing(device).empty());
         storage.Close();
         QVERIFY(library.DeleteProfile(profile.id, problem));
     }
@@ -4025,6 +4093,73 @@ for line in s.makefile('rb'):
         QVERIFY(renamed.open(QIODevice::ReadOnly));
         QCOMPARE(renamed.readAll().trimmed(), machine);
         QVERIFY(!QFileInfo::exists(ids.fileName()));
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // ActiveSync asks before a first partnership; the answer goes to the core and the box closes
+    // by itself when the core moves on without one.
+    void activeSyncPartnershipQuestion() {
+        QSettings().clear();
+        QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Pocket", 6, "hp-ipaq-rx1950", 0);
+        QTemporaryDir files;
+        menuCore(files.path(), "hp-ipaq-rx1950");
+        if (QTest::currentTestFailed()) return;
+        frondSync::SyncLibrary library;
+        QString error;
+        QVERIFY2(frondDesktopSync::openLibrary(library, error), qPrintable(error));
+        frondSync::ProfileInfo profile;
+        std::string problem;
+        QVERIFY(library.CreateProfile("Pocket PC", profile, problem));
+        MainWindow window(files.filePath("core"));
+        window.show();
+        window.openSession(managedSession("Pocket"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        auto* sync = bar->findChild<QAction*>("barSync");
+        QVERIFY(sync);
+        QTRY_VERIFY_WITH_TIMEOUT(sync->isVisible() && sync->isEnabled(), 5000);
+        QCOMPARE(sync->text(), QString("ActiveSync"));
+        QFile ids(frondSessions::syncIdPath(managedSession("Pocket")));
+        QTRY_VERIFY_WITH_TIMEOUT(ids.exists(), 5000);
+        QVERIFY(ids.open(QIODevice::ReadOnly));
+        const auto machine = ids.readAll().trimmed().toStdString();
+        ids.close();
+        QVERIFY(library.Assign(frondSync::MachineDeviceKey(machine), profile.id, problem, "winmo"));
+        auto readSent = [&] {
+            QFile file(files.filePath("sent"));
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray{};
+        };
+        auto question = [&] { return window.findChild<QMessageBox*>("partnershipQuestion"); };
+        auto* label = bar->findChild<QLabel*>("barStatus");
+
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-start ask"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        QCOMPARE(question()->text(), QString("Set up an ActiveSync partnership with this device?"));
+        question()->findChild<QPushButton*>("partnershipGuest")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-answer guest"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("ActiveSync complete:"), 3000);
+        QVERIFY(!question());
+
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        question()->findChild<QPushButton*>("partnershipSetUp")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-answer set-up"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("ActiveSync complete:"), 3000);
+
+        // The guest's cable came out: the core ends the sync and the question goes with it.
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        QFile events(files.filePath("emitsync"));
+        QVERIFY(events.open(QIODevice::WriteOnly));
+        events.write("failed usb: ActiveSync ended before the partnership question was answered.");
+        events.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!question(), 3000);
+        QCOMPARE(readSent().count("activesync-answer"), 2);
+        window.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QVERIFY(library.DeleteProfile(profile.id, problem));
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }

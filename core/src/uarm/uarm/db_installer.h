@@ -25,6 +25,7 @@ int32_t dbInstallerInstall(struct SyscallDispatch* sd, size_t len, void* data);
 // with its creator gets sysAppLaunchCmdSyncNotify unless it's the app in front, and an app install
 // while the launcher is in front relaunches the launcher so it lists the app. Any other app in front
 // stays. Runs at the same EvtGetEvent safe point as the install, in its own guest transaction.
-void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data);
+// Without relaunch only the notify is sent, for a batch that relaunches once (relaunchLauncher).
+void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data, bool relaunch = true);
 
 #endif  // _DB_INSTALLER_H_

@@ -405,6 +405,11 @@ struct Probe {
             return false;
         }
     } codeHooks;
+    // Fast: the armed pc stops are CPU code hooks as well (syncPcStopHooks), so the lean path and the JIT run up to
+    // them and leave them to the step, as for codeHooks. Without that (Exact, or no room for them) a pc stop runs
+    // every instruction through the step. Host side, not saved.
+    bool pcStopHooked = false;
+    bool pcStopStepped() const { return pcStop.armed && !pcStopHooked; }
     // quietWriteClocks' last count, with what it depends on. Host side, not saved.
     struct QuietWriteMemo {
         Imx1Cs5Mode mode;
@@ -862,7 +867,8 @@ struct Probe {
         if (mode != quietMode || cpuArm920Waiting(cpu) || !peripherals.mcuEnabled() || peripherals.mcuWakePending() ||
             peripherals.systemStopped() || graphicsWireStatus != Imx1BootstrapAccess::ok ||
             peripherals.systemPllBusStallPending() || boundReached() ||
-            (codeHooks.count && codeHooks.at(cpuGetRegisters(cpu)[15] & ~1u)))
+            (codeHooks.count && codeHooks.at(cpuGetRegisters(cpu)[15] & ~1u)) ||
+            (pcStop.armed && pcStop.at(cpuGetRegisters(cpu)[15] & ~1u)))
             return 0;
         if (linesPending) {
             flushSubmitBoard();
@@ -3615,9 +3621,27 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     return true;
 }
 
+// The CPU's code hooks: the machine's own, and in Fast the armed pc stops too when there's room. Setting the same
+// hooks again leaves the translated code alone.
+static void syncPcStopHooks(Probe* p) {
+    uint32_t pcs[ARM920_MAX_CODE_HOOKS];
+    unsigned count = 0;
+    for (unsigned i = 0; i < p->codeHooks.count; ++i) pcs[count++] = p->codeHooks.pcs[i];
+    p->pcStopHooked = false;
+    if (p->fastEngine && p->pcStop.armed && count + p->pcStop.count <= ARM920_MAX_CODE_HOOKS) {
+        for (unsigned i = 0; i < p->pcStop.count; ++i) pcs[count++] = p->pcStop.pcs[i];
+        p->pcStopHooked = true;
+    }
+    if (!cpuArm920SetCodeHooks(p->cpu, pcs, count)) {
+        p->pcStopHooked = false;
+        cpuArm920SetCodeHooks(p->cpu, p->codeHooks.pcs, p->codeHooks.count);
+    }
+}
+
 static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idleHclkLimit) {
     auto* p = machine->probe;
     if (p->stopped || p->terminal || !retiredBudget) return;
+    syncPcStopHooks(p);
     if (retiredBudget > imx1ProbeMaximumSteps || UINT64_MAX - p->retired < retiredBudget) {
         p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
         p->result.peripheralStatus = Imx1BootstrapAccess::sequence;
@@ -3676,7 +3700,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 // A span the JIT ran to its end, or one a step started with the interrupt lines still to look at,
                 // goes on at once where it can (spanBoundary).
                 if ((quietCycles < leanMinimumSpan || linesPending) && p->fastJit && !p->blPrefix &&
-                    slice + 1 < retiredBudget && !p->pcStop.armed) {
+                    slice + 1 < retiredBudget && !p->pcStopStepped()) {
                     surfaceWait.armed = false;
                     const int next = p->spanBoundary();
                     if (next < 0) { ended = true; break; }
@@ -3685,7 +3709,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     slot2HaltOff = false;
                 }
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
-                    cpuArm920ClockMode(p->cpu) != quietMode || p->pcStop.armed) break;
+                    cpuArm920ClockMode(p->cpu) != quietMode || p->pcStopStepped()) break;
                 uint64_t hard = retiredBudget - slice - 1;
                 if (p->bounds) {
                     const uint64_t used = p->work - p->sliceWorkStart;
@@ -4064,6 +4088,7 @@ Imx1MachineAudio imx1MachineAudio(const Imx1Machine* machine) {
     a.gpioDInUse = board.gpioRegister(3, 8);
     a.gpioDData = board.gpioRegister(3, 7);
     a.gpioDOutputSelect = board.gpioRegister(3, 2);
+    a.lcdcPwmr = board.lcdcContrastControl();
     return a;
 }
 
@@ -4424,6 +4449,12 @@ UsbPacketResult imx1MachineUsbIn(Imx1Machine* machine, uint8_t endpoint, uint8_t
 }
 void imx1MachineSetUsbHostPending(Imx1Machine* machine, bool pending) {
     if (machine) machine->probe->usbHostPending = pending;
+}
+bool imx1MachineForwardRtc(Imx1Machine* machine, uint64_t seconds) {
+    if (!machine) return false;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return false;
+    return p->peripherals.forwardRtc(seconds);
 }
 bool imx1MachineUsbOutReady(const Imx1Machine* machine, uint8_t endpoint) {
     return machine && machine->probe->cs5Configuration.usbState().endpointOutReady(endpoint);

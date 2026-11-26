@@ -239,7 +239,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `db-export-rom FILE` | Export RAM and ROM databases (not the PACE cache). |
 | `db-export-all FILE` | Export every database. |
 
-`install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays, and so does a launch already under way.
+`install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Over the control socket the notify and the launcher reopen wait until 0.5 s after the last `install`, or until the next other command, quit or a lost connection, and then run once for the whole batch. Another app in front stays, and so does a launch already under way.
 
 The commands you start wake a sleeping Palm first with a power button press, here and on the control socket: `install`, `launch`, `set-auto-off`, the `db-export` commands, `launch-app`, `delete-db`, `export`, `export-db`, `db-list wake` and the Memory Stick file commands. No press is added while one from the host is held or queued. The guest runs until it's awake and takes host calls, 5 guest seconds at most. `db-list` and `os-version` leave it asleep. A Palm still asleep refuses the command, saying so (`asleep` on the control socket).
 
@@ -328,7 +328,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `cradle-button-state`, `cradle-button` | None to read, `down` or `up` to set | `cradle-button`: actual button state, or `unavailable` for a read on devices without this control. |
 | `sync-state`, `sync-profile` | None to read, profile name to set (empty to use the assigned profile) | `sync`: Sync Manager status. The profile change applies to the next HotSync. |
 | `sync-start` | Empty, `local` or `network` | `sync`: start HotSync on USB or serial. Over USB the press goes in once the device comes up, or after 2 s (a Zodiac's USB only comes up once HotSync runs), and right after a sync it waits like `hotsync`. `local` also disables Network HotSync. With `network`, open the guest's HotSync app and return `network` with a prompt to tap Network HotSync. |
-| `activesync-start` | `usb`, `serial` or empty for the configured transport | `sync`: start ActiveSync on Windows Mobile. |
+| `activesync-start` | `usb`, `serial` or empty for the configured transport, then optionally `ask` | `sync`: start ActiveSync on Windows Mobile. With `ask`, a device with no partnership and no saved answer waits at stage `partnership-question` for `activesync-answer`; without it, it pairs. |
+| `activesync-answer` | `set-up` or `guest` | `sync`: answer the partnership question. `guest` syncs nothing and isn't asked again. `none` when no question is open. |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |

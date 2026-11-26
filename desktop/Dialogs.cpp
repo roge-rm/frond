@@ -14,6 +14,8 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
+#include <QSettings>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
@@ -37,22 +39,59 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     setWindowTitle(tr("Import firmware"));
     setObjectName("firmwareDialog");
     form = new QFormLayout;
+    // The combo holds the choice (its items are the device's fixed name; empty detects) and stays hidden. The
+    // button opens the menu: Detect, Recent, then a submenu for each group.
     device = new QComboBox(this);
     device->setObjectName("device");
-    // Items hold the device's fixed name; empty detects.
+    device->setVisible(false);
     device->addItem(tr("Detect from the NOR image"), QString());
-    // Sorted by name here; the device list itself keeps its order.
-    QList<Device> sorted(std::begin(frondFirmware::devices), std::end(frondFirmware::devices));
-    std::stable_sort(sorted.begin(), sorted.end(), [](Device a, Device b) {
-        return QString::localeAwareCompare(frondFirmware::deviceName(a), frondFirmware::deviceName(b)) < 0;
-    });
-    for (auto d : sorted) {
-        const auto id = frondFirmware::deviceId(d);
-        const auto name = frondFirmware::deviceName(d);
-        device->addItem(name, id);
-    }
+    for (auto d : frondFirmware::devices)
+        device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
     device->setCurrentIndex(std::max(0, device->findData(frondFirmware::deviceId(preselect))));
-    form->addRow(tr("Device"), device);
+    auto* deviceButton = new QPushButton(this);
+    deviceButton->setObjectName("deviceButton");
+    deviceButton->setStyleSheet("text-align: left; padding: 4px 8px;");
+    auto* menu = new QMenu(deviceButton);
+    menu->setObjectName("deviceMenu");
+    deviceButton->setMenu(menu);
+    auto pick = [this](const QString& id) { device->setCurrentIndex(std::max(0, device->findData(id))); };
+    auto fillMenu = [this, menu, pick] {
+        menu->clear();
+        auto* detect = menu->addAction(tr("Detect from the NOR image"));
+        detect->setObjectName("deviceDetect");
+        connect(detect, &QAction::triggered, this, [pick] { pick(QString()); });
+        const auto recent = QSettings().value("recentDevices").toStringList();
+        QList<QString> shown;
+        for (const auto& id : recent)
+            if (frondFirmware::deviceFromId(id) != Device::automatic) shown.append(id);
+        if (!shown.isEmpty()) {
+            auto* sub = menu->addMenu(tr("Recent"));
+            sub->setObjectName("deviceGroupRecent");
+            for (const auto& id : shown) {
+                auto* action = sub->addAction(frondFirmware::deviceName(frondFirmware::deviceFromId(id)));
+                action->setData(id);
+                connect(action, &QAction::triggered, this, [pick, id] { pick(id); });
+            }
+        }
+        for (auto group : deviceGroups5) {
+            const auto members = frondFirmware::devicesInGroup(group);
+            if (members.empty()) continue;
+            auto* sub = menu->addMenu(QString::fromUtf8(deviceGroupName5(group)));
+            sub->setObjectName(QString("deviceGroup%1").arg(int(group)));
+            for (auto d : members) {
+                const auto id = frondFirmware::deviceId(d);
+                auto* action = sub->addAction(frondFirmware::deviceName(d));
+                action->setData(id);
+                connect(action, &QAction::triggered, this, [pick, id] { pick(id); });
+            }
+        }
+    };
+    connect(menu, &QMenu::aboutToShow, this, fillMenu);
+    fillMenu();
+    auto showChoice = [this, deviceButton] { deviceButton->setText(device->currentText()); };
+    connect(device, &QComboBox::currentIndexChanged, this, showChoice);
+    showChoice();
+    form->addRow(tr("Device"), deviceButton);
     auto field = [&](const QString& label, const QString& key, QLabel** labelWidget = nullptr) {
         auto* row = new QHBoxLayout;
         auto* edit = new QLineEdit(this);
@@ -204,7 +243,8 @@ void listMidiOutputPorts(QObject* context, std::function<void(const QStringList&
         done({});
     });
     core->start(midiCore, {"--music-midi-ports"});
-    timeout->start(5000);
+    // A first start of a newly installed core can take seconds on Windows while it's scanned.
+    timeout->start(20000);
 }
 
 QString midiPortKey(const QString& name) {
@@ -401,6 +441,12 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     engineRow->addWidget(engineLabel);
     engineRow->addWidget(engine, 1);
     speedLayout->addLayout(engineRow);
+    directStick = new QCheckBox(tr("Direct stick"), speedBox);
+    directStick->setObjectName("directStick");
+    directStick->setChecked(prefs.directStick);
+    speedLayout->addWidget(directStick);
+    connect(engine, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this] { directStick->setEnabled(engine->currentData().toBool()); });
     layout->addWidget(speedBox);
     peripherals = new QGroupBox(tr("Connections"), this);
     auto* peripheralsLayout = new QGridLayout(peripherals);
@@ -486,6 +532,8 @@ void MachineSettings::showMusic() {
     if (!zodiac || choice != "midi" || midiPortsListed) return;
     midiPortsListed = true;
     listMidiOutputPorts(this, [this](const QStringList& ports) {
+        // Nothing found is asked again the next time MIDI device is chosen.
+        if (ports.isEmpty()) midiPortsListed = false;
         const auto keep = midiPort->currentData().toString();
         const QSignalBlocker blocked(midiPort);
         midiPort->clear();
@@ -493,6 +541,10 @@ void MachineSettings::showMusic() {
         midiPort->addItem(tr("Frond's own port"), "virtual");
 #endif
         for (const auto& port : ports) midiPort->addItem(port, port);
+        if (midiPort->count() == 0 && keep.isEmpty()) {
+            midiPort->addItem(tr("No MIDI ports found"));
+            midiPort->setItemData(0, false, Qt::UserRole - 1);  // disabled
+        }
         int index = keep.isEmpty() ? 0 : midiPort->findData(keep);
         // The same port under new client numbers.
         if (index < 0)
@@ -563,6 +615,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     prefs.jogLandscape = frondSessions::JogLandscape(jogLandscape->currentData().toInt());
     prefs.fastEngine = engine->currentData().toBool();
+    prefs.directStick = directStick->isChecked();
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
     frondSessions::setSpeed(&prefs, speed->currentData().toString());
@@ -658,6 +711,8 @@ void MachineSettings::setDevice(Device device) {
         const QSignalBlocker blocked(engine);
         engine->setCurrentIndex(frondFirmware::fastByDefault(device) ? 1 : 0);
     }
+    directStick->setVisible(device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac);
+    directStick->setEnabled(engine->currentData().toBool());
     speedGroup->setVisible(true);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);

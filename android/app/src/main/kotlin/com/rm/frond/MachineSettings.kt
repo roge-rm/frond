@@ -68,6 +68,23 @@ enum class BarMode(val label: String, val arg: String) {
     OWN_SPACE("Own space", "space"),
 }
 
+// The phone key held to record on a device with a voice or record key; arg is the saved name. The key is only
+// used while that machine runs. keyCode is an Android KeyEvent code, 0 for none.
+enum class RecordKey(val label: String, val arg: String, val keyCode: Int) {
+    NONE("None", "none", 0),
+    VOLUME_DOWN("Volume down", "volume-down", android.view.KeyEvent.KEYCODE_VOLUME_DOWN),
+    VOLUME_UP("Volume up", "volume-up", android.view.KeyEvent.KEYCODE_VOLUME_UP),
+    L3("Gamepad L3", "l3", android.view.KeyEvent.KEYCODE_BUTTON_THUMBL),
+    SELECT("Gamepad Select", "select", android.view.KeyEvent.KEYCODE_BUTTON_SELECT),
+    ;
+
+    fun matches(code: Int) = keyCode != 0 && code == keyCode
+
+    companion object {
+        fun byArg(arg: String?) = entries.firstOrNull { it.arg == arg } ?: NONE
+    }
+}
+
 // Which per-machine rows Edit settings and the running menu show. Every device has speed. A 68k device
 // has contrast (on a grey LCD) and no engine or low-latency audio.
 data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Boolean, val audioPreview: Boolean) {
@@ -118,6 +135,8 @@ data class MachineSettings(
     val wifiModule: Boolean = true,
     // The guest motor drives the controller's or the phone's vibrator.
     val rumble: Boolean = true,
+    // Zodiac in Fast: the ROM takes each stick sample as it is (the core's --direct-stick).
+    val directStick: Boolean = true,
     // CLIE TG50: the game controller on the connector. null leaves what the session has (nothing was chosen yet).
     val gamepad: Boolean? = null,
     // The battery the Palm reads: Maximum, a set level (0 to 100), or this phone's. Charging is the Palm on its charger,
@@ -131,6 +150,8 @@ data class MachineSettings(
     val musicOutput: MusicOutput = MusicOutput.FM,
     val soundFont: String = "",
     val midiDevice: String = "",
+    // A device with a voice or record key: the phone key held to record.
+    val recordKey: RecordKey = RecordKey.NONE,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
@@ -142,9 +163,11 @@ data class MachineSettings(
         if (batteryLevel != DEFAULT_BATTERY_LEVEL) it.put("batteryLevel", batteryLevel)
         if (!batteryCharging) it.put("batteryCharging", false)
         if (headphonesIn) it.put("headphonesIn", true)
+        if (!directStick) it.put("directStick", false)
         if (musicOutput != MusicOutput.FM) it.put("musicOutput", musicOutput.arg)
         if (soundFont.isNotEmpty()) it.put("soundFont", soundFont)
-        if (midiDevice.isNotEmpty()) it.put("midiDevice", midiDevice) }
+        if (midiDevice.isNotEmpty()) it.put("midiDevice", midiDevice)
+        if (recordKey != RecordKey.NONE) it.put("recordKey", recordKey.arg) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -167,6 +190,10 @@ data class MachineSettings(
         } else if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
         if (speed != CpuSpeed.ORIGINAL) addAll(listOf("--speed", CpuSpeed.forCore(speed, m68k).arg))
     }
+
+    // The Zodiac's Direct stick for the core, used only with the Fast engine.
+    fun directStickArguments(): List<String> =
+        if (engine == Engine.FAST && directStick) listOf("--direct-stick") else emptyList()
 
     // The Zodiac's Music output for the core: a SoundFont that is there, or a MIDI device the activity found
     // (midiDeviceId, its MidiManager id). Nothing for the game's own sound or a choice with nothing to use.
@@ -247,6 +274,7 @@ data class MachineSettings(
                     else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
                 wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
                 rumble = json.optBoolean("rumble", fallback.rumble),
+                directStick = json.optBoolean("directStick", fallback.directStick),
                 gamepad = if (json.has("gamepad")) json.optBoolean("gamepad") else fallback.gamepad,
                 batteryMode = BatteryMode.entries.firstOrNull { it.arg == json.optString("batteryMode") } ?: BatteryMode.MAX,
                 batteryLevel = json.optInt("batteryLevel", DEFAULT_BATTERY_LEVEL).coerceIn(0, 100),
@@ -255,6 +283,7 @@ data class MachineSettings(
                 musicOutput = MusicOutput.entries.firstOrNull { it.arg == json.optString("musicOutput") } ?: MusicOutput.FM,
                 soundFont = json.optString("soundFont", ""),
                 midiDevice = json.optString("midiDevice", ""),
+                recordKey = RecordKey.byArg(json.optString("recordKey")),
             )
         }
     }

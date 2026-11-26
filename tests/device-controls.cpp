@@ -2729,6 +2729,9 @@ static void zodiacControls() {
     keyEvent(SDLK_F10,true);guest.expect({{keyIdStickPress,true}});assert(input.PressedButtons()==deviceKeyBit(keyIdStickPress));
     pointer(SDL_MOUSEBUTTONDOWN,sx,sy);pointer(SDL_MOUSEBUTTONUP,sx,sy);guest.sticks.clear();guest.expect({});
     keyEvent(SDLK_F10,false);guest.expect({{keyIdStickPress,false}});
+    // Enter presses the centre too, as the Zodiac has no Select.
+    keyEvent(SDLK_RETURN,true);guest.expect({{keyIdStickPress,true}});
+    keyEvent(SDLK_RETURN,false);guest.expect({{keyIdStickPress,false}});
     // The LCD sits between the panels.
     pointer(SDL_MOUSEBUTTONDOWN,150,0);guest.pen(true,0,0);pointer(SDL_MOUSEBUTTONUP,150,0);guest.pen(false);
     pointer(SDL_MOUSEBUTTONDOWN,629,319);guest.pen(true,479,319);pointer(SDL_MOUSEBUTTONUP,629,319);guest.pen(false);
@@ -2877,6 +2880,31 @@ static void zodiacControls() {
         input.SetControllerMap(ControllerMap{});guest.expect({{keyIdHard2,false}});
         padButton(SDL_CONTROLLER_BUTTON_A,false);guest.expect({});
         input.SetControllerMap(defaults);guest.expect({});
+    }
+    // The map's stick: right moves the Zodiac's stick instead of pressing the Action keys, none leaves it to the d-pad.
+    {
+        const ControllerMap defaults=input.GetControllerMap();
+        ControllerMap right=defaults;right.setStick(PadStick::right);
+        input.SetControllerMap(right);guest.expect({});
+        padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);st=guest.lastStick();assert(st.x==1 && st.y==0);guest.expect({});
+        padAxis(SDL_CONTROLLER_AXIS_LEFTY,32767);guest.noStick();
+        padAxis(SDL_CONTROLLER_AXIS_RIGHTX,0);st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);
+        padAxis(SDL_CONTROLLER_AXIS_LEFTY,0);
+        // One axis at a time: X from the right stick's X upside down, Y from the left stick's Y.
+        ControllerMap custom=defaults;custom.setStickAxis(false,PadAxis::rightX,true);
+        input.SetControllerMap(custom);guest.expect({});
+        padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);st=guest.lastStick();assert(st.x==-1 && st.y==0);guest.expect({});
+        padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);guest.noStick();
+        padAxis(SDL_CONTROLLER_AXIS_LEFTY,-32768);st=guest.lastStick();assert(st.x==-1 && st.y==-1);
+        padAxis(SDL_CONTROLLER_AXIS_LEFTY,0);padAxis(SDL_CONTROLLER_AXIS_RIGHTX,0);st=guest.lastStick();assert(!input.Stick().held);
+        padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);
+        ControllerMap none=defaults;none.setStick(PadStick::none);
+        input.SetControllerMap(none);
+        padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);guest.noStick();
+        padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,true);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+        padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,false);st=guest.lastStick();assert(!input.Stick().held);
+        padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);
+        input.SetControllerMap(defaults);guest.expect({});guest.noStick();
     }
     // The controller's stick over its range; it wins over the arrow keys and the pointer wins over it.
     padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);st=guest.lastStick();assert(st.x==1 && st.y==0 && input.Stick().held);

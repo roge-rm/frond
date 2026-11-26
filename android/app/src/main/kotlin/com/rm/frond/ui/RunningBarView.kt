@@ -78,6 +78,7 @@ class RunningBarState {
     var sound by mutableStateOf(true)
     var soundKey by mutableStateOf(false)
     var powerKey by mutableStateOf(false)
+    var recordKey by mutableStateOf(false)
     var keyboardKey by mutableStateOf(false)
     var menuOpen by mutableStateOf(false)
     // The device and model behind the menu; null until the firmware is resolved.
@@ -98,12 +99,16 @@ class RunningBarState {
     internal var syncManager by mutableStateOf(false)
     internal var syncSettings by mutableStateOf(false)
     internal var syncAssignment by mutableStateOf(false)
+    // The core's ActiveSync partnership question is open and not yet answered.
+    internal var partnershipQuestion by mutableStateOf(false)
 }
 
 class RunningBarActions(
     val back: () -> Unit,
     val toggleSound: () -> Unit,
     val power: () -> Unit,
+    // The Record button went down (true) or was let go (false).
+    val record: (Boolean) -> Unit,
     val keyboard: () -> Unit,
     val show: () -> Unit,
     val hide: () -> Unit,
@@ -115,6 +120,8 @@ class RunningBarActions(
     val filesOpen: (Boolean) -> Unit,
     val startSync: () -> Unit,
     val syncMachines: () -> List<Session>,
+    // true sets up an ActiveSync partnership, false connects as a guest.
+    val answerPartnership: (Boolean) -> Unit,
 )
 
 @Composable
@@ -123,7 +130,7 @@ fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
         // The view is the whole screen while a sheet is open, so its scrim catches every touch.
         val menuOpen = state.menuOpen
         val sheetOpen = state.sheet != null
-        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment || state.model?.let { it.busy != null || it.path != null || it.log != null } == true
+        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment || state.partnershipQuestion || state.model?.let { it.busy != null || it.path != null || it.log != null } == true
         if (RunningBar.autoHides(state.mode, state.shown, menuOpen, sheetOpen, dialogOpen)) {
             LaunchedEffect(state.touches, menuOpen, sheetOpen, dialogOpen) {
                 delay(RunningBar.AUTO_HIDE_MS)
@@ -194,6 +201,18 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
             if (device != null && !device.runs68k) BarButton({ state.model?.rotate() }, button) {
                 Icon(painterResource(R.drawable.ic_rotate_device), contentDescription = "Rotate")
             }
+            if (state.recordKey) IconButton({}, Modifier.size(button).pointerInput(Unit) {
+                // Held down to record: the key is down for as long as the finger is.
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    actions.record(true)
+                    try {
+                        do { val event = awaitPointerEvent() } while (event.changes.any { it.pressed })
+                    } finally {
+                        actions.record(false)
+                    }
+                }
+            }) { Icon(painterResource(R.drawable.ic_mic), contentDescription = "Record") }
             if (state.powerKey) BarButton(actions.power, button) { Icon(painterResource(R.drawable.ic_power), contentDescription = "Power") }
             Box {
                 BarButton(actions.openMenu, button) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
@@ -245,7 +264,7 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
     if (state.syncManager) {
         val machines = remember { actions.syncMachines() }
         Dialog({ state.syncManager = false }, DialogProperties(usePlatformDefaultWidth = false)) {
-            Surface(Modifier.fillMaxSize()) { SyncManagerScreen(machines, refresh = state.syncRefresh) { state.syncManager = false } }
+            Surface(Modifier.fillMaxSize()) { SyncManagerScreen(machines, refresh = state.syncRefresh, protocol = state.syncProtocol) { state.syncManager = false } }
         }
     }
     state.syncMachine?.let { machine ->
@@ -253,6 +272,15 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
         if (state.syncSettings) SyncDeviceDialog(machine, onClose = { state.syncSettings = false },
             protocol = state.syncProtocol, networkHotSync = model.device.supportsNetworkHotSync())
     }
+    // Back connects as a guest, as cancelling desktop ActiveSync's setup did; a tap outside does nothing.
+    if (state.partnershipQuestion) AlertDialog(
+        onDismissRequest = { actions.answerPartnership(false) },
+        properties = DialogProperties(dismissOnClickOutside = false),
+        title = { Text("ActiveSync") },
+        text = { Text("Set up an ActiveSync partnership with this device?") },
+        confirmButton = { TextButton(onClick = { actions.answerPartnership(true) }) { Text("Set up") } },
+        dismissButton = { TextButton(onClick = { actions.answerPartnership(false) }) { Text("Connect as guest") } },
+    )
     BusyDialog(model)
     AlertBox(model)
     CardPickerDialogs(model)

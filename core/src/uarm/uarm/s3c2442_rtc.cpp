@@ -7,9 +7,11 @@ namespace {
 
     unsigned fromBcd(uint32_t v) { return (v >> 4) * 10 + (v & 0xf); }
     uint32_t toBcd(unsigned v) { return ((v / 10) << 4) | (v % 10); }
+    // Days in a month. year is the full year; the manual's 2 digit year counts 00 (2000) as a leap year.
     unsigned daysIn(unsigned month, unsigned year) {
         static const uint8_t days[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-        if (month == 2 && year % 4 == 0) return 29;
+        const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        if (month == 2 && leap) return 29;
         return month >= 1 && month <= 12 ? days[month - 1] : 31;
     }
     // BCD register order from BCDSEC at 0x70: second, minute, hour, date, day, month, year.
@@ -23,14 +25,18 @@ void S3cRtc::reset(const Time& start) {
     rtcrst = 0;
     for (auto& a : alarm) a = 0;
     alarm[3] = alarm[4] = 1;  // ALMDATE and ALMMON start at 1
-    bcd[sec] = toBcd(start.second);
-    bcd[min] = toBcd(start.minute);
-    bcd[hour] = toBcd(start.hour);
-    bcd[date] = toBcd(start.date);
-    bcd[day] = start.day;
-    bcd[mon] = toBcd(start.month);
-    bcd[year] = start.year;
+    setTime(start);
     secondPhase = tickPhase = 0;
+}
+
+void S3cRtc::setTime(const Time& time) {
+    bcd[sec] = toBcd(time.second);
+    bcd[min] = toBcd(time.minute);
+    bcd[hour] = toBcd(time.hour);
+    bcd[date] = toBcd(time.date);
+    bcd[day] = time.day;
+    bcd[mon] = toBcd(time.month);
+    bcd[year] = time.year;
 }
 
 // Byte registers at word offsets (little endian), read and written whole.
@@ -77,7 +83,10 @@ S3cAccess S3cRtc::write(uint32_t offset, uint32_t value) {
 
 void S3cRtc::secondPassed(S3cIntc& intc) {
     unsigned s = fromBcd(bcd[sec]) + 1, m = fromBcd(bcd[min]), h = fromBcd(bcd[hour]);
-    unsigned d = fromBcd(bcd[date]), mo = fromBcd(bcd[mon]), y = fromBcd(bcd[year]), wd = bcd[day];
+    unsigned d = fromBcd(bcd[date]), mo = fromBcd(bcd[mon]), wd = bcd[day];
+    // The manual's year is two BCD digits, 99 rolling to 00 with 00 a leap year (2000). A board that keeps it
+    // binary (binaryYear) counts the byte as years from baseYear, with the real calendar's leap rule.
+    const unsigned y = binaryYear ? baseYear + (bcd[year] & 0xff) : 2000 + fromBcd(bcd[year]);
     if (s >= 60) { s = 0; ++m; }
     if (m >= 60) { m = 0; ++h; }
     if (h >= 24) {
@@ -85,8 +94,10 @@ void S3cRtc::secondPassed(S3cIntc& intc) {
         wd = wd >= 7 ? 1 : wd + 1;
         if (++d > daysIn(mo, y)) {
             d = 1;
-            // The year byte is only written when it counts on, so a board that keeps it binary keeps its value.
-            if (++mo > 12) { mo = 1; bcd[year] = toBcd((y + 1) % 100); }
+            if (++mo > 12) {
+                mo = 1;
+                bcd[year] = binaryYear ? (bcd[year] + 1) & 0xff : toBcd((fromBcd(bcd[year]) + 1) % 100);
+            }
         }
     }
     bcd[sec] = toBcd(s); bcd[min] = toBcd(m); bcd[hour] = toBcd(h);
