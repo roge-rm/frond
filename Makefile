@@ -1085,6 +1085,12 @@ test-native-budget:
 test-frond-arm-big-install: out/frond
 	python3 tests/frond-arm-big-install.py
 
+# 13 installs in a row on the T|X over the socket, timed (12 small, one 2 MB with 521 resources),
+# then all listed. Same sessions as above.
+.PHONY: test-frond-arm-batch-install
+test-frond-arm-batch-install: out/frond
+	python3 tests/frond-arm-batch-install.py
+
 # A guest-ready check wakes nothing; a host call wakes the T|X's UI task, and a refused one on the Zire 72
 # wakes it at most once (GDB breakpoint on EvtWakeup). Same sessions as above.
 .PHONY: test-host-call-wake
