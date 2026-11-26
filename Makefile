@@ -424,6 +424,17 @@ test-dana-keyboard-art: $(if $(filter core,$(DANA_ART_SOURCE)),prepare)
 		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_ART_BUILD)/test-dana-keyboard-art
 	$(DANA_ART_BUILD)/test-dana-keyboard-art
 
+.PHONY: test-zaurus-art
+test: test-zaurus-art
+# ZAURUS_ART_OUT=folder also writes preview PNGs there.
+test-zaurus-art: prepare
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/common \
+		tests/zaurus-art.cpp core/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(OBJ_ROOT)/test-zaurus-art
+	$(OBJ_ROOT)/test-zaurus-art $(ZAURUS_ART_OUT)
+
 .PHONY: test-dana-view
 test: test-dana-view
 DANA_VIEW_SOURCE ?= core
