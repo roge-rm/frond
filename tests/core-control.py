@@ -812,6 +812,10 @@ def check_68k(core, rom, root):
         assert c.ok('ms-state', code='card') == 'none'
         # The snap-on modem takes the serial port's place, and a link takes it back.
         c.events.clear()
+        assert c.ok('modem-sync', 'sync', code='modem-sync').startswith('sync ')
+        assert c.ok('modem-sync', 'off', code='modem-sync') == 'off'
+        assert c.ok('serial-mode', 'ppp', code='serial') == 'ppp idle'
+        assert c.ok('serial-state', code='serial') == 'ppp idle'
         assert c.ok('serial-mode', 'modem', code='serial') == 'modem idle'
         assert c.ok('serial-state', code='serial') == 'modem idle'
         assert c.ok('serial-mode', 'pty', code='serial').startswith('pty /dev/pts/')

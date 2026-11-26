@@ -9,6 +9,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,7 +35,8 @@ import com.rm.frond.UsbLink
 
 internal fun relayText(s: NetRelay.Status): String = when (s.phase) {
     NetRelay.Phase.OFF -> s.error?.let { "Off. $it" } ?: "Off"
-    NetRelay.Phase.WAITING -> "Waiting for a peer on port ${(s.mode as? BeamMode.Listen)?.port}"
+    NetRelay.Phase.WAITING -> "Waiting for a peer at ${s.listenAddresses}" +
+        if ((s.mode as? BeamMode.Listen)?.allowNetwork == false) ", network connections are off" else ""
     NetRelay.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) }}"
     NetRelay.Phase.CONNECTED -> "Connected to ${s.peer ?: "a peer"}"
     NetRelay.Phase.DISCONNECTED -> s.error ?: "Disconnected"
@@ -42,7 +44,7 @@ internal fun relayText(s: NetRelay.Status): String = when (s.phase) {
 
 internal fun debuggerText(s: NetRelay.Status): String = when (s.phase) {
     NetRelay.Phase.CONNECTED -> "gdb connected from ${s.peer ?: "the network"}"
-    NetRelay.Phase.WAITING -> "Waiting for gdb on port ${(s.mode as? BeamMode.Listen)?.port}"
+    NetRelay.Phase.WAITING -> "Waiting for gdb at ${s.listenAddresses}"
     else -> s.error?.let { "Off. $it" } ?: "Off"
 }
 
@@ -81,15 +83,17 @@ private fun RelayDialog(
         choice = when {
             syncAttached -> "sync"
             current == BeamMode.Off -> "off"
-            else -> start.encode().substringBefore(':')
+            current is BeamMode.Listen -> "listen"
+            else -> "connect"
         },
         port = (start as? BeamMode.Listen)?.port,
+        allowNetwork = (current as? BeamMode.Listen)?.allowNetwork == true,
         address = (last as? BeamMode.Connect ?: start as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) },
         addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value,
         onDismiss = onDismiss,
-        toMode = { choice, port, address ->
+        toMode = { choice, port, address, allowNetwork ->
             when (choice) {
-                "listen" -> NetRelay.port(port)?.let { BeamMode.Listen(it) }
+                "listen" -> NetRelay.port(port)?.let { BeamMode.Listen(it, allowNetwork) }
                 "connect" -> relay.address(address)?.let { BeamMode.Connect(it.first, it.second) }
                 else -> BeamMode.Off
             }
@@ -110,15 +114,17 @@ private fun <T> LinkDialog(
     port: Int?,
     address: String?,
     addresses: List<String>?,
+    allowNetwork: Boolean,
     onDismiss: () -> Unit,
-    toMode: (choice: String, port: String, address: String) -> T?,
+    toMode: (choice: String, port: String, address: String, allowNetwork: Boolean) -> T?,
     onChoose: (T) -> Unit,
     useSync: (() -> Unit)? = null,
 ) {
     var picked by remember { mutableStateOf(choice) }
     var portText by remember { mutableStateOf((port ?: defaultPort).toString()) }
     var addressText by remember { mutableStateOf(address ?: "") }
-    val mode = toMode(picked, portText, addressText)
+    var network by remember { mutableStateOf(allowNetwork) }
+    val mode = toMode(picked, portText, addressText, network)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -142,8 +148,17 @@ private fun <T> LinkDialog(
                         isError = mode == null,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    ListItem(
+                        headlineContent = { Text("Allow network peers") },
+                        trailingContent = { Switch(checked = network, onCheckedChange = { network = it }) },
+                    )
                     Text(
-                        if (addresses == null) "Looking up this device's address" else if (addresses.isEmpty()) "No network address" else "This device: " + addresses.joinToString(", "),
+                        when {
+                            !network -> "Loopback (127.0.0.1, ::1)"
+                            addresses == null -> "Looking up this device's address"
+                            addresses.isEmpty() -> "All interfaces"
+                            else -> "This device: " + addresses.joinToString(", ")
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp),
@@ -257,7 +272,8 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             val sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC
             val current = if (model.serialSync) InfraredChoice.SYNC_MANAGER else model.serial.choice
             val choices = remember(current, sync) {
-                InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem, sync)
+                InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem, sync,
+                    ppp = model.device.runs68k)
             }
             ConnectionChoiceDialog("Serial port", current, onDismiss, choices) { onDismiss(); model.changeSerial(it) }
         }

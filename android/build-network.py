@@ -17,8 +17,8 @@ SOURCES = [
      '4ab5af85ec6124cb526a15c58bbc0877d241807e30855779808dbf9292d861aa'),
     ('glib-2.84.4', 'https://download.gnome.org/sources/glib/2.84/glib-2.84.4.tar.xz',
      '8a9ea10943c36fc117e253f80c91e477b673525ae45762942858aef57631bb90'),
-    ('libslirp-v4.9.1', 'https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.1/libslirp-v4.9.1.tar.bz2',
-     '3caff6e2de445f4995629d4929c55419f661b2b1d14f12481e155a71c1e8f811'),
+    ('libslirp-v4.9.7', 'https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.7/libslirp-v4.9.7.tar.bz2',
+     '363dfacf2821758c52388303b691093030b43ce8fd63142a55e878cbeb9a889c'),
 ]
 FFI_WRAP = '''[wrap-file]
 directory = libffi-3.4.6

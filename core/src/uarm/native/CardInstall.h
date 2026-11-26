@@ -2,9 +2,7 @@
 #define FROND_CARD_INSTALL_H
 
 // Install on a Windows CE device (SoC::InstallsToCard): the file goes onto the SD card in the slot, which the
-// guest then sees taken out and put back in. CE has no HotSync, so the guest's own tools take it from there
-// (File Explorer opens a CAB with wceload). The card goes through the same take-out and put-in as the
-// frontends' card exchange, so the card file is edited only while nothing else has it open.
+// guest sees taken out and put back in. A CAB can start the guest's installer on insertion.
 
 #include <cctype>
 #include <filesystem>
@@ -15,6 +13,7 @@
 #include "CardReinsert.h"
 #include "CardSwap.h"
 #include "SoC.h"
+#include "WinCeAutorun.h"
 #include "storage/CardFile.h"
 #include "storage/FatImage.h"
 
@@ -34,7 +33,8 @@ inline bool cabFile(const std::filesystem::path& path) {
 
 // Copies source into the card's top folder, over a file of the same name. Needs the card in; it ends up in again
 // unless putting it back fails (code card-out).
-inline CardInstallResult installToSdCard(SoC& soc, const std::filesystem::path& folder, const std::string& source) {
+inline CardInstallResult installToSdCard(SoC& soc, const std::filesystem::path& folder, const std::string& source,
+                                          bool startCab = true) {
     if (!sdCardInitialized()) return {false, "no-card", "Put an SD card in first."};
     if (folder.empty()) return {false, "folder", takeOutNeedsFolder};
     if (slotCards().sdProtected) return {false, "protected", "The SD card is write protected."};
@@ -55,13 +55,23 @@ inline CardInstallResult installToSdCard(SoC& soc, const std::filesystem::path& 
         return {false, out.code, out.message};
     }
     CardInstallResult result{true, "copied", {}};
+    bool autorun = false;
     try {
         std::ifstream in(source, std::ios::binary);
         if (!in) throw frondStorage::Error("Could not read the file.");
         frondStorage::CardFile card(folder / frondMachine::fileCardSibling(frondMachine::kindSd), true);
         frondStorage::FatImage fat(card);
-        copyToCardRoot(fat, name, [&](char* buffer, int64_t n) { in.read(buffer, n); return int64_t(in.gcount()); },
-                       int64_t(size));
+        clearWinCeAutorun(fat);
+        const auto read = [&](char* buffer, int64_t n) {
+            in.read(buffer, n);
+            return int64_t(in.gcount());
+        };
+        copyToCardRoot(fat, name, read, int64_t(size));
+        if (startCab && cabFile(source)) {
+            in.clear();
+            in.seekg(0);
+            if (in) autorun = stageWinCeAutorun(fat, read, int64_t(size));
+        }
     } catch (const std::exception& e) {
         result = {false, "card", e.what()};
     }
@@ -72,6 +82,8 @@ inline CardInstallResult installToSdCard(SoC& soc, const std::filesystem::path& 
     soc.SetSdWriteProtect(false);
     settleEject(soc);
     soc.SdInsert();
+    if (result.ok && autorun)
+        return {true, "autorun", "CAB copied. Continue installation on the device."};
     if (result.ok)
         result.message = cabFile(source) ? "Copied to the SD card. Open it in File Explorer to install it."
                                          : "Copied to the SD card.";

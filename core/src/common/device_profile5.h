@@ -133,7 +133,7 @@ constexpr DeviceProfile5 zodiacProfile5(DeviceType5 type, const char* name, cons
     return {type, name, label, DeviceGroup5::tapwave, released, DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
             DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
             DeviceBoard5::imx1Zodiac, DeviceArt::zodiac,
-            {false, false, true, true, false, true, true, true, false, false, false, false, false, false, false, 3, true},
+            {false, false, true, true, false, true, true, true, false, false, false, true, false, false, false, 3, true},
             0x7d0000, 0, ram, ram, DisplayMode::mode_480x320, 1u << 10, false,
             DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
             {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}};

@@ -112,6 +112,9 @@ fun ConnectionsScreen(home: HomeModel, model: ConnectionsModel) {
             item(key = "self") {
                 ListItem(
                     headlineContent = { Text("This Frond: ${model.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = if (model.listenAddresses.isEmpty()) null else {
+                        { Text("Listening at ${model.listenAddresses}") }
+                    },
                     trailingContent = { TextButton(onClick = { renamingSelf = true }, enabled = model.loaded) { Text("Rename") } },
                 )
             }

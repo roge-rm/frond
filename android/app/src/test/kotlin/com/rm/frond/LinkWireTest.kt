@@ -116,6 +116,7 @@ class LinkWireTest {
         assertEquals("Couldn't reach Pixel.", LinkWire.pairResultText("unreachable", "Pixel"))
         val row = LinkWire.ConnectionRow("id", "Desk", "dan-laptop", "", up = true, rtt = 4, keyChanged = false, forgotten = false, seen = "", channels = "Infrared: TX – E2")
         assertEquals("Connected · 4 ms · Infrared: TX – E2", LinkWire.connectionStatus(row))
+        assertEquals("Not seen, network connections are off", LinkWire.connectionStatus(row.copy(up = false, network = false)))
         assertEquals("Key changed, pair again", LinkWire.connectionStatus(row.copy(keyChanged = true)))
         assertEquals("Not paired on dan-laptop, pair again", LinkWire.connectionStatus(row.copy(up = false, forgotten = true)))
         assertEquals("Seen at 192.168.1.20", LinkWire.connectionStatus(row.copy(up = false, seen = "192.168.1.20")))

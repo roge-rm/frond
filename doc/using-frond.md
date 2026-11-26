@@ -76,7 +76,7 @@ Under Applications (the Linux panel or the Android sheet):
 
 Close Palm dialogs first if an install or export can't get through.
 
-On the rx1950 **Install…** copies files onto the SD card's top folder, so it needs a card in the slot. Windows Mobile sees the card go out and come back. To install a CAB, open Storage Card in File Explorer and tap it. The application list, Launch, Export, Other… and Export all… are greyed. Use Files under Storage to copy files off the card.
+On the rx1950 **Install…** copies files to the top folder of the SD card. With one CAB selected, Windows Mobile opens its installer when the card goes back in. Accept the publisher prompt on the emulated screen and finish the install there. If the installer does not open, or you picked several files, open Storage Card in File Explorer and tap the CAB. In Applications, **Refresh** reads the installed programs over ActiveSync. Use Files under Storage to copy files off the card.
 
 ### FrondBench
 
@@ -329,13 +329,15 @@ Open Pairing… from the File menu on Linux or Connections from the Home ⋮ men
 
 - Connected, with the round trip time and what it carries, for example "Connected · 4 ms · Infrared: Palm TX – Tungsten E2".
 - Seen at 192.168.1.20, which means it's on the network but nothing is using the link.
-- Not seen.
+- Not seen. When network connections are off it says "Not seen, network connections are off".
 - Key changed, pair again, see below.
 - Not paired on <name>, pair again, which means that install forgot you.
 
 On Linux "This computer" is the first row. It joins machines running in different windows on the same computer, needs no pairing and is always there.
 
 A row's menu (right-click on Linux, ⋮ on Android) has Rename, Address…, Bluetooth radio and Forget. Rename is only your name for it. Address… sets an address to try when the install isn't found by itself, and Forget removes the pairing, after which the other install shows "pair again".
+
+Connections only takes links from this computer or phone unless you allow the network. To accept incoming links and use Nearby across the network, turn on **Allow incoming Frond links over the network**, in Settings on Android or at the top of Connections on Linux. On Android it applies when the link service next starts, so close Connections and stop any machines using it before reopening. On Linux it applies at once. Connections shows the listening addresses. Installs that already had paired connections before this setting existed keep it on, and new installs start with it off. On Linux `FROND_LINK_ALLOW_NETWORK=1` (or `0`) overrides the setting.
 
 To pair, open Connections on both. The other install shows up under Nearby, and Pair (or Add by address… if it isn't listed, with an address like `192.168.1.20`) asks it for a code. It shows a 6-digit code, for example "dan-laptop wants to pair. Code 482 913", and you type that code in on the first one ("Enter the code shown on Pixel 8"). The code lasts 2 minutes. After 3 wrong tries, or once the code runs out, that install won't take a new pairing for a minute. Pairing swaps keys, and every later link checks them. If an install's key doesn't match, the row says "Key changed, pair again" and Frond doesn't link until you pair again. That happens after a reinstall, and it can also mean someone else is using that address.
 
@@ -374,7 +376,7 @@ Without a connection, serial, USB HotSync and infrared beaming have an endpoint 
 
 The choice is saved with each machine. A status line shows the endpoint and whether a peer is connected. Changing the choice while the machine runs closes the old connection. Nothing from the host is saved in a session, and reset, true sleep and loading a session close the connection.
 
-On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server all go over the network, to another Frond or to the link tools below on a computer.
+On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server all go over the network, to another Frond or to the link tools below on a computer. Wait for a peer on Android has an Allow network peers switch. Without it the port only takes connections from the device itself, and the status line says "network connections are off". A Wait for a peer saved before the switch existed keeps taking network peers.
 
 Android has no PTYs. Its USB HotSync row has Off, Wait for a peer (all addresses, port 5034, and it shows the phone's address) and Connect to an address, to reach a link tool on a computer. Infrared, serial and Bluetooth on Android use connections only.
 
@@ -412,7 +414,9 @@ On the CLIÉ T415, set USB to Off in Connections to use Serial for HotSync. Use 
 
 A 68k Palm's serial port is the cradle connector, set to Off, a PTY or a TCP port like the other serial ports. Serial HotSync works with pilot-link on that path (`pilot-xfer -p /dev/pts/N -l`): press HotSync in the Connections panel, then start HotSync on the Palm. Infrared beaming works as on the other devices.
 
-A 68k Palm reaches the network the way the real ones did, with PPP over the serial port to a PPP server on the host. Frond doesn't redirect NetLib for it. Put the serial port on a PTY or TCP port, from the command line:
+A 68k Palm reaches the network with PPP over its serial port. On Android set **Serial port** to **Direct PPP** in **Edit settings** or **Connections**, then set up Palm OS as described below. The built-in router gives the guest 10.0.2.15, with DNS at 10.0.2.3.
+
+On desktop you can also use the built-in router with `--serial ppp`, or connect a host PPP server to a PTY or TCP port:
 
 ```sh
 out/frond-68k iiix.frond --serial pty     # prints: serial: pty /dev/pts/N connected
@@ -466,6 +470,8 @@ Disconnect hangs up. Loading a session saved while online gives NO CARRIER, as i
 
 ### HotSync by modem
 
+On Android, assign the machine a Sync Manager profile and set **Serial port** to **Modem**. In the HotSync app select **Modem** and dial 4687962 to sync straight to that profile. For Network HotSync, set **Connection** to **Network** in **Sync settings**, then tap Frond's HotSync button or reopen the machine. Use 10.0.2.2 as the Primary PC Address in the guest and select the dial-up service in **Modem Sync Prefs**.
+
 On Linux the modem can HotSync with pilot-link two ways. The state line shows the PTY for the first, for example "Modem: idle, HotSync on /dev/pts/5".
 
 - Modem Sync to a number: dial 4687962 (HOTSYNC on a keypad) and the call goes straight to that PTY. Run `pilot-xfer -p /dev/pts/5 -l` (or another pilot-link command), then in the HotSync app tap Modem, enter 4687962 as the phone number, keep Palm Modem US/Canada and tap the HotSync button. With a dial prefix like `9,` it still works.
@@ -479,18 +485,20 @@ Devices with an infrared phone can use Mobile phone in the Infrared list (Linux,
 2. Palm OS 4.1: use the built-in IR to Phone connection.
 3. Dial any number, with PPP and Query DNS as above, and Connect.
 
+On a Zodiac, make a new connection in Prefs → Connection. Set **Connect to** to **Modem** and **Via** to **Infrared**, then select that connection in the Network panel.
+
 The state line reads "Mobile phone: idle", "linked" once the Palm has found the phone, "dialling", then "online at 33600". It takes about 5 to 20 seconds to come up. Infrared beaming to another Frond is off while Mobile phone is on.
 
 ### Mobile phone over Bluetooth
 
-Devices with Bluetooth can use Mobile phone in the Bluetooth list on Linux. It's This Frond's radio with a phone called "Frond Phone" on it, which offers Dial-up Networking and has the same modem and internet as the infrared phone. Machines on This Frond's radio still find each other.
+Devices with Bluetooth can use **Mobile phone** in the Bluetooth list on Android and Linux. Look for "Frond Phone", which offers Dial-up Networking and has the same modem and internet as the infrared phone. On Android the phone uses a radio private to the running machine's Sync Manager profile. On Linux the phone shares This Frond's radio.
 
 1. In Prefs, Connection, make a connection to a phone via Bluetooth, and find Frond Phone with Device. Pair with the passkey 1234.
 2. Dial any number, with PPP and Query DNS as above, and Connect.
 
-The status reads "Bluetooth: This Frond's radio, Mobile phone: idle", then "dialling" and "online at 33600" during a call. The Debian package includes the phone; a source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built. Android doesn't have it yet.
+The phone status shows "idle", then "dialling" and "online at 33600" during a call. The Android app and Debian package include the phone. A Linux source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built.
 
-For Zodiac Network HotSync over Bluetooth dial-up, start the phone peer on the virtual radio with a Sync Manager folder:
+For Zodiac Network HotSync over Bluetooth dial-up on Android, assign a profile in **Sync settings** and select **Mobile phone**. On Linux, start the phone peer with a Sync Manager folder:
 
 ```sh
 build/bluetooth-opp-peer/bluetooth-opp-peer RADIO-SOCKET --dun --sync-folder PROFILE-FOLDER
@@ -503,13 +511,14 @@ Modem and phone by device:
 | | Modem on serial | Mobile phone on infrared | Mobile phone on Bluetooth |
 |---|---|---|---|
 | 68k Palms | yes, Palm OS 3.1, 3.5, 4.1, not the m100 and m105 | yes, Palm OS 3.5 and 4.1 | no |
-| T\|X, TG50, E2, Zire 72 | no | yes | yes, Linux |
+| T\|X, TG50, E2, Zire 72 | no | yes | yes, Android and Linux |
+| Zodiac 1 and 2 | no | yes | yes, Android and Linux |
 | Tungsten E3 | no | no | no |
 | Dana, Dana Wireless | no | no | no |
 
 ### USB HotSync
 
-Plugs the device's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
+Plugs the device's USB port into the computer. On Android use Wait for a peer, turn on **Allow network peers**, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
 
 ### Sync Manager
 
@@ -604,7 +613,7 @@ What each device has, beyond the Devices table in the [README](../README.md#devi
 | Sound | yes | yes | yes | yes | yes, see below | yes, piezo | yes |
 | Low-latency audio | yes | yes | yes | yes | shorter queue | | shorter queue |
 | Microphone | | | | yes | yes | | yes |
-| Network | yes | | | | | PPP over serial | Virtual Wi-Fi |
+| Network | Virtual Wi-Fi, IR and Bluetooth dial-up | Virtual Wi-Fi card, IR and Bluetooth dial-up | | Virtual Wi-Fi card, IR and Bluetooth dial-up | IR and Bluetooth dial-up | Direct PPP, modem and IR dial-up where supported | Virtual Wi-Fi |
 | Serial port | yes | yes | yes | not offered | yes | yes | ActiveSync |
 | USB HotSync | yes | yes | yes | yes | yes | | ActiveSync |
 | Infrared beaming | yes | yes | yes | yes | yes | yes | yes |

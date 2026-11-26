@@ -424,7 +424,7 @@ static void spp_tests(void){spp_mode=true;selftest=true;struct selection s={.lo=
 static void dun_tests(void){
  dun_mode=true;selftest=true;struct selection s={.lo={0},.hi={0xffff},.n=1};struct bytes r=record(&s);
  assert(has_uuid(r.b,r.n,0x1103,0)&&has_uuid(r.b,r.n,0x1201,0)&&!has_uuid(r.b,r.n,0x1105,0)&&!has_uuid(r.b,r.n,8,0)&&find_channel(r.b,r.n,0)==CHANNEL);
- dun=frond_dun_create(NULL,NULL);assert(dun);assert(!strcmp(frond_dun_state(dun),"off"));
+ dun=frond_dun_create(NULL,NULL,NULL);assert(dun);assert(!strcmp(frond_dun_state(dun),"off"));
  stream_open=true;frond_dun_open(dun,monotonic_ns());stream_flush();assert(!strcmp(dun_state,"idle"));
  const char at[]="AT\r";stream_data(at,3,NULL);add(&selftest_output,"",1);assert(strstr((char*)selftest_output.b,"OK"));selftest_output.n=0;
  const char dial[]="ATDT*99#\r";stream_data(dial,sizeof(dial)-1,NULL);assert(!strcmp(dun_state,"dialling"));
@@ -482,15 +482,17 @@ int main(int argc,char**argv){
  /* SOCKET OUTPUT [options] for OPP and SPP; SOCKET --dun [--pin PIN] [--sync-folder DIR [--sync-profile NAME]]
     for the phone; SOCKET --spp-hotsync --sync-folder DIR [--sync-profile NAME] [--pin PIN]
     for the HotSync desktop; SOCKET --dun-dial ADDRESS for the phone test client. */
- const char *sync_folder=NULL, *sync_profile=NULL;
+ const char *sync_folder=NULL, *sync_profile=NULL, *sync_machine=NULL;
  int first=3;if(!strncmp(argv[2],"--",2))first=2;else output_path=argv[2];
  for(int at=first;at<argc;++at){
-  if(!strcmp(argv[at],"--sync-folder")||!strcmp(argv[at],"--sync-profile")){
+  if(!strcmp(argv[at],"--sync-folder")||!strcmp(argv[at],"--sync-profile")||!strcmp(argv[at],"--sync-machine")){
    const char* option=argv[at++];
    if(at>=argc || !argv[at][0] || !strncmp(argv[at],"--",2)){
     fprintf(stderr,"%s needs a value\n",option);return 2;
    }
-   if(!strcmp(option,"--sync-folder"))sync_folder=argv[at];else sync_profile=argv[at];
+   if(!strcmp(option,"--sync-folder"))sync_folder=argv[at];
+   else if(!strcmp(option,"--sync-profile"))sync_profile=argv[at];
+   else sync_machine=argv[at];
    continue;
   }
   if(!strcmp(argv[at],"--spp-hotsync")){hotsync_mode=true;continue;}
@@ -504,12 +506,16 @@ int main(int argc,char**argv){
   fputs("--sync-folder is for a HotSync server and is required with --sync-profile\n", stderr);
   return 2;
  }
+ if (sync_machine && (!dun_mode || push_mode || !sync_folder)) {
+  fputs("--sync-machine requires a DUN server with --sync-folder\n", stderr);
+  return 2;
+ }
  if (hotsync_mode) {
   spp_mode = true;
   frond_bt_sync_configure(sync_folder, sync_profile);
  }
  assert(!hold_put||!push_mode);assert(!dun_disc_hangup||(dun_mode&&push_mode));assert(!gate_path||push_mode);assert((dun_mode||hotsync_mode)!=!!output_path&&!(dun_mode&&spp_mode));if(output_path)assert(access(output_path,F_OK)!=0);
- if(dun_mode&&!push_mode){dun=frond_dun_create(sync_folder,sync_profile);if(!dun){fprintf(stderr,"slirp did not start\n");return 2;}}
+ if(dun_mode&&!push_mode){dun=frond_dun_create(sync_folder,sync_profile,sync_machine);if(!dun){fprintf(stderr,"slirp did not start\n");return 2;}}
  sk=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);assert(sk>=0);struct sockaddr_un a={.sun_family=AF_UNIX};assert(strlen(argv[1])<sizeof(a.sun_path));strcpy(a.sun_path,argv[1]);
  /* The phone may start beside a btvirt that hasn't made its socket yet. */
  for(int tries=(dun_mode||hotsync_mode)&&!push_mode?50:1;connect(sk,(void*)&a,sizeof(a));){assert(--tries>0);usleep(100000);}

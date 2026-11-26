@@ -230,7 +230,7 @@ void usage() {
             "                 [--contrast 0-100] [--window-scale 1-4] [--hide-buttons] [--no-sound] [--no-rumble] [--audio-output WAV]\n"
             "                 [--controller-map KEY:BUTTON,...|none]\n"
             "                 [--pa1-trace NEW_CSV (T415 development)]\n"
-            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
+            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem|ppp] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
@@ -1334,7 +1334,8 @@ class Runner {
                 (link == &serialLink ? serialError : infraredError) = error;
                 continue;
             }
-            if (link == &serialLink && serialTransport->ModemMode()) cout << name << ": " << serialTransport->Describe() << endl;
+            if (link == &serialLink && (serialTransport->ModemMode() || serialTransport->DirectMode()))
+                cout << name << ": " << serialTransport->Describe() << endl;
             else if (link == &irLink && (irTransport->PhoneMode() || irTransport->PrinterMode())) cout << name << ": " << irTransport->Describe() << endl;
             else if (link->GetKind() != HostLink68k::Kind::off) cout << name << ": " << link->Describe() << endl;
         }
@@ -1386,13 +1387,14 @@ class Runner {
             error = "Transport is not qualified for this device.";
             return false;
         }
-        if (mode == "modem") {
-            if (!profile->capabilities.modem) {
+        if (mode == "modem" || mode == "ppp") {
+            if (mode == "modem" && !profile->capabilities.modem) {
                 error = string(profile->displayName) + " has no modem";
                 return false;
             }
-            if (!serialTransport->SetModemMode(true, error)) return false;
+            if (!serialTransport->SetNetworkMode(mode == "modem", mode == "ppp", error)) return false;
             serialLink.Close();
+            UpdateSerialCable();
             SyncDTR();
             return true;
         }
@@ -1400,10 +1402,10 @@ class Runner {
         uint16_t port;
         string path;
         if (!HostLink68k::Parse(mode, kind, port, &path)) {
-            error = "use off, pty, tcp:PORT, unix:PATH, sync or modem";
+            error = "use off, pty, tcp:PORT, unix:PATH, sync, modem or ppp";
             return false;
         }
-        serialTransport->SetModemMode(false, error);
+        serialTransport->SetNetworkMode(false, false, error);
         const bool opened = serialLink.Open(kind, port, error, path);
         UpdateSerialCable();
         return opened;
@@ -1490,6 +1492,7 @@ class Runner {
     }
 
     string SerialState() const {
+        if (serialTransport->DirectMode()) return serialTransport->Describe();
         return serialTransport->ModemMode() ? ModemState() : LinkState(serialLink, serialTransport->Host());
     }
 
@@ -1540,7 +1543,7 @@ class Runner {
     void UpdateSerialCable() {
         if (profile->deviceType != deviceTypeT415) return;
         auto* venice = dynamic_cast<EmRegsVzPegVenice*>(EmBankRegs::GetSubBank(0xfffff900, 2));
-        if (venice) venice->SetSerialCable(serialLink.GetKind() != HostLink68k::Kind::off);
+        if (venice) venice->SetSerialCable(serialLink.GetKind() != HostLink68k::Kind::off || serialTransport->DirectMode());
     }
     void RestoreUsb() {
         UpdateSerialCable();
@@ -1743,7 +1746,7 @@ class Runner {
     }
     void ServiceLinks() {
         if (serialLink.GetKind() == HostLink68k::Kind::off && irLink.GetKind() == HostLink68k::Kind::off &&
-            !serialTransport->ModemMode() && !irTransport->PhoneMode() && !irTransport->PrinterMode())
+            !serialTransport->ModemMode() && !serialTransport->DirectMode() && !irTransport->PhoneMode() && !irTransport->PrinterMode())
             return;
         const bool on = gSession->IsPowerOn();
         irLink.SetAsleep(!on);
@@ -2131,7 +2134,7 @@ class Runner {
             const bool serial = command == "serial-mode";
             string mode, error;
             if (!(words >> mode))
-                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|modem" : "|phone|printer") << endl);
+                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|sync|modem|ppp" : "|phone|printer") << endl);
             if (serial ? !SetSerial(mode, error) : !SetInfrared(mode, error))
                 return void(cout << (serial ? "serial: " : "infrared: ") << "error " << error << endl);
             cout << (serial ? "serial: " + SerialState() : "infrared: " + InfraredState()) << endl;
@@ -2139,7 +2142,7 @@ class Runner {
             cout << "serial: " << SerialState() << endl;
         } else if (command == "modem-sync") {
             string mode, error;
-            if (!(words >> mode)) return void(cout << "usage: modem-sync off|pty|tcp:PORT|unix:PATH" << endl);
+            if (!(words >> mode)) return void(cout << "usage: modem-sync off|pty|tcp:PORT|unix:PATH|sync" << endl);
             if (!SetModemSync(mode, error)) return void(cout << "modem-sync: error " << error << endl);
             cout << "modem-sync: " << modemSyncLink.Describe() << endl;
         } else if (command == "irda-state") {
@@ -2429,6 +2432,7 @@ class Runner {
 
     // "off", "off <error>" after a failed change, or "pty|tcp|unix <endpoint> connected|waiting".
     string SerialDescription() const {
+        if (serialTransport->DirectMode()) return serialTransport->Describe();
         return serialTransport->ModemMode() ? ModemState() : LinkDescription(serialLink, serialError);
     }
 
@@ -2560,7 +2564,8 @@ class Runner {
         static const char* const argumentCommands[] = {
             "launch-app",  "delete-db", "db-list", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
-            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter", "battery", "sync-profile", "sync-start"};
+            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter", "battery", "sync-profile", "sync-start",
+            "modem-sync"};
         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
         if(command=="dana-down" || command=="dana-up" || command=="dana-text") {
             const auto result=DanaInputCommand(command,argument);
@@ -2746,7 +2751,8 @@ class Runner {
             if (UsbCradle() && usbCradleMode != "off")
                 return {false, "busy", "The USB cradle is in use. Turn USB off to use serial HotSync."};
             if (!serialSync) {
-                if (!profile->capabilities.serial || serialTransport->ModemMode() || serialLink.GetKind() != HostLink68k::Kind::off)
+                if (!profile->capabilities.serial || serialTransport->ModemMode() || serialTransport->DirectMode() ||
+                    serialLink.GetKind() != HostLink68k::Kind::off)
                     return {false, "busy", "The cradle is in use. Set serial or USB to sync first."};
                 serialError.clear();
                 if (!SetSerial("sync", serialError)) return {false, "serial", serialError};
@@ -2769,9 +2775,8 @@ class Runner {
             HostLink68k::Kind kind;
             uint16_t port;
             string path;
-            if (serial && argument == "modem") {
+            if (serial && (argument == "modem" || argument == "ppp")) {
                 serialError.clear();
-                if (!profile->capabilities.modem) return {false, "unsupported", string(profile->displayName) + " has no modem."};
                 if (!SetSerial(argument, serialError)) return {false, "serial", serialError};
                 return {true, "serial", SerialDescription()};
             }
@@ -2789,7 +2794,7 @@ class Runner {
                 return {true, "infrared", InfraredDescription()};
             }
             if (!HostLink68k::Parse(argument, kind, port, &path) || (!serial && kind == HostLink68k::Kind::syncManager))
-                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH, sync or modem." : "Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
+                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH, sync, modem or ppp." : "Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
             HostLink68k& link = serial ? serialLink : irLink;
             string& error = serial ? serialError : infraredError;
             error.clear();
@@ -4024,7 +4029,7 @@ bool parseOptions(int argc, char** argv, Options& options) {
             HostLink68k::Kind kind;
             uint16_t port;
             string path;
-            if (!v || (!(arg == "--serial" && string(v) == "modem") &&
+            if (!v || (!(arg == "--serial" && (string(v) == "modem" || string(v) == "ppp")) &&
                        !(arg == "--irda" && (string(v) == "phone" || string(v) == "printer")) &&
                        (!HostLink68k::Parse(v, kind, port, &path) || (arg == "--irda" && kind == HostLink68k::Kind::syncManager))))
                 return false;
@@ -4123,7 +4128,7 @@ int main(int argc, char** argv) {
     signal(SIGPIPE, SIG_IGN);
 #endif
     MemoryStickBackend::factory = [] { return make_unique<FrondMsBackend>(); };
-    if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.21.0" << endl, 0;
+    if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.20.0" << endl, 0;
     Options options;
     if (!parseOptions(argc, argv, options)) {
         if (options.refused.empty()) return usage(), 2;

@@ -121,6 +121,8 @@ class SessionFile5 {
 
     size_t bufferSize{0};
     std::unique_ptr<uint8_t[]> buffer;
+    // The inflated sections a Serialize replaced; the section pointers stay valid.
+    std::unique_ptr<uint8_t[]> retiredBuffer;
 
     uint32_t ramSize{0};
 

@@ -11,7 +11,7 @@ extern "C" {
 #endif
 struct frond_dun;
 /* A sync folder enables Network HotSync to 10.0.2.2. Null if slirp can't start. */
-struct frond_dun* frond_dun_create(const char* sync_folder, const char* sync_profile);
+struct frond_dun* frond_dun_create(const char* sync_folder, const char* sync_profile, const char* sync_machine);
 void frond_dun_destroy(struct frond_dun* dun);
 /* The guest opened or closed the DUN channel. Closing it hangs up. */
 void frond_dun_open(struct frond_dun* dun, uint64_t now);

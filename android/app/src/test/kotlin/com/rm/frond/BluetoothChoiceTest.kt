@@ -24,9 +24,9 @@ class BluetoothChoiceTest {
     }
 
     @Test fun pickerAsTheDesktopLabelsIt() {
-        assertEquals(listOf("off" to "Off", "radio" to "This Frond", "link:aa11" to "Desk", "link:bb22" to "Laptop"),
+        assertEquals(listOf("off" to "Off", "radio" to "This Frond", "phone" to "Mobile phone", "link:aa11" to "Desk", "link:bb22" to "Laptop"),
             BluetoothChoice.choices("radio", paired))
-        assertEquals(listOf("off" to "Off", "radio" to "This Frond", "link:cc33" to "Unknown connection"),
+        assertEquals(listOf("off" to "Off", "radio" to "This Frond", "phone" to "Mobile phone", "link:cc33" to "Unknown connection"),
             BluetoothChoice.choices("link:cc33", emptyList()))
         assertEquals("radio", BluetoothChoice.active("radio", emptyList()))
         assertEquals("aa11", BluetoothChoice.active("link:aa11", paired))

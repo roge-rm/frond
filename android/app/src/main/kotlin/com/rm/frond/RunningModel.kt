@@ -20,6 +20,7 @@ class ModelHost(
     val lifecycleScope: kotlinx.coroutines.CoroutineScope,
     private val ui: (Runnable) -> Unit,
     private val onFinish: () -> Unit,
+    val syncState: (String) -> Unit,
 ) {
     val applicationContext: android.content.Context = context.applicationContext
     val contentResolver: android.content.ContentResolver get() = applicationContext.contentResolver
@@ -482,7 +483,10 @@ class RunningModel(
             val result = withContext(Dispatchers.IO) {
                 InstallBatch.run(uris, { displayName(it) ?: "A file" }, { n, total ->
                     if (total > 1) activity.runOnUiThread { busy = "Installing $n of $total" }
-                }) { last = d.install(it, if (device.installsToCard) displayName(it) ?: "file" else null) }
+                }) {
+                    last = d.install(it, if (device.installsToCard) displayName(it) ?: "file" else null,
+                        copyOnly = device.installsToCard && uris.size > 1)
+                }
             }
             busy = null
             val summary = result.summary()
@@ -534,6 +538,62 @@ class RunningModel(
                 }
             }
             appsNote = note
+        }
+    }
+
+    var installedPrograms by mutableStateOf<List<String>>(emptyList())
+        private set
+    var installedProgramsNote by mutableStateOf<String?>("Installed programs haven’t been read")
+        private set
+    var readingInstalledPrograms by mutableStateOf(false)
+        private set
+
+    fun refreshInstalledPrograms() {
+        val control = link ?: return
+        if (!device.rx1950 || readingInstalledPrograms || waitingForGdb || busy != null) return
+        readingInstalledPrograms = true
+        installedProgramsNote = null
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { control.request("winmo-apps", timeoutSeconds = 10) }
+            if (!reply.ok) acceptInstalledPrograms(false, reply.message)
+        }
+    }
+
+    fun acceptInstalledPrograms(ok: Boolean, message: String) {
+        if (!readingInstalledPrograms) return
+        readingInstalledPrograms = false
+        if (!ok) {
+            installedProgramsNote = message
+            return
+        }
+        try {
+            val parser = android.util.Xml.newPullParser()
+            parser.setInput(message.reader())
+            val names = mutableSetOf<String>()
+            var uninstall = false
+            var found = false
+            while (true) {
+                when (parser.nextToken()) {
+                    org.xmlpull.v1.XmlPullParser.END_DOCUMENT -> break
+                    org.xmlpull.v1.XmlPullParser.DOCDECL -> error("Unexpected document declaration")
+                    org.xmlpull.v1.XmlPullParser.START_TAG -> {
+                        val type = parser.getAttributeValue(null, "type")
+                        when (parser.depth) {
+                            1 -> require(parser.name == "wap-provisioningdoc")
+                            2 -> {
+                                uninstall = parser.name == "characteristic" && type == "UnInstall"
+                                found = found || uninstall
+                            }
+                            3 -> if (uninstall && parser.name == "characteristic" && !type.isNullOrEmpty()) names.add(type)
+                        }
+                    }
+                }
+            }
+            require(found)
+            installedPrograms = names.sortedWith(String.CASE_INSENSITIVE_ORDER)
+            installedProgramsNote = if (names.isEmpty()) "No installed programs" else null
+        } catch (e: Exception) {
+            installedProgramsNote = "Windows Mobile returned an invalid program list."
         }
     }
 
@@ -954,7 +1014,8 @@ class RunningModel(
             sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(serial = choice) } }
             activity.runOnUiThread { settings = settings.copy(serial = choice) }
             if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
-            SerialLink.apply(activity.applicationContext, l, choice, name, device.label, attachedSync = attachedSync)
+            SerialLink.apply(activity.applicationContext, l, choice, name, device.label,
+                attachedSync = attachedSync, modemSync = sessionId != null)
         }
     }
 
@@ -1005,10 +1066,15 @@ class RunningModel(
         if (bluetoothWatcher != null) return
         bluetoothWatcher = activity.lifecycleScope.launch {
             BluetoothLink.status.collect {
+                val before = bluetooth
                 bluetooth = it
-                ++bluetoothEpoch
-                radio = null
-                readRadio()
+                if (it.phoneSync != before.phoneSync)
+                    activity.syncState(it.phoneSync.ifEmpty { "off" })
+                if (it.bt != before.bt || it.active != before.active || it.choice != before.choice) {
+                    ++bluetoothEpoch
+                    radio = null
+                    readRadio()
+                }
             }
         }
     }
@@ -1056,12 +1122,13 @@ class RunningModel(
         }
     }
 
-    // Off, radio or link:<id>: kept in the machine's settings, then applied to the core and the link.
+    // Kept in the machine's settings, then applied to the core and the link.
     fun changeBluetooth(choice: String) = device("Changing Bluetooth", "Couldn't change Bluetooth", false) { l ->
         sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(bluetooth = choice) } }
         activity.runOnUiThread { settings = settings.copy(bluetooth = choice) }
         if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
-        BluetoothLink.apply(activity.applicationContext, l, choice, name, device.label).also { activity.runOnUiThread { readRadio() } }
+        BluetoothLink.apply(activity.applicationContext, l, choice, name, device.label, sessionId)
+            .also { activity.runOnUiThread { readRadio() } }
     }
 
     // Both go back to the Palm, where the reset or rotation shows.
@@ -1108,6 +1175,12 @@ class RunningModel(
     fun hardReset(saveFirst: Boolean) = device(if (saveFirst) "Saving" else "Resetting", "Couldn't hard reset", true) { l ->
         runHardReset(FrondActivity.running?.session, saveFirst, onSaved = { FrondActivity.running?.savedMachine() }) { command, argument ->
             l.request(command, argument, timeoutSeconds = if (command == "save") 120 else 30)
+        }.also { error ->
+            if (error == null && device.rx1950) activity.runOnUiThread {
+                installedPrograms = emptyList()
+                readingInstalledPrograms = false
+                installedProgramsNote = "Installed programs haven’t been read"
+            }
         }
     }
 

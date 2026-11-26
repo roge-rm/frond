@@ -271,7 +271,12 @@ open class FrondActivity : SDLActivity() {
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
             if (name == "sync") runOnUiThread { syncState(state) }
+            if (name == "winmo-apps" || name == "winmo-apps-error") runOnUiThread {
+                menuModel?.acceptInstalledPrograms(name == "winmo-apps", state)
+            }
             if (name == "serial" || name == "usb") runOnUiThread { menuModel?.acceptSyncRoute(name, state) }
+            if (name == "serial") SerialLink.acceptNativeState(state)
+            if (name == "infrared") IrLink.acceptNativeState(state)
             if (name == "microphone") {
                 Log.i(TAG, "microphone: $state")
                 // The core turns capture off and on by itself too, around a TG50 sleep.
@@ -293,8 +298,6 @@ open class FrondActivity : SDLActivity() {
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO", "1", true)
         setCoreTestEnvironment()
         HostDns.start(applicationContext)
-        // A btvirt and sockets left by an emulator that was killed.
-        BtLink.cleanLater(applicationContext)
         super.onCreate(savedInstanceState)
         UnbufferedInput.request(window.decorView)
         InputTrace.followFrames()
@@ -338,21 +341,24 @@ open class FrondActivity : SDLActivity() {
         val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
         val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
+        val serialPpp = machineSettings.serial == InfraredChoice.PPP && launchDevice().runs68k && launchDevice().serialPort
         val serialSync = machineSettings.serial == InfraredChoice.SYNC_MANAGER &&
             launchDevice().serialPort && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
         val serialWired = InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort
-        val serialLink = serialWired || serialModem || serialSync
+        val serialLink = serialWired || serialModem || serialPpp || serialSync
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
             if ((infraredLink && !infraredPhone && !infraredPrinter) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
             link.whenConnected {
                 Thread({
-                    val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label
+                    val session = Sessions.forPath(applicationContext, sessionPath)
+                    val name = session?.name ?: launchDevice().label
                     if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
                         ?.let { Log.w(TAG, "infrared: $it") }
-                    if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label)
+                    if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label,
+                        modemSync = session != null)
                         ?.let { Log.w(TAG, "serial: $it") }
-                    if (bluetoothLink) BluetoothLink.apply(applicationContext, link, machineSettings.bluetooth, name, launchDevice().label)
+                    if (bluetoothLink) BluetoothLink.apply(applicationContext, link, machineSettings.bluetooth, name, launchDevice().label, session?.id)
                         ?.let { Log.w(TAG, "bluetooth: $it") }
                 }, "FrondLinks").apply { isDaemon = true }.start()
             }
@@ -1269,7 +1275,7 @@ open class FrondActivity : SDLActivity() {
         val results = BarResults(this)
         barResults = results
         val model = RunningModel(
-            ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}),
+            ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}, ::syncState),
             device, SdCard(this, link, sessionPath, device), PalmDatabases(this, link), link, session?.name ?: device.label,
         )
         menuModel = model
@@ -1668,14 +1674,13 @@ open class FrondActivity : SDLActivity() {
             val error = synchronized(debugLock) {
                 // Back right at launch already stopped it.
                 if (debugStopped) return@Thread
-                DebugLink.relay(BeamMode.Listen(settings.debuggerPort), port)
+                DebugLink.relay(BeamMode.Listen(settings.debuggerPort, settings.debuggerNetwork), port)
             }
-            val addresses = NetRelay.addresses(applicationContext)
-            val text = when {
-                error != null -> error
-                addresses.isEmpty() -> "Waiting for gdb on port ${settings.debuggerPort}"
-                else -> "Waiting for gdb at " + addresses.joinToString(", ") { "$it:${settings.debuggerPort}" }
-            }
+            val relay = DebugLink.status.value
+            val addresses = if (settings.debuggerNetwork && relay.phase == NetRelay.Phase.WAITING)
+                NetRelay.addresses(applicationContext) else emptyList()
+            val text = error ?: if (addresses.isEmpty()) com.rm.frond.ui.debuggerText(relay)
+                else "Waiting for gdb at " + addresses.joinToString(", ") { NetRelay.hostPort(it, settings.debuggerPort) }
             runOnUiThread { if (!(gdbBlocksLink && link.connectedOnce) && !leaving) { note.text = text; note.visibility = View.VISIBLE } }
             // Nothing can reach the core's gdb port, so let the Palm run without it.
             if (error != null) releaseDebugger(port)

@@ -109,7 +109,9 @@ class SocS3C2442 : public SoC {
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
     bool SetUsbCable(bool attached);
-    void StartActiveSync();
+    std::shared_ptr<frondSync::ActiveSyncSession> StartActiveSync(bool listApplications = false);
+    bool ActiveSyncRunning() const;
+    void StopActiveSync();
     bool StartSerialActiveSync();
     bool StopSerialActiveSync();
     bool UsbCableAttached() const { return machine->usbVbus(); }

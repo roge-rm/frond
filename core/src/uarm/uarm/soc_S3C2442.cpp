@@ -474,11 +474,21 @@ UsbDevicePort SocS3C2442::GetUsbPort() {
     return {this, ops};
 }
 
-void SocS3C2442::StartActiveSync() {
+std::shared_ptr<frondSync::ActiveSyncSession> SocS3C2442::StartActiveSync(bool listApplications) {
     StopSerialActiveSync();
     usbDesktop.reset();
-    activeSync = std::make_shared<frondSync::ActiveSyncSession>();
+    activeSync = std::make_shared<frondSync::ActiveSyncSession>(false, listApplications);
     activeSync->Start();
+    return activeSync;
+}
+
+bool SocS3C2442::ActiveSyncRunning() const {
+    return (activeSync && activeSync->Running()) || (serialSync && serialSync->session->Running());
+}
+
+void SocS3C2442::StopActiveSync() {
+    usbDesktop.reset();
+    activeSync.reset();
 }
 
 bool SocS3C2442::StartSerialActiveSync() {
@@ -503,10 +513,7 @@ bool SocS3C2442::StopSerialActiveSync() {
 
 bool SocS3C2442::SetUsbCable(bool attached) {
     if (halted) return false;
-    if (!attached) {
-        usbDesktop.reset();
-        activeSync.reset();
-    }
+    if (!attached) StopActiveSync();
     machine->setUsbVbus(attached);
     // USB power is AC to the battery driver.
     rx1950ApplyBattery(*machine, battery);

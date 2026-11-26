@@ -4,9 +4,14 @@
 
 #include "zip/zip.h"
 
+namespace {
+// The size a member declares is read from the archive; larger ones are not unpacked.
+constexpr size_t maxEntryBytes = 256u << 20;
+}  // namespace
+
 ZipfileWalker::ZipfileWalker(size_t bufferSize, void* buffer) {
     this->buffer = std::make_unique<char[]>(bufferSize);
-    memcpy(this->buffer.get(), buffer, bufferSize);
+    if (bufferSize && buffer) memcpy(this->buffer.get(), buffer, bufferSize);
 
     zip = zip_stream_open(this->buffer.get(), bufferSize, 0, 'r');
 
@@ -67,6 +72,8 @@ const char* ZipfileWalker::GetCurrentEntryName() {
 
 uint8_t* ZipfileWalker::GetCurrentEntryContent() {
     if (currentEntryContent) return currentEntryContent;
+
+    if (GetState() != State::stateOpen || GetCurrentEntrySize() > maxEntryBytes) return nullptr;
 
     size_t bufferSize;
     if (zip_entry_read(zip, reinterpret_cast<void**>(&currentEntryContent), &bufferSize) < 0 ||

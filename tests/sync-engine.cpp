@@ -838,6 +838,34 @@ void TestActiveSync(const std::string& root) {
     const auto left = profile.PendingInstalls(key);
     CHECK(left.size() == 1 && left.front().id == palmItem.id);
 
+    {
+        const auto status = manager.Status().Describe();
+        ActiveSyncSession readOnly(false, true);
+        readOnly.Start();
+        Handheld control{readOnly.Pipe(0)}, rapi{readOnly.Pipe(1)};
+        connectRapi(control, rapi);
+        const std::string query =
+            R"(<wap-provisioningdoc><characteristic-query type="UnInstall" recursive="false"/></wap-provisioningdoc>)";
+        auto packet = Words({uint32_t((query.size() + 1) * 2 + 12), 0x0e, uint32_t((query.size() + 1) * 2)});
+        for (const auto c : query) packet.insert(packet.end(), {uint8_t(c), 0});
+        packet.insert(packet.end(), {0, 0});
+        PutWords(packet, {1});
+        CHECK(rapi.Bytes6(packet.size()) == packet);
+
+        const std::u16string xml =
+            uR"(<wap-provisioningdoc><characteristic type="UnInstall"><characteristic type="Éditeur"/></characteristic></wap-provisioningdoc>)";
+        auto reply = Words({0, 0, uint32_t((xml.size() + 1) * 2)});
+        for (const auto c : xml) reply.insert(reply.end(), {uint8_t(c), uint8_t(c >> 8)});
+        reply.insert(reply.end(), {0, 0});
+        rapi.Put(Words({uint32_t(reply.size())}));
+        rapi.Put(reply);
+        finish(readOnly);
+        CHECK(readOnly.ApplicationError().empty());
+        CHECK(readOnly.Applications().find("Éditeur") != std::string::npos);
+        CHECK(manager.Status().Describe() == status);
+        CHECK(profile.PendingInstalls(key).size() == left.size());
+    }
+
     CHECK(profile.RequestActiveSyncPairing(key, true, error));
     ActiveSyncSession occupiedSession;
     occupiedSession.Start();

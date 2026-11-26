@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QPointer>
 class LinkClient;
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -47,4 +48,5 @@ class ConnectionsWindow : public QDialog {
     LinkClient* client;
     QJsonObject state;
     QLabel* requestLabel{nullptr};
+    QCheckBox* allowNetwork{nullptr};
 };

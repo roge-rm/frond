@@ -87,13 +87,11 @@ inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfil
 
 // Install, the application list and hard reset. Every Palm OS device has them; callers also check palmOs.
 inline bool guestServices(Device) { return true; }
-// Install, the application list and hard reset are Palm OS guest services. A Windows CE device has its own
-// (installsToCard, ceHardReset) and greys out the rest. Callers check this and guestServices.
+// Palm OS device profiles use the core's Palm guest services.
 inline bool palmOs(Device device) {
     return device == Device::automatic || deviceProfileOs5(profile(device)) == DeviceOs5::palmOs;
 }
-// Windows CE: Install copies the file onto the SD card, where the guest's File Explorer opens it (wceload for a
-// CAB); the application list stays greyed. The rx1950 only so far.
+// Windows CE installs through the SD card.
 inline bool installsToCard(Device device) {
     return device != Device::automatic && profile(device).board == DeviceBoard5::s3c2442Rx1950;
 }
