@@ -1,6 +1,7 @@
 // Sharp Zaurus SL-C3000 art: keys against the Spitz keyboard matrix, geometry, hit testing,
 // held-key drawing and both layouts. With an output folder it also writes preview PNGs.
 #include "DeviceControls.h"
+#include "ZaurusGlyphs.h"
 #include <SDL_image.h>
 #include <cassert>
 #include <cstdio>
@@ -81,6 +82,23 @@ int main(int argc, char** argv) {
         assert(matrix.insert({k.row,k.column}).second);
     }
     assert(icons==5 && side==4);
+    // Every character printed outside ASCII has a glyph, and each glyph is used.
+    std::set<uint32_t> used;
+    for(size_t i=0;i<art.count;++i)
+        for(const char* text : {art.keys[i].legend,art.keys[i].upper,art.keys[i].blue})
+            for(const char* p=text;*p;) {
+                const auto b=static_cast<unsigned char>(*p++);
+                if(b<0x80)continue;
+                const int more=b>=0xf0 ? 3 : b>=0xe0 ? 2 : 1;
+                uint32_t c=b&(0x3f>>more);
+                for(int m=0;m<more;++m)c=(c<<6)|(static_cast<unsigned char>(*p++)&0x3f);
+                used.insert(c);
+            }
+    std::set<uint32_t> glyphs;
+    for(const auto& g : zaurusGlyphs) {
+        assert(glyphs.insert(g.code).second && g.advance>0 && std::strlen(g.rows)==size_t(zaurusGlyphGrid*zaurusGlyphGrid/4));
+    }
+    assert(used==glyphs);
     assert(matrix.size()==std::size(spitzMatrix));
     for(const auto& m : spitzMatrix)assert(matrix.count(m));
     assert(art.count<=128);
@@ -183,7 +201,7 @@ int main(int argc, char** argv) {
                          Preview{"portrait-viewer-phone",1080,2400,ZaurusStyle::view,false}}) {
         Image image(p.w,p.h);
         draw(image,zaurusLayout(p.w,p.h,p.style),p.held ? chord : ZaurusKeysHeld{});
-        image.save(out+"/"+p.name+".png");
+        image.save(out+"/"+p.name+"-jp.png");
     }
     {
         // The keyboard alone at 3x its units.
@@ -191,7 +209,7 @@ int main(int argc, char** argv) {
         Image image(w,h);
         ZaurusLayout l{ZaurusStyle::clamshell,{0,0,0,0},{0,0,0,0},{0,0,w,h},{0,0,0,0}};
         drawZaurusControls(image.renderer,l,ZaurusKeysHeld{});
-        image.save(out+"/keyboard-3x.png");
+        image.save(out+"/keyboard-3x-jp.png");
     }
     std::printf("previews written to %s\n",out.c_str());
     return 0;

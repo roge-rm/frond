@@ -1,4 +1,5 @@
 #include "DeviceControls.h"
+#include "ZaurusGlyphs.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -3229,13 +3230,111 @@ float zaurusGlyph(ZaurusMark mark, float x, float y) {
     }
 }
 
-float zaurusText(const char* text, float x, float y, float size) {return tg50TextDistance(text,x,y,size);}
+// The Japanese legends come from ZaurusGlyphs.h: each bitmap is smoothed once, then read with
+// bilinear filtering, whose half-way contour is the glyph's outline.
+struct ZaurusGlyphMap { uint32_t code; float advance; std::vector<float> c; };
+const ZaurusGlyphMap* zaurusGlyphMap(uint32_t code) {
+    static const auto maps=[] {
+        std::vector<ZaurusGlyphMap> m;
+        const int n=zaurusGlyphGrid;
+        for(const auto& g : zaurusGlyphs) {
+            std::vector<float> bits(size_t(n)*n),smooth(size_t(n)*n);
+            for(int y=0;y<n;++y)for(int x=0;x<n;++x) {
+                const char h=g.rows[y*(n/4)+x/4];
+                const int v=h<='9' ? h-'0' : h-'a'+10;
+                bits[size_t(y)*n+x]=float((v>>(3-x%4))&1);
+            }
+            auto at=[&](int x,int y) {return x<0 || y<0 || x>=n || y>=n ? 0.f : bits[size_t(y)*n+x];};
+            for(int y=0;y<n;++y)for(int x=0;x<n;++x) {
+                float sum=0;
+                for(int j=-1;j<=1;++j)for(int i=-1;i<=1;++i)sum+=at(x+i,y+j)*float((2-std::abs(i))*(2-std::abs(j)));
+                smooth[size_t(y)*n+x]=sum/16;
+            }
+            m.push_back({g.code,float(g.advance)/n,std::move(smooth)});
+        }
+        return m;
+    }();
+    for(const auto& g : maps) if(g.code==code) return &g;
+    return nullptr;
+}
+float zaurusGlyphSample(const ZaurusGlyphMap& g, float u, float v) {
+    const int n=zaurusGlyphGrid;
+    u-=0.5f;v-=0.5f;
+    const int x=int(std::floor(u)),y=int(std::floor(v));
+    const float fx=u-x,fy=v-y;
+    auto at=[&](int i,int j) {return i<0 || j<0 || i>=n || j>=n ? 0.f : g.c[size_t(j)*n+i];};
+    return (at(x,y)*(1-fx)+at(x+1,y)*fx)*(1-fy)+(at(x,y+1)*(1-fx)+at(x+1,y+1)*fx)*fy;
+}
+uint32_t zaurusNextCode(const char*& p) {
+    const auto b=static_cast<unsigned char>(*p++);
+    if(b<0x80)return b;
+    const int more=b>=0xf0 ? 3 : b>=0xe0 ? 2 : 1;
+    uint32_t c=b&(0x3f>>more);
+    for(int i=0;i<more && *p;++i)c=(c<<6)|(static_cast<unsigned char>(*p++)&0x3f);
+    return c;
+}
+// Japanese characters are an em of zaurusEm stroke font cells, on the Latin baseline.
+constexpr float zaurusEm=8.f;
+struct ZaurusTextItem { uint32_t code; float advance; };
+std::vector<ZaurusTextItem> zaurusTextItems(const char* text, float& total) {
+    std::vector<ZaurusTextItem> items;
+    total=0;
+    bool lastLatin=false;
+    for(const char* p=text;*p;) {
+        const uint32_t c=zaurusNextCode(p);
+        const auto* g=c>=0x80 ? zaurusGlyphMap(c) : nullptr;
+        const float advance=c<0x80 ? tg50Glyph(char(c)).advance : g ? g->advance*zaurusEm : 0;
+        items.push_back({c,advance});
+        total+=advance;
+        lastLatin=c<0x80;
+    }
+    // The stroke font's advance ends in a gap.
+    if(lastLatin)total-=1.8f;
+    return items;
+}
+float zaurusTextWidth(const char* text, float size) {
+    float total;
+    zaurusTextItems(text,total);
+    return std::max(0.f,total)*size;
+}
+// Latin and Japanese on one line, centred on cx, the Latin capitals from top to top+6*size.
 void paintZaurusText(Canvas& canvas, const char* text, float cx, float top, float size, Rgb colour) {
     if(!*text)return;
-    const float w=tg50TextWidth(text,size),weight=std::max(0.4f,0.4f*size+0.1f);
-    canvas.paint(cx-w*0.5f-3,top-2*size-1,cx+w*0.5f+3,top+8*size+1,[&](float x,float y) {
-        return canvas.edge(zaurusText(text,x-cx,y-top,size)-weight);
+    float total;
+    const auto items=zaurusTextItems(text,total);
+    const float w=total*size,weight=std::max(0.4f,0.4f*size+0.1f);
+    const float em=zaurusEm*size,emTop=top+(6-zaurusGlyphAscent*zaurusEm)*size;
+    const float texel=em/zaurusGlyphGrid,texelPx=texel*canvas.s;
+    // Samples per pixel side when the glyph is drawn smaller than its bitmap.
+    const int k=std::min(4,std::max(1,int(std::ceil(1/texelPx))));
+    canvas.paint(cx-w*0.5f-3,emTop-1,cx+w*0.5f+3,top+8*size+1,[&](float x,float y) {
+        float stroke=1e9f,jp=0,pen=cx-w*0.5f;
+        for(const auto& item : items) {
+            if(item.code<0x80) {
+                const auto& g=tg50Glyph(char(item.code));
+                const float gx=(x-pen)/size+g.left,gy=(y-top)/size;
+                for(const auto& s : g.segments)stroke=std::min(stroke,segment(gx,gy,s[0],s[1],s[2],s[3]));
+            } else if(const auto* g=zaurusGlyphMap(item.code)) {
+                const float u=(x-pen)/texel,v=(y-emTop)/texel;
+                if(u>-2 && v>-2 && u<zaurusGlyphGrid+2 && v<zaurusGlyphGrid+2) {
+                    float sum=0;
+                    for(int j=0;j<k;++j)for(int i=0;i<k;++i) {
+                        const float du=((i+0.5f)/k-0.5f)/texelPx,dv=((j+0.5f)/k-0.5f)/texelPx;
+                        sum+=clamp01((zaurusGlyphSample(*g,u+du,v+dv)-0.5f)*std::max(1.f,texelPx*1.4f)+0.5f);
+                    }
+                    jp=std::max(jp,sum/(k*k));
+                }
+            }
+            pen+=item.advance*size;
+        }
+        return std::max(canvas.edge(stroke*size-weight),jp);
     },[&](float,float,Rgb) {return colour;});
+}
+// The number of characters in a UTF-8 string.
+size_t zaurusLength(const char* text) {
+    size_t n=0;
+    for(const char* p=text;*p;++p)n+=(static_cast<unsigned char>(*p)&0xc0)!=0x80;
+    return n;
 }
 // Small blue marks printed over the number row: zoom out and in, and the backlight down and up.
 float zaurusBlueMark(const char* name, float x, float y) {
@@ -3292,8 +3391,12 @@ void paintZaurusCap(Canvas& canvas, const ZaurusKeyArt& key, bool held) {
 
     const Rgb ink=held ? zaurusGlow : zaurusInk;
     const float cx=face.x+face.w*0.5f,cy=face.y+face.h*0.5f;
-    auto fit=[&](const char* t,float size) {return std::min(size,(face.w-3)/std::max(1.f,tg50TextWidth(t,1)));};
-    if(*key.upper) {
+    auto fit=[&](const char* t,float size) {return std::min(size,(face.w-3)/std::max(1.f,zaurusTextWidth(t,1)));};
+    if(*key.upper && zaurusLength(key.legend)>1) {
+        // Comma and full stop: the shifted character at the top, the Japanese and Latin marks below.
+        paintZaurusText(canvas,key.upper,cx,face.y+3,1.15f,ink);
+        paintZaurusText(canvas,key.legend,cx,face.y+face.h-10.5f,1.3f,ink);
+    } else if(*key.upper) {
         // Shifted character at the upper left, the main one lower right.
         const bool tall=face.h>24;
         paintZaurusText(canvas,key.upper,face.x+7,face.y+(tall ? 3.f : 2.5f),tall ? 1.15f : 0.95f,ink);
@@ -3313,7 +3416,7 @@ void paintZaurusCap(Canvas& canvas, const ZaurusKeyArt& key, bool held) {
             return canvas.edge(std::min(segment(x,y,l,cy,r,cy)-0.7f,
                                         polygon<3>(x,y,{{{l-1,cy},{l+3.5f,cy-3},{l+3.5f,cy+3}}})));
         },[&](float,float,Rgb) {return ink;});
-    } else if(std::strlen(key.legend)==1) {
+    } else if(zaurusLength(key.legend)==1) {
         const float size=face.h>20 ? 2.f : 1.5f;
         paintZaurusText(canvas,key.legend,cx,cy-3*size,size,ink);
     } else if(std::strchr(key.legend,'\n')) {
@@ -3476,7 +3579,8 @@ void paintZaurusKeyboard(Canvas& canvas, const ZaurusKeysHeld& held) {
                 canvas.paint(bx-7,by-4,bx+7,by+9,[&](float x,float y) {
                     return canvas.edge(zaurusBlueMark(k.blue,(x-bx)*1.15f,(y-by-2.4f)*1.15f)/1.15f);
                 },[](float,float,Rgb) {return zaurusBlue;});
-            else paintZaurusText(canvas,k.blue,bx,by,0.8f,zaurusBlue);
+            // The 0 key's A is the smaller one (half-width letters, against full-width on 9).
+            else paintZaurusText(canvas,k.blue,bx,by,std::strcmp(k.name,"0")==0 ? 0.6f : 0.8f,zaurusBlue);
         }
     }
 }
@@ -3878,31 +3982,31 @@ void drawDanaKeyCaps(SDL_Renderer* renderer,const SDL_Rect& dest,int width,int h
 }
 
 const ZaurusArt& zaurusArt() {
-    // Keyboard rows, cap sizes and printed legends follow photos of the SL-C3000; row and column
-    // are the Spitz keyboard matrix (the Linux spitz keymap). Kana and Zen/Han are the matrix's
-    // two Japanese keys in that order. The hard icons are printed on the bezel and aren't in the
-    // matrix.
+    // Keyboard rows, cap sizes and printed legends, Japanese included, follow photos of the
+    // SL-C3000 and C1000 (the same keyboard); row and column are the Spitz keyboard matrix (the
+    // Linux spitz keymap). Kana and Zen/Han are the matrix's two Japanese keys in that order. The
+    // hard icons are printed on the bezel and aren't in the matrix.
     using M=ZaurusMark;
     const auto K=ZaurusPart::keyboard,I=ZaurusPart::icons,S=ZaurusPart::side;
     static const ZaurusKeyArt keys[] = {
         {"1",K,{25,20,34,26},"1","!","zoom-",M::none,0,1},{"2",K,{77,20,34,26},"2","\"","zoom+",M::none,1,1},
         {"3",K,{129,20,34,26},"3","#","dim-",M::none,0,2},{"4",K,{180,20,34,26},"4","$","dim+",M::none,1,2},
-        {"5",K,{232,20,34,26},"5","%","",M::none,0,3},{"6",K,{284,20,34,26},"6","&","",M::none,0,4},
-        {"7",K,{336,20,34,26},"7","'","",M::none,0,5},{"8",K,{388,20,34,26},"8","(","",M::none,1,5},
-        {"9",K,{439,20,34,26},"9",")","A",M::none,0,6},{"0",K,{491,20,34,26},"0","~","a",M::none,0,7},
+        {"5",K,{232,20,34,26},"5","%","",M::none,0,3},{"6",K,{284,20,34,26},"6","&","あ",M::none,0,4},
+        {"7",K,{336,20,34,26},"7","'","ア",M::none,0,5},{"8",K,{388,20,34,26},"8","(","ｱ",M::none,1,5},
+        {"9",K,{439,20,34,26},"9",")","A",M::none,0,6},{"0",K,{491,20,34,26},"0","~","A",M::none,0,7},
         {"backspace",K,{540,20,40,26},"BS","","Del",M::backspace,0,8},
 
         {"q",K,{17,60,44,32},"Q","","",M::none,2,1},{"w",K,{75,60,44,32},"W","","^",M::none,3,1},
         {"e",K,{133,60,44,32},"E","","=",M::none,2,2},{"r",K,{192,60,44,32},"R","","+",M::none,1,3},
         {"t",K,{250,60,44,32},"T","","[",M::none,2,3},{"y",K,{308,60,44,32},"Y","","]",M::none,1,4},
-        {"u",K,{366,60,44,32},"U","","",M::none,2,5},{"i",K,{424,60,44,32},"I","","",M::none,1,6},
+        {"u",K,{366,60,44,32},"U","","「",M::none,2,5},{"i",K,{424,60,44,32},"I","","」",M::none,1,6},
         {"o",K,{483,60,44,32},"O","","",M::none,1,7},{"p",K,{541,60,44,32},"P","","",M::none,1,8},
 
         {"tab",K,{16,106,30,32},"Tab","","Caps",M::none,2,0},
         {"a",K,{62,106,44,32},"A","","",M::none,4,1},{"s",K,{121,106,44,32},"S","","",M::none,3,2},
         {"d",K,{179,106,44,32},"D","",".",M::none,4,2},{"f",K,{238,106,44,32},"F","","\\",M::none,3,3},
         {"g",K,{296,106,44,32},"G","",";",M::none,2,4},{"h",K,{355,106,44,32},"H","",":",M::none,3,5},
-        {"j",K,{413,106,44,32},"J","","*",M::none,2,6},{"k",K,{472,106,44,32},"K","","",M::none,2,7},
+        {"j",K,{413,106,44,32},"J","","*",M::none,2,6},{"k",K,{472,106,44,32},"K","","¥",M::none,2,7},
         {"l",K,{531,106,44,32},"L","","|",M::none,3,7},
 
         {"lshift",K,{14,152,36,32},"Shift","","",M::none,4,9},
@@ -3914,11 +4018,11 @@ const ZaurusArt& zaurusArt() {
         {"enter",K,{531,152,56,34},"Enter","","",M::enter,4,8},
 
         {"fn",K,{10,198,40,32},"Fn","","",M::none,5,10},{"ctrl",K,{60,198,34,32},"Ctrl","","",M::none,0,0},
-        {"kana",K,{104,198,36,32},"Kana\nHira","","",M::none,6,1},
-        {"zenhan",K,{148,198,36,32},"Zen\nHan","","",M::none,6,2},
+        {"kana",K,{104,198,36,32},"カナ\nひら","","記号",M::none,6,1},
+        {"zenhan",K,{148,198,36,32},"全/半","","漢字",M::none,6,2},
         {"minus",K,{194,198,36,32},"-","","@",M::none,5,3},
-        {"space",K,{244,198,120,32},"Space","","",M::none,5,4},
-        {"comma",K,{380,198,34,32},",","/","<",M::none,5,5},{"dot",K,{424,198,34,32},".","?",">",M::none,4,6},
+        {"space",K,{244,198,120,32},"前候補\nSpace/変換","","音訓",M::none,5,4},
+        {"comma",K,{380,198,34,32},"、,","/","<",M::none,5,5},{"dot",K,{424,198,34,32},"。.","?",">",M::none,4,6},
 
         {"up",K,{510,206,40,32},"","","",M::up,5,7},{"down",K,{510,286,40,32},"","","",M::down,6,7},
         {"left",K,{474,242,32,40},"","","",M::left,6,6},{"right",K,{554,242,32,40},"","","",M::right,6,8},
