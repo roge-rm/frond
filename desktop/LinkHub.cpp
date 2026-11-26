@@ -1,4 +1,5 @@
 #include "LinkHub.h"
+#include "LinkLines.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QJsonArray>
@@ -34,7 +35,6 @@ constexpr qint64 kRadioStartMs = 5000;  // btvirt gets this long to make its soc
 constexpr qint64 kBluetoothAhead = 16384;
 constexpr int kMaxPending = 16;       // connections not yet authenticated
 constexpr int kPerAddress = 10;       // new connections per address in 10 s
-const QByteArray kBeaconMagic("FRLB");
 
 Bytes toBytes(const QByteArray& a) { return Bytes(a.begin(), a.end()); }
 QByteArray fromBytes(const Bytes& b) { return QByteArray(reinterpret_cast<const char*>(b.data()), int(b.size())); }
@@ -233,12 +233,9 @@ void Hub::newClient() {
 }
 void Hub::clientInput(Client* c) {
     c->input += c->socket->readAll();
-    if (c->input.size() > 1 << 20) { c->socket->abort(); return; }
-    for (int at; (at = c->input.indexOf('\n')) >= 0;) {
-        const auto line = c->input.left(at);
-        c->input.remove(0, at + 1);
-        const auto doc = QJsonDocument::fromJson(line);
-        if (doc.isObject()) handle(c, doc.object());
+    if (c->input.size() > kClientInputMax) { c->socket->abort(); return; }
+    for (QJsonObject op; takeClientLine(c->input, op);) {
+        if (!op.isEmpty()) handle(c, op);
         if (!clients.contains(c)) return;
     }
 }
@@ -307,19 +304,11 @@ void Hub::handle(Client* c, const QJsonObject& op) {
             pairOut.port = it->port;
             pairOut.peerName = it->name;
         } else {
-            auto address = op.value("address").toString().trimmed();
+            const auto address = op.value("address").toString().trimmed();
             pairOut.typedAddress = address;
-            quint16 port = quint16(op.value("port").toInt(defaultPort));
-            // host, host:port, [v6]:port
-            if (address.startsWith('[') && address.contains("]:")) {
-                port = quint16(address.section("]:", 1).toUInt());
-                address = address.section("]:", 0, 0).mid(1);
-            } else if (address.count(':') == 1) {
-                port = quint16(address.section(':', 1).toUInt());
-                address = address.section(':', 0, 0);
-            }
-            pairOut.host = address;
-            pairOut.port = port ? port : defaultPort;
+            const auto target = splitAddress(address, quint16(op.value("port").toInt(defaultPort)), defaultPort);
+            pairOut.host = target.first;
+            pairOut.port = target.second;
         }
         pairOutStart();
     } else if (type == "pair-code") {
@@ -603,11 +592,8 @@ QList<QPair<QString, quint16>> Hub::dialTargets(const QString& hex) const {
     if (const auto it = runs.find(hex); it != runs.end() && !it->seen.isNull()) add(it->seen.toString(), it->seenPort);
     add(p->goodHost, p->goodPort);
     if (!p->address.isEmpty()) {
-        auto host = p->address;
-        quint16 port = defaultPort;
-        if (host.startsWith('[') && host.contains("]:")) { port = quint16(host.section("]:", 1).toUInt()); host = host.section("]:", 0, 0).mid(1); }
-        else if (host.count(':') == 1) { port = quint16(host.section(':', 1).toUInt()); host = host.section(':', 0, 0); }
-        add(host, port ? port : defaultPort);
+        const auto target = splitAddress(p->address, defaultPort, defaultPort);
+        add(target.first, target.second);
     }
     return targets;
 }
@@ -1112,7 +1098,7 @@ bool Hub::pullSerial(Conn* c) {
 }
 
 // ---- Discovery ----
-// Beacon: "FRLB", version 1, type (1 beacon, 2 query), install id, TCP port, name.
+// Beacons are laid out in LinkLines.h.
 
 bool Hub::discoveryActive() const {
     if (watchers() || pairOut.client) return true;
@@ -1146,13 +1132,13 @@ void Hub::datagrams() {
     while (udp.hasPendingDatagrams()) {
         const auto d = udp.receiveDatagram(512);
         const auto data = d.data();
-        if (!allowedPeer(d.senderAddress()) || !data.startsWith(kBeaconMagic)) continue;
-        Reader r(reinterpret_cast<const uint8_t*>(data.constData()) + 4, size_t(data.size() - 4));
-        const auto version = r.u8(), type = r.u8();
-        const auto id = r.array<16>();
-        const auto port = r.u16();
-        const auto name = QString::fromStdString(r.str8()).left(64);
-        if (!r.ok() || version != 1 || id == store.local().id) continue;
+        if (!allowedPeer(d.senderAddress())) continue;
+        const auto heard = parseBeacon(data);
+        if (!heard || heard->id == store.local().id) continue;
+        const auto type = heard->type;
+        const auto& id = heard->id;
+        const auto port = heard->port;
+        const auto& name = heard->name;
         if (type == 2 && discoveryActive()) beacon(1, d.senderAddress(), quint16(d.senderPort()));
         const auto hex = hexId(id);
         if (auto* p = store.find(id); p && p->paired) {
