@@ -57,8 +57,17 @@ class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private
     fun axes(device: Int, stickX: Float, stickY: Float, hatX: Float, hatY: Float, leftTrigger: Float, rightTrigger: Float,
              rightX: Float = 0f, rightY: Float = 0f) {
         val pad = pads.getOrPut(device) { Pad() }
-        pad.stickX = when (map.stick) { ZodiacStick.LEFT -> stickX; ZodiacStick.RIGHT -> rightX; ZodiacStick.NONE -> 0f }
-        pad.stickY = when (map.stick) { ZodiacStick.LEFT -> stickY; ZodiacStick.RIGHT -> rightY; ZodiacStick.NONE -> 0f }
+        val values = { axis: PadAxis -> when (axis) {
+            PadAxis.NONE -> 0f
+            PadAxis.LEFT_X -> stickX
+            PadAxis.LEFT_Y -> stickY
+            PadAxis.RIGHT_X -> rightX
+            PadAxis.RIGHT_Y -> rightY
+            PadAxis.LEFT_TRIGGER -> leftTrigger
+            PadAxis.RIGHT_TRIGGER -> rightTrigger
+        } }
+        pad.stickX = values(map.stickX.axis).let { if (map.stickX.invert) -it else it }
+        pad.stickY = values(map.stickY.axis).let { if (map.stickY.invert) -it else it }
         stickKeys.update(device, ControllerMap.STICK_LEFT, stickX, stickY) { key, down -> key(device, key, down) }
         stickKeys.update(device, ControllerMap.STICK_RIGHT, rightX, rightY) { key, down -> key(device, key, down) }
         hat(device, pad, hatX, hatY)

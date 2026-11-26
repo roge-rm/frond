@@ -260,6 +260,37 @@ class ZodiacTest {
         assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_X, -32768)), events)
     }
 
+    @Test fun eachStickAxisTakesAnyControllerAxisAndCanBeInverted() {
+        // Old saved values are the presets they were.
+        assertEquals(ZodiacStick.LEFT, ControllerMap.decode("96:app1", zodiac).stick)
+        val oldRight = ControllerMap.decode("96:app1,stick:right", zodiac)
+        assertEquals(StickAxis(PadAxis.RIGHT_X), oldRight.stickX)
+        assertEquals(StickAxis(PadAxis.RIGHT_Y), oldRight.stickY)
+        assertEquals(PadAxis.NONE, ControllerMap.decode("stick:none", zodiac).stickX.axis)
+        // Right stick X, left stick Y upside down; the keys at those axes' ends come off.
+        val rightLeft = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.LEFT)
+        val leftUp = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.UP)
+        val custom = ControllerMap.defaults(zodiac).assign(PalmButton.APP1, rightLeft).assign(PalmButton.APP2, leftUp)
+            .withStickAxis(false, PadAxis.RIGHT_X, false).withStickAxis(true, PadAxis.LEFT_Y, true)
+        assertEquals(ZodiacStick.CUSTOM, custom.stick)
+        assertFalse(rightLeft in custom.keys)
+        assertFalse(leftUp in custom.keys)
+        assertTrue(custom.encode().endsWith(",stickx:rightx,sticky:-lefty"))
+        assertEquals(custom, ControllerMap.decode(custom.encode(), zodiac))
+        assertEquals(ZodiacStick.LEFT, ControllerMap.decode("stickx:sideways,sticky:-", zodiac).stick)
+
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(custom) { events += it }
+        pad.axes(1, 1f, 0.5f, 0f, 0f, 0f, 0f, rightX = -1f, rightY = 0f)
+        assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_X, -32768), Axis(1, ZodiacPad.AXIS_LEFT_Y, -16383)), events)
+        // A trigger can be an axis.
+        pad.replaceMap(custom.withStickAxis(false, PadAxis.NONE, true).withStickAxis(true, PadAxis.RIGHT_TRIGGER, false))
+        events.clear()
+        pad.axes(2, 1f, 1f, 0f, 0f, 0f, 1f)
+        assertEquals(listOf(Axis(2, ZodiacPad.AXIS_LEFT_Y, 32767)), events)
+        assertEquals(ZodiacStick.LEFT, custom.withStick(ZodiacStick.LEFT).stick)
+    }
+
     @Test fun aReboundDpadDirectionIsSavedAndUsed() {
         // A hat d-pad is assigned while a button waits, as the d-pad key.
         val assigned = mutableListOf<Pair<Int, Boolean>>()

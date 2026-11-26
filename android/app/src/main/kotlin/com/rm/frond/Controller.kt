@@ -98,20 +98,59 @@ enum class PalmButton(val id: String) {
     }
 }
 
-// The controller stick that moves the Zodiac's analogue stick. Saved as the desktop's ControllerMap.h does.
-enum class ZodiacStick(val id: String, val label: String) {
-    LEFT("left", "Left stick"), RIGHT("right", "Right stick"), NONE("none", "None");
+// A controller axis that can move the Zodiac's analogue stick: a stick axis or a trigger. Saved as the
+// desktop's ControllerMap.h does.
+enum class PadAxis(val id: String, val label: String) {
+    NONE("none", "None"), LEFT_X("leftx", "Left stick X"), LEFT_Y("lefty", "Left stick Y"),
+    RIGHT_X("rightx", "Right stick X"), RIGHT_Y("righty", "Right stick Y"),
+    LEFT_TRIGGER("lefttrigger", "L2"), RIGHT_TRIGGER("righttrigger", "R2");
+
+    // The controller keys at this axis's ends, which come off the map once it moves the stick.
+    val keys: Set<Int> get() = when (this) {
+        NONE -> emptySet()
+        LEFT_X -> setOf(ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.LEFT), ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.RIGHT))
+        LEFT_Y -> setOf(ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.UP), ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.DOWN))
+        RIGHT_X -> setOf(ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.LEFT), ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.RIGHT))
+        RIGHT_Y -> setOf(ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.UP), ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.DOWN))
+        LEFT_TRIGGER -> setOf(KeyEvent.KEYCODE_BUTTON_L2)
+        RIGHT_TRIGGER -> setOf(KeyEvent.KEYCODE_BUTTON_R2)
+    }
 
     companion object {
         fun byId(id: String) = entries.firstOrNull { it.id == id }
     }
 }
 
+// One of the Zodiac stick's two axes: the controller axis that moves it, and whether it runs backwards.
+data class StickAxis(val axis: PadAxis, val invert: Boolean = false)
+
+// The presets for the two stick axes: the controller's left or right stick, or none. Anything else is custom.
+enum class ZodiacStick(val id: String, val label: String) {
+    LEFT("left", "Left stick"), RIGHT("right", "Right stick"), NONE("none", "None"), CUSTOM("custom", "Custom");
+
+    companion object {
+        fun byId(id: String) = entries.firstOrNull { it.id == id && it != CUSTOM }
+    }
+}
+
 // Which controller key (an Android keycode, or a stick direction as stickKey numbers it) presses which
 // Palm button. One key presses one button; a button can have more than one key. The d-pad hat and left
-// stick always drive the 5-way, and on the Zodiac `stick` is the one that moves its analogue stick
-// (saved as a "stick:right" or "stick:none" entry, left when missing, which an older app skips).
-data class ControllerMap(val keys: Map<Int, PalmButton>, val stick: ZodiacStick = ZodiacStick.LEFT) {
+// stick always drive the 5-way, and on the Zodiac stickX and stickY are the controller axes that move its
+// analogue stick, left stick by default. A preset is saved as a "stick:right" or "stick:none" entry (nothing
+// for left, which an older app skips); other choices are "stickx:AXIS" and "sticky:AXIS", with a leading
+// "-" on the axis name for inverted.
+data class ControllerMap(
+    val keys: Map<Int, PalmButton>,
+    val stickX: StickAxis = StickAxis(PadAxis.LEFT_X),
+    val stickY: StickAxis = StickAxis(PadAxis.LEFT_Y),
+) {
+    val stick: ZodiacStick get() = when {
+        stickX == StickAxis(PadAxis.LEFT_X) && stickY == StickAxis(PadAxis.LEFT_Y) -> ZodiacStick.LEFT
+        stickX == StickAxis(PadAxis.RIGHT_X) && stickY == StickAxis(PadAxis.RIGHT_Y) -> ZodiacStick.RIGHT
+        stickX.axis == PadAxis.NONE && stickY.axis == PadAxis.NONE -> ZodiacStick.NONE
+        else -> ZodiacStick.CUSTOM
+    }
+
     fun keysFor(button: PalmButton): List<Int> = keys.filterValues { it == button }.keys.sorted()
 
     // Adds key to button's keys, taking it from whatever it pressed before.
@@ -122,20 +161,35 @@ data class ControllerMap(val keys: Map<Int, PalmButton>, val stick: ZodiacStick 
 
     fun clear(button: PalmButton): ControllerMap = copy(keys = keys.filterValues { it != button })
 
-    // Picks the Zodiac's stick and takes that stick's direction keys off, so it only moves the stick.
+    // Picks a preset and takes that stick's direction keys off, so it only moves the stick. Custom changes nothing.
     fun withStick(chosen: ZodiacStick): ControllerMap {
-        val stickIndex = when (chosen) {
-            ZodiacStick.LEFT -> STICK_LEFT
-            ZodiacStick.RIGHT -> STICK_RIGHT
-            ZodiacStick.NONE -> return copy(stick = chosen)
+        val (x, y) = when (chosen) {
+            ZodiacStick.LEFT -> PadAxis.LEFT_X to PadAxis.LEFT_Y
+            ZodiacStick.RIGHT -> PadAxis.RIGHT_X to PadAxis.RIGHT_Y
+            ZodiacStick.NONE -> PadAxis.NONE to PadAxis.NONE
+            ZodiacStick.CUSTOM -> return this
         }
-        val own = StickDirection.entries.map { stickKey(stickIndex, it) }.toSet()
-        return ControllerMap(keys - own, chosen)
+        return ControllerMap(keys - x.keys - y.keys, StickAxis(x), StickAxis(y))
+    }
+
+    // Sets the stick's X (or Y) axis and takes the keys at that axis's ends off.
+    fun withStickAxis(y: Boolean, axis: PadAxis, invert: Boolean): ControllerMap {
+        val bound = StickAxis(axis, axis != PadAxis.NONE && invert)
+        val rest = copy(keys = keys - axis.keys)
+        return if (y) rest.copy(stickY = bound) else rest.copy(stickX = bound)
     }
 
     fun encode(): String {
-        val entries = keys.entries.sortedBy { it.key }.map { "${it.key}:${it.value.id}" }
-        return (if (stick == ZodiacStick.LEFT) entries else entries + "stick:${stick.id}").joinToString(",")
+        val entries = keys.entries.sortedBy { it.key }.map { "${it.key}:${it.value.id}" }.toMutableList()
+        when (val chosen = stick) {
+            ZodiacStick.LEFT -> {}
+            ZodiacStick.CUSTOM -> {
+                entries += "stickx:${if (stickX.invert) "-" else ""}${stickX.axis.id}"
+                entries += "sticky:${if (stickY.invert) "-" else ""}${stickY.axis.id}"
+            }
+            else -> entries += "stick:${chosen.id}"
+        }
+        return entries.joinToString(",")
     }
 
     companion object {
@@ -210,19 +264,29 @@ data class ControllerMap(val keys: Map<Int, PalmButton>, val stick: ZodiacStick 
             if (text == null) return defaults(device)
             val allowed = PalmButton.on(device)
             val keys = mutableMapOf<Int, PalmButton>()
-            var stick = ZodiacStick.LEFT
+            var stickX = StickAxis(PadAxis.LEFT_X)
+            var stickY = StickAxis(PadAxis.LEFT_Y)
             for (entry in text.split(',')) {
                 val parts = entry.split(':')
                 if (parts.size != 2) continue
                 if (parts[0] == "stick") {
-                    stick = ZodiacStick.byId(parts[1]) ?: stick
+                    val preset = ControllerMap(emptyMap()).withStick(ZodiacStick.byId(parts[1]) ?: continue)
+                    stickX = preset.stickX
+                    stickY = preset.stickY
+                    continue
+                }
+                if (parts[0] == "stickx" || parts[0] == "sticky") {
+                    val invert = parts[1].startsWith("-")
+                    val axis = PadAxis.byId(parts[1].removePrefix("-")) ?: continue
+                    val bound = StickAxis(axis, axis != PadAxis.NONE && invert)
+                    if (parts[0] == "sticky") stickY = bound else stickX = bound
                     continue
                 }
                 val key = parts[0].toIntOrNull() ?: continue
                 val button = PalmButton.byId(parts[1])?.takeIf { it in allowed } ?: continue
                 if (key > 0) keys[key] = button
             }
-            return ControllerMap(keys, stick)
+            return ControllerMap(keys, stickX, stickY)
         }
 
         @Suppress("DEPRECATION")

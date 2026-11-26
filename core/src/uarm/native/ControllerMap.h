@@ -164,18 +164,57 @@ inline std::string palmKeyLabel(PalmKey key, const DeviceProfile5& profile) {
     }
 }
 
-// The controller stick that moves the Zodiac's analogue stick, outside the key map.
-enum class PadStick : int { left, right, none };
+// A controller axis that can move the Zodiac's analogue stick: a stick axis, or a trigger (0 to full travel).
+enum class PadAxis : int { none, leftX, leftY, rightX, rightY, leftTrigger, rightTrigger, count };
+inline const char* padAxisId(PadAxis axis) {
+    static const char* const ids[] = {"none", "leftx", "lefty", "rightx", "righty", "lefttrigger", "righttrigger"};
+    static_assert(sizeof(ids) / sizeof(ids[0]) == size_t(PadAxis::count), "a name per controller axis");
+    return int(axis) >= 0 && axis < PadAxis::count ? ids[int(axis)] : "none";
+}
+inline const char* padAxisName(PadAxis axis) {
+    static const char* const names[] = {"None", "Left stick X", "Left stick Y", "Right stick X", "Right stick Y", "L2", "R2"};
+    return int(axis) >= 0 && axis < PadAxis::count ? names[int(axis)] : "None";
+}
+inline bool padAxisFromId(const std::string& id, PadAxis& axis) {
+    for (int i = 0; i < int(PadAxis::count); ++i)
+        if (id == padAxisId(PadAxis(i))) { axis = PadAxis(i); return true; }
+    return false;
+}
+// The controller keys a stick or trigger axis presses at its ends, which come off the map when the axis moves the stick.
+inline void padAxisKeys(PadAxis axis, PadKey& first, PadKey& second) {
+    switch (axis) {
+        case PadAxis::leftX: first = PadKey::leftLeft; second = PadKey::leftRight; break;
+        case PadAxis::leftY: first = PadKey::leftUp; second = PadKey::leftDown; break;
+        case PadAxis::rightX: first = PadKey::rightLeft; second = PadKey::rightRight; break;
+        case PadAxis::rightY: first = PadKey::rightUp; second = PadKey::rightDown; break;
+        case PadAxis::leftTrigger: first = second = PadKey::leftTrigger; break;
+        case PadAxis::rightTrigger: first = second = PadKey::rightTrigger; break;
+        default: first = second = PadKey::count; break;
+    }
+}
+
+// One of the Zodiac stick's two axes: the controller axis that moves it, and whether it runs backwards.
+struct StickAxis {
+    PadAxis axis{PadAxis::none};
+    bool invert{false};
+    bool operator==(const StickAxis& o) const { return axis == o.axis && invert == o.invert; }
+    bool operator!=(const StickAxis& o) const { return !(*this == o); }
+};
+
+// The presets for the two stick axes: the controller's left or right stick, or none. Anything else is custom.
+enum class PadStick : int { left, right, none, custom };
 inline const char* padStickId(PadStick stick) {
     return stick == PadStick::right ? "right" : stick == PadStick::none ? "none" : "left";
 }
 
 // One controller key presses one Palm button; a Palm button can have several keys. On the Zodiac,
-// stick says which controller stick is its analogue stick (saved as "stick:right" or "stick:none",
-// left when missing, so older maps keep the left stick and older cores skip the entry).
+// stickX and stickY say which controller axes move its analogue stick, left stick by default. A preset is
+// saved as "stick:right" or "stick:none" (nothing for left, so older maps keep the left stick and older
+// cores skip the entry); other choices are "stickx:AXIS" and "sticky:AXIS", the axis name with a leading
+// "-" for inverted, or "none".
 struct ControllerMap {
     std::map<PadKey, PalmKey> keys;
-    PadStick stick{PadStick::left};
+    StickAxis stickX{PadAxis::leftX, false}, stickY{PadAxis::leftY, false};
 
     std::vector<PadKey> keysFor(PalmKey button) const {
         std::vector<PadKey> found;
@@ -185,24 +224,51 @@ struct ControllerMap {
     // Takes key from whatever it pressed before.
     void assign(PalmKey button, PadKey key) { keys[key] = button; }
     void remove(PadKey key) { keys.erase(key); }
-    // Picks the Zodiac's stick and takes that stick's direction keys off, so it only moves the stick.
-    void setStick(PadStick chosen) {
-        stick = chosen;
-        if (chosen == PadStick::none) return;
-        const int first = int(chosen == PadStick::left ? PadKey::leftLeft : PadKey::rightLeft);
-        for (int i = first; i < first + 4; ++i) keys.erase(PadKey(i));
+    PadStick preset() const {
+        if (!stickX.invert && !stickY.invert) {
+            if (stickX.axis == PadAxis::leftX && stickY.axis == PadAxis::leftY) return PadStick::left;
+            if (stickX.axis == PadAxis::rightX && stickY.axis == PadAxis::rightY) return PadStick::right;
+        }
+        if (stickX.axis == PadAxis::none && stickY.axis == PadAxis::none) return PadStick::none;
+        return PadStick::custom;
     }
-    bool operator==(const ControllerMap& o) const { return keys == o.keys && stick == o.stick; }
+    // Takes the keys at an axis's ends off, so the axis only moves the stick.
+    void freeAxis(PadAxis axis) {
+        PadKey first, second;
+        padAxisKeys(axis, first, second);
+        if (first != PadKey::count) { keys.erase(first); keys.erase(second); }
+    }
+    // Picks a preset and takes that stick's direction keys off. Custom changes nothing.
+    void setStick(PadStick chosen) {
+        if (chosen == PadStick::custom) return;
+        stickX = {chosen == PadStick::left ? PadAxis::leftX : chosen == PadStick::right ? PadAxis::rightX : PadAxis::none, false};
+        stickY = {chosen == PadStick::left ? PadAxis::leftY : chosen == PadStick::right ? PadAxis::rightY : PadAxis::none, false};
+        freeAxis(stickX.axis);
+        freeAxis(stickY.axis);
+    }
+    // Sets the stick's X (or Y) axis and takes the keys at that axis's ends off.
+    void setStickAxis(bool y, PadAxis axis, bool invert) {
+        (y ? stickY : stickX) = {axis, axis != PadAxis::none && invert};
+        freeAxis(axis);
+    }
+    bool usesAxis(PadAxis axis) const { return axis != PadAxis::none && (stickX.axis == axis || stickY.axis == axis); }
+    bool operator==(const ControllerMap& o) const { return keys == o.keys && stickX == o.stickX && stickY == o.stickY; }
     bool operator!=(const ControllerMap& o) const { return !(*this == o); }
 
     // "key:button,..." in key order, or "none" for an empty map, so it is never an empty argument.
     std::string encode() const {
         std::string text;
-        for (const auto& entry : keys) {
-            if (!text.empty()) text += ',';
-            text += std::string(padKeyId(entry.first)) + ':' + palmKeyId(entry.second);
+        auto add = [&](const std::string& entry) { text += (text.empty() ? "" : ",") + entry; };
+        for (const auto& entry : keys) add(std::string(padKeyId(entry.first)) + ':' + palmKeyId(entry.second));
+        const PadStick chosen = preset();
+        if (chosen == PadStick::custom) {
+            for (const bool y : {false, true}) {
+                const StickAxis& one = y ? stickY : stickX;
+                add(std::string(y ? "sticky:" : "stickx:") + (one.invert ? "-" : "") + padAxisId(one.axis));
+            }
+        } else if (chosen != PadStick::left) {
+            add(std::string("stick:") + padStickId(chosen));
         }
-        if (stick != PadStick::left) text += std::string(text.empty() ? "" : ",") + "stick:" + padStickId(stick);
         return text.empty() ? "none" : text;
     }
 
@@ -267,11 +333,20 @@ inline ControllerMap decodeControllerMap(const std::string& text, const DevicePr
         start = comma + 1;
         const size_t colon = entry.find(':');
         if (colon == std::string::npos) continue;
-        if (entry.compare(0, colon, "stick") == 0) {
+        const std::string name = entry.substr(0, colon);
+        if (name == "stick") {
             const std::string id = entry.substr(colon + 1);
-            if (id == "right") map.stick = PadStick::right;
-            else if (id == "none") map.stick = PadStick::none;
-            else if (id == "left") map.stick = PadStick::left;
+            if (id == "right") map.setStick(PadStick::right);
+            else if (id == "none") map.setStick(PadStick::none);
+            else if (id == "left") map.setStick(PadStick::left);
+            continue;
+        }
+        if (name == "stickx" || name == "sticky") {
+            std::string id = entry.substr(colon + 1);
+            const bool invert = !id.empty() && id[0] == '-';
+            PadAxis axis;
+            if (invert) id.erase(0, 1);
+            if (padAxisFromId(id, axis)) (name == "sticky" ? map.stickY : map.stickX) = {axis, axis != PadAxis::none && invert};
             continue;
         }
         PadKey key;
@@ -295,10 +370,26 @@ struct PadReading {
     PadKeyMask axisHeld{0};
 };
 
-// The axes of the stick that moves the Zodiac's analogue stick; 0, 0 for none.
-inline void padStickAxes(const PadReading& pad, PadStick stick, int16_t& x, int16_t& y) {
-    x = stick == PadStick::left ? pad.leftX : stick == PadStick::right ? pad.rightX : 0;
-    y = stick == PadStick::left ? pad.leftY : stick == PadStick::right ? pad.rightY : 0;
+inline int16_t padAxisValue(const PadReading& pad, PadAxis axis) {
+    switch (axis) {
+        case PadAxis::leftX: return pad.leftX;
+        case PadAxis::leftY: return pad.leftY;
+        case PadAxis::rightX: return pad.rightX;
+        case PadAxis::rightY: return pad.rightY;
+        case PadAxis::leftTrigger: return pad.leftTrigger;
+        case PadAxis::rightTrigger: return pad.rightTrigger;
+        default: return 0;
+    }
+}
+
+// The values of the axes that move the Zodiac's analogue stick, inverted where the map says; 0, 0 for none.
+inline void padStickAxes(const PadReading& pad, const ControllerMap& map, int16_t& x, int16_t& y) {
+    auto one = [&](const StickAxis& bound) {
+        const int value = padAxisValue(pad, bound.axis);
+        return int16_t(bound.invert ? std::min(-value, 32767) : value);
+    };
+    x = one(map.stickX);
+    y = one(map.stickY);
 }
 
 // The controller keys a reading holds: its buttons and the axis keys past their press point.

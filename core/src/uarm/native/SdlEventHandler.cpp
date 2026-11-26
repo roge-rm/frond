@@ -306,20 +306,17 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
             case SDL_CONTROLLERAXISMOTION: {
                 PadReading& one = pads[event.caxis.which];
                 const int16_t value = event.caxis.value;
-                const PadStick stickAxes = controllerMap.stick;
+                PadAxis moved = PadAxis::none;
                 switch (event.caxis.axis) {
-                    case SDL_CONTROLLER_AXIS_LEFTX: one.leftX = value; break;
-                    case SDL_CONTROLLER_AXIS_LEFTY: one.leftY = value; break;
-                    case SDL_CONTROLLER_AXIS_RIGHTX: one.rightX = value; break;
-                    case SDL_CONTROLLER_AXIS_RIGHTY: one.rightY = value; break;
-                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: one.leftTrigger = value; break;
-                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: one.rightTrigger = value; break;
+                    case SDL_CONTROLLER_AXIS_LEFTX: one.leftX = value; moved = PadAxis::leftX; break;
+                    case SDL_CONTROLLER_AXIS_LEFTY: one.leftY = value; moved = PadAxis::leftY; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTX: one.rightX = value; moved = PadAxis::rightX; break;
+                    case SDL_CONTROLLER_AXIS_RIGHTY: one.rightY = value; moved = PadAxis::rightY; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERLEFT: one.leftTrigger = value; moved = PadAxis::leftTrigger; break;
+                    case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: one.rightTrigger = value; moved = PadAxis::rightTrigger; break;
                     default: break;
                 }
-                const bool leftAxis = event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX || event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY;
-                const bool rightAxis = event.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTX || event.caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY;
-                if ((stickAxes == PadStick::left && leftAxis) || (stickAxes == PadStick::right && rightAxis))
-                    lastStickPad = event.caxis.which;
+                if (controllerMap.usesAxis(moved)) lastStickPad = event.caxis.which;
                 UpdateGamepad();
                 break;
             }
@@ -556,8 +553,17 @@ void SdlEventHandler::ReleaseInputs() {
     // taken off the device: the axes stay, so a stick still pushed is back when focus returns.
     for (auto& entry : pads) {
         PadReading kept;
-        if (controllerMap.stick == PadStick::right) { kept.rightX = entry.second.rightX; kept.rightY = entry.second.rightY; }
-        else { kept.leftX = entry.second.leftX; kept.leftY = entry.second.leftY; }
+        for (const PadAxis axis : {controllerMap.stickX.axis, controllerMap.stickY.axis}) {
+            switch (axis) {
+                case PadAxis::leftX: kept.leftX = entry.second.leftX; break;
+                case PadAxis::leftY: kept.leftY = entry.second.leftY; break;
+                case PadAxis::rightX: kept.rightX = entry.second.rightX; break;
+                case PadAxis::rightY: kept.rightY = entry.second.rightY; break;
+                case PadAxis::leftTrigger: kept.leftTrigger = entry.second.leftTrigger; break;
+                case PadAxis::rightTrigger: kept.rightTrigger = entry.second.rightTrigger; break;
+                default: break;
+            }
+        }
         entry.second = kept;
     }
     padFocused = false;
@@ -646,8 +652,7 @@ void SdlEventHandler::SetControllerMap(const ControllerMap& map) {
                 SDL_GameControllerOpen(i);
     UpdateGamepad();
 }
-// A controller key is held if any controller holds it. The Zodiac's stick (the map's stick: left, right
-// or none) is the one moved last, or while that one is at rest or gone, the first controller with it pushed.
+// A controller key is held if any controller holds it. The Zodiac's stick (the map's stick axes) is the one moved last, or while that one is at rest or gone, the first controller with it pushed.
 // A key the controller holds counts with the built-in holds, so a key held some other way too goes
 // down once and comes up when the last of them lets go.
 void SdlEventHandler::UpdateGamepad() {
@@ -658,7 +663,7 @@ void SdlEventHandler::UpdateGamepad() {
     int16_t stickX = 0, stickY = 0;
     auto pushed = [&](const PadReading& pad) {
         int16_t x, y;
-        padStickAxes(pad, controllerMap.stick, x, y);
+        padStickAxes(pad, controllerMap, x, y);
         if (!x && !y) return false;
         stickX = x;
         stickY = y;

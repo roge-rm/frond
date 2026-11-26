@@ -2890,6 +2890,14 @@ static void zodiacControls() {
         padAxis(SDL_CONTROLLER_AXIS_LEFTY,32767);guest.noStick();
         padAxis(SDL_CONTROLLER_AXIS_RIGHTX,0);st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);
         padAxis(SDL_CONTROLLER_AXIS_LEFTY,0);
+        // One axis at a time: X from the right stick's X upside down, Y from the left stick's Y.
+        ControllerMap custom=defaults;custom.setStickAxis(false,PadAxis::rightX,true);
+        input.SetControllerMap(custom);guest.expect({});
+        padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);st=guest.lastStick();assert(st.x==-1 && st.y==0);guest.expect({});
+        padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);guest.noStick();
+        padAxis(SDL_CONTROLLER_AXIS_LEFTY,-32768);st=guest.lastStick();assert(st.x==-1 && st.y==-1);
+        padAxis(SDL_CONTROLLER_AXIS_LEFTY,0);padAxis(SDL_CONTROLLER_AXIS_RIGHTX,0);st=guest.lastStick();assert(!input.Stick().held);
+        padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);
         ControllerMap none=defaults;none.setStick(PadStick::none);
         input.SetControllerMap(none);
         padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);guest.noStick();

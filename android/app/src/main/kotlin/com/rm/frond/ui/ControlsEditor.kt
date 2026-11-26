@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -24,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.rm.frond.ControllerMap
 import com.rm.frond.Device
+import com.rm.frond.PadAxis
 import com.rm.frond.PalmButton
 import com.rm.frond.ZodiacStick
 
@@ -51,6 +53,12 @@ class ControlsEditor(private val context: Context, val device: Device, val mapDe
         if (stick != map.stick) change(map.withStick(stick))
     }
 
+    fun chooseAxis(y: Boolean, axis: PadAxis, invert: Boolean) {
+        capturing = null
+        val bound = if (y) map.stickY else map.stickX
+        if (axis != bound.axis || (axis != PadAxis.NONE && invert != bound.invert)) change(map.withStickAxis(y, axis, invert))
+    }
+
     fun clearButton(button: PalmButton) {
         capturing = null
         change(map.clear(button))
@@ -74,7 +82,11 @@ class ControlsEditor(private val context: Context, val device: Device, val mapDe
 @Composable
 fun ControllerButtons(editor: ControlsEditor) {
     val device = editor.device
-    if (editor.mapDevice.zodiac) ZodiacStickRow(editor)
+    if (editor.mapDevice.zodiac) {
+        ZodiacStickRow(editor)
+        ZodiacAxisRow(editor, "Stick X", false)
+        ZodiacAxisRow(editor, "Stick Y", true)
+    }
     for (button in PalmButton.listed(editor.mapDevice)) {
         val waiting = editor.capturing == button
         Row(
@@ -121,9 +133,38 @@ private fun ZodiacStickRow(editor: ControlsEditor) {
             Text(editor.map.stick.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            for (stick in ZodiacStick.entries) {
+            for (stick in ZodiacStick.entries.filter { it != ZodiacStick.CUSTOM }) {
                 DropdownMenuItem(text = { Text(stick.label) }, onClick = { open = false; editor.chooseStick(stick) })
             }
         }
+    }
+}
+
+// One of the Zodiac stick's axes: the controller axis that moves it, and Invert.
+@Composable
+private fun ZodiacAxisRow(editor: ControlsEditor, title: String, y: Boolean) {
+    var open by remember { mutableStateOf(false) }
+    val bound = if (y) editor.map.stickY else editor.map.stickX
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.weight(1f)) {
+            Row(
+                Modifier.fillMaxWidth().clickableRow { editor.capturing = null; open = true }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                Text(bound.axis.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                for (axis in PadAxis.entries) {
+                    DropdownMenuItem(text = { Text(axis.label) }, onClick = { open = false; editor.chooseAxis(y, axis, bound.invert) })
+                }
+            }
+        }
+        Text("Invert", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 12.dp))
+        Checkbox(
+            checked = bound.invert,
+            enabled = bound.axis != PadAxis.NONE,
+            onCheckedChange = { editor.chooseAxis(y, bound.axis, it) },
+        )
     }
 }
