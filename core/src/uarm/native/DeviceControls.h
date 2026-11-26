@@ -19,7 +19,7 @@ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, ri
                                trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
                                calendarGrid, menu, phoneEnd };
 enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350, m125, v, m100, m500,
-                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, treo650 };
+                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, treo650, zire31 };
 // Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
 // it (around), and only the current arrangement's keys are shown.
@@ -597,6 +597,22 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     };
     static const DeviceControlProfile treo650Profile{320,252,treo650,std::size(treo650),{102,36,106,70},35,{135,58,40,26},
                                                      DeviceControlStyle::treo650,0.42f,1,0,144};
+    // Zire 31 on a 160-wide screen, 2 units per pixel: a raised panel on the blue body with
+    // Calendar and Contacts as dark rounded squares either side of a black rounded-square
+    // five-way with an oval select key. The power key with its green light sits outside the
+    // screen's width on the real one, so it's pulled in to the far left.
+    static const DeviceButton zire31[] = {
+        {keyIdPower, {2,38,13,34}, "Power", DeviceControlIcon::power},
+        {keyIdHard1, {30,31,48,48}, "Calendar", DeviceControlIcon::calendar},
+        {keyIdHard2, {242,31,48,48}, "Contacts", DeviceControlIcon::contacts},
+        {keyIdUp, {150,11,20,16}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {150,86,20,16}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {117,46,18,20}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {185,46,18,20}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {140,42,40,28}, "Select", DeviceControlIcon::select},
+    };
+    static const DeviceControlProfile zire31Profile{320,112,zire31,std::size(zire31),{114,8,92,96},30,{140,42,40,28},
+                                                    DeviceControlStyle::zire31,0.3f,2};
     // CLIE PEG-T415 under its 320-wide screen, 1 unit per pixel: four wide, flat chrome slats
     // edge to edge (Date Book, Address, To Do, Memo Pad) either side of a narrow rocker split
     // across its middle, under a dark metal strip with the keys' icons stamped on it. The Jog
@@ -636,6 +652,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::tg50: return gamepad ? tg50GamepadProfile : tg50Profile;
         case DeviceArt::t415: return t415Profile;
         case DeviceArt::treo650: return treo650Profile;
+        case DeviceArt::zire31: return zire31Profile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
         case DeviceArt::hpIpaqRx1950: return rx1950Profile;
@@ -1090,9 +1107,9 @@ inline DanaLayout danaLayout(int viewWidth, int viewHeight, bool keyboard) {
 
 // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
 // rectangles only place the artwork.
-enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast };
+enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast, hotSync };
 // E2 and Zire 72: two Graffiti areas between full-height lines; the 68k Palms: one rounded box.
-enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500 };
+enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500, zire31 };
 struct SilkscreenButton {
     SDL_Rect bounds;
     const char* label;
@@ -1217,6 +1234,21 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     };
     static const DeviceSilkscreen t415Silkscreen{320,128,t415,std::size(t415),{52,16,122,106},{174,16,94,108},
                                                  SilkscreenStyle::t415,1};
+    // Zire 31: the NOR's 'aslk' (at 0x7f0c0), in units of half an LCD pixel from row 160, 64 rows
+    // deep. HotSync and Find run to x 162 in the ROM and the keyboards to row 228; kept to the
+    // panel here.
+    static const SilkscreenButton zire31[] = {
+        {{0,4,48,60}, "Home", SilkscreenIcon::home},
+        {{0,64,48,64}, "Menu", SilkscreenIcon::menu},
+        {{276,4,44,60}, "HotSync", SilkscreenIcon::hotSync},
+        {{276,64,44,64}, "Find", SilkscreenIcon::find},
+        {{48,4,24,22}, "Clock", SilkscreenIcon::clock},
+        {{252,4,24,22}, "Display", SilkscreenIcon::contrast},
+        {{48,108,32,28}, "Letter keyboard", SilkscreenIcon::letters},
+        {{244,108,32,28}, "Number keyboard", SilkscreenIcon::numbers},
+    };
+    static const DeviceSilkscreen zire31Silkscreen{320,128,zire31,std::size(zire31),{54,4,124,112},{178,4,88,112},
+                                                   SilkscreenStyle::zire31,2};
     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
     switch(art) {
         case DeviceArt::e2: return e2Silkscreen;
@@ -1230,6 +1262,7 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
         case DeviceArt::v: case DeviceArt::vx: return vSilkscreen;
         case DeviceArt::m500: case DeviceArt::c500: return m500Silkscreen;
         case DeviceArt::t415: return t415Silkscreen;
+        case DeviceArt::zire31: return zire31Silkscreen;
         default: return none;
     }
 }

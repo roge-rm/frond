@@ -198,11 +198,52 @@ void treo650(const std::string& out) {
         checkHeld(d,key,1);
     renders(d,out,treoKey(13));
 }
+
+void zire31(const std::string& out) {
+    const Device d{"zire-31",DeviceArt::zire31,160,160};
+    const auto& p=deviceControls(d.art);
+    const auto& silk=deviceSilkscreen(d.art);
+    assert(p.width==320 && p.height==112 && p.unit==2 && p.count==8 && p.style==DeviceControlStyle::zire31);
+    assert(silk.count==8 && silk.unit==2 && silk.height==128 && silkRows(d)==64 && silk.style==SilkscreenStyle::zire31);
+    for(size_t i=0;i<silk.count;++i) {
+        const auto& r=silk.buttons[i].bounds;
+        assert(r.x>=0 && r.y>=0 && r.x+r.w<=silk.width && r.y<silk.height);
+    }
+    checkKeys(d);
+    // Window pixels: the strip starts under the 160 LCD rows and the 64 silkscreen rows.
+    const int top=224;
+    assert(deviceControlsHeight(p,160)==56);
+    assert(keyAt(d,80,top+28)==keyIdSelect && keyAt(d,80,top+9)==keyIdUp && keyAt(d,62,top+28)==keyIdLeft);
+    assert(keyAt(d,27,top+27)==keyIdHard1 && keyAt(d,133,top+27)==keyIdHard2 && keyAt(d,4,top+27)==keyIdPower);
+    assert(keyAt(d,48,top+27)==keyInvalid && keyAt(d,110,top+50)==keyInvalid && keyAt(d,27,top+50)==keyInvalid);
+
+    // Colours at 2x: the black silkscreen and its light discs, the blue body, dark app keys,
+    // the black five-way and the green power light.
+    Image image(320,imageHeight(d,2));
+    drawDevice(image,d,2,0);
+    auto pixel=[&](float x,float y) {return image.at(int(x*2),int(y*2));};
+    assert(brightness(pixel(80,163))<150 && brightness(pixel(12,176))>450 && brightness(pixel(149,176))>450);
+    const auto blue=pixel(5,top+6);
+    assert(blue.b>blue.r+30);
+    const auto app=pixel(27,top+31);
+    assert(brightness(app)<330 && app.b>app.r);
+    assert(brightness(pixel(64,top+10))<200);
+    int green=0;
+    for(int y=(top+19)*2;y<(top+27)*2;++y)for(int x=0;x<20;++x) {
+        const auto c=image.at(x,y);
+        if(c.g>c.r+60 && c.g>c.b+40)++green;
+    }
+    assert(green>4);
+
+    for(KeyId key:{keyIdPower,keyIdHard1,keyIdHard2,keyIdSelect,keyIdUp,keyIdRight})checkHeld(d,key,2);
+    renders(d,out,keyIdHard1);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::string out=argc>1 ? argv[1] : "";
     treo650(out);
+    zire31(out);
     std::puts("palm candidate art ok");
     return 0;
 }

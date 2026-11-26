@@ -1208,6 +1208,16 @@ float silkscreenDiscGlyph(SilkscreenIcon icon, float x, float y) {
         }
         case SilkscreenIcon::find:
             return std::min(ring(x,y,2.5f,-2.5f,6.3f)-1.8f,segment(x,y,-2.6f,2.6f,-8.6f,8.6f)-2.3f);
+        case SilkscreenIcon::hotSync: {
+            // Two arrows chasing each other clockwise round a circle.
+            float d=1e9f;
+            for(float a0:{190.f,10.f}) {
+                const float a1=degrees(a0+118),c=std::cos(a1),s=std::sin(a1);
+                const std::array<std::array<float,2>,3> head{{{9*c-5.5f*s,9*s+5.5f*c},{14.5f*c,14.5f*s},{3.5f*c,3.5f*s}}};
+                d=std::min({d,arc(x,y,0,0,9,degrees(a0),a1)-2.2f,polygon(x,y,head)});
+            }
+            return d;
+        }
         default: return 1e9f;
     }
 }
@@ -1246,6 +1256,9 @@ void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
                               Rgb{46,49,48},Rgb{20,22,21},Rgb{186,194,186},0.06f,1,2,1.4f} :
         iiix ? SilkscreenLook{Rgb{178,188,164},Rgb{166,176,152},Rgb{60,64,58},Rgb{34,37,34},
                               Rgb{58,62,60},Rgb{34,37,36},Rgb{188,198,176},0.07f,0.8f,6,1.25f,0.85f} :
+        // Zire 31: a black panel printed light grey, with light grey discs and dark glyphs.
+        silk.style==SilkscreenStyle::zire31 ? SilkscreenLook{Rgb{34,35,40},Rgb{22,23,27},Rgb{8,8,10},Rgb{176,180,188},
+                                                             Rgb{204,207,212},Rgb{168,172,180},Rgb{30,32,38},0.06f,1,4,1.6f,1.3f} :
         silk.style==SilkscreenStyle::zire72 ? SilkscreenLook{Rgb{82,87,100},Rgb{74,79,92},Rgb{36,39,46},Rgb{178,183,194},
                                                              Rgb{196,200,208},Rgb{170,175,184},Rgb{50,54,64},0.08f,0.5f,4,1}
       : m515 ? SilkscreenLook{Rgb{132,139,128},Rgb{122,129,118},Rgb{70,74,68},Rgb{236,240,232},
@@ -2863,6 +2876,66 @@ void paintTreo650Controls(Canvas& canvas, const DeviceControlProfile& profile, i
     }
 }
 
+// Zire 31: metallic blue body with a raised panel holding the keys, dark blue-grey app keys with
+// light icons, a black five-way and a small power key with a green light above it.
+void paintZire31Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+    const float H=profile.height;
+    const int ox=(width-profile.width)/2;
+    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+    auto all=[&](float,float) {return 1.f;};
+    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+    const Rgb body{78,100,140};
+    canvas.paint(0,0,width,H,all,[&](float x,float y,Rgb) {
+        Rgb c=mix(body*1.08f,body*0.74f,std::pow(y/H,1.1f));
+        c=c+Rgb{3,3,4}*std::sin(y*7.9f+std::sin(x*0.27f)*0.8f);
+        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
+        return c*(1-0.22f*t*t);
+    });
+    // Lower edge of the silkscreen bezel.
+    canvas.paint(0,0,width,4,[&](float,float y) {return canvas.edge(y-1.4f);},[](float,float,Rgb) {return Rgb{20,24,34};});
+    canvas.paint(0,0,width,6,[&](float,float y) {return canvas.edge(std::fabs(y-2.8f)-0.8f)*0.7f;},
+                 [](float,float,Rgb) {return Rgb{170,190,220};});
+    // The raised panel round the keys: a shadow, a lighter top edge and a gently lit face.
+    const SDL_Rect panel=shifted({19,6,286,100});
+    auto dpanel=[&](float x,float y) {return deviceRoundedDistance(panel,42,x,y);};
+    canvas.paint(panel.x-4,panel.y-2,panel.x+panel.w+4,panel.y+panel.h+6,[&](float x,float y) {
+        return canvas.edge(dpanel(x,y-2.5f)-1)*0.5f;
+    },[](float,float,Rgb) {return Rgb{22,28,42};});
+    canvas.paint(panel.x-1,panel.y-1,panel.x+panel.w+1,panel.y+panel.h+1,[&](float x,float y) {return canvas.edge(dpanel(x,y));},
+                 [&](float x,float y,Rgb) {
+        Rgb c=mix(body*1.18f,body*0.86f,clamp01((y-panel.y)/panel.h));
+        c=mix(c*1.15f,c,clamp01(-dpanel(x,y)/4));
+        return c+Rgb{3,3,4}*std::sin(y*7.9f+std::sin(x*0.27f)*0.8f);
+    });
+    canvas.paint(panel.x,panel.y,panel.x+panel.w,panel.y+panel.h,[&](float x,float y) {
+        return canvas.edge(std::fabs(dpanel(x,y)+1)-0.5f)*clamp01((panel.y+panel.h*0.6f-y)/(panel.h*0.6f));
+    },[](float,float,Rgb) {return Rgb{196,212,236};});
+
+    const SilverKeyLook keys{Rgb{14,17,26},Rgb{98,110,132},Rgb{50,58,76},Rgb{8,8,10},Rgb{150,170,204},
+                             Rgb{214,222,236},Rgb{170,178,194},2.2f,0.72f};
+    const SilverKeyLook powerLook{Rgb{14,17,26},Rgb{150,166,196},Rgb{88,102,132},Rgb{6,6,8},Rgb{160,180,212},
+                                  Rgb{30,36,52},Rgb{24,28,40},1.2f,0.75f};
+    for(size_t i=0;i<profile.count;++i) {
+        const auto& button=profile.buttons[i];
+        if(deviceNavigatorButton(profile,button))continue;
+        const SDL_Rect key=shifted(button.bounds);
+        const bool power=button.key==keyIdPower;
+        paintSilverKey(canvas,key,deviceButtonCorner(profile,key),down(button.key),button.icon,power ? 0.45f : 1.1f,
+                       power ? powerLook : keys,!power);
+        if(power) {
+            // The green charge light: a short bar on the key's upper half.
+            const float lx=key.x+key.w*0.5f,ly0=key.y+6,ly1=key.y+14;
+            canvas.paint(lx-3,ly0-3,lx+3,ly1+3,[&](float x,float y) {return canvas.edge(segment(x,y,lx,ly0,lx,ly1)-1.3f);},
+                         [](float,float,Rgb) {return Rgb{70,200,96};});
+        }
+    }
+    // Black rounded-square five-way with a dark oval select key.
+    if(profile.navigator.w>0)
+        paintNavigator(canvas,profile,ox,pressed,{Rgb{6,7,10},Rgb{84,88,98},Rgb{20,21,25},Rgb{26,27,31},
+                                                  Rgb{48,50,56},Rgb{150,156,172},7,0.45f,0.3f,0.7f,
+                                                  Rgb{4,4,6},Rgb{64,66,74},Rgb{26,27,32},Rgb{120,124,136}});
+}
+
 // iPAQ 210: gloss black, a thin strip of four flat keys split by seams, each with a lighter
 // lip along its bottom, and a polished chrome shield five-way with a recessed select key.
 void paintIpaq210Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
@@ -3459,6 +3532,7 @@ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& prof
         case DeviceControlStyle::rx1950: paintRx1950Controls(canvas,profile,width*u,pressed,stick);break;
         case DeviceControlStyle::h4350: paintH4350Controls(canvas,profile,width*u,pressed,view);break;
         case DeviceControlStyle::treo650: paintTreo650Controls(canvas,profile,width*u,pressed,view);break;
+        case DeviceControlStyle::zire31: paintZire31Controls(canvas,profile,width*u,pressed);break;
         case DeviceControlStyle::t415: paintT415Controls(canvas,profile,beside ? profile.width : width*u,pressed,false,beside);break;
         default: paintTxControls(canvas,profile,width*u,pressed);
     }
