@@ -40,6 +40,7 @@ void audioQueueMark(struct AudioQueue* audioQueue, uint64_t guestNs);
 struct AudioQueueState {
     size_t pendingSamples;
     uint64_t generation;
+    uint64_t committed;  // frames pushed so far, as AudioQueueAccounting
 };
 
 // A clear marks a discontinuity; consumers must re-prime for the new stream.
