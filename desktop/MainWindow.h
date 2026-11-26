@@ -3,6 +3,7 @@
 #include <QJsonObject>
 #include "HostBattery.h"
 #include <QMainWindow>
+#include <QSet>
 #include <QSettings>
 #include <QLockFile>
 #include <QPointer>
@@ -180,6 +181,7 @@ class MainWindow : public QMainWindow {
     void embedReply(bool ok, const QString& message);
     void afterEmbedding();
     void afterDevice();
+    void afterIrSync();
     void afterCradle();
     void showCradle(const QString& state);
     void pollGamepad();
@@ -354,6 +356,10 @@ class MainWindow : public QMainWindow {
     QString cradleSetting;
     bool outOfCradle() const;
     bool cradleStartupPending{false};
+    // frond-68k's irda-sync-support answer: whether the running ROM takes IR HotSync, asked at each
+    // start. Sessions whose ROM said no, so Edit settings doesn't offer it either.
+    bool irSyncWorks{true}, irSyncStartupPending{false};
+    QSet<QString> irSyncRefused;
     bool protectionKnown{false}, protection2Known{false}, protectionStartPending{false}, protection2StartPending{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};

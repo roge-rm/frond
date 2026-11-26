@@ -915,6 +915,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
+        irSyncWorks = true; irSyncStartupPending = false;
         holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); cradleSetting.clear(); cradleStartupPending = false; showCamera("pattern");
         mipsTimer->stop();
         batteryTimer->stop();
@@ -1016,6 +1017,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (stopping) { save(); return; }
             if (ok) { if (!syncRunning) notify(message, 0); }
             else { log->appendPlainText(command + ": " + message); notify(message, 8000); }
+            return;
+        }
+        if (command == "irda-sync-support") {
+            const bool startup = irSyncStartupPending;
+            irSyncStartupPending = false;
+            // An older core without the command takes it as it always did.
+            irSyncWorks = !ok || message != "no";
+            if (irSyncWorks) irSyncRefused.remove(sessionPath); else irSyncRefused.insert(sessionPath);
+            refresh();
+            if (stopping) save();
+            else if (startup) afterIrSync();
             return;
         }
         if (command == "cradle-setting") {
@@ -1679,8 +1691,9 @@ void MainWindow::refresh() {
     usb->setEnabled(editable && caps.usb);
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
     // IR HotSync: the HotSync app's IR to a PC/Handheld, on a HotSync device with infrared.
-    offerMode(irda, "sync", hotSyncAvailable && caps.infrared);
-    if (!(hotSyncAvailable && caps.infrared) && irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
+    const bool irSyncAvailable = hotSyncAvailable && caps.infrared && irSyncWorks;
+    offerMode(irda, "sync", irSyncAvailable);
+    if (!irSyncAvailable && irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
     irdaPort->setEnabled(caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp"); irdaPort->setReadOnly(!editable);
     irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
@@ -2182,6 +2195,15 @@ void MainWindow::afterDevice() {
     // Asks the core what it supports, once a second until it answers, then the host battery once a minute.
     batteryTimer->start(1000);
     batteryTick();
+    const auto protocol = frondDesktopSync::protocol(runningDevice);
+    if (frondFirmware::runs68k(runningDevice) && frondFirmware::capabilities(runningDevice).infrared &&
+        frondDesktopSync::available(protocol) && protocol == frondDesktopSync::Protocol::hotSync && send("irda-sync-support")) {
+        irSyncStartupPending = true;
+        return;
+    }
+    afterIrSync();
+}
+void MainWindow::afterIrSync() {
     if (frondFirmware::isZodiac(runningDevice) && send("cradle-setting")) {
         cradleStartupPending = true;
         return;
@@ -2482,6 +2504,11 @@ void MainWindow::editSession(const QString& path) {
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
     MachineSettingsDialog dialog(device, prefs, this);
+    {
+        const auto protocol = frondDesktopSync::protocol(device);
+        const bool hotSync = frondDesktopSync::available(protocol) && protocol == frondDesktopSync::Protocol::hotSync;
+        dialog.controls->offerSync(hotSync, hotSync && !irSyncRefused.contains(canonicalSession(path)));
+    }
     if (frondDesktopSync::available(frondDesktopSync::protocol(device))) {
         auto* sync = new QPushButton(tr("Sync settings…"), &dialog);
         sync->setObjectName("machineSyncSettings");

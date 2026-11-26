@@ -190,7 +190,18 @@ internal fun linkRunSocket(context: Context, name: String): String? {
     return File(folder, "$name-${android.os.Process.myPid()}.sock").path
 }
 
-object IrLink : CoreLink("ir", "irda-mode", "Infrared", "ir")
+object IrLink : CoreLink("ir", "irda-mode", "Infrared", "ir") {
+    // False once frond-68k says the running ROM can't take IR HotSync (irda-sync-support), so Infrared
+    // beaming doesn't offer Sync Manager.
+    @Volatile var syncWorks = true
+
+    // Asks the core; an older core without the command keeps Sync Manager.
+    fun checkSync(control: ControlLink): Boolean {
+        val reply = control.request("irda-sync-support", timeoutSeconds = 10)
+        syncWorks = !(reply.ok && reply.message == "no")
+        return syncWorks
+    }
+}
 
 // Serial is lossless: the engine opens the core's socket only once the channel joins, so the Palm's DSR and DCD
 // mean the far port is open, and the far Palm's RTS low stops the link and drops this one's CTS.

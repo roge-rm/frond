@@ -80,6 +80,10 @@ def main():
                 break
             assert time.monotonic() < end, f"no IR HotSync result in {timeout} s: {state}"
             time.sleep(2)
+        failed = "failed" in state.split(";", 1)[-1].split(":")[0]
+        if failed:
+            frame("failed.png")
+        assert not failed, f"IR HotSync failed: {state}; link went {' > '.join(seen)}"
         if not args.full and backup and "done infrared" not in state:
             frame("backing-up.png")
             assert "sync open" in seen, f"IR HotSync: {state}; link went {' > '.join(seen)}"

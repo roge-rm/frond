@@ -54,6 +54,8 @@ class IrSync : public IrPeer, private IrCommPort {
     IrLap lap;
     IasServer ias;
     IrComm comm;
+    // Bytes from the guest the pipe had no room for yet, at most pendingMax.
+    static constexpr size_t pendingMax = 65536;
     std::deque<uint8_t> pending;
 };
 

@@ -336,6 +336,11 @@ open class FrondActivity : SDLActivity() {
                 }.apply { isDaemon = true }.start()
             }
         }
+        // A 68k ROM before Palm OS 3.3 has no IR HotSync; the core says which this one is.
+        IrLink.syncWorks = true
+        if (launchDevice().runs68k && launchDevice().infrared && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC &&
+            machineSettings.infrared != InfraredChoice.SYNC_MANAGER)
+            link.whenConnected { Thread { IrLink.checkSync(link) }.apply { isDaemon = true }.start() }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
         val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
         val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
@@ -356,7 +361,8 @@ open class FrondActivity : SDLActivity() {
                 Thread({
                     val session = Sessions.forPath(applicationContext, sessionPath)
                     val name = session?.name ?: launchDevice().label
-                    if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
+                    if (infraredSync && launchDevice().runs68k && !IrLink.checkSync(link)) Log.w(TAG, "infrared: IR HotSync needs Palm OS 3.3 or later")
+                    else if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
                         ?.let { Log.w(TAG, "infrared: $it") }
                     if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label,
                         modemSync = session != null)

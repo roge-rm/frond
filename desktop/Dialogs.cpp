@@ -646,6 +646,24 @@ void MachineSettings::setNewMachine() {
     connect(engine, &QComboBox::activated, this, [this] { automaticEngine = false; });
     setDevice(device);
 }
+void MachineSettings::offerSync(bool serialSync, bool infraredSync) {
+    const auto offer = [](QComboBox* combo, bool on, const QString& saved, QStringList after) {
+        int at = combo->findData("sync");
+        if (!on && at >= 0) {
+            if (combo->currentIndex() == at) combo->setCurrentIndex(combo->findData("off"));
+            combo->removeItem(at);
+        }
+        if (!on) return;
+        if (at < 0) {
+            at = 0;
+            for (const auto& data : after) at = std::max(at, combo->findData(data) + 1);
+            combo->insertItem(at, tr("Sync Manager"), "sync");
+        }
+        if (saved == "sync") combo->setCurrentIndex(at);
+    };
+    offer(serial, serialSync, originalPreferences.serial, {"tcp", "modem", "keyboard"});
+    offer(infrared, infraredSync, originalPreferences.infrared, {"tcp", "printer", "phone"});
+}
 void MachineSettings::showPeripherals(bool shown) {
     peripheralsShown = shown;
     setDevice(device);

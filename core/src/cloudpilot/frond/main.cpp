@@ -2843,6 +2843,8 @@ class Runner {
         }
         if (command == "serial-state") return {true, "serial", SerialDescription()};
         if (command == "irda-state") return {true, "infrared", InfraredDescription()};
+        // Whether IR HotSync can run on this ROM, for the UI's Sync Manager choice.
+        if (command == "irda-sync-support") return {true, "infrared", RomHasIrComm() ? "yes" : "no"};
         if (command == "serial-mode" || command == "irda-mode") {
             const bool serial = command == "serial-mode";
             HostLink68k::Kind kind;

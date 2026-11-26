@@ -26,16 +26,28 @@ void IrSync::Service(uint64_t now) {
     lap.Service(now);
 }
 
-// Bytes left from an earlier HotSync aren't the new one's.
+// Bytes left from an earlier HotSync aren't the new one's. After a close the old session has ended
+// its input, so the endpoint starts again with a fresh pipe and the next HotSync can't reach it.
 void IrSync::Opened(uint64_t now) {
     pending.clear();
-    if (auto* pipe = endpoint.Pipe()) pipe->Clear();
+    auto* pipe = endpoint.Pipe();
+    if (!pipe || pipe->Ended()) endpoint.Start(frondSync::Transport::infrared);
+    else pipe->Clear();
 }
 
-void IrSync::Closed(uint64_t now) {}
+// The guest closed IrCOMM or the link went: the Sync Manager reads what came, then sees the end, so
+// a HotSync cut off midway fails instead of waiting for the guest.
+void IrSync::Closed(uint64_t now) {
+    Flush();
+    pending.clear();
+    if (auto* pipe = endpoint.Pipe()) pipe->FinishInput();
+}
 
+// Past pendingMax the excess is dropped, as a serial port overruns.
 void IrSync::FromGuest(const uint8_t* data, size_t size, uint64_t now) {
-    pending.insert(pending.end(), data, data + size);
+    Flush();
+    const size_t room = pendingMax - std::min(pendingMax, pending.size());
+    pending.insert(pending.end(), data, data + std::min(size, room));
     Flush();
 }
 

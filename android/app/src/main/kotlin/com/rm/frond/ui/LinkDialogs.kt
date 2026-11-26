@@ -27,6 +27,7 @@ import com.rm.frond.BeamMode
 import com.rm.frond.BluetoothChoice
 import com.rm.frond.BluetoothLink
 import com.rm.frond.InfraredChoice
+import com.rm.frond.IrLink
 import com.rm.frond.SyncProtocol
 import com.rm.frond.LinkStore
 import com.rm.frond.NetRelay
@@ -245,7 +246,7 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             val current = model.beam.choice
             val choices = remember {
                 InfraredChoice.infraredChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.irPhone,
-                    sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC)
+                    sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC && IrLink.syncWorks)
             }
             // Leaving Printer with output that isn't saved asks first.
             var leaving by remember { mutableStateOf<String?>(null) }
