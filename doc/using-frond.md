@@ -529,7 +529,7 @@ Open **Sync Manager** from **…** on Android or from **…** or **File** on the
 
 Use Frond CSV to keep all fields and data when exporting records. Contacts also support vCard, calendar and tasks support iCalendar, and you can import or export a memo as a UTF-8 text file. iCalendar supports single-day appointments and tasks without repeats or alarms. Records with repeats or alarms can be exported as CSV.
 
-**Connections** can route a Palm OS serial or USB link to **Sync Manager** so you can start HotSync from the handheld. USB and serial HotSync can still go to a PTY or TCP port for external tools.
+**Connections** can route a Palm OS serial, USB or infrared link to **Sync Manager** so you can start HotSync from the handheld. USB and serial HotSync can still go to a PTY or TCP port for external tools.
 
 #### Queue applications from an installer
 
@@ -584,6 +584,10 @@ python3 tools/link-irda.py 5030 5031
 ```
 
 `link-irda.py` reconnects when a device wakes.
+
+### IR HotSync
+
+A Palm OS device with infrared and a **HotSync** button can HotSync over infrared to its Sync Manager profile. Assign the profile in **Sync settings** first, then pick **Sync Manager** in the Infrared list (Linux: the Infrared beaming row; Android: Infrared beaming in Connections, or the machine's settings). In the HotSync app choose **Local**, set the list under the icon to **IR to a PC/Handheld** and tap the icon. The Palm finds "Frond" and syncs as it would in the cradle, only slower, so a full backup of a T|X takes a while. It needs Palm OS 3.3 or later; the Palm III's 3.0 ROM has no IR HotSync. Detach the infrared keyboard first, as they share the port.
 
 ### Infrared keyboard
 
