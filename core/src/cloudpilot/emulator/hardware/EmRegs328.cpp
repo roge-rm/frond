@@ -1160,11 +1160,13 @@ int32 EmRegs328::GetInterruptLevel(void) {
 
     if ((intStatusHi & hwr328IntHiPen) != 0) return 5;
 
-    // Level 4 = SPIM, TMR2, UART, WDT, RTC, KB, PWM, INT0 - INT7.
+    // Level 4 = SPIM, TMR2, UART, WDT, RTC, KB, PWM, INT0 - INT7. A guest stopped for a received
+    // byte (IrLib, serial) wakes on the UART's.
 
     if ((intStatusLo & (hwr328IntLoAllKeys | hwr328IntLoPWM | hwr328IntLoKbd |
                         //	hwr328IntLoLCDC |
-                        hwr328IntLoRTC | hwr328IntLoWDT | hwr328IntLoTimer2 | hwr328IntLoSPIM)) !=
+                        hwr328IntLoRTC | hwr328IntLoWDT | hwr328IntLoUART | hwr328IntLoTimer2 |
+                        hwr328IntLoSPIM)) !=
         0)
         return 4;
 
