@@ -14,20 +14,21 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.channels.ServerSocketChannel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 // How a relayed endpoint (USB HotSync, the debugger) reaches another machine on the network.
 sealed class BeamMode {
     object Off : BeamMode()
-    // Waits on all interfaces for one peer at a time.
-    data class Listen(val port: Int) : BeamMode()
+    data class Listen(val port: Int, val allowNetwork: Boolean = false) : BeamMode()
     data class Connect(val host: String, val port: Int) : BeamMode()
 
-    // Kept in the relay's preferences as off, listen:PORT or connect:HOST:PORT.
+    // Stored as off, listen-local:PORT, listen-network:PORT or connect:HOST:PORT. listen:PORT is what older
+    // versions saved, when listening took network peers.
     fun encode(): String = when (this) {
         Off -> "off"
-        is Listen -> "listen:$port"
+        is Listen -> if (allowNetwork) "listen-network:$port" else "listen-local:$port"
         is Connect -> "connect:${NetRelay.hostPort(host, port)}"
     }
 
@@ -35,7 +36,9 @@ sealed class BeamMode {
         fun decode(text: String?): BeamMode? = when {
             text == null -> null
             text == "off" -> Off
-            text.startsWith("listen:") -> NetRelay.port(text.removePrefix("listen:"))?.let { Listen(it) }
+            text.startsWith("listen:") -> NetRelay.port(text.removePrefix("listen:"))?.let { Listen(it, allowNetwork = true) }
+            text.startsWith("listen-local:") -> NetRelay.port(text.removePrefix("listen-local:"))?.let { Listen(it) }
+            text.startsWith("listen-network:") -> NetRelay.port(text.removePrefix("listen-network:"))?.let { Listen(it, allowNetwork = true) }
             // Saved modes always carry a port; the 1 never applies.
             text.startsWith("connect:") -> NetRelay.address(text.removePrefix("connect:"), 1)?.let { Connect(it.first, it.second) }
             else -> null
@@ -64,6 +67,7 @@ abstract class NetRelay(
         // The peer's address while connected.
         val peer: String? = null,
         val error: String? = null,
+        val listenAddresses: String = "",
     )
 
     // Reads the core's stateCommand reply: null while its endpoint is still tcp on port, otherwise the reason
@@ -94,7 +98,7 @@ abstract class NetRelay(
     // Bumped on every change; threads from an older setting stop.
     @Volatile private var generation = 0
     private var corePort = 0
-    private var server: ServerSocket? = null
+    private var listeners = emptyList<ServerSocketChannel>()
     private var session: Session? = null
     // FrondActivity's control link, for asking the core whether its endpoint is still on our port.
     @Volatile private var link: ControlLink? = null
@@ -152,21 +156,19 @@ abstract class NetRelay(
             corePort = port
             when (mode) {
                 is BeamMode.Listen -> {
-                    val listener = try {
-                        ServerSocket().apply {
-                            reuseAddress = true
-                            bind(InetSocketAddress(mode.port), 4)
-                        }
+                    listeners = try {
+                        TcpListeners.open(mode.port, mode.allowNetwork, 4)
                     } catch (e: IOException) {
-                        null
+                        emptyList()
                     }
-                    if (listener == null) {
+                    if (listeners.isEmpty()) {
                         ++generation
                         failed = "Couldn't wait on port ${mode.port}. Another app may be using it."
                     } else {
-                        server = listener
-                        state.value = Status(mode, Phase.WAITING)
-                        Thread({ accept(gen, mode, listener) }, "FrondRelayWait-$what").apply { isDaemon = true }.start()
+                        state.value = waiting(mode)
+                        for (listener in listeners) {
+                            Thread({ accept(gen, mode, listener.socket()) }, "FrondRelayWait-$what").apply { isDaemon = true }.start()
+                        }
                     }
                 }
                 is BeamMode.Connect -> connectLater(gen, mode)
@@ -190,8 +192,7 @@ abstract class NetRelay(
     fun stop() {
         synchronized(lock) {
             ++generation
-            try { server?.close() } catch (_: IOException) {}
-            server = null
+            closeListeners()
             session?.close()
             session = null
             link = null
@@ -220,6 +221,16 @@ abstract class NetRelay(
             }
         }, "FrondRelayConnect-$what").apply { isDaemon = true }.start()
     }
+
+    // Under lock.
+    private fun closeListeners() {
+        for (listener in listeners) try { listener.close() } catch (_: IOException) {}
+        listeners = emptyList()
+    }
+
+    private fun waiting(mode: BeamMode.Listen) = Status(
+        mode, Phase.WAITING, listenAddresses = TcpListeners.addresses(listeners),
+    )
 
     private fun accept(gen: Int, mode: BeamMode.Listen, listener: ServerSocket) {
         var failures = 0
@@ -261,8 +272,7 @@ abstract class NetRelay(
             synchronized(lock) {
                 if (gen != generation) return
                 ++generation
-                try { server?.close() } catch (_: IOException) {}
-                server = null
+                closeListeners()
                 session?.close()
                 session = null
                 link = null
@@ -287,7 +297,7 @@ abstract class NetRelay(
             if (s.generation != generation) return
             Log.i(TAG, "$what: peer ended (${reason ?: "closed"})")
             state.value = when (val mode = s.mode) {
-                is BeamMode.Listen -> Status(mode, Phase.WAITING)
+                is BeamMode.Listen -> waiting(mode)
                 is BeamMode.Connect -> Status(mode, Phase.DISCONNECTED, error = reason)
                 BeamMode.Off -> Status()
             }
@@ -302,8 +312,7 @@ abstract class NetRelay(
             session = null
             if (s.generation != generation) return
             ++generation
-            try { server?.close() } catch (_: IOException) {}
-            server = null
+            closeListeners()
             Log.i(TAG, "$what: off, $reason")
             state.value = Status(error = reason)
         }
@@ -451,7 +460,7 @@ abstract class NetRelay(
         // HotSync burst.
         const val HELD_MAX = 64 * 1024
         // The core listens on IPv4 only; Android's getLoopbackAddress() is ::1.
-        val LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+        val LOOPBACK: InetAddress = TcpListeners.ipv4Loopback
 
         // "1".."65535", or null.
         fun port(text: String): Int? = text.trim().toIntOrNull()?.takeIf { it in 1..65535 }

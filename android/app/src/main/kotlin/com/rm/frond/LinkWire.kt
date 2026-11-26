@@ -221,6 +221,8 @@ object LinkWire {
         val up: Boolean, val rtt: Long, val keyChanged: Boolean, val forgotten: Boolean, val seen: String, val channels: String,
         // Whose radio Bluetooth uses with it: here or there.
         val bluetoothRadio: String = "here",
+        // False when the link service takes no network connections, so a peer can't reach it.
+        val network: Boolean = true,
     )
 
     fun connectionStatus(c: ConnectionRow): String = when {
@@ -228,6 +230,7 @@ object LinkWire {
         c.forgotten -> "Not paired on ${c.peerName}, pair again"
         c.up -> "Connected · ${c.rtt} ms" + if (c.channels.isNotEmpty()) " · ${c.channels}" else ""
         c.seen.isNotEmpty() -> "Seen at ${c.seen}"
+        !c.network -> "Not seen, network connections are off"
         else -> "Not seen"
     }
 

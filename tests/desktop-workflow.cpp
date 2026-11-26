@@ -37,7 +37,6 @@
 #include <QSpinBox>
 #include <QSlider>
 #include <QProcess>
-#include <QTcpServer>
 #include <QTcpSocket>
 #include <QImage>
 #include "MainWindow.h"
@@ -61,6 +60,7 @@
 #include <QJsonObject>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QNetworkInterface>
 #include <QTcpServer>
 #include <QUdpSocket>
 #include <atomic>
@@ -101,6 +101,7 @@ struct TestHub {
         env.insert("FROND_LINK_PORT", QString::number(port)); env.insert("FROND_LINK_DISCOVERY_PORT", "0");
         env.insert("FROND_BTVIRT", fakeRadio());
         env.remove("FROND_LINK_SOCKET");
+        env.remove("FROND_LINK_ALLOW_NETWORK");
     }
     QString store() const { return data + "/frond/connections"; }
     QString socket() const { return run + "/frond/link.sock"; }
@@ -5988,6 +5989,8 @@ for line in s.makefile('rb'):
         ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
         ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1,127.0.0.2:%1").arg(ub));
         hb.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ub));
+        ha.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
+        hb.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
         hb.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(ua));
         HubUser a(ha), a1(ha);
         auto b = std::make_unique<HubUser>(hb), b1 = std::make_unique<HubUser>(hb);
@@ -6051,6 +6054,7 @@ for line in s.makefile('rb'):
         const quint16 ua = freeUdpPort();
         TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
         ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
+        ha.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
         ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(freeUdpPort()));
         HubUser a(ha), b(hb), a1(ha);
         QVERIFY(pairHubs(a, b, false));
@@ -6198,7 +6202,7 @@ for line in s.makefile('rb'):
             QVERIFY(cw->nearbyEmpty->isVisible() && !cw->pairButton->isEnabled());
             typeInto("Desk");
             cw->rename->click();
-            QTRY_COMPARE_WITH_TIMEOUT(cw->header->text(), QString("This Frond: Desk"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(cw->header->text().startsWith("This Frond: Desk"), 5000);
             // Add by address, then the code Bee shows.
             b.got.clear();
             typeInto("127.0.0.1:" + hb.env.value("FROND_LINK_PORT"));
@@ -8099,6 +8103,87 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }
+    void linkListenLoopback() {
+        QTcpServer probe;
+        const bool ipv6 = probe.listen(QHostAddress::LocalHostIPv6, 0);
+        probe.close();
+        const auto discovery = freeUdpPort();
+        TestHub hub({}, "loopback", 0);
+        hub.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(discovery));
+        HubUser user(hub);
+        user.client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+        const auto state = user.last("state");
+        const auto port = quint16(state.value("port").toInt());
+        QVERIFY(port != 0);
+        const auto addresses = QString("127.0.0.1:%1").arg(port) +
+            (ipv6 ? QString(", [::1]:%1").arg(port) : QString());
+        QCOMPARE(state.value("listen").toString(), addresses);
+        const auto reaches = [port](const QHostAddress& address) {
+            QTcpSocket client;
+            client.connectToHost(address, port);
+            return client.waitForConnected(1000);
+        };
+        QVERIFY(reaches(QHostAddress::LocalHost));
+        if (ipv6) QVERIFY(reaches(QHostAddress::LocalHostIPv6));
+        for (const auto& address : QNetworkInterface::allAddresses()) {
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback())
+                QVERIFY(!reaches(address));
+        }
+        QUdpSocket udp;
+        QVERIFY(udp.bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress));
+        udp.close();
+        // The Connections switch moves the listener to the network and is saved.
+        const auto identity = [&hub] {
+            QFile f(hub.store() + "/identity.json");
+            return f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).object() : QJsonObject();
+        };
+        QVERIFY(!identity().value("network").toBool(true));
+        QVERIFY(!state.value("network").toBool(true));
+        user.client.send({{"op", "network"}, {"on", true}});
+        QTRY_VERIFY_WITH_TIMEOUT(user.last("state").value("network").toBool(), 10000);
+        QVERIFY(identity().value("network").toBool());
+        for (const auto& address : QNetworkInterface::allAddresses()) {
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback())
+                QVERIFY(reaches(address));
+        }
+        QVERIFY(QUdpSocket().bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress) == false);
+        killHub(user);
+    }
+
+    // An identity saved before the setting existed keeps network links when it has paired peers.
+    void linkNetworkMigration() {
+        for (const bool paired : {false, true}) {
+            QTemporaryDir dir(QDir::currentPath() + "/build/lkm-XXXXXX");
+            TestHub hub(dir.path(), "m", freePort());
+            {
+                HubUser user(hub);
+                user.client.setSticky("watch", {{"op", "watch"}});
+                QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+                killHub(user);
+            }
+            QFile f(hub.store() + "/identity.json");
+            QVERIFY(f.open(QIODevice::ReadWrite));
+            auto o = QJsonDocument::fromJson(f.readAll()).object();
+            o.remove("network");
+            f.resize(0);
+            f.write(QJsonDocument(o).toJson());
+            f.close();
+            if (paired) {
+                QFile list(hub.store() + "/connections.json");
+                QVERIFY(list.open(QIODevice::WriteOnly));
+                const QString key(64, 'a'), id(32, 'b');
+                list.write(QJsonDocument(QJsonObject{{"version", 1}, {"entries", QJsonArray{QJsonObject{
+                    {"id", id}, {"name", "Old"}, {"key", key}, {"paired", true}}}}}).toJson());
+            }
+            HubUser user(hub);
+            user.client.setSticky("watch", {{"op", "watch"}});
+            QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+            QCOMPARE(user.last("state").value("network").toBool(), paired);
+            killHub(user);
+        }
+    }
+
     // Pairing by an IPv6 loopback address.
     void linkPairingIpv6() {
         QTcpServer probe;

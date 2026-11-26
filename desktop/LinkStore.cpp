@@ -1,4 +1,5 @@
 #include "LinkStore.h"
+#include <algorithm>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -49,7 +50,7 @@ QString Store::open(const QString& where) {
     lock->setStaleLockTime(0);
     if (!lock->tryLock(0)) return QStringLiteral("Another link service uses %1.").arg(folder);
     QFile identity(folder + "/identity.json");
-    bool loaded = false;
+    bool loaded = false, hasNetwork = true;
     if (identity.open(QIODevice::ReadOnly)) {
         const auto o = QJsonDocument::fromJson(identity.readAll()).object();
         Key32 secret{};
@@ -57,6 +58,8 @@ QString Store::open(const QString& where) {
             parseHex(o.value("secret").toString(), secret) && identityFromSecret(secret, info.identity)) {
             info.name = o.value("name").toString().toStdString();
             port = quint16(o.value("port").toInt(defaultPortValue));
+            hasNetwork = o.contains("network");
+            allowNetwork = o.value("network").toBool(false);
             loaded = true;
         }
         wipe(secret.data(), secret.size());
@@ -91,12 +94,18 @@ QString Store::open(const QString& where) {
             peers.push_back(p);
         }
     }
+    // An identity saved before the setting existed accepted network links: keep that for installs with paired peers.
+    if (!hasNetwork) {
+        allowNetwork = std::any_of(peers.begin(), peers.end(), [](const Peer& p) { return p.paired; });
+        saveIdentity();
+    }
     return {};
 }
 bool Store::saveIdentity() {
     return writePrivate(folder + "/identity.json",
                         QJsonObject{{"version", 1}, {"id", hexId(info.id)}, {"name", name()},
-                                    {"secret", toHex(info.identity.secret)}, {"port", int(port)}});
+                                    {"secret", toHex(info.identity.secret)}, {"port", int(port)},
+                                    {"network", allowNetwork}});
 }
 bool Store::save() {
     QJsonArray entries;

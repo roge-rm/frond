@@ -65,6 +65,8 @@ object Links {
         lateinit var e: LinkEngine
         e = LinkEngine(store, object : LinkEngine.Host {
             override val discoveryPort = LinkWire.DEFAULT_PORT
+            override val allowNetwork = Settings.load(context).linkNetwork
+            override fun networkAddresses() = NetRelay.addresses(context)
             override fun discovery(on: Boolean) = multicast(context, on)
             override fun networkAllowed() = !needsPermission(context)
             override fun stopped() = engineStopped(e)
