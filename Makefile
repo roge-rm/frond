@@ -1738,7 +1738,7 @@ device-session-probe: out/frond
 		tests/device-session.cpp @$(OBJ_ROOT)/device-session-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-device-session
 
-# With QtCore the desktop store cases are in too.
+# With QtCore the desktop store cases are in too, and with a JDK's jni.h the link JNI case.
 FUZZ_REGRESSIONS_QT = $(if $(shell pkg-config --exists Qt6Core && echo yes),-fPIC -Idesktop -Icore/src/uarm/native $(shell pkg-config --cflags Qt6Core))
 FUZZ_REGRESSIONS_QT_LIBS = $(if $(FUZZ_REGRESSIONS_QT),$(shell pkg-config --libs Qt6Core) -lz)
 .PHONY: test-fuzz-regressions
@@ -1751,7 +1751,7 @@ test-fuzz-regressions: prepare
 		-c tests/fuzz-regressions-qt.cpp -o $(OBJ_ROOT)/fuzz-regressions-qt.o && \
 		$(CXX) -std=c++17 -O1 -g -fsanitize=address $(FUZZ_REGRESSIONS_QT) -c desktop/LinkStore.cpp -o $(OBJ_ROOT)/linkstore-fuzz-regressions.o)
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address -Wall -Wextra -Werror -Icore/src/common -Icore/src/common/savestate \
-		-Itests/fuzz -Ilink -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux $(if $(FUZZ_REGRESSIONS_QT),-DFROND_FUZZ_QT) \
+		-Itests/fuzz -Ilink $(if $(FUZZ_JNI_INCLUDE),-DFROND_FUZZ_JNI -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux) $(if $(FUZZ_REGRESSIONS_QT),-DFROND_FUZZ_QT) \
 		tests/fuzz-regressions.cpp core/src/common/ZipfileWalker.cpp core/src/common/session/session_file5.cpp \
 		core/src/common/savestate/Chunk.cpp core/src/common/Logging.cpp $(LINK_SOURCES) $(OBJ_ROOT)/miniz-fuzz-regressions.o \
 		$(OBJ_ROOT)/zip-fuzz-regressions.o $(OBJ_ROOT)/monocypher-fuzz-regressions.o $(if $(FUZZ_REGRESSIONS_QT),$(OBJ_ROOT)/fuzz-regressions-qt.o $(OBJ_ROOT)/linkstore-fuzz-regressions.o) $(FUZZ_REGRESSIONS_QT_LIBS) \

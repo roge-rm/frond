@@ -13,8 +13,10 @@
 #include "savestate/Chunk.h"
 #include "session/session_file5.h"
 #include "zip/miniz.h"
+#ifdef FROND_FUZZ_JNI
 #include "FakeJni.h"
 #include "../android/app/src/main/cpp/LinkJni.cpp"
+#endif
 #ifdef FROND_FUZZ_QT
 void stickHeader();  // fuzz-regressions-qt.cpp
 void storeNumbers();
@@ -118,6 +120,7 @@ static void sessionFiles() {
     CHECK(!liar.Deserialize(lie.size(), lie.data()));
 }
 
+#ifdef FROND_FUZZ_JNI
 #define J(name) Java_com_rm_frond_LinkNative_##name
 
 static void linkJniLengths() {
@@ -144,13 +147,16 @@ static void linkJniLengths() {
     CHECK(J(pairResult)(e, nullptr, pair) == jint(PairResult::Pending));
     J(pairFree)(e, nullptr, pair);
 }
+#endif
 
 
 int main() {
     savestateStrings();
     zipMembers();
     sessionFiles();
+#ifdef FROND_FUZZ_JNI
     linkJniLengths();
+#endif
 #ifdef FROND_FUZZ_QT
     stickHeader();
     storeNumbers();
