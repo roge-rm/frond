@@ -345,7 +345,8 @@ open class FrondActivity : SDLActivity() {
         val serialSync = machineSettings.serial == InfraredChoice.SYNC_MANAGER &&
             launchDevice().serialPort && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
         val serialWired = InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort
-        val serialLink = serialWired || serialModem || serialPpp || serialSync
+        val serialKeyboard = machineSettings.serial == InfraredChoice.KEYBOARD && launchDevice().serialKeyboard
+        val serialLink = serialWired || serialModem || serialPpp || serialSync || serialKeyboard
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
             if ((infraredLink && !infraredPhone && !infraredPrinter) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
@@ -358,6 +359,7 @@ open class FrondActivity : SDLActivity() {
                     if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label,
                         modemSync = session != null)
                         ?.let { Log.w(TAG, "serial: $it") }
+                    if (serialKeyboard) runOnUiThread { if (!leaving) readKeyboard() }
                     if (bluetoothLink) BluetoothLink.apply(applicationContext, link, machineSettings.bluetooth, name, launchDevice().label, session?.id)
                         ?.let { Log.w(TAG, "bluetooth: $it") }
                 }, "FrondLinks").apply { isDaemon = true }.start()
@@ -1200,7 +1202,7 @@ open class FrondActivity : SDLActivity() {
 
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
-    private fun readKeyboard() {
+    fun readKeyboard() {
         if (launchDevice().isDana()) {
             keyboardButton?.visibility = if (leaving || touchHidden) View.GONE else View.VISIBLE
             return

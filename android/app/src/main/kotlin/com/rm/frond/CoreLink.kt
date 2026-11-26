@@ -31,6 +31,13 @@ open class CoreLink(
             choice == InfraredChoice.MODEM -> callText("Modem")
             choice == InfraredChoice.PPP -> if (native.startsWith("ppp ")) "Direct PPP: ${native.substringAfter(' ')}" else "Direct PPP"
             choice == InfraredChoice.SYNC_MANAGER -> "Sync Manager"
+            choice == InfraredChoice.KEYBOARD -> when (native.substringAfter(' ', "")) {
+                "ready" -> "Keyboard: ready"
+                "pulsing" -> "Keyboard: waking the driver"
+                "asleep" -> "Keyboard: no driver answered"
+                "" -> "Palm Portable Keyboard"
+                else -> "Keyboard: low power"
+            }
             choice == InfraredChoice.PHONE -> callText("Mobile phone")
             choice == InfraredChoice.PRINTER && error == null && title == "Infrared" -> "Printer"
             !active && InfraredChoice.linkId(choice) != null -> "$title: Unknown connection"
@@ -83,6 +90,7 @@ open class CoreLink(
                 choice == InfraredChoice.MODEM && modeCommand == "serial-mode" -> "modem"
                 choice == InfraredChoice.PPP && modeCommand == "serial-mode" -> "ppp"
                 choice == InfraredChoice.SYNC_MANAGER && modeCommand == "serial-mode" -> "sync"
+                choice == InfraredChoice.KEYBOARD && modeCommand == "serial-mode" -> "keyboard"
                 choice == InfraredChoice.PHONE && modeCommand == "irda-mode" -> "phone"
                 choice == InfraredChoice.PRINTER && modeCommand == "irda-mode" -> "printer"
                 else -> null
@@ -100,7 +108,8 @@ open class CoreLink(
             if (id == null) {
                 detach()
                 val wasOn = attachedSync || state.value.active || state.value.choice in
-                    listOf(InfraredChoice.MODEM, InfraredChoice.PPP, InfraredChoice.PHONE, InfraredChoice.PRINTER, InfraredChoice.SYNC_MANAGER)
+                    listOf(InfraredChoice.MODEM, InfraredChoice.PPP, InfraredChoice.PHONE, InfraredChoice.PRINTER, InfraredChoice.SYNC_MANAGER,
+                        InfraredChoice.KEYBOARD)
                 state.value = Status(choice, title = title)
                 if (wasOn) {
                     val reply = control.request(modeCommand, "off", timeoutSeconds = 30)

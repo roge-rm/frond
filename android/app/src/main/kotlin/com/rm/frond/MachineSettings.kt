@@ -233,7 +233,11 @@ data class MachineSettings(
     fun forDevice(from: Device, to: Device): MachineSettings =
         copy(
             engine = if (engine == from.defaultEngine) to.defaultEngine else engine,
-            serial = if (serial == InfraredChoice.PPP && !(to.runs68k && to.serialPort)) InfraredChoice.OFF else serial,
+            serial = when {
+                serial == InfraredChoice.PPP && !(to.runs68k && to.serialPort) -> InfraredChoice.OFF
+                serial == InfraredChoice.KEYBOARD && !to.serialKeyboard -> InfraredChoice.OFF
+                else -> serial
+            },
         )
 
     companion object {

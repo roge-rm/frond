@@ -38,6 +38,20 @@ class SerialChoiceTest {
         assertEquals(listOf("off"), InfraredChoice.serialChoices("off", emptyList(), modem = false).map { it.first })
     }
 
+    @Test fun portableKeyboardIsOnlyOfferedWhereTheDeviceTakesIt() {
+        val keyboard = InfraredChoice.KEYBOARD
+        assertEquals(keyboard, MachineSettings.from(MachineSettings(serial = keyboard).json()).serial)
+        assertEquals("off", InfraredChoice.normaliseInfrared(keyboard))
+        val iii = requireNotNull(Device.byId("palm-iii"))
+        val iiix = requireNotNull(Device.byId("palm-iiix"))
+        assertEquals(true, iii.serialKeyboard && iiix.serialKeyboard)
+        assertEquals(keyboard, MachineSettings(serial = keyboard).forDevice(iii, iiix).serial)
+        assertEquals("off", MachineSettings(serial = keyboard).forDevice(iiix, Device.TX).serial)
+        assertEquals(listOf("off", keyboard), InfraredChoice.serialChoices("off", emptyList(), modem = false, keyboard = true).map { it.first })
+        assertEquals("Keyboard: ready", CoreLink.Status(keyboard, title = "Serial", native = "keyboard ready").text)
+        assertEquals("Keyboard: low power", CoreLink.Status(keyboard, title = "Serial", native = "keyboard low-power").text)
+    }
+
     @Test fun directPppIsOnlyOfferedOnSupportedSerialPorts() {
         val ppp = InfraredChoice.PPP
         assertEquals(ppp, MachineSettings.from(MachineSettings(serial = ppp).json()).serial)

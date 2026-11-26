@@ -411,6 +411,7 @@ object InfraredChoice {
     const val MODEM = "modem"
     const val PPP = "ppp"
     const val SYNC_MANAGER = "sync"
+    const val KEYBOARD = "keyboard"
 
     const val PHONE = "phone"
 
@@ -424,11 +425,12 @@ object InfraredChoice {
     // The infrared port's saved value: the same, phone or printer.
     fun normaliseInfrared(value: String?): String = if (value == PHONE || value == PRINTER) value else normalise(value)
 
-    // The serial port can also go to the modem or Sync Manager.
+    // The serial port can also go to the modem, Sync Manager or the Palm Portable Keyboard.
     fun normaliseSerial(value: String?): String = when (value) {
         MODEM -> MODEM
         PPP -> PPP
         SYNC_MANAGER -> SYNC_MANAGER
+        KEYBOARD -> KEYBOARD
         else -> normalise(value)
     }
 
@@ -441,8 +443,9 @@ object InfraredChoice {
     }
 
     fun serialChoices(current: String, paired: List<Pair<String, String>>, modem: Boolean,
-                      sync: Boolean = false, ppp: Boolean = false): List<Pair<String, String>> =
+                      sync: Boolean = false, ppp: Boolean = false, keyboard: Boolean = false): List<Pair<String, String>> =
         choices(current, paired).toMutableList().also {
+            if (keyboard) it.add(1, KEYBOARD to "Palm Portable Keyboard")
             if (ppp) it.add(1, PPP to "Direct PPP")
             if (modem) it.add(1, MODEM to "Modem")
             if (sync) it.add(1, SYNC_MANAGER to "Sync Manager")

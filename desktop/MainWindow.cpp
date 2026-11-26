@@ -1603,6 +1603,7 @@ void MainWindow::refresh() {
         const QSignalBlocker blocked(serial);
         const auto mode = serial->currentData();
         frondLink::setModemChoice(serial, caps.modem);
+        frondLink::setKeyboardChoice(serial, m68k && caps.serial, frondFirmware::serialKeyboard(currentDevice()));
         if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
     }
     shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
@@ -3337,6 +3338,12 @@ void MainWindow::showSerial(const QString& state) {
     if (state.isEmpty()) serialState->clear();
     else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
     else if (parts[0] == "sync") serialState->setText(tr("Serial: Sync Manager"));
+    else if (parts[0] == "keyboard") {
+        // "keyboard ready|low-power|pulsing|asleep|idle" from the core's Palm Portable Keyboard.
+        const auto phase = parts.value(1);
+        serialState->setText(phase == "ready" ? tr("Keyboard: ready") : phase == "pulsing" ? tr("Keyboard: waking the driver")
+                             : phase == "asleep" ? tr("Keyboard: no driver answered") : tr("Keyboard: low power"));
+    }
     else if (parts[0] == "modem" && parts.size() > 1) {
         // "modem STATE [SPEED]; hotsync pty /dev/pts/N connected|waiting" with a HotSync link.
         const auto modem = state.section("; ", 0, 0).split(' ');
@@ -3354,6 +3361,8 @@ void MainWindow::loadSerialSettings() {
     const auto& value = runningPreferences.serial;
     const QSignalBlocker blocked(serial);
     frondLink::setModemChoice(serial, frondFirmware::capabilities(runningDevice).modem);
+    frondLink::setKeyboardChoice(serial, frondFirmware::runs68k(runningDevice) && frondFirmware::capabilities(runningDevice).serial,
+                                 frondFirmware::serialKeyboard(runningDevice));
     frondLink::addConnectionChoices(serial, value);
     serial->setCurrentIndex(std::max(0, serial->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     serialPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5023);

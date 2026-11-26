@@ -1016,6 +1016,7 @@ class RunningModel(
             if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
             SerialLink.apply(activity.applicationContext, l, choice, name, device.label,
                 attachedSync = attachedSync, modemSync = sessionId != null)
+                .also { if (device.serialKeyboard) activity.runOnUiThread { FrondActivity.running?.readKeyboard() } }
         }
     }
 

@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QString>
 #include <QVector>
@@ -110,6 +111,19 @@ inline void setModemChoice(QComboBox* combo, bool present) {
     const int at = combo->findData("modem");
     if (!present && at >= 0) combo->removeItem(at);
     if (present && at < 0) combo->insertItem(std::max(0, combo->findData("tcp")) + 1, QCoreApplication::translate("frondLink", "Modem"), "modem");
+}
+// Shows Palm Portable Keyboard (data "keyboard") after Modem on a serial picker when shown, greyed
+// unless the device's port takes the keyboard.
+inline void setKeyboardChoice(QComboBox* combo, bool shown, bool enabled) {
+    int at = combo->findData("keyboard");
+    if (!shown && at >= 0) combo->removeItem(at);
+    if (!shown) return;
+    if (at < 0) {
+        at = std::max(combo->findData("modem"), std::max(0, combo->findData("tcp"))) + 1;
+        combo->insertItem(at, QCoreApplication::translate("frondLink", "Palm Portable Keyboard"), "keyboard");
+    }
+    if (auto* model = qobject_cast<QStandardItemModel*>(combo->model()))
+        if (auto* item = model->item(at)) item->setEnabled(enabled);
 }
 // The same for Mobile phone (data "phone") on an infrared picker, for devices with an infrared phone.
 inline void setPhoneChoice(QComboBox* combo, bool present) {

@@ -273,7 +273,7 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             val current = if (model.serialSync) InfraredChoice.SYNC_MANAGER else model.serial.choice
             val choices = remember(current, sync) {
                 InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem, sync,
-                    ppp = model.device.runs68k)
+                    ppp = model.device.runs68k, keyboard = model.device.serialKeyboard)
             }
             ConnectionChoiceDialog("Serial port", current, onDismiss, choices) { onDismiss(); model.changeSerial(it) }
         }
