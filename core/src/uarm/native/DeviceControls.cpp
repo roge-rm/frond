@@ -420,6 +420,30 @@ float glyphDistance(char c, float x, float y) {
             d=std::min({d,arc(x,y,0.2f,-5.3f,1.7f,degrees(-90),degrees(90)),arc(x,y,0.6f,-1.8f,1.8f,degrees(-90),degrees(90))});
             break;
         case 'C': d=arc(x,y,0.3f,-3.5f,3.5f,degrees(45),degrees(315));break;
+        case 'D':
+            line(-2.2f,0,-2.2f,-7);line(-2.2f,-7,-0.6f,-7);line(-2.2f,0,-0.6f,0);
+            d=std::min(d,arc(x,y,-0.6f,-3.5f,3.5f,degrees(-90),degrees(90)));
+            break;
+        case 'E': line(-2.2f,0,-2.2f,-7);line(-2.2f,-7,2.2f,-7);line(-2.2f,-3.6f,1.6f,-3.6f);line(-2.2f,0,2.2f,0);break;
+        case 'F': line(-2.2f,0,-2.2f,-7);line(-2.2f,-7,2.2f,-7);line(-2.2f,-3.6f,1.6f,-3.6f);break;
+        case 'I': line(0,0,0,-7);break;
+        case 'L': line(-2,0,-2,-7);line(-2,0,2.2f,0);break;
+        case 'M': line(-2.8f,0,-2.8f,-7);line(-2.8f,-7,0,-2.4f);line(0,-2.4f,2.8f,-7);line(2.8f,-7,2.8f,0);break;
+        case 'N': line(-2.4f,0,-2.4f,-7);line(-2.4f,-7,2.4f,0);line(2.4f,0,2.4f,-7);break;
+        case 'O': d=std::fabs(std::hypot(x/2.9f,(y+3.5f)/3.5f)-1)*2.9f;break;
+        case 'P':
+            line(-2.2f,0,-2.2f,-7);line(-2.2f,-7,0.2f,-7);line(-2.2f,-3.4f,0.2f,-3.4f);
+            d=std::min(d,arc(x,y,0.2f,-5.2f,1.8f,degrees(-90),degrees(90)));
+            break;
+        case 'R':
+            line(-2.2f,0,-2.2f,-7);line(-2.2f,-7,0.2f,-7);line(-2.2f,-3.4f,0.2f,-3.4f);line(-0.2f,-3.4f,2.4f,0);
+            d=std::min(d,arc(x,y,0.2f,-5.2f,1.8f,degrees(-90),degrees(90)));
+            break;
+        case 'S':
+            d=std::min(arc(x,y,0,-5.25f,1.75f,degrees(90),degrees(330)),arc(x,y,0,-1.75f,1.75f,degrees(270),degrees(510)));
+            break;
+        case 'T': line(-2.6f,-7,2.6f,-7);line(0,-7,0,0);break;
+        case 'U': line(-2.4f,-7,-2.4f,-2.4f);line(2.4f,-7,2.4f,-2.4f);d=std::min(d,arc(x,y,0,-2.4f,2.4f,degrees(0),degrees(180)));break;
         case 'a': d=ring(x,y,-0.4f,-2.5f,2.5f);line(2.1f,-5.2f,2.1f,0);break;
         case 'b': d=ring(x,y,0.4f,-2.5f,2.5f);line(-2.1f,-7.4f,-2.1f,0);break;
         case 'c': d=arc(x,y,0.3f,-2.5f,2.5f,degrees(45),degrees(315));break;
@@ -743,11 +767,28 @@ void paintTealPower(Canvas& canvas, const DeviceControlProfile& profile, const D
     },[&](float,float,Rgb) {return ink;});
 }
 
+// IIIx-family plastic and keys: the body, the ring round each app key (dark pocket or raised
+// collar), the light catching rims, the key and rocker domes (base plus highlight), the groove
+// round the rocker and the printed icons.
+struct IIIxLook {
+    Rgb body;
+    Rgb pocketTop{24,26,25},pocketBottom{38,41,39},lip{104,109,105},rockerLip{100,105,101};
+    Rgb key{50,54,52},keyLight{34,36,35},keyEdge{30,32,31},keyRim{116,121,117};
+    Rgb rocker{54,58,56},rockerLight{36,38,37},rockerRim{120,125,121},groove{16,17,16},chevron{118,123,119};
+    Rgb ink{196,200,194},inkHeld{110,114,110};
+};
 // Body plastic: IIIx dark charcoal, IIIe the same a hair warmer, IIIxe a faintly cooler slate.
-const Rgb iiixBody{60,64,61},iiieBody{67,64,57},iiixeBody{61,65,68};
+const IIIxLook iiixLook{Rgb{60,64,61}},iiieLook{Rgb{67,64,57}},iiixeLook{Rgb{61,65,68}};
+// Palm III: lighter blue-grey plastic, the keys and rocker the body's grey in raised collars a
+// shade darker, with white print.
+const IIIxLook palmIIILook{Rgb{100,106,110},Rgb{70,75,79},Rgb{86,92,96},Rgb{150,156,160},Rgb{146,152,156},
+                           Rgb{90,96,100},Rgb{44,46,47},Rgb{60,64,67},Rgb{164,170,174},
+                           Rgb{94,100,104},Rgb{44,46,47},Rgb{166,172,176},Rgb{46,50,53},Rgb{156,162,166},
+                           Rgb{232,236,236},Rgb{140,146,148}};
 
 void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed,
-                       Rgb body) {
+                       const IIIxLook& look) {
+    const Rgb body=look.body;
     const float H=profile.height;
     const int ox=(width-profile.width)/2;
     auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
@@ -763,7 +804,7 @@ void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int 
     // The lower edge of the screen window, then the rounded lip of the bezel.
     canvas.paint(0,0,width,3,[&](float,float y) {return canvas.edge(y-1.2f);},[](float,float,Rgb) {return Rgb{18,19,18};});
     canvas.paint(0,0,width,9,[&](float,float y) {return canvas.edge(std::fabs(y-3.6f)-1.2f)*0.55f;},
-                 [](float,float,Rgb) {return Rgb{104,109,105};});
+                 [&](float,float,Rgb) {return look.lip;});
 
     for(size_t i=0;i<profile.count;++i) {
         const auto& button=profile.buttons[i];
@@ -776,9 +817,9 @@ void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int 
         const float x0=pocket.x-3,y0=pocket.y-3,x1=pocket.x+pocket.w+3,y1=pocket.y+pocket.h+4;
         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
             return canvas.edge(std::fabs(dp(x,y)-0.9f)-0.7f)*clamp01((y-pocket.y)/pocket.h-0.15f)*0.8f;
-        },[](float,float,Rgb) {return Rgb{104,109,105};});
+        },[&](float,float,Rgb) {return look.lip;});
         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dp(x,y));},[&](float x,float y,Rgb) {
-            return mix(Rgb{24,26,25},Rgb{38,41,39},clamp01((y-pocket.y)/pocket.h))+Rgb{4,4,4}*speckle(x,y);
+            return mix(look.pocketTop,look.pocketBottom,clamp01((y-pocket.y)/pocket.h))+Rgb{4,4,4}*speckle(x,y);
         });
         // Grey dome; holding it presses it into the pocket.
         const float sink=held ? 0.8f : 0;
@@ -789,15 +830,15 @@ void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int 
                      [](float,float,Rgb) {return Rgb{8,9,8};});
         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dk(x,y));},[&](float x,float y,Rgb) {
             const float r=std::hypot((x-kcx+key.w*0.12f)/(key.w*0.5f),(y-kcy+key.h*0.22f)/(key.h*0.55f));
-            Rgb c=Rgb{50,54,52}+Rgb{34,36,35}*std::pow(clamp01(1-r),1.6f)+Rgb{3,3,3}*speckle(x,y);
-            c=mix(Rgb{30,32,31},c,clamp01(-dk(x,y)/3));
+            Rgb c=look.key+look.keyLight*std::pow(clamp01(1-r),1.6f)+Rgb{3,3,3}*speckle(x,y);
+            c=mix(look.keyEdge,c,clamp01(-dk(x,y)/3));
             // Held: darker, with a shadow under the pocket's top lip.
             return held ? c*(0.55f+0.2f*clamp01(-dk(x,y-1.8f)/3)) : c;
         });
         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
             return canvas.edge(std::fabs(dk(x,y)+0.8f)-0.35f)*(held?0.1f:0.45f)*clamp01((kcy-y)/(key.h*0.5f));
-        },[](float,float,Rgb) {return Rgb{116,121,117};});
-        const Rgb ink=held ? Rgb{110,114,110} : Rgb{196,200,194};
+        },[&](float,float,Rgb) {return look.keyRim;});
+        const Rgb ink=held ? look.inkHeld : look.ink;
         const float k=1.65f,reach=11*k;
         canvas.paint(kcx-reach,kcy-reach,kcx+reach,kcy+reach,[&](float x,float y) {
             return canvas.edge(iconDistance(button.icon,(x-kcx)/k,(y-kcy)/k)*k-0.6f*k);
@@ -825,29 +866,29 @@ void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int 
         const float x0=cx-22,y0=a.y-2,x1=cx+22,y1=b.y+b.h+2;
         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
             return canvas.edge(std::fabs(dr(x,y,1.2f))-0.6f)*clamp01((y-a.y)/(b.y+b.h-a.y))*0.7f;
-        },[](float,float,Rgb) {return Rgb{100,105,101};});
-        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dr(x,y,0.4f));},[](float,float,Rgb) {return Rgb{16,17,16};});
+        },[&](float,float,Rgb) {return look.rockerLip;});
+        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dr(x,y,0.4f));},[&](float,float,Rgb) {return look.groove;});
         auto face=[&](float x,float y) {return dr(x,y-0.7f*heldAt(y),-1.4f);};
         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(face(x,y));},[&](float x,float y,Rgb) {
             // Each lobe is domed with its own highlight; the waist dips.
             const float ly=y<split ? top : bottom;
             const float r=std::hypot((x-cx+3)/15,(y-ly+5)/15);
-            Rgb c=Rgb{54,58,56}+Rgb{36,38,37}*std::pow(clamp01(1-r),1.6f)+Rgb{3,3,3}*speckle(x,y);
+            Rgb c=look.rocker+look.rockerLight*std::pow(clamp01(1-r),1.6f)+Rgb{3,3,3}*speckle(x,y);
             c=c*(1-0.25f*std::exp(-std::pow((y-split)/5,2.f)));
-            c=mix(Rgb{30,32,31},c,clamp01(-face(x,y)/3));
+            c=mix(look.keyEdge,c,clamp01(-face(x,y)/3));
             return c*(1-0.42f*heldAt(y));
         });
         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
             const float ly=y<split ? top : bottom;
             return canvas.edge(std::fabs(face(x,y)+0.8f)-0.35f)*0.45f*clamp01((ly-y)/10)*(1-0.8f*heldAt(y));
-        },[](float,float,Rgb) {return Rgb{120,125,121};});
+        },[&](float,float,Rgb) {return look.rockerRim;});
         // Small moulded chevrons on the lobes.
         for(int i=0;i<2;++i) {
             const float dir=i ? 1 : -1,yy=(i ? bottom : top)+dir*6.5f+0.7f*float(i ? dnHeld : upHeld);
             canvas.paint(cx-5,yy-4,cx+5,yy+4,[&](float x,float y) {
                 return canvas.edge(std::min(segment(x,y,cx-2.6f,yy-dir*1.3f,cx,yy+dir*1.3f),
                                             segment(x,y,cx+2.6f,yy-dir*1.3f,cx,yy+dir*1.3f))-0.5f)*0.6f;
-            },[](float,float,Rgb) {return Rgb{118,123,119};});
+            },[&](float,float,Rgb) {return look.chevron;});
         }
     }
 
@@ -1202,6 +1243,45 @@ struct SilkscreenLook {
 
 void paintT415Silkscreen(Canvas& canvas, const DeviceSilkscreen& silk);
 
+// The Palm III's Home glyph, in silkscreenDiscGlyph's units: a thick arrow sweeping up from the
+// lower left and pointing to the upper right.
+float applicationsArrow(float x, float y) {
+    const float cx=6,cy=6,r=14,end=degrees(248);
+    const float px=cx+r*std::cos(end),py=cy+r*std::sin(end),tx=-std::sin(end),ty=std::cos(end),nx=std::cos(end),ny=std::sin(end);
+    const std::array<std::array<float,2>,3> head{{{px+11*tx,py+11*ty},{px+8*nx,py+8*ny},{px-8*nx,py-8*ny}}};
+    return std::min(arc(x,y,cx,cy,r,degrees(158),degrees(246))-3,polygon(x,y,head));
+}
+
+// The Palm III's printed names under Home, Menu, Calc and Find.
+const char* palmIIILabel(SilkscreenIcon icon) {
+    switch(icon) {
+        case SilkscreenIcon::home: return "APPLICATIONS";
+        case SilkscreenIcon::menu: return "MENU";
+        case SilkscreenIcon::calc: return "CALCULATOR";
+        case SilkscreenIcon::find: return "FIND";
+        default: return "";
+    }
+}
+
+// Capitals set round the foot of a circle, reading left to right, their tops gap units from it.
+void paintArcLabel(Canvas& canvas, const char* text, float cx, float cy, float gap, float k, Rgb ink) {
+    const int n=int(std::strlen(text));
+    if(!n)return;
+    const float base=gap+7*k,step=6.2f*k/(gap+3.5f*k);
+    auto at=[&](int i) {return degrees(90)+((n-1)*0.5f-i)*step;};
+    canvas.paint(cx-base-4,cy-base-4,cx+base+4,cy+base+4,[&](float x,float y) {
+        const float a=std::atan2(y-cy,x-cx);
+        const int closest=int(std::lround((degrees(90)-a)/step+(n-1)*0.5f));
+        float d=1e9f;
+        for(int i=std::max(0,closest-1);i<=std::min(n-1,closest+1);++i) {
+            const float t=at(i),bx=cx+base*std::cos(t),by=cy+base*std::sin(t);
+            const float u=(x-bx)*std::sin(t)-(y-by)*std::cos(t),v=(x-bx)*std::cos(t)+(y-by)*std::sin(t);
+            d=std::min(d,glyphDistance(text[i],u/k,v/k)*k);
+        }
+        return canvas.edge(d-0.5f);
+    },[&](float,float,Rgb) {return ink;});
+}
+
 void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
     if(silk.style==SilkscreenStyle::t415)return paintT415Silkscreen(canvas,silk);
     const float W=silk.width,H=silk.height;
@@ -1215,8 +1295,13 @@ void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
     // IIIc: printed light on a dark panel, with the IIIx's box and smaller discs.
     const bool v=silk.style==SilkscreenStyle::v,iiic=silk.style==SilkscreenStyle::iiic;
     const bool m500=silk.style==SilkscreenStyle::m500,m515=silk.style==SilkscreenStyle::m515 || m500;
-    const bool narrow=iiix || v || iiic,slanted=m125 || v || iiix || iiic || m515,iiixLabels=iiix || iiic;
+    // Palm III: the IIIx's layout on a mint panel, with smaller discs each labelled round its foot.
+    const bool palmIII=silk.style==SilkscreenStyle::iii;
+    const bool narrow=iiix || v || iiic || palmIII,slanted=m125 || v || iiix || iiic || m515 || palmIII;
+    const bool iiixLabels=iiix || iiic || palmIII;
     const SilkscreenLook look=
+        palmIII ? SilkscreenLook{Rgb{158,206,190},Rgb{146,194,178},Rgb{58,72,66},Rgb{30,44,40},
+                                 Rgb{44,58,54},Rgb{22,32,30},Rgb{178,216,202},0.07f,0.8f,6,1.25f,0.85f} :
         iiic ? SilkscreenLook{Rgb{62,65,74},Rgb{54,57,66},Rgb{24,26,30},Rgb{196,200,208},
                               Rgb{214,218,224},Rgb{188,192,200},Rgb{44,47,56},0.07f,0.8f,12,1.25f,0.85f} :
         m500 ? SilkscreenLook{Rgb{184,192,182},Rgb{172,180,170},Rgb{70,74,68},Rgb{34,37,34},
@@ -1238,7 +1323,7 @@ void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
     // Printed panel over the digitizer.
     canvas.paint(0,0,W,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
         Rgb c=mix(look.panelTop,look.panelBottom,y/H);
-        if(iiix || iiic || slanted)c=c+Rgb{12,12,12}*(iiix ? 1 : 0.5f)*speckle(x,y);
+        if(iiix || iiic || slanted)c=c+Rgb{12,12,12}*(iiix || palmIII ? 1 : 0.5f)*speckle(x,y);
         const float t=std::fabs(x-W*0.5f)/(W*0.5f);
         return c*(1-look.vignette*t*t);
     });
@@ -1321,16 +1406,20 @@ void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
                 break;
             }
             default: {
-                // Lighter disc with a dark glyph, centred on the reachable rectangle.
-                const float cy=r.y+r.h*0.5f,R=std::min(r.w,r.h)*0.5f-look.discInset;
+                // Lighter disc with a dark glyph, centred on the reachable rectangle; on the Palm III
+                // a smaller one set a little high, its label round its foot.
+                const float cy=r.y+r.h*0.5f-(palmIII ? 2.5f : 0),R=palmIII ? 17 : std::min(r.w,r.h)*0.5f-look.discInset;
                 canvas.paint(cx-R-1,cy-R-1,cx+R+1,cy+R+1,[&](float x,float y) {
                     return canvas.edge(std::hypot(x-cx,y-cy)-R);
                 },[&](float x,float y,Rgb) {
                     return mix(look.discTop,look.discBottom,clamp01((y-cy+R)/(2*R)))*(1-0.04f*clamp01((x-cx)/R));
                 });
+                const bool arrow=palmIII && button.icon==SilkscreenIcon::home;
                 canvas.paint(cx-R,cy-R,cx+R,cy+R,[&](float x,float y) {
-                    return canvas.edge(silkscreenDiscGlyph(button.icon,(x-cx)*19/R,(y-cy)*19/R)*R/19);
+                    x=(x-cx)*19/R;y=(y-cy)*19/R;
+                    return canvas.edge((arrow ? applicationsArrow(x,y) : silkscreenDiscGlyph(button.icon,x,y))*R/19);
                 },[&](float,float,Rgb) {return look.glyph;});
+                if(palmIII)paintArcLabel(canvas,palmIIILabel(button.icon),cx,cy,R+1.6f,0.62f,ink);
             }
         }
     }
@@ -3234,9 +3323,10 @@ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& prof
         case DeviceControlStyle::e2: paintE2Controls(canvas,profile,width*u,pressed);break;
         case DeviceControlStyle::zire72: paintZire72Controls(canvas,profile,width*u,pressed);break;
         case DeviceControlStyle::m515: paintM515Controls(canvas,profile,width*u,pressed,m515Look);break;
-        case DeviceControlStyle::iiix: paintIIIxControls(canvas,profile,width*u,pressed,iiixBody);break;
-        case DeviceControlStyle::iiie: paintIIIxControls(canvas,profile,width*u,pressed,iiieBody);break;
-        case DeviceControlStyle::iiixe: paintIIIxControls(canvas,profile,width*u,pressed,iiixeBody);break;
+        case DeviceControlStyle::iiix: paintIIIxControls(canvas,profile,width*u,pressed,iiixLook);break;
+        case DeviceControlStyle::iiie: paintIIIxControls(canvas,profile,width*u,pressed,iiieLook);break;
+        case DeviceControlStyle::iiixe: paintIIIxControls(canvas,profile,width*u,pressed,iiixeLook);break;
+        case DeviceControlStyle::iii: paintIIIxControls(canvas,profile,width*u,pressed,palmIIILook);break;
         case DeviceControlStyle::m125: paintM125Controls(canvas,profile,width*u,pressed,m125Look);break;
         case DeviceControlStyle::m100: paintM125Controls(canvas,profile,width*u,pressed,m100Look);break;
         case DeviceControlStyle::m105: paintM125Controls(canvas,profile,width*u,pressed,m105Look);break;

@@ -514,7 +514,7 @@ static void iiixArt(DeviceArt art) {
     assert(p.width==320 && p.height==88 && p.unit==u && deviceControlsHeight(p)==44);
     assert(p.count==7 && p.navigator.w==0);
     assert(p.style==(art==DeviceArt::iiie ? DeviceControlStyle::iiie : art==DeviceArt::iiixe ? DeviceControlStyle::iiixe
-                                                                                            : DeviceControlStyle::iiix));
+                     : art==DeviceArt::iii ? DeviceControlStyle::iii : DeviceControlStyle::iiix));
     const KeyId keys[]={keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdUp,keyIdDown,keyIdPower};
     for(size_t i=0;i<p.count;++i)assert(p.buttons[i].key==keys[i]);
     auto at=[&](float x,float y) {
@@ -583,7 +583,9 @@ static void iiixArt(DeviceArt art) {
 
     // Silkscreen: the ROM's System 'silk' 10000, doubled from row 160.
     const auto& silk=deviceSilkscreen(art);
-    assert(silk.count==6 && silk.width==320 && silk.height==120 && silk.unit==2 && silk.style==SilkscreenStyle::iiix);
+    const bool palmIII=art==DeviceArt::iii;
+    assert(silk.count==6 && silk.width==320 && silk.height==120 && silk.unit==2);
+    assert(silk.style==(palmIII ? SilkscreenStyle::iii : SilkscreenStyle::iiix));
     const std::pair<SilkscreenIcon,SDL_Rect> rom[]={
         {SilkscreenIcon::home,{0,164,27,28}},{SilkscreenIcon::menu,{0,192,27,28}},
         {SilkscreenIcon::calc,{133,164,27,28}},{SilkscreenIcon::find,{133,192,27,28}},
@@ -606,14 +608,26 @@ static void iiixArt(DeviceArt art) {
         int tw,th;SDL_QueryTexture(t,nullptr,nullptr,&tw,&th);assert(tw==w && th==h);
         SDL_RenderCopy(r,t,nullptr,nullptr);SDL_DestroyTexture(t);
         auto pt=[&](float x,float y) {return brightness(readPixel(s,int(x*scale/2),int(y*scale/2)));};
-        // Pale speckled panel; dark discs round light glyphs.
+        // Pale speckled panel; dark discs round light glyphs. The Palm III's are smaller, set a
+        // little high, with a dark label under each.
         const int panel=pt(120,60);
         assert(panel>400);
+        if(palmIII) {
+            const auto c=readPixel(s,int(120*scale/2),int(60*scale/2));
+            assert(c.g>c.r+30 && c.b>c.r+15);
+        }
         for(size_t i=0;i<4;++i) {
             const auto& sb=silk.buttons[i].bounds;
-            const float cx=sb.x+sb.w*0.5f,cy=sb.y+sb.h*0.5f,R=std::min(sb.w,sb.h)*0.5f-6;
+            const float cx=sb.x+sb.w*0.5f,cy=sb.y+sb.h*0.5f-(palmIII ? 2.5f : 0),R=palmIII ? 17 : std::min(sb.w,sb.h)*0.5f-6;
             assert(cx-R>=0 && cx+R<=320 && cy-R>=0 && cy+R<=120);
             assert(pt(cx,cy-R+2.5f)<panel-200 && pt(cx-R+2.5f,cy)<panel-200);
+            if(palmIII) {
+                // Panel just outside the disc, then ink somewhere in the label band below it.
+                assert(std::abs(pt(cx,cy-R-1.5f)-panel)<60);
+                int darkest=panel;
+                for(float x=cx-6;x<=cx+6;x+=0.5f)for(float y=cy+R+2;y<=cy+R+6;y+=0.5f)darkest=std::min(darkest,pt(x,y));
+                assert(darkest<panel-150);
+            }
         }
         // One rounded box inside the Graffiti areas, with a dark triangle at each end of the split.
         assert(pt(160,3.5f)<panel-200 && pt(160,116.5f)<panel-200 && pt(61.5f,60)<panel-200 && pt(258.5f,60)<panel-200);
@@ -914,6 +928,10 @@ static void sharedArt() {
         }
     }
     assert(&deviceSilkscreen(DeviceArt::iiie)==&deviceSilkscreen(DeviceArt::iiix) && &deviceSilkscreen(DeviceArt::iiixe)==&deviceSilkscreen(DeviceArt::iiix));
+    // The Palm III shares the IIIx's keys and silkscreen rectangles and prints its own silkscreen.
+    assert(deviceControls(DeviceArt::iii).buttons==deviceControls(DeviceArt::iiix).buttons);
+    assert(deviceSilkscreen(DeviceArt::iii).buttons==deviceSilkscreen(DeviceArt::iiix).buttons);
+    assert(&deviceSilkscreen(DeviceArt::iii)!=&deviceSilkscreen(DeviceArt::iiix));
     assert(&deviceSilkscreen(DeviceArt::vx)==&deviceSilkscreen(DeviceArt::v));
     assert(&deviceSilkscreen(DeviceArt::m100)==&deviceSilkscreen(DeviceArt::m125) && &deviceSilkscreen(DeviceArt::m105)==&deviceSilkscreen(DeviceArt::m125));
     assert(&deviceSilkscreen(DeviceArt::c500)==&deviceSilkscreen(DeviceArt::m500));
@@ -937,6 +955,9 @@ static void sharedArt() {
         return std::abs(int(x.r)-y.r)+std::abs(int(x.g)-y.g)+std::abs(int(x.b)-y.b)>=6;
     };
     assert(differ(DeviceArt::iiix,DeviceArt::iiie) && differ(DeviceArt::iiix,DeviceArt::iiixe) && differ(DeviceArt::iiie,DeviceArt::iiixe));
+    // The Palm III's grey is clearly lighter than the IIIx family's.
+    for(auto art:{DeviceArt::iiix,DeviceArt::iiie,DeviceArt::iiixe})
+        assert(brightness(body(DeviceArt::iii))>brightness(body(art))+60);
     assert(differ(DeviceArt::v,DeviceArt::vx) && differ(DeviceArt::m100,DeviceArt::m105) && differ(DeviceArt::m100,DeviceArt::m125));
     assert(differ(DeviceArt::m125,DeviceArt::m130) && differ(DeviceArt::m100,DeviceArt::m130));
     const DeviceArt m515s[]={DeviceArt::m515,DeviceArt::m500,DeviceArt::c500,DeviceArt::m505,DeviceArt::m520};
@@ -1740,7 +1761,7 @@ static void zireAndM515() {
         artDevice(art);
         artSilkscreen(art);
     }
-    for(auto art:{DeviceArt::iiix,DeviceArt::iiie,DeviceArt::iiixe})iiixArt(art);
+    for(auto art:{DeviceArt::iiix,DeviceArt::iiie,DeviceArt::iiixe,DeviceArt::iii})iiixArt(art);
     for(auto art:{DeviceArt::m125,DeviceArt::m100,DeviceArt::m105,DeviceArt::m130})m125Art(art);
     iiicArt();
     for(auto art:{DeviceArt::v,DeviceArt::vx})vArt(art);
@@ -3230,5 +3251,5 @@ int main(int argc,char** argv) {
     zodiacControls();
     clieGamepad();
     zodiacRightStick();
-    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx, m125 and TG50 hit areas, the IIIe, IIIxe, IIIc, V, Vx, m100, m105, m130, m500, c500, m505 and m520 art, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys; iPAQ 210, rx1950 and h4350 bars and h4350 keyboard hiding; T415 art, jog tab and silkscreen; TG50 game controller art");
+    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx, m125 and TG50 hit areas, the Palm III, IIIe, IIIxe, IIIc, V, Vx, m100, m105, m130, m500, c500, m505 and m520 art, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys; iPAQ 210, rx1950 and h4350 bars and h4350 keyboard hiding; T415 art, jog tab and silkscreen; TG50 game controller art");
 }
