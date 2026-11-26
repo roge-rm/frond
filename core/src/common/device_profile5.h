@@ -177,6 +177,17 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
       DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true, true},
      4 | 8 | 16 | 32 | 64 | 128, 1886, 200000000},
+    // Palm III: the original 68328 board (not the EZ) with 2 MiB of RAM and OS 3.0 in flash. Its ROMs (header
+    // version 2 to 5 with no EZ flag) are told by the missing EZ flag and, from version 5, the HAL ID. Serial,
+    // IrDA, piezo and the snap-on Palm III modem like the IIIx.
+    {deviceTypePalmIII, "palm-iii", "Palm III", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+     DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x72636b79 /* rcky */, DeviceBoard5::ez328, DeviceArt::iii,
+     {false, false, true, false, false, true, false, true, false, false, true, true},
+     0, 0, 2u << 20, 2u << 20, DisplayMode::mode_160x160, 1u << 1, false,
+     DeviceNorLayout5::any, 0, 0, false, 0, 0,
+     {true, "iii", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",
+      "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iii"},
+     0, 0, 16580608},
     // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
     // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial, IrDA and the snap-on Palm III modem; nothing else
     // is on the device.
@@ -570,7 +581,7 @@ inline DeviceNorInfo5 deviceProfileInspectNor5(uint64_t size, Reader read) {
 }
 
 // Reads only the card header of a 68k ROM, so a ROM it accepts can still be one the board can't run;
-// frond-68k checks that properly. Header versions 1 and 2 (68328 ROMs) and 68328-only ROMs are refused.
+// frond-68k checks that properly. Header version 1 and 68328 ROMs other than the Palm III's are refused.
 // Version 5 headers carry company and HAL IDs, which must match the profile's; older ones have none.
 struct Device68kRomInfo5 {
     const DeviceProfile5* profile{nullptr};
@@ -672,6 +683,15 @@ inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read)
         }
         return info;
     }
+    // The Palm III's ROMs have no EZ flag: header version 2 to 5, with the Palm III's HAL ID from version 5.
+    if (info.headerVersion >= 2 && info.headerVersion <= 5 && !(flags & 0x0021)) {
+        const auto* iii = deviceProfileNamed5("palm-iii");
+        if (info.headerVersion == 5 && (info.companyId != iii->companyId || info.halId != iii->halId)) return info;
+        if (size > rom68kMaxSize5 || size % 0x1000 || cardBytes > size) return info;
+        if (reset < rom68kEzBase5 || reset - rom68kEzBase5 >= size) return info;
+        info.profile = iii;
+        return info;
+    }
     if (info.headerVersion < 3 || info.headerVersion > 5 || (flags & 0x0001) || !(flags & 0x0020)) return info;
     if (size > rom68kMaxSize5 || size % 0x1000 || cardBytes > size) return info;
     if (reset < rom68kEzBase5 || reset - rom68kEzBase5 >= size) return info;
@@ -683,7 +703,8 @@ inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read)
         return info;
     }
     for (const auto& p : deviceProfiles5) {
-        if (p.detect != DeviceDetect5::romHeader68k || p.board != DeviceBoard5::ez328) continue;
+        if (p.detect != DeviceDetect5::romHeader68k || p.board != DeviceBoard5::ez328 ||
+            p.deviceType == deviceTypePalmIII) continue;
         if (info.headerVersion >= 5 && (info.companyId != p.companyId || info.halId != p.halId)) continue;
         info.profile = &p;
         return info;
@@ -707,6 +728,8 @@ inline bool deviceProfileTakes68kRom5(const DeviceProfile5& chosen, const Device
     // The IIIc's ROM (its own HAL ID) goes to the IIIc only and the IIIc takes no other; the rest of the EZ
     // devices share the IIIx family's ROMs.
     if (chosen.deviceType == deviceTypeIIIc || info.profile->deviceType == deviceTypeIIIc) return false;
+    // The Palm III's ROMs (68328, no EZ flag) are its own too.
+    if (chosen.deviceType == deviceTypePalmIII || info.profile->deviceType == deviceTypePalmIII) return false;
     return chosen.board == DeviceBoard5::ez328 && info.profile->board == DeviceBoard5::ez328;
 }
 

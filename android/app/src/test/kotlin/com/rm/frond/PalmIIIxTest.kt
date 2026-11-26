@@ -59,9 +59,25 @@ class PalmIIIxTest {
         }
     }
 
+    @Test fun palmIiiRomsAreItsOwn() {
+        val iii = Device.byId("palm-iii")!!
+        // OS 3.0 is header version 2, 3.3 version 3 and 4.1 version 5 with the "rcky" HAL; none has the EZ flag.
+        for ((version, size) in listOf(2 to 0x200000L, 3 to 0x148000L, 5 to 0x1a8000L)) {
+            val f = rom(size, version, flags = 0x0000, company = 0x70616c6dL, hal = 0x72636b79L, resetOffset = 0x8226)
+            assertEquals(iii, Firmware.detect(f))
+            assertNull(Firmware.check(iii, f, null))
+            assertTrue(Firmware.check(iii, f, tmp.newFile())!!.contains("no NAND"))
+            for (other in listOf(iiix) + ezIds.map { Device.byId(it)!! })
+                assertEquals("This is a Palm III ROM. Choose Palm III.", Firmware.check(other, f, null))
+        }
+        assertNull(Firmware.detect(rom(0x1a8000, 5, flags = 0, company = 0x70616c6dL, hal = 0x73756d6fL)))
+        // An EZ ROM isn't the Palm III's.
+        assertEquals("This is a Palm IIIx ROM. Choose Palm IIIx.", Firmware.check(iii, rom(0x128000, 3), null))
+    }
+
     @Test fun romsTheIiixCantRunAreRefused() {
-        // 68328 only, header version 2, an unknown HAL: the header is there but it can't run.
-        for (f in listOf(rom(0x128000, 3, flags = 0x0010), rom(0x128000, 2),
+        // RAM only, header version 1, an unknown HAL: the header is there but it can't run.
+        for (f in listOf(rom(0x128000, 3, flags = 0x0001), rom(0x128000, 1, flags = 0),
                          rom(0x1a8000, 5, company = 0x70616c6dL, hal = 0x12345678L))) {
             assertNull(Firmware.detect(f))
             assertEquals("This ROM isn't one the Palm IIIx can run.", Firmware.check(iiix, f, null))
@@ -99,7 +115,7 @@ class PalmIIIxTest {
         assertFalse(d.cardSupported || d.holdPresent)
         assertEquals(listOf("--device", "palm-iiix"), d.coreFlags)
         // The Danas run on the 68k core too; every other device is ARM.
-        for (arm in Device.entries.filter { it != d && !it.isDana() && it.id !in ezIds && it.id !in vzIds && it.id !in colourIds && it.id !in greyVzIds }) assertFalse(arm.id, arm.runs68k)
+        for (arm in Device.entries.filter { it != d && it.id != "palm-iii" && !it.isDana() && it.id !in ezIds && it.id !in vzIds && it.id !in colourIds && it.id !in greyVzIds }) assertFalse(arm.id, arm.runs68k)
     }
 
     @Test fun otherEzDevicesAreInTheInventory() {
@@ -126,7 +142,7 @@ class PalmIIIxTest {
                 assertEquals(iiix, Firmware.detect(f))
             }
             assertEquals("The ${d.label} has no NAND. Leave the NAND image empty.", Firmware.check(d, rom(0x178000, 3), tmp.newFile()))
-            assertEquals("This ROM isn't one the ${d.label} can run.", Firmware.check(d, rom(0x178000, 3, flags = 0x0010), null))
+            assertEquals("This ROM isn't one the ${d.label} can run.", Firmware.check(d, rom(0x178000, 3, flags = 0x0001), null))
         }
         val clock = "cclkPalmClock\u0000".toByteArray(Charsets.US_ASCII)
         for (at in listOf(0x150000L, 0x1fffffL - 13, 0x1fffcL)) {

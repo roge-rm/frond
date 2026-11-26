@@ -23,6 +23,7 @@ KNOWN = {
     '29c696f48f50b6e2fcb37023aca24447d01c903c1b1bc8327a7debd7016d9fb1': (1540096, 4, 'palm-iiix'),  # Palm-OS-3.5-en-ez-dbg
     '78298aaf48f2247c013e54d1d05820edd41ca057a948ac8492939967c879d9a8': (1736704, 5, 'palm-iiix'),  # Palm-IIIx-V-4.1-en
     '541447fa871823e2b5e538fae375c127055cdfd7bab52bfffb3e2071848177a8': (3276800, 5, 'sony-clie-t415'),  # Sony-Clie-T400
+    '5de71eef687ef32ed94d2353184e80ccd5b15239739d20b882ee83c441c1f3ef': (2097152, 2, 'palm-iii'),  # Palm-OS-3.0-en
 }
 
 
@@ -62,7 +63,10 @@ def main():
             'arm': (bytes(arm), 'not a 68k Palm ROM'),
             'oversize': (header(0x201000), 'unsupported 68k ROM'),
             'truncated': (header(0x120000, card=0x128000), 'unsupported 68k ROM'),
-            '68328': (header(0x128000, flags=0x10), 'unsupported 68k ROM'),
+            'ram-only': (header(0x128000, flags=0x01), 'unsupported 68k ROM'),
+            'header-v1': (header(0x128000, version=1, flags=0), 'unsupported 68k ROM'),
+            # No EZ flag is the Palm III's: the header is taken and nothing is behind it.
+            'palm-iii-hollow': (header(0x200000, version=2, flags=0, reset=0x10c08226), 'unreadable ROM'),
             # A header the quick check takes, with nothing behind it.
             'hollow': (header(0x128000), 'unreadable ROM'),
         }

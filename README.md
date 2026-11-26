@@ -2,7 +2,7 @@
 
 Frond is a PDA emulator for Linux and Android, for running apps and games and writing your own. There are builds for Windows and macOS too, untested.
 
-It runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, and the HP iPAQ rx1950 on Windows Mobile 5, with sound, memory cards, infrared, Bluetooth, HotSync, ActiveSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
+It runs Palm OS devices from the Palm III to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, and the HP iPAQ rx1950 on Windows Mobile 5, with sound, memory cards, infrared, Bluetooth, HotSync, ActiveSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
@@ -65,6 +65,7 @@ Dan
 | Sony CLIÉ TG50 | 5.0 | 320×320 colour | Memory Stick | yes | yes | yes | | USB, serial |
 | Tapwave Zodiac 1 and 2 | 5.2 | 480×320 colour | two SD | yes | yes | yes | | USB, serial |
 | **Palm OS 3 and 4, 68k** | | | | | | | | |
+| Palm III | 3.0 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIx | 3.1, 3.5 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIe | 3.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIxe | 3.5 | 160×160 grey | | piezo | yes | | PPP | serial |
@@ -86,7 +87,7 @@ Dan
 | HP iPAQ rx1950 | Windows Mobile 5 | 240×320 colour | SD | yes | yes | | virtual Wi-Fi | ActiveSync, USB and serial |
 
 - The ARM devices have two engines. Exact runs the device exactly and Fast is a JIT that runs quicker on a slow computer or phone. Pick one in each machine's [Settings](doc/using-frond.md#settings).
-- The 68k devices, from the Palm IIIx to the m520, the Danas and the CLIÉ T415, run in their own runner, `frond-68k`, with the Exact engine only. Their networking is PPP over serial or the dial-up modem, see [68k Palm serial and PPP](doc/using-frond.md#68k-palm-serial-and-ppp).
+- The 68k devices, from the Palm III to the m520, the Danas and the CLIÉ T415, run in their own runner, `frond-68k`, with the Exact engine only. Their networking is PPP over serial or the dial-up modem, see [68k Palm serial and PPP](doc/using-frond.md#68k-palm-serial-and-ppp).
 - The iPAQ rx1950 runs Windows Mobile 5. It installs CABs from its SD card and syncs over [ActiveSync](doc/using-frond.md#activesync).
 
 What each device has, and what isn't done yet, is in [Availability and limits](doc/using-frond.md#availability-and-limits) and its [Device notes](doc/using-frond.md#device-notes).
@@ -133,7 +134,7 @@ These builds are made as is and I haven't tried them. Get them from [Releases](h
 | Zire 72 | 14,942,208 bytes | none |
 | Sony CLIÉ TG50 | 13,041,664 bytes | none |
 | Tapwave Zodiac 1 and 2 | the 8,192,000 byte ROM, or Tapwave's Zodiac 1.1 update (the zip or the PRC in it) | none |
-| Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100 and m105 | one ROM file, 1.2 to 2.1 MB | none |
+| Palm III, IIIx, IIIe, IIIxe, IIIc, V, Vx, m100 and m105 | one ROM file, 1.2 to 2.1 MB | none |
 | Palm m125, m130, m500, m505, m515, m520 and IBM WorkPad c500 | one ROM file, 2.4 to 4.2 MB | none |
 | AlphaSmart Dana and Dana Wireless | one ROM file, 6 MiB | none |
 | HP iPAQ rx1950 | `CEBL.nbf` from HP's WM5 ROM 1.01.00 ENG (264,794 bytes) | OS image: `CEOS.nbf` from the same ROM (67,095,130 bytes), or another OS `.nbf` |

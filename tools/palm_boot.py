@@ -602,6 +602,37 @@ def iiix_setup(core, root):
     iiix_setup_pages(core, root, frame)
 
 
+def iii_tab(rows):
+    """Width of the inverted title tab at the top left. The launcher's tab (the clock) is short, a form's is long."""
+    return next((x for x in range(160) if not iiix_dark(rows, x, 2)), 160)
+
+
+def iii_prefs(rows):
+    """The Preferences form OS 3.0 opens after the calibration: a title tab as wide as its name."""
+    return iiix_title(rows) and iii_tab(rows) >= 62
+
+
+def iii_launcher(rows):
+    return iiix_launcher(rows) and iii_tab(rows) < 62
+
+
+def iii_setup(core, root):
+    """Palm III, OS 3.0: three calibration targets, then Preferences with no setup pages; the Applications
+    silkscreen key opens the launcher."""
+    frame = root / 'boot-frame.png'
+    rows = core.wait_frame(frame, lambda rows: iii_launcher(rows) or iii_prefs(rows) or iiix_target(rows, 10, 10), 120)
+    if iii_launcher(rows):
+        return
+    if iiix_target(rows, 10, 10):
+        iiix_calibrate(core, root, frame)
+        core.wait_frame(frame, iii_prefs, 60)
+    (root / 'preferences.png').write_bytes(frame.read_bytes())
+    # Let the form finish drawing, then Applications (the Home key).
+    time.sleep(3)
+    core.tap(root, 13, 178)
+    core.wait_frame(root / 'launcher.png', iii_launcher, 60)
+
+
 def halve(rows):
     """A 320x320 frame as 160x160, each pixel the darkest of its 2x2 block, so the IIIx checks see thin lines."""
     if rows is None or len(rows) != 320:
@@ -716,7 +747,7 @@ def setup_device(device, core, root, variant=None):
 
 SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'e2-denvfs': e2_denvfs_setup, 'e3': e3_setup,
                  'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup, 'iiix-hires': iiix_hires_setup,
-                 'dana': dana_setup}
+                 'iii': iii_setup, 'dana': dana_setup}
 
 
 def launcher_check(device, variant=None):
@@ -730,7 +761,7 @@ def launcher_check(device, variant=None):
 LAUNCHER_CHECKS = {'wallpaper': launcher_wallpaper,
                    'e2-denvfs': e2_denvfs_launcher,
                    'wallpaper-upper': upper_wallpaper_launcher, 'tg50-clie': tg50_launcher,
-                   'iiix': iiix_launcher, 'iiix-hires': iiix_hires_launcher, 'dana': dana_launcher,
+                   'iiix': iiix_launcher, 'iii': iii_launcher, 'iiix-hires': iiix_hires_launcher, 'dana': dana_launcher,
                    'e3-stock': e3_launcher}
 
 

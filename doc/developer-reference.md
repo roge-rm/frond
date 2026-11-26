@@ -577,7 +577,7 @@ Breakpoints and snapshots aren't saved in sessions. On Android, Settings > Debug
 
 ## 68k Palms (frond-68k)
 
-`frond-68k` runs the 68k Palms on the CloudpilotEmu 68k core: the DragonBall EZ ones (Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100, m105, Palm OS 3.1 to 4.1) and the DragonBall VZ ones (m125, m130, m500, c500, m505, m515, m520, Dana, Palm OS 4.0 and 4.1). It is a separate program from `frond`, built by `make out/frond-68k` (the cloudpilot sources with `FROND_68K=1`, no network proxy, readline or Fast engine) and shipped in the Debian package as `/usr/lib/frond/frond-68k-core` beside `frond-core`. The desktop and Android apps start it for 68k devices. Run it by hand like this:
+`frond-68k` runs the 68k Palms on the CloudpilotEmu 68k core: the DragonBall EZ ones (Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100, m105, Palm OS 3.1 to 4.1), the Palm III (the original DragonBall 328, Palm OS 3.0) and the DragonBall VZ ones (m125, m130, m500, c500, m505, m515, m520, Dana, Palm OS 4.0 and 4.1). It is a separate program from `frond`, built by `make out/frond-68k` (the cloudpilot sources with `FROND_68K=1`, no network proxy, readline or Fast engine) and shipped in the Debian package as `/usr/lib/frond/frond-68k-core` beside `frond-core`. The desktop and Android apps start it for 68k devices. Run it by hand like this:
 
 ```sh
 out/frond-68k --rom palm-os-3.5-ez.rom --run-for 10 --framebuffer-output out.png
