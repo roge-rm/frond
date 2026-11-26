@@ -2,6 +2,9 @@
 #define FROND_GUEST_DATABASE_OPS_H
 
 #include <algorithm>
+#include <array>
+#include <cstring>
+#include <vector>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
@@ -121,30 +124,60 @@ inline void SettleBeforeReset(SoC& soc, uint64_t delay = 3000000000, uint64_t li
     }
 }
 
-inline int InstallNow(SoC& soc, size_t size, void* data) {
+// The database header (name, type and creator) of each install whose sync notify and launcher
+// relaunch are still to come (InstallLater), and the host time of the last one, in microseconds.
+struct PendingFinish {
+    std::vector<std::array<uint8_t, 78>> headers;
+    uint64_t at{0};
+    unsigned tries{0};
+};
+
+inline PendingFinish& pendingFinish() {
+    static PendingFinish pending;
+    return pending;
+}
+
+// The sync notify for each header and one launcher relaunch after them, as HotSync does at the end
+// of a sync, in one transaction of their own: if they fail, the guest goes back to just after the
+// installs, which still succeeded. At the safe point NativePrepare or syscallDispatchPrepare found.
+inline void FinishPrepared(SoC& soc, bool native, const std::vector<std::array<uint8_t, 78>>& headers) {
+    constexpr uint32_t application = 0x6170706cu;
+    bool app = false;
+    for (const auto& header : headers) app |= (uint32_t(header[60]) << 24 | header[61] << 16 | header[62] << 8 | header[63]) == application;
+    try {
+        ReadOnlyGuest transaction(soc);
+        if (!native) {
+            for (const auto& header : headers) dbInstallerFinish(soc.GetSyscallDispatch(), header.size(), header.data(), false);
+            if (app) relaunchLauncher(soc.GetSyscallDispatch());
+        } else {
+            WithSession(soc, [&](auto& session) {
+                DatabaseOf<decltype(session)> database(session);
+                for (const auto& header : headers) database.FinishInstall(header.data(), header.size(), false);
+                if (app) database.RelaunchLauncher();
+                database.Finish();
+                session.Close();
+            });
+        }
+        transaction.Commit();
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "install: sync notify or launcher relaunch failed, the database is installed: %s\n", error.what());
+    }
+}
+
+// Installs at the app's next event wait. With finish, the sync notify and the launcher relaunch run
+// right after it; without, the header joins pendingFinish for FinishPending.
+inline int InstallNow(SoC& soc, size_t size, void* data, bool finish) {
     if (!Wake(soc)) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
-    if (!NativePrepare(soc)) {
+    const bool native = NativePrepare(soc);
+    if (!native) {
         if (!syscallDispatchM68kSupport(soc.GetSyscallDispatch())) return DB_INSTALL_RESULT_ERR_NOT_SUPPORTED;
         if (!syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
-        {
-            ReadOnlyGuest transaction(soc);
-            const int result = dbInstallerInstall(soc.GetSyscallDispatch(), size, data);
-            if (result < 0) return result;
-            transaction.Commit();
-            if (result != DB_INSTALL_RESULT_OK) return result;
-        }
-        // The sync notify and launcher relaunch run in their own transaction: if they fail, the
-        // guest goes back to just after the install, which still succeeded.
-        try {
-            ReadOnlyGuest transaction(soc);
-            dbInstallerFinish(soc.GetSyscallDispatch(), size, data);
-            transaction.Commit();
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "install: sync notify or launcher relaunch failed, the database is installed: %s\n", error.what());
-        }
-        return DB_INSTALL_RESULT_OK;
-    }
-    {
+        ReadOnlyGuest transaction(soc);
+        const int result = dbInstallerInstall(soc.GetSyscallDispatch(), size, data);
+        if (result < 0) return result;
+        transaction.Commit();
+        if (result != DB_INSTALL_RESULT_OK) return result;
+    } else {
         ReadOnlyGuest transaction(soc);
         const int result = WithSession(soc, [&](auto& session) {
             DatabaseOf<decltype(session)> database(session);
@@ -158,25 +191,63 @@ inline int InstallNow(SoC& soc, size_t size, void* data) {
         transaction.Commit();
         if (result != DB_INSTALL_RESULT_OK) return result;
     }
-    try {
-        ReadOnlyGuest transaction(soc);
-        WithSession(soc, [&](auto& session) {
-            DatabaseOf<decltype(session)> database(session);
-            database.FinishInstall(static_cast<const uint8_t*>(data), size);
-            database.Finish();
-            session.Close();
-        });
-        transaction.Commit();
-    } catch (const std::exception& error) {
-        std::fprintf(stderr, "install: sync notify or launcher relaunch failed, the database is installed: %s\n", error.what());
+    if (size < 78) return DB_INSTALL_RESULT_OK;
+    std::array<uint8_t, 78> header;
+    std::memcpy(header.data(), data, header.size());
+    if (finish) {
+        // The guest is still at the safe point the install ran at.
+        FinishPrepared(soc, native, {header});
+    } else {
+        pendingFinish().headers.push_back(header);
     }
     return DB_INSTALL_RESULT_OK;
 }
 
 inline int Install(SoC& soc, size_t size, void* data) {
-    const int result = InstallNow(soc, size, data);
+    const int result = InstallNow(soc, size, data, true);
     if (result >= 0) noteStoreWrite(soc);
     return result;
+}
+
+// Installs one file of what may be a batch: the sync notifies and the one launcher relaunch wait for
+// FinishPending, so files sent one after another don't each relaunch the launcher and take a second
+// checkpoint. now is host time in microseconds.
+inline int InstallLater(SoC& soc, size_t size, void* data, uint64_t now) {
+    const int result = InstallNow(soc, size, data, false);
+    if (result >= 0) noteStoreWrite(soc);
+    if (!pendingFinish().headers.empty()) pendingFinish().at = now;
+    return result;
+}
+
+// How long after the last InstallLater the batch counts as done, in microseconds of host time.
+constexpr uint64_t kFinishDelay = 500000;
+inline bool FinishDue(uint64_t now) {
+    const auto& pending = pendingFinish();
+    return !pending.headers.empty() && now - pending.at >= kFinishDelay;
+}
+inline bool FinishWaiting() { return !pendingFinish().headers.empty(); }
+
+// Sends what InstallLater left: the notifies and one relaunch. A sleeping Palm isn't woken for it;
+// it's tried again kFinishDelay later, and dropped after 20 tries (the databases are installed
+// either way). now is host time in microseconds.
+inline void FinishPending(SoC& soc, uint64_t now) {
+    auto& pending = pendingFinish();
+    if (pending.headers.empty()) return;
+    bool native = false;
+    const bool ready = !frondNative::guestAsleep(soc) &&
+                       ((native = NativePrepare(soc)) ||
+                        (syscallDispatchM68kSupport(soc.GetSyscallDispatch()) &&
+                         syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))));
+    if (!ready) {
+        pending.at = now;
+        if (++pending.tries < 20) return;
+        std::fprintf(stderr, "install: sync notify and launcher relaunch dropped, Palm OS isn't ready\n");
+        pending = {};
+        return;
+    }
+    const auto headers = std::move(pending.headers);
+    pending = {};
+    FinishPrepared(soc, native, headers);
 }
 
 enum class LaunchResult { notReady, failed, launched };

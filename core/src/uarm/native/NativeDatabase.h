@@ -125,8 +125,9 @@ class NativeDatabase {
     // install while the launcher is in front relaunches the launcher so it lists the app, unless an
     // event is waiting: the notified app may have queued one (an app switch queues appStopEvent),
     // or a pen or key event came in. Native calls take no card number; SysEventAvail is the 68k
-    // EvtEventAvail.
-    void FinishInstall(const uint8_t* bytes, size_t length) {
+    // EvtEventAvail. Without relaunch only the notify is sent, for a batch that relaunches once
+    // (RelaunchLauncher).
+    void FinishInstall(const uint8_t* bytes, size_t length, bool relaunch = true) {
         if (!bytes || length < 78) return;
         const auto* text = reinterpret_cast<const char*>(bytes);
         const uint32_t installed = Find(std::string(text, strnlen(text, 31)));
@@ -150,7 +151,7 @@ class NativeDatabase {
             const uint32_t error = session.Call(0x87c8, {app, 0, syncNotify, 0}, {scratch + 104});
             if (error) std::fprintf(stderr, "install: sync notify failed: Palm OS error %u\n", error);
         }
-        if (type != applicationType || currentCreator != launcherCreator) return;
+        if (!relaunch || type != applicationType || currentCreator != launcherCreator) return;
         if (call(0x881c, {}) & 0xff || call(0x82e0, {1, 0, 0, 0}) & 0xff) return;
         if (call(0x88f8, {current, 0, 0, 0}) != 0) throw std::runtime_error("Could not relaunch the launcher");
     }

@@ -158,10 +158,16 @@ class DesktopControl {
         switch (channel.Receive(request)) {
             case DesktopChannel::Poll::closed: return lost(ctx);
             case DesktopChannel::Poll::handled: return false;
-            case DesktopChannel::Poll::idle: break;
+            case DesktopChannel::Poll::idle:
+                if (GuestDatabaseOps::FinishDue(timestampUsec())) finishInstalls(ctx);
+                break;
             case DesktopChannel::Poll::request: {
                 const auto& command = request.command;
                 const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || (command == "sync-start" && request.argument == "network") || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
+                // Installs sent one after another finish together once they stop coming; any other
+                // guest work, or a quit, waits for that first.
+                if (GuestDatabaseOps::FinishWaiting() && ((work && command != "install") || command == "quit"))
+                    finishInstalls(ctx);
                 if (work) {
                     // Host calls only drop capture for their length; the user's choice stays and capture comes back.
                     if (ctx.microphone) ctx.microphone->Suspend();
@@ -203,8 +209,20 @@ class DesktopControl {
  private:
     // The socket closed. When the launcher went away without asking to quit, the session is saved
     // where its close would have saved it, here on the emulation thread like a save request.
+    // The sync notifies and the launcher relaunch for installs sent one after another
+    // (GuestDatabaseOps::InstallLater), with playback paused like any host call.
+    void finishInstalls(commands::Context& ctx) {
+        if (ctx.microphone) ctx.microphone->Suspend();
+        ctx.audioDriver.Pause();
+        GuestDatabaseOps::FinishPending(*ctx.soc, timestampUsec());
+        if (sound) ctx.audioDriver.Start();
+        ctx.mainLoop.PauseAt(timestampUsec());
+    }
+
     bool lost(commands::Context& ctx) {
         finishPendingSave(ctx);
+        if (GuestDatabaseOps::FinishWaiting() && !saveOnLoss.empty() && !quit && channel.Lost() && !channel.QuitPending())
+            finishInstalls(ctx);
         if (saveOnLoss.empty() || quit || !channel.Lost() || channel.QuitPending()) return true;
         if (ctx.microphone) ctx.microphone->Disarm();
         ctx.audioDriver.Pause();
@@ -1160,7 +1178,7 @@ class DesktopControl {
         if (command == "install") {
             std::unique_ptr<uint8_t[]> data; size_t size;
             if (!util::ReadFile(path, data, size)) return {false, "read", "Could not read the application database."};
-            const auto result = GuestDatabaseOps::Install(*ctx.soc, size, data.get());
+            const auto result = GuestDatabaseOps::InstallLater(*ctx.soc, size, data.get(), timestampUsec());
             switch (result) {
                 case DB_INSTALL_RESULT_OK: return {true, "installed", "Application installed."};
                 case DB_INSTALL_RESULT_NEEDS_RESET: return {true, "needs-reset", "Installed. Reset the Palm to finish installation."};

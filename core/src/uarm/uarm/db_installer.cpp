@@ -125,7 +125,7 @@ static uint32_t be32(const uint8_t* p) {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
 }
 
-void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data) {
+void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data, bool relaunch) {
     if (len < 78 || !syscallDispatchPrepare(sd)) return;
     const auto* header = static_cast<const uint8_t*>(data);
     char name[32]{};
@@ -166,7 +166,7 @@ void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data)
 
     // The relaunch goes through SysUIAppSwitch like the launch command. Any event already waiting,
     // a tap or the appStopEvent of a switch under way, goes first and the launcher keeps its list.
-    if (type != sysFileTApplication || currentCreator != sysFileCLauncher ||
+    if (!relaunch || type != sysFileTApplication || currentCreator != sysFileCLauncher ||
         syscall68k_EvtEventAvail(sd, SC_EXECUTE_FULL) || syscall68k_EvtSysEventAvail(sd, SC_EXECUTE_FULL, true))
         return;
     if (syscall68k_SysUIAppSwitch(sd, SC_EXECUTE_FULL, 0, current, 0, 0) != 0)
