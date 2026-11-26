@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <array>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -54,6 +55,7 @@
 #include "../../uarm/native/DeviceControls.h"
 #include "../../uarm/native/ShortcutKeys.h"
 #include "DanaX11Keys.h"
+#include "PortableKeyboardKeys.h"
 #include "../../uarm/native/WindowId.h"
 #include "../../uarm/native/WindowLayout.h"
 #include "../../uarm/native/DanaView.h"
@@ -231,7 +233,7 @@ void usage() {
             "                 [--controller-map KEY:BUTTON,...|none]\n"
             "                 [--pa1-trace NEW_CSV (T415 development)]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|sync|modem|ppp] [--usb off|pty|tcp:PORT|unix:PATH|sync]\n"
-            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
+            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer|sync] [--modem-sync off|pty|tcp:PORT|unix:PATH|sync]\n"
             "                 [--sync-folder DIR] [--sync-profile NAME] [--sync-machine KEY] [--sync-user NAME] [--sync-network]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
@@ -1335,9 +1337,9 @@ class Runner {
                 (link == &serialLink ? serialError : infraredError) = error;
                 continue;
             }
-            if (link == &serialLink && (serialTransport->ModemMode() || serialTransport->DirectMode()))
+            if (link == &serialLink && (serialTransport->ModemMode() || serialTransport->DirectMode() || serialTransport->KeyboardMode()))
                 cout << name << ": " << serialTransport->Describe() << endl;
-            else if (link == &irLink && (irTransport->PhoneMode() || irTransport->PrinterMode())) cout << name << ": " << irTransport->Describe() << endl;
+            else if (link == &irLink && (irTransport->PeerMode())) cout << name << ": " << irTransport->Describe() << endl;
             else if (link->GetKind() != HostLink68k::Kind::off) cout << name << ": " << link->Describe() << endl;
         }
         if (options.usb != "off") {
@@ -1388,6 +1390,19 @@ class Runner {
             error = "Transport is not qualified for this device.";
             return false;
         }
+        if (mode == "keyboard") {
+            if (!deviceProfileSerialKeyboard5(profile->deviceType)) {
+                error = string(profile->displayName) + " takes no Palm Portable Keyboard";
+                return false;
+            }
+            serialTransport->SetNetworkMode(false, false, error);
+            serialLink.Close();
+            serialTransport->SetKeyboardMode(true);
+            UpdateSerialCable();
+            return true;
+        }
+        serialTransport->SetKeyboardMode(false);
+        ReleaseHostKeyboard();
         if (mode == "modem" || mode == "ppp") {
             if (mode == "modem" && !profile->capabilities.modem) {
                 error = string(profile->displayName) + " has no modem";
@@ -1403,7 +1418,7 @@ class Runner {
         uint16_t port;
         string path;
         if (!HostLink68k::Parse(mode, kind, port, &path)) {
-            error = "use off, pty, tcp:PORT, unix:PATH, sync, modem or ppp";
+            error = "use off, pty, tcp:PORT, unix:PATH, sync, modem, ppp or keyboard";
             return false;
         }
         serialTransport->SetNetworkMode(false, false, error);
@@ -1425,6 +1440,15 @@ class Runner {
             irLink.Close();
             return true;
         }
+        if (mode == "sync") {
+            if (!RomHasIrComm()) {
+                error = "IR HotSync needs Palm OS 3.3 or later";
+                return false;
+            }
+            irTransport->SetSyncMode(true);
+            irLink.Close();
+            return true;
+        }
         if (mode == "phone") {
             if (!profile->capabilities.irPhone) {
                 error = string(profile->displayName) + " has no infrared phone";
@@ -1442,11 +1466,12 @@ class Runner {
         uint16_t port;
         string path;
         if (!HostLink68k::Parse(mode, kind, port, &path) || kind == HostLink68k::Kind::syncManager) {
-            error = "use off, pty, tcp:PORT, unix:PATH, phone or printer";
+            error = "use off, pty, tcp:PORT, unix:PATH, phone, printer or sync";
             return false;
         }
         irTransport->SetPhoneMode(false, error);
         irTransport->SetPrinterMode(false);
+        irTransport->SetSyncMode(false);
         return irLink.Open(kind, port, error, path);
     }
 
@@ -1461,7 +1486,7 @@ class Runner {
     }
 
     string InfraredState() const {
-        return irTransport->PhoneMode() || irTransport->PrinterMode() ? irTransport->Describe()
+        return irTransport->PeerMode() ? irTransport->Describe()
                                                                       : LinkState(irLink, irTransport->Host());
     }
 
@@ -1493,7 +1518,7 @@ class Runner {
     }
 
     string SerialState() const {
-        if (serialTransport->DirectMode()) return serialTransport->Describe();
+        if (serialTransport->DirectMode() || serialTransport->KeyboardMode()) return serialTransport->Describe();
         return serialTransport->ModemMode() ? ModemState() : LinkState(serialLink, serialTransport->Host());
     }
 
@@ -1747,7 +1772,8 @@ class Runner {
     }
     void ServiceLinks() {
         if (serialLink.GetKind() == HostLink68k::Kind::off && irLink.GetKind() == HostLink68k::Kind::off &&
-            !serialTransport->ModemMode() && !serialTransport->DirectMode() && !irTransport->PhoneMode() && !irTransport->PrinterMode())
+            !serialTransport->ModemMode() && !serialTransport->DirectMode() && !serialTransport->KeyboardMode() &&
+            !irTransport->PeerMode())
             return;
         const bool on = gSession->IsPowerOn();
         irLink.SetAsleep(!on);
@@ -1918,6 +1944,29 @@ class Runner {
         auto scan=DanaScan5::Named(argument);
         if(!scan) return "unsupported-key";
         return DanaKey(DanaSource5::console,*scan,command=="dana-down")?"accepted":"busy";
+    }
+
+    // A host key on the Palm Portable Keyboard, with Fn held around keys from its Fn layer. A code
+    // held by two host keys (both Ctrl keys) goes up with the last. False for keys it hasn't got.
+    bool HostKeyboardKey(SDL_Scancode scan, bool down) {
+        const auto key = portableKeyboardKey(scan);
+        if (!key || size_t(scan) >= hostKeyboardHeld.size()) return false;
+        if (hostKeyboardHeld[scan] == down) return true;
+        hostKeyboardHeld[scan] = down;
+        auto hold = [this](uint8_t code, bool on) {
+            if (on ? ++hostKeyboardCodes[code] == 1 : hostKeyboardCodes[code] > 0 && --hostKeyboardCodes[code] == 0)
+                serialTransport->KeyboardKey(code, on);
+        };
+        if (down && key.fn) hold(frondKeyboard::PortableKeyboard::kFn, true);
+        hold(uint8_t(key.code), down);
+        if (!down && key.fn) hold(frondKeyboard::PortableKeyboard::kFn, false);
+        return true;
+    }
+    // Lets go of every host key on the keyboard.
+    void ReleaseHostKeyboard() {
+        for (size_t scan = 0; scan < hostKeyboardHeld.size(); ++scan)
+            if (hostKeyboardHeld[scan]) HostKeyboardKey(SDL_Scancode(scan), false);
+        hostKeyboardCodes.fill(0);
     }
 
     // Every source of a key (mouse, keyboard, fingers) goes through here; the key is pressed by the
@@ -2135,7 +2184,7 @@ class Runner {
             const bool serial = command == "serial-mode";
             string mode, error;
             if (!(words >> mode))
-                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|sync|modem|ppp" : "|phone|printer") << endl);
+                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|sync|modem|ppp|keyboard" : "|phone|printer|sync") << endl);
             if (serial ? !SetSerial(mode, error) : !SetInfrared(mode, error))
                 return void(cout << (serial ? "serial: " : "infrared: ") << "error " << error << endl);
             cout << (serial ? "serial: " + SerialState() : "infrared: " + InfraredState()) << endl;
@@ -2149,7 +2198,30 @@ class Runner {
         } else if (command == "irda-state") {
             cout << "infrared: " << InfraredState() << endl;
         } else if (command == "irda-stats") {
-            cout << "infrared: " << (irTransport->PhoneMode() || irTransport->PrinterMode() ? irTransport->Stats() : "off") << endl;
+            cout << "infrared: " << (irTransport->PeerMode() ? irTransport->Stats() : "off") << endl;
+        } else if (command == "keyboard-down" || command == "keyboard-up") {
+            // The Palm Portable Keyboard key for a host key by SDL scancode name, quoted if it has a space.
+            string name;
+            words >> std::ws;
+            if (words.peek() == '"') { words.get(); std::getline(words, name, '"'); }
+            else words >> name;
+            const auto scan = SDL_GetScancodeFromName(name.c_str());
+            if (!serialTransport->KeyboardMode()) return void(cout << "keyboard: detached" << endl);
+            if (!portableKeyboardKey(scan)) return void(cout << "keyboard: no key " << name << endl);
+            HostKeyboardKey(scan, command == "keyboard-down");
+            cout << "keyboard: " << serialTransport->Describe().substr(9) << endl;
+        } else if (command == "keyboard-type") {
+            // Types the rest of the line on the Palm Portable Keyboard, 10 keys a second; \n is Enter.
+            string text;
+            words >> std::ws;
+            std::getline(words, text);
+            for (size_t at = 0; (at = text.find("\\n", at)) != string::npos;) text.replace(at, 2, "\n");
+            if (!serialTransport->KeyboardMode()) return void(cout << "keyboard: detached" << endl);
+            if (!serialTransport->Typist().Type(text)) return void(cout << "keyboard: no key for a character" << endl);
+            cout << "keyboard: typing" << endl;
+        } else if (command == "keyboard-state") {
+            cout << "keyboard: " << (serialTransport->KeyboardMode() ? serialTransport->Describe().substr(9) : string("detached"))
+                 << (serialTransport->Typist().Busy() ? " typing" : "") << endl;
         } else if (command == "hotsync") {
             // The cradle's HotSync button, pressed and let go.
             gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::press));
@@ -2433,12 +2505,12 @@ class Runner {
 
     // "off", "off <error>" after a failed change, or "pty|tcp|unix <endpoint> connected|waiting".
     string SerialDescription() const {
-        if (serialTransport->DirectMode()) return serialTransport->Describe();
+        if (serialTransport->DirectMode() || serialTransport->KeyboardMode()) return serialTransport->Describe();
         return serialTransport->ModemMode() ? ModemState() : LinkDescription(serialLink, serialError);
     }
 
     string InfraredDescription() const {
-        return irTransport->PhoneMode() || irTransport->PrinterMode() ? irTransport->Describe()
+        return irTransport->PeerMode() ? irTransport->Describe()
                                                                       : LinkDescription(irLink, infraredError);
     }
 
@@ -2771,13 +2843,17 @@ class Runner {
         }
         if (command == "serial-state") return {true, "serial", SerialDescription()};
         if (command == "irda-state") return {true, "infrared", InfraredDescription()};
+        // Whether IR HotSync can run on this ROM, for the UI's Sync Manager choice.
+        if (command == "irda-sync-support") return {true, "infrared", RomHasIrComm() ? "yes" : "no"};
         if (command == "serial-mode" || command == "irda-mode") {
             const bool serial = command == "serial-mode";
             HostLink68k::Kind kind;
             uint16_t port;
             string path;
-            if (serial && (argument == "modem" || argument == "ppp")) {
+            if (serial && (argument == "modem" || argument == "ppp" || argument == "keyboard")) {
                 serialError.clear();
+                if (argument == "keyboard" && !deviceProfileSerialKeyboard5(profile->deviceType))
+                    return {false, "unsupported", string(profile->displayName) + " takes no Palm Portable Keyboard."};
                 if (!SetSerial(argument, serialError)) return {false, "serial", serialError};
                 return {true, "serial", SerialDescription()};
             }
@@ -2789,13 +2865,14 @@ class Runner {
                 if (!SetInfrared(argument, infraredError)) return {false, "infrared", infraredError};
                 return {true, "infrared", InfraredDescription()};
             }
-            if (!serial && argument == "printer") {
+            if (!serial && (argument == "printer" || argument == "sync")) {
                 infraredError.clear();
+                if (argument == "sync" && !RomHasIrComm()) return {false, "unsupported", "IR HotSync needs Palm OS 3.3 or later."};
                 if (!SetInfrared(argument, infraredError)) return {false, "infrared", infraredError};
                 return {true, "infrared", InfraredDescription()};
             }
             if (!HostLink68k::Parse(argument, kind, port, &path) || (!serial && kind == HostLink68k::Kind::syncManager))
-                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH, sync, modem or ppp." : "Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
+                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH, sync, modem, ppp or keyboard." : "Use off, pty, tcp:PORT, unix:PATH, phone, printer or sync."};
             HostLink68k& link = serial ? serialLink : irLink;
             string& error = serial ? serialError : infraredError;
             error.clear();
@@ -2804,6 +2881,7 @@ class Runner {
             } else {
                 irTransport->SetPhoneMode(false, error);
                 irTransport->SetPrinterMode(false);
+                irTransport->SetSyncMode(false);
                 // A failed open leaves the link off, and its state shows why.
                 if (!link.Open(kind, port, error, path)) return {false, "infrared", error};
             }
@@ -2818,7 +2896,7 @@ class Runner {
             return {true, "modem-sync", modemSyncLink.Describe()};
         }
         if (command == "irda-stats") {
-            if (irTransport->PhoneMode() || irTransport->PrinterMode()) return {true, "infrared", irTransport->Stats()};
+            if (irTransport->PeerMode()) return {true, "infrared", irTransport->Stats()};
             return {true, "infrared", "rx=" + to_string(irLink.Received()) + " tx=" + to_string(irLink.Sent()) +
                                           " port=" + (irTransport->Host().IsOpen() ? "open" : "closed")};
         }
@@ -2885,7 +2963,7 @@ class Runner {
             }
             return {true, "battery", BatteryState()};
         }
-        if (command == "keyboard-state") return {true, "keyboard", "detached"};
+        if (command == "keyboard-state") return {true, "keyboard", serialTransport->KeyboardMode() ? "attached" : "detached"};
         if (command == "irprinter") {
             if (!profile->capabilities.infrared) return {false,"unsupported","This device has no infrared port."};
             auto split=argument.find(' ');
@@ -2944,7 +3022,17 @@ class Runner {
             if (argument != "on" && argument != "off") return {false, "argument", "Use on or off."};
             return {false, "unsupported", "This device has no supported Hold switch."};
         }
-        if (command == "keyboard-key") return {false, "unsupported", "This device has no keyboard."};
+        // keyboard-key CODE d|u: a Palm Portable Keyboard matrix code in hex.
+        if (command == "keyboard-key") {
+            if (!serialTransport->KeyboardMode()) return {false, "unsupported", "No keyboard is attached."};
+            unsigned code = 0;
+            char direction = 0;
+            if (sscanf(argument.c_str(), "%x %c", &code, &direction) != 2 || (direction != 'd' && direction != 'u') ||
+                !frondKeyboard::PortableKeyboard::Valid(uint8_t(code)) || code > 0xff)
+                return {false, "argument", "Use a matrix code in hex, then d or u."};
+            if (!serialTransport->KeyboardKey(uint8_t(code), direction == 'd')) return {false, "busy", "The keyboard's buffer is full."};
+            return {true, "keyboard", "attached"};
+        }
         if (command == "usb-mode") return {false, "unsupported", "USB is not supported on this device."};
         if (command == "bluetooth-state" || command == "bluetooth-mode")
             return {false, "unsupported", "This device has no Bluetooth radio."};
@@ -3130,6 +3218,10 @@ class Runner {
         if (irTransport->PhoneMode() && !RomHasIrComm()) {
             irTransport->SetPhoneMode(false, infraredError);
             infraredError = "the infrared phone needs Palm OS 3.3 or later";
+        }
+        if (irTransport->SyncMode() && !RomHasIrComm()) {
+            irTransport->SetSyncMode(false);
+            infraredError = "IR HotSync needs Palm OS 3.3 or later";
         }
         cout << "loaded session " << path << endl;
     }
@@ -3629,6 +3721,7 @@ class Runner {
         if (penDown) gSession->QueuePenEvent(PenEvent::up());
         penDown = false;
         mouseKey = keyInvalid;
+        ReleaseHostKeyboard();
         touch.ReleaseAll();
         keyHolds.Clear();
         controllers.Forget();
@@ -3797,7 +3890,7 @@ class Runner {
                     break;
                 case SDL_TEXTINPUT: {
                     const auto c = static_cast<unsigned char>(event.text.text[0]);
-                    if (deviceTypeIsDana5(profile->deviceType)) break;
+                    if (deviceTypeIsDana5(profile->deviceType) || serialTransport->KeyboardMode()) break;
                     if (c && c < 0x80) gSession->QueueKeyboardEvent(char(c));
                     break;
                 }
@@ -3806,7 +3899,7 @@ class Runner {
                     const bool keyDown = event.type == SDL_KEYDOWN;
                     if (desktop) {
                         if (const auto name = shortcutName(event.key.keysym.sym, event.key.keysym.mod,
-                                                          deviceTypeIsDana5(profile->deviceType))) {
+                                                          deviceTypeIsDana5(profile->deviceType) || serialTransport->KeyboardMode())) {
                             if (keyDown && !event.key.repeat) desktop->Event("shortcut", *name);
                             break;
                         }
@@ -3822,6 +3915,11 @@ class Runner {
                         if(retap) ApplyDanaHostKey(event.key.keysym.scancode,false);
                         ApplyDanaHostKey(event.key.keysym.scancode,keyDown);
                         break;
+                    }
+                    // The Palm Portable Keyboard takes every key it has; the rest keep their uses.
+                    if (serialTransport->KeyboardMode() || hostKeyboardHeld[event.key.keysym.scancode]) {
+                        if (event.key.repeat && portableKeyboardKey(event.key.keysym.scancode)) break;
+                        if (HostKeyboardKey(event.key.keysym.scancode, keyDown)) break;
                     }
                     KeyId key = keyInvalid;
                     switch (event.key.keysym.sym) {
@@ -3879,6 +3977,9 @@ class Runner {
     bool smooth{false};
     SDL_Window* window{nullptr};
     bool windowFocused{false}, windowPolled{false}, keyboardGrabWanted{false}, keyboardGrabbed{false};
+    // Host keys down on the Palm Portable Keyboard, and how many host keys hold each matrix code.
+    std::array<bool, SDL_NUM_SCANCODES> hostKeyboardHeld{};
+    std::array<int, 0x60> hostKeyboardCodes{};
     // The desktop app is in front (app-active); controllers count then even without window focus.
     bool appActive{false};
     SDL_Renderer* renderer{nullptr};
@@ -4030,9 +4131,9 @@ bool parseOptions(int argc, char** argv, Options& options) {
             HostLink68k::Kind kind;
             uint16_t port;
             string path;
-            if (!v || (!(arg == "--serial" && (string(v) == "modem" || string(v) == "ppp")) &&
-                       !(arg == "--irda" && (string(v) == "phone" || string(v) == "printer")) &&
-                       (!HostLink68k::Parse(v, kind, port, &path) || (arg == "--irda" && kind == HostLink68k::Kind::syncManager))))
+            if (!v || (!(arg == "--serial" && (string(v) == "modem" || string(v) == "ppp" || string(v) == "keyboard")) &&
+                       !(arg == "--irda" && (string(v) == "phone" || string(v) == "printer" || string(v) == "sync")) &&
+                       !HostLink68k::Parse(v, kind, port, &path)))
                 return false;
             (arg == "--serial" ? options.serial : options.irda) = v;
         } else if (arg == "--sync-network") {

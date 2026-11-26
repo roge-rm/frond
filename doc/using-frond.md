@@ -529,7 +529,7 @@ Open **Sync Manager** from **…** on Android or from **…** or **File** on the
 
 Use Frond CSV to keep all fields and data when exporting records. Contacts also support vCard, calendar and tasks support iCalendar, and you can import or export a memo as a UTF-8 text file. iCalendar supports single-day appointments and tasks without repeats or alarms. Records with repeats or alarms can be exported as CSV.
 
-**Connections** can route a Palm OS serial or USB link to **Sync Manager** so you can start HotSync from the handheld. USB and serial HotSync can still go to a PTY or TCP port for external tools.
+**Connections** can route a Palm OS serial, USB or infrared link to **Sync Manager** so you can start HotSync from the handheld. USB and serial HotSync can still go to a PTY or TCP port for external tools.
 
 #### Queue applications from an installer
 
@@ -585,9 +585,17 @@ python3 tools/link-irda.py 5030 5031
 
 `link-irda.py` reconnects when a device wakes.
 
+### IR HotSync
+
+A Palm OS device with infrared and a **HotSync** button can HotSync over infrared to its Sync Manager profile. Assign the profile in **Sync settings** first, then pick **Sync Manager** in the Infrared list (Linux: the Infrared beaming row; Android: Infrared beaming in Connections, or the machine's settings). In the HotSync app choose **Local**, set the list under the icon to **IR to a PC/Handheld** and tap the icon. The Palm finds "Frond" and syncs as it would in the cradle, only slower, so a full backup of a T|X takes a while. IR HotSync is always started from the Palm; Frond's Sync button uses the cradle. It needs Palm OS 3.3 or later; the Palm III's 3.0 ROM has no IR HotSync, so Frond leaves Sync Manager out there once the machine has run. Detach the infrared keyboard first, as they share the port.
+
 ### Infrared keyboard
 
 Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keyboard, on the T|X, E2, E3, Zire 72 and TG50. It needs Palm's Universal Wireless Keyboard driver 1.13 in the Palm (the infrared one, not the Bluetooth Palm Wireless Keyboard driver), which Frond doesn't include. Install it, reset when it asks, open Keyboard in Palm OS and set Status to ON. Then attach the keyboard (the Machine menu on Linux, the corner menu on Android) and type in the device window. If the driver isn't in the Palm when you attach the keyboard, Frond says so. While it's attached every key goes to the driver, arrows included, so with the driver off nothing you type reaches the Palm. Left Alt is Fn and right Alt is AltGr, and the layout follows physical US keys, so pick the matching one in the driver. F1 to F4 and Escape keep their button and power uses. The attachment is saved with the machine.
+
+### Palm Portable Keyboard
+
+Serial port set to Palm Portable Keyboard plugs Palm's folding cradle keyboard into the Palm III, IIIx, IIIe, IIIxe and IIIc, on Linux and Android. It needs the Palm Portable Keyboard driver (Keyboard.prc) in the Palm, which Frond doesn't include. Install it and reset. The keyboard pulses the HotSync line when it's plugged in or a key wakes it, and the driver opens the port and takes it, so no HotSync starts. Type in the device window on Linux, or on a hardware or the on-screen keyboard on Android. Left Alt is Fn, right Alt is Alt and the Windows key is Cmd. F5 to F8 are the four application keys, F9 is Done, Page Up and Page Down scroll. F1 to F4 and Escape keep their button and power uses. The state line under Serial port says "Keyboard: ready" while the driver listens and "Keyboard: low power" between keys, as the driver closes the port when idle. "Keyboard: no driver answered" means the driver isn't there or is off.
 
 ### Bluetooth
 

@@ -15,6 +15,8 @@ const char* TransportName(Transport transport) {
             return "modem";
         case Transport::network:
             return "network";
+        case Transport::infrared:
+            return "infrared";
         default:
             return "serial";
     }

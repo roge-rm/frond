@@ -134,6 +134,7 @@ int main() {
                   << ",\"built_in_wifi\":" << (p.capabilities.builtInWifi ? "true" : "false")
                   << ",\"wifi_only_network\":" << (p.capabilities.wifiOnlyNetwork ? "true" : "false")
                   << ",\"clie_gamepad\":" << (f.clieGamepad ? "true" : "false")
+                  << ",\"serial_keyboard\":" << (deviceProfileSerialKeyboard5(p.deviceType) ? "true" : "false")
                   << ",\"firmware_variants\":[";
         bool firstVariant = true;
         for (const auto& v : deviceFirmwareVariants5) {

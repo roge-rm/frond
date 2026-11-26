@@ -27,6 +27,7 @@ import com.rm.frond.BeamMode
 import com.rm.frond.BluetoothChoice
 import com.rm.frond.BluetoothLink
 import com.rm.frond.InfraredChoice
+import com.rm.frond.IrLink
 import com.rm.frond.SyncProtocol
 import com.rm.frond.LinkStore
 import com.rm.frond.NetRelay
@@ -243,7 +244,10 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
     when (kind) {
         LinkKind.BEAM -> {
             val current = model.beam.choice
-            val choices = remember { InfraredChoice.infraredChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.irPhone) }
+            val choices = remember {
+                InfraredChoice.infraredChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.irPhone,
+                    sync = SyncProtocol.forDevice(model.device) == SyncProtocol.HOT_SYNC && IrLink.syncWorks)
+            }
             // Leaving Printer with output that isn't saved asks first.
             var leaving by remember { mutableStateOf<String?>(null) }
             // The notification for a print that arrives in the background needs this on Android 13 and later.
@@ -273,7 +277,7 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             val current = if (model.serialSync) InfraredChoice.SYNC_MANAGER else model.serial.choice
             val choices = remember(current, sync) {
                 InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem, sync,
-                    ppp = model.device.runs68k)
+                    ppp = model.device.runs68k, keyboard = model.device.serialKeyboard)
             }
             ConnectionChoiceDialog("Serial port", current, onDismiss, choices) { onDismiss(); model.changeSerial(it) }
         }

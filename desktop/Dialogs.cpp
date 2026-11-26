@@ -480,6 +480,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     infrared->setCurrentIndex(std::max(0, infrared->findData(prefs.infrared.startsWith("tcp:") ? QString("tcp") : prefs.infrared)));
     if (prefs.infrared == "phone") { frondLink::setPhoneChoice(infrared, true); infrared->setCurrentIndex(infrared->findData("phone")); }
     if (prefs.serial == "modem") { frondLink::setModemChoice(serial, true); serial->setCurrentIndex(serial->findData("modem")); }
+    if (prefs.serial == "keyboard") { frondLink::setKeyboardChoice(serial, true, true); serial->setCurrentIndex(serial->findData("keyboard")); }
     bluetoothLabel = new QLabel(tr("Bluetooth"), peripherals);
     bluetooth = new QComboBox(peripherals);
     bluetooth->setObjectName("machineBluetooth");
@@ -645,6 +646,24 @@ void MachineSettings::setNewMachine() {
     connect(engine, &QComboBox::activated, this, [this] { automaticEngine = false; });
     setDevice(device);
 }
+void MachineSettings::offerSync(bool serialSync, bool infraredSync) {
+    const auto offer = [](QComboBox* combo, bool on, const QString& saved, QStringList after) {
+        int at = combo->findData("sync");
+        if (!on && at >= 0) {
+            if (combo->currentIndex() == at) combo->setCurrentIndex(combo->findData("off"));
+            combo->removeItem(at);
+        }
+        if (!on) return;
+        if (at < 0) {
+            at = 0;
+            for (const auto& data : after) at = std::max(at, combo->findData(data) + 1);
+            combo->insertItem(at, tr("Sync Manager"), "sync");
+        }
+        if (saved == "sync") combo->setCurrentIndex(at);
+    };
+    offer(serial, serialSync, originalPreferences.serial, {"tcp", "modem", "keyboard"});
+    offer(infrared, infraredSync, originalPreferences.infrared, {"tcp", "printer", "phone"});
+}
 void MachineSettings::showPeripherals(bool shown) {
     peripheralsShown = shown;
     setDevice(device);
@@ -676,6 +695,8 @@ void MachineSettings::setDevice(Device device) {
         const QSignalBlocker blocked(serial);
         const auto mode = serial->currentData();
         frondLink::setModemChoice(serial, known && frondFirmware::capabilities(device).modem);
+        frondLink::setKeyboardChoice(serial, known && frondFirmware::runs68k(device) && frondFirmware::capabilities(device).serial,
+                                     known && frondFirmware::serialKeyboard(device));
         if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
     }
     for (QWidget* w : {static_cast<QWidget*>(serialLabel), static_cast<QWidget*>(serial)}) w->setVisible(hasSerial);

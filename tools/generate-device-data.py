@@ -18,7 +18,7 @@ def outputs(profiles):
         'id': 'name', 'label': 'display_name', 'group': 'group', 'released': 'released', 'cohort': 'cohort', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',
         'sound': 'sound', 'storageSlot': 'storage_slot', 'sdSlot': 'sd_slot', 'memoryStick': 'memory_stick_supported', 'network': 'network', 'serialPort': 'serial', 'microphone': 'microphone', 'camera': 'camera',
-        'keyboard': 'keyboard', 'usb': 'usb', 'infrared': 'infrared', 'bluetooth': 'bluetooth', 'modem': 'modem', 'irPhone': 'ir_phone', 'usbPrinter': 'usb_printer', 'usbWifi': 'usb_wifi', 'builtInWifi': 'built_in_wifi', 'wifiOnlyNetwork': 'wifi_only_network', 'clieGamepad': 'clie_gamepad',
+        'keyboard': 'keyboard', 'usb': 'usb', 'infrared': 'infrared', 'bluetooth': 'bluetooth', 'modem': 'modem', 'irPhone': 'ir_phone', 'usbPrinter': 'usb_printer', 'usbWifi': 'usb_wifi', 'builtInWifi': 'built_in_wifi', 'wifiOnlyNetwork': 'wifi_only_network', 'clieGamepad': 'clie_gamepad', 'serialKeyboard': 'serial_keyboard',
         'detectKind': 'detect', 'companyId': 'company_id', 'halId': 'hal_id',
         'norLayout': 'nor_layout', 'headerOffset': 'header_offset', 'bigCardOffset': 'big_card_offset',
         'width': 'width', 'height': 'height', 'sideTabWidth': 'side_tab_width', 'silkscreenHeight': 'silkscreen_height',

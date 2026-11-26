@@ -7,6 +7,7 @@ directppp uses the built-in serial PPP server, --only
 modem does the same through the snap-on modem (--serial modem) and --only irphone through the
 infrared phone (--irda phone). --only modemsync HotSyncs over the modem both ways: Modem Sync to the
 HotSync number through --modem-sync pty, then Network HotSync over PPP to pilot-xfer on net:.
+--only irsync HotSyncs over infrared to the Sync Manager (--irda sync).
 
 ROMs come from --rom, else the IIIx 3.1 ROM in the private firmware folder; with none the checks
 are skipped. A ROM whose name has T400 runs as the CLIE T415 at 320x320 through palm_boot.HalfCore. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
@@ -35,9 +36,9 @@ import boot_fixture  # noqa: E402
 from wait_for import wait_until, WaitTimeout  # noqa: E402
 
 CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'usb', 'unix', 'card-flags', 'databases', 'ppp', 'directppp', 'modem', 'irphone',
-          'modemsync', 'irprint']
+          'modemsync', 'irprint', 'irsync', 'keyboard']
 # Reach example.com over the internet, so they only run when asked for with --only.
-OPT_IN = {'ppp', 'directppp', 'modem', 'irphone', 'modemsync', 'irprint'}
+OPT_IN = {'ppp', 'directppp', 'modem', 'irphone', 'modemsync', 'irprint', 'irsync', 'keyboard'}
 T415_ROM = 'Sony/CLIE-T400/Sony-Clie-T400.rom'
 # The device under test; main() sets it from each ROM's name.
 DEVICE = 'palm-iiix'
@@ -46,7 +47,7 @@ IIIX_LIKE = ('palm-iiix', 'palm-iii')
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
 FRONDBENCH = OBJ / 'frondbench/FrondBench.prc'
 PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k', 'ppp68k': 'FrondPPP68k',
-          'irprint68k': 'FrondIRPrint68k'}
+          'irprint68k': 'FrondIRPrint68k', 'kbd68k': 'FrondKeyboard68k'}
 
 
 class Skip(Exception):
@@ -932,6 +933,50 @@ def check_modemsync(rom, session, root, probes):
             f'{listed.group(1)} databases, modem went {" > ".join(network)}')
 
 
+def check_irsync(rom, session, root, probes):
+    """IR HotSync to the Sync Manager (--irda sync): the HotSync app's Local trigger set to IR to a
+    PC/Handheld, then the HotSync button. The core's IrSync PC answers discovery, IAS and IrCOMM and
+    the Sync Manager backs the Palm up into --sync-folder. OS 3.0 and 3.1 have no IrCOMM, so the core
+    refuses irda-mode sync there."""
+    if '3.1' in rom.name or palm_iii_os(rom, '3.0'):
+        with Machine(session, root, 'irsync') as m:
+            reply = m.send('irda-mode sync', 'infrared:')
+        if 'Palm OS 3.3' not in reply:
+            raise AssertionError(f'irda-mode sync on an OS without IrCOMM: {reply}')
+        return f'refused before Palm OS 3.3: {reply}'
+    if '3.5' not in rom.name and not palm_iii_os(rom, '3.3') and not palm_iii_os(rom, '4.1'):
+        raise Skip('the HotSync taps are for OS 3.5 and the Palm III')
+    folder = root / 'irsync' / 'sync'
+    with Machine(session, root, 'irsync', '--irda', 'sync', '--sync-folder', folder) as m:
+        state = m.send('irda-state', 'infrared:')
+        if 'sync idle' not in state:
+            raise AssertionError(f'irda-state before: {state}')
+        m.core.launch('HotSync')
+        time.sleep(2)
+        # Local, the Cradle/Cable trigger, IR to a PC/Handheld, the HotSync button.
+        for x, y in [(60, 115), (70, 124)]:
+            m.core.tap(m.root, x, y)
+            time.sleep(0.8)
+        m.frame('ir-chosen.png')
+        m.core.tap(m.root, 80, 80)
+        seen = []
+        end = time.monotonic() + 180
+        while time.monotonic() < end:
+            state = m.send('irda-state', 'infrared:').split(': ', 1)[1]
+            link = state.split(';')[0]
+            if not seen or seen[-1] != link:
+                seen.append(link)
+            if 'done infrared' in state or 'failed' in state:
+                break
+            time.sleep(1)
+        time.sleep(5)
+        m.frame('irsync-done.png')
+    backed = re.search(r'(\d+) backed up', state)
+    if 'done infrared' not in state or not backed or int(backed.group(1)) == 0 or 'sync open' not in seen:
+        raise AssertionError(f'IR HotSync: {state}; link went {" > ".join(seen)}')
+    return f'{state.split("; ", 1)[1]}; link went {" > ".join(seen)}'
+
+
 def check_irprint(rom, session, root, probes):
     """IR printing (--irda printer): the print probe finds Frond Printer with the guest's own IrLib, asks
     IAS for IrLPT, connects to that LSAP over plain IrLMP and sends one line. irprinter save gives the
@@ -961,6 +1006,57 @@ def check_irprint(rom, session, root, probes):
     if 'done' not in lines or not job.is_file() or job.read_bytes() != b'Frond IR print test\r\n':
         raise AssertionError(f'probe: {" | ".join(lines)}; {status}; {saved}')
     return ' | '.join(lines[1:]) + f'; {job.stat().st_size} bytes saved'
+
+
+def check_keyboard(rom, session, root, probes):
+    """The Palm Portable Keyboard (serial-mode keyboard) read by the keyboard probe through the guest's
+    Serial Manager: the power-up HotSync pulse, FA FD when RTS rises, "Hi" typed as make and break codes
+    with the last break twice, then with RTS low a held key's pulse, the ID with that key, and its
+    release."""
+    if not palm_boot.rom_device(DEVICE).get('serial_keyboard'):
+        raise Skip(f'{DEVICE} takes no Palm Portable Keyboard')
+    log = None
+
+    def lines(m):
+        reply = m.send(f'db-export-db FrondKeyboardLog "{log}"', 'export')
+        if 'written' not in reply or not log.exists():
+            return []
+        data = log.read_bytes()
+        return data[int.from_bytes(data[78:82], 'big'):].split(b'\0')[0].decode(errors='replace').splitlines()
+
+    def wait(m, prefix, timeout=40):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            found = [line for line in lines(m) if line.split(' ')[0] == prefix or line == prefix]
+            if found:
+                return found[-1]
+            time.sleep(0.5)
+        raise AssertionError(f'no "{prefix}": {" | ".join(lines(m))}')
+
+    with Machine(session, root, 'keyboard') as m:
+        log = m.root / 'log.pdb'
+        m.install(probes['kbd68k'])
+        m.core.launch('Frond keyboard')
+        wait(m, 'ready')
+        attached = m.send('serial-mode keyboard', 'serial:')
+        if 'keyboard' not in attached:
+            raise AssertionError(f'serial-mode keyboard: {attached}')
+        ident = wait(m, 'id')
+        m.send('keyboard-type Hi', 'keyboard:')
+        keys = wait(m, 'keys')
+        wait(m, 'low')
+        m.send('keyboard-down A', 'keyboard:')
+        wake = wait(m, 'wake')
+        m.send('keyboard-up A', 'keyboard:')
+        up = wait(m, 'up')
+        wait(m, 'done')
+        state = m.send('serial-state', 'serial:')
+        m.frame('probe.png')
+    expected = {'id': 'id fa fd', 'keys': 'keys 58 16 96 d8 d8 3d bd bd', 'wake': 'wake fa fd 11', 'up': 'up 91 91'}
+    got = {'id': ident, 'keys': keys, 'wake': wake, 'up': up}
+    if got != expected:
+        raise AssertionError(f'{got}; {state}')
+    return f'{ident} | {keys} | {wake} | {up}; {state}'
 
 
 def check_databases(rom, session, root, probes):
@@ -1019,11 +1115,13 @@ def build_probes(root, sdk):
 
 
 NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'contrast': [], 'beam': [], 'serial': [], 'usb': [], 'unix': [], 'card-flags': [], 'databases': [],
-         'ppp': ['ppp68k'], 'directppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': [], 'irprint': ['irprint68k']}
+         'ppp': ['ppp68k'], 'directppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': [], 'irprint': ['irprint68k'],
+         'irsync': [], 'keyboard': ['kbd68k']}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'contrast': check_contrast, 'sleep': check_sleep, 'beam': check_beam,
        'serial': check_serial, 'usb': check_usb,
        'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp, 'directppp': check_directppp,
-       'modem': check_modem, 'irphone': check_irphone, 'modemsync': check_modemsync, 'irprint': check_irprint}
+       'modem': check_modem, 'irphone': check_irphone, 'modemsync': check_modemsync, 'irprint': check_irprint,
+       'irsync': check_irsync, 'keyboard': check_keyboard}
 
 
 def launcher_session(device, rom, root):

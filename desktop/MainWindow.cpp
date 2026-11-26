@@ -560,6 +560,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
     irda->addItem(tr("Printer"),"printer");
+    irda->addItem(tr("Sync Manager"),"sync");
     irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Pairing."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
@@ -914,6 +915,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
+        irSyncWorks = true; irSyncStartupPending = false;
         holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); cradleSetting.clear(); cradleStartupPending = false; showCamera("pattern");
         mipsTimer->stop();
         batteryTimer->stop();
@@ -1015,6 +1017,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (stopping) { save(); return; }
             if (ok) { if (!syncRunning) notify(message, 0); }
             else { log->appendPlainText(command + ": " + message); notify(message, 8000); }
+            return;
+        }
+        if (command == "irda-sync-support") {
+            const bool startup = irSyncStartupPending;
+            irSyncStartupPending = false;
+            // An older core without the command takes it as it always did.
+            irSyncWorks = !ok || message != "no";
+            if (irSyncWorks) irSyncRefused.remove(sessionPath); else irSyncRefused.insert(sessionPath);
+            refresh();
+            if (stopping) save();
+            else if (startup) afterIrSync();
             return;
         }
         if (command == "cradle-setting") {
@@ -1603,6 +1616,7 @@ void MainWindow::refresh() {
         const QSignalBlocker blocked(serial);
         const auto mode = serial->currentData();
         frondLink::setModemChoice(serial, caps.modem);
+        frondLink::setKeyboardChoice(serial, m68k && caps.serial, frondFirmware::serialKeyboard(currentDevice()));
         if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
     }
     shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
@@ -1676,6 +1690,10 @@ void MainWindow::refresh() {
     if (usbNetwork) usbPort->setVisible(false);
     usb->setEnabled(editable && caps.usb);
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
+    // IR HotSync: the HotSync app's IR to a PC/Handheld, on a HotSync device with infrared.
+    const bool irSyncAvailable = hotSyncAvailable && caps.infrared && irSyncWorks;
+    offerMode(irda, "sync", irSyncAvailable);
+    if (!irSyncAvailable && irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
     irdaPort->setEnabled(caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp"); irdaPort->setReadOnly(!editable);
     irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
@@ -2177,6 +2195,15 @@ void MainWindow::afterDevice() {
     // Asks the core what it supports, once a second until it answers, then the host battery once a minute.
     batteryTimer->start(1000);
     batteryTick();
+    const auto protocol = frondDesktopSync::protocol(runningDevice);
+    if (frondFirmware::runs68k(runningDevice) && frondFirmware::capabilities(runningDevice).infrared &&
+        frondDesktopSync::available(protocol) && protocol == frondDesktopSync::Protocol::hotSync && send("irda-sync-support")) {
+        irSyncStartupPending = true;
+        return;
+    }
+    afterIrSync();
+}
+void MainWindow::afterIrSync() {
     if (frondFirmware::isZodiac(runningDevice) && send("cradle-setting")) {
         cradleStartupPending = true;
         return;
@@ -2477,6 +2504,11 @@ void MainWindow::editSession(const QString& path) {
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
     MachineSettingsDialog dialog(device, prefs, this);
+    {
+        const auto protocol = frondDesktopSync::protocol(device);
+        const bool hotSync = frondDesktopSync::available(protocol) && protocol == frondDesktopSync::Protocol::hotSync;
+        dialog.controls->offerSync(hotSync, hotSync && !irSyncRefused.contains(canonicalSession(path)));
+    }
     if (frondDesktopSync::available(frondDesktopSync::protocol(device))) {
         auto* sync = new QPushButton(tr("Sync settings…"), &dialog);
         sync->setObjectName("machineSyncSettings");
@@ -2839,6 +2871,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (syncMachineId.isEmpty()) {
         if (serial->currentData() == "sync") serial->setCurrentIndex(serial->findData("off"));
         if (usb->currentData() == "sync") usb->setCurrentIndex(usb->findData("off"));
+        if (irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     }
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     // A PTY for Modem Sync calls to the HotSync number, there whenever the modem is picked.
@@ -3092,6 +3125,12 @@ void MainWindow::showIrda(const QString& state) {
         const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
     }
     if (mode == "printer") { irdaState->setText(tr("Printer: ready")); refresh(); return; }
+    // "sync idle|linked|open; SYNC-STATE": the IR HotSync PC.
+    if (mode == "sync") {
+        const auto phase = parts.value(1).section(';', 0, 0);
+        irdaState->setText(phase == "idle" ? tr("Infrared: Sync Manager") : tr("Infrared: Sync Manager, linked"));
+        refresh(); return;
+    }
     if (mode == "phone") {
         const auto phase = parts.value(1);
         irdaState->setText(phase == "online" && parts.size() > 2 ? tr("Mobile phone: online at %1").arg(parts[2])
@@ -3337,6 +3376,12 @@ void MainWindow::showSerial(const QString& state) {
     if (state.isEmpty()) serialState->clear();
     else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
     else if (parts[0] == "sync") serialState->setText(tr("Serial: Sync Manager"));
+    else if (parts[0] == "keyboard") {
+        // "keyboard ready|low-power|pulsing|asleep|idle" from the core's Palm Portable Keyboard.
+        const auto phase = parts.value(1);
+        serialState->setText(phase == "ready" ? tr("Keyboard: ready") : phase == "pulsing" ? tr("Keyboard: waking the driver")
+                             : phase == "asleep" ? tr("Keyboard: no driver answered") : tr("Keyboard: low power"));
+    }
     else if (parts[0] == "modem" && parts.size() > 1) {
         // "modem STATE [SPEED]; hotsync pty /dev/pts/N connected|waiting" with a HotSync link.
         const auto modem = state.section("; ", 0, 0).split(' ');
@@ -3354,6 +3399,8 @@ void MainWindow::loadSerialSettings() {
     const auto& value = runningPreferences.serial;
     const QSignalBlocker blocked(serial);
     frondLink::setModemChoice(serial, frondFirmware::capabilities(runningDevice).modem);
+    frondLink::setKeyboardChoice(serial, frondFirmware::runs68k(runningDevice) && frondFirmware::capabilities(runningDevice).serial,
+                                 frondFirmware::serialKeyboard(runningDevice));
     frondLink::addConnectionChoices(serial, value);
     serial->setCurrentIndex(std::max(0, serial->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     serialPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5023);

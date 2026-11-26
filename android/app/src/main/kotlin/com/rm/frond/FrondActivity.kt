@@ -336,28 +336,38 @@ open class FrondActivity : SDLActivity() {
                 }.apply { isDaemon = true }.start()
             }
         }
+        // A 68k ROM before Palm OS 3.3 has no IR HotSync; the core says which this one is.
+        IrLink.syncWorks = true
+        if (launchDevice().runs68k && launchDevice().infrared && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC &&
+            machineSettings.infrared != InfraredChoice.SYNC_MANAGER)
+            link.whenConnected { Thread { IrLink.checkSync(link) }.apply { isDaemon = true }.start() }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
         val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
         val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
-        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter
+        val infraredSync = machineSettings.infrared == InfraredChoice.SYNC_MANAGER && launchDevice().infrared &&
+            SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
+        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter || infraredSync
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
         val serialPpp = machineSettings.serial == InfraredChoice.PPP && launchDevice().runs68k && launchDevice().serialPort
         val serialSync = machineSettings.serial == InfraredChoice.SYNC_MANAGER &&
             launchDevice().serialPort && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
         val serialWired = InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort
-        val serialLink = serialWired || serialModem || serialPpp || serialSync
+        val serialKeyboard = machineSettings.serial == InfraredChoice.KEYBOARD && launchDevice().serialKeyboard
+        val serialLink = serialWired || serialModem || serialPpp || serialSync || serialKeyboard
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
-            if ((infraredLink && !infraredPhone && !infraredPrinter) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
+            if ((infraredLink && !infraredPhone && !infraredPrinter && !infraredSync) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
             link.whenConnected {
                 Thread({
                     val session = Sessions.forPath(applicationContext, sessionPath)
                     val name = session?.name ?: launchDevice().label
-                    if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
+                    if (infraredSync && launchDevice().runs68k && !IrLink.checkSync(link)) Log.w(TAG, "infrared: IR HotSync needs Palm OS 3.3 or later")
+                    else if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
                         ?.let { Log.w(TAG, "infrared: $it") }
                     if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label,
                         modemSync = session != null)
                         ?.let { Log.w(TAG, "serial: $it") }
+                    if (serialKeyboard) runOnUiThread { if (!leaving) readKeyboard() }
                     if (bluetoothLink) BluetoothLink.apply(applicationContext, link, machineSettings.bluetooth, name, launchDevice().label, session?.id)
                         ?.let { Log.w(TAG, "bluetooth: $it") }
                 }, "FrondLinks").apply { isDaemon = true }.start()
@@ -1200,7 +1210,7 @@ open class FrondActivity : SDLActivity() {
 
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
-    private fun readKeyboard() {
+    fun readKeyboard() {
         if (launchDevice().isDana()) {
             keyboardButton?.visibility = if (leaving || touchHidden) View.GONE else View.VISIBLE
             return

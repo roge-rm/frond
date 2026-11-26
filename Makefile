@@ -818,6 +818,13 @@ test-modem: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 		$(shell pkg-config --cflags --libs slirp) -o $(OBJ_ROOT)/test-modem
 	$(OBJ_ROOT)/test-modem
 
+.PHONY: test-portable-keyboard
+test: test-portable-keyboard
+test-portable-keyboard: prepare
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -Wall -Wextra -UNDEBUG -Icore/src/common \
+		$(shell pkg-config --cflags sdl2) tests/portable-keyboard.cpp -o $(OBJ_ROOT)/test-portable-keyboard
+	$(OBJ_ROOT)/test-portable-keyboard
+
 .PHONY: test-rndis-host
 test: test-rndis-host
 test-rndis-host: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
@@ -830,7 +837,7 @@ test-rndis-host: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 test: test-ir-peer
 test-ir-peer: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/ir-peer.cpp \
-		$(COMMON_LIB) -o $(OBJ_ROOT)/test-ir-peer
+		$(COMMON_LIB) -lpthread -o $(OBJ_ROOT)/test-ir-peer
 	$(OBJ_ROOT)/test-ir-peer
 
 .PHONY: test-ir-printer

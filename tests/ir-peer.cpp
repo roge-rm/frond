@@ -2,15 +2,22 @@
 // Tiny TP 1.1 and IrCOMM 1.0 specs, asks what Palm OS 3.5 and 4.1 ask when they dial through
 // "IR to Phone": discovery in 6 slots, SNRM up to 115200 with a window of 1, IAS for
 // IrDA:IrCOMM's Tiny TP LSAP, a 9-wire cooked IrCOMM connect with credit 1, the Hayes init and
-// dial, then PPP's LCP. Also lost frames each way, the poll timer, the watchdog and DISC.
+// dial, then PPP's LCP. Also lost frames each way, the poll timer, the watchdog and DISC. And the
+// IR HotSync PC: the same link and IrCOMM, with the HotSync wakeup reaching the Sync Manager.
 
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ir/IrPhone.h"
+#include "ir/IrSync.h"
 #include "ir/Sir.h"
+#include "sync/Link.h"
 #include "modem/PppServer.h"
 #include "net/IpNetwork.h"
 
@@ -99,8 +106,7 @@ static void TestSir() {
 // ---- A scripted primary ----
 
 struct Primary {
-    IrPhone& phone;
-    PppServer& ppp;
+    IrPeer& phone;
     uint64_t now{1000 * ms};
     SirUnwrapper unwrapper;
     // The guest's device address, our connection address (shifted, C/R clear) and sequence.
@@ -113,7 +119,8 @@ struct Primary {
     std::string fromPhone;
     std::vector<Bytes> lastFrames;
 
-    Primary(IrPhone& phone, PppServer& ppp) : phone(phone), ppp(ppp) {}
+    Primary(IrPeer& phone, PppServer&) : phone(phone) {}
+    explicit Primary(IrPeer& peer) : phone(peer) {}
 
     void Send(const Bytes& frame, unsigned extraBofs = 0) {
         std::vector<uint8_t> wire;
@@ -778,6 +785,83 @@ static void TestLeftovers() {
     CHECK(p.fromPhone.find("OK") != std::string::npos);
 }
 
+// ---- IR HotSync ----
+
+// The HotSync app's "IR to a PC/Handheld": discovery finds a computer with IrCOMM, IAS and a 9-wire
+// cooked connect as for the phone, then the CMP wakeup goes to the Sync Manager, which acknowledges
+// it and answers with INIT at the same speed.
+static void TestSync() {
+    char folder[] = "/tmp/frond-ir-sync-XXXXXX";
+    if (!mkdtemp(folder)) {
+        CHECK(false);
+        return;
+    }
+    frondSync::SyncOptions options;
+    options.root = folder;
+    frondSync::SyncManager::Get().Configure(options);
+    {
+        IrSync pc;
+        Primary p{pc};
+        CHECK(pc.Describe().rfind("sync idle; waiting infrared", 0) == 0);
+
+        std::vector<Bytes> answers;
+        for (uint8_t slot = 0; slot < 6; ++slot) {
+            p.Send(Discovery(p.address, 0x01, slot), 10);
+            for (const Bytes& f : p.Collect(60 * ms, false)) answers.push_back(f);
+        }
+        p.Send(Discovery(p.address, 0x01, 0xff), 10);
+        p.Collect(20 * ms, false);
+        CHECK(answers.size() == 1);
+        if (answers.size() == 1) CHECK(Bytes(answers[0].begin() + 14, answers[0].end()) == Cat({0x84, 0x04, 0x00}, Text("Frond")));
+        p.Send(Snrm(p, phoneAddress), 10);
+        p.Collect();
+        p.vs = p.vr = 0;
+        p.Poll();
+        CHECK(pc.Lap().Connected());
+        CHECK(pc.Describe().rfind("sync linked;", 0) == 0);
+
+        CHECK(LmConnect(p, p.iasLsap, 0x00, {}).empty());
+        CHECK(Ias(p, "IrDA:IrCOMM", "IrDA:TinyTP:LsapSel") ==
+              Bytes({0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, IrComm::cookedLsap}));
+        CHECK(Ias(p, "Device", "DeviceName") == Cat({0x00, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 5}, Text("Frond")));
+        p.Exchange({0x80, p.iasLsap, 0x02, 0x01});
+        CHECK(LmConnect(p, p.commLsap, IrComm::cookedLsap, {0x01, 0x03, 0x00, 0x01, IrComm::nineWire}) == Bytes({0x07}));
+        p.phoneCredit = 1;
+        CHECK(pc.Comm().GetMode() == IrComm::Mode::Cooked);
+        CHECK(pc.Describe().rfind("sync open;", 0) == 0);
+
+        // The wakeup asks for 57600; the Sync Manager keeps the IrCOMM link as it is.
+        const Bytes wakeup{1, 0, 1, 1, 0, 0, 0, 0, 0xe1, 0};
+        const Bytes padp{1, 0xc0, 0, uint8_t(wakeup.size())};
+        p.Exchange(p.Comm(frondSync::SlpPacket(3, 3, 2, 0xff, Cat(padp, wakeup))));
+        // The engine answers on its own thread, so wait in real time too.
+        Bytes ack, init;
+        for (int i = 0; i < 300 && init.empty(); ++i) {
+            if (p.phoneCredit == 0) {
+                p.phoneCredit = 1;
+                p.Exchange({IrComm::cookedLsap, p.commLsap, 0x01});
+            } else {
+                p.Poll();
+            }
+            p.Idle(10 * ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            Bytes in(p.fromPhone.begin(), p.fromPhone.end());
+            while (in.size() >= 12 && in[0] == 0xbe) {
+                const size_t size = size_t(in[6] << 8 | in[7]);
+                if (in.size() < 12 + size) break;
+                Bytes body(in.begin() + 10, in.begin() + long(10 + size));
+                (ack.empty() ? ack : init) = body;
+                in.erase(in.begin(), in.begin() + long(12 + size));
+            }
+            if (init.empty()) ack.clear();
+        }
+        CHECK(ack.size() == 4 && ack[0] == 2);
+        CHECK(init.size() == 14 && init[0] == 1 && init[4] == 2 && init[5] == 0x00 && init[12] == 0xe1);
+        CHECK(pc.Comm().BytesFromGuest() == 10 + padp.size() + wakeup.size() + 2);
+    }
+    std::filesystem::remove_all(folder);
+}
+
 int main() {
     TestSir();
     const unsigned sir = checks;
@@ -789,11 +873,13 @@ int main() {
     const unsigned dropped = checks - sir - call - loss;
     TestLeftovers();
     const unsigned leftovers = checks - sir - call - loss - dropped;
+    TestSync();
+    const unsigned sync = checks - sir - call - loss - dropped - leftovers;
     if (failures) {
         fprintf(stderr, "FAIL: %u of %u IR peer checks\n", failures, checks);
         return 1;
     }
-    printf("PASS: %u IR peer checks (%u SIR, %u call, %u link loss and raw, %u dropped call, %u leftovers and limits)\n",
-           checks, sir, call, loss, dropped, leftovers);
+    printf("PASS: %u IR peer checks (%u SIR, %u call, %u link loss and raw, %u dropped call, %u leftovers and limits, %u HotSync)\n",
+           checks, sir, call, loss, dropped, leftovers, sync);
     return 0;
 }

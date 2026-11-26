@@ -31,6 +31,13 @@ open class CoreLink(
             choice == InfraredChoice.MODEM -> callText("Modem")
             choice == InfraredChoice.PPP -> if (native.startsWith("ppp ")) "Direct PPP: ${native.substringAfter(' ')}" else "Direct PPP"
             choice == InfraredChoice.SYNC_MANAGER -> "Sync Manager"
+            choice == InfraredChoice.KEYBOARD -> when (native.substringAfter(' ', "")) {
+                "ready" -> "Keyboard: ready"
+                "pulsing" -> "Keyboard: waking the driver"
+                "asleep" -> "Keyboard: no driver answered"
+                "" -> "Palm Portable Keyboard"
+                else -> "Keyboard: low power"
+            }
             choice == InfraredChoice.PHONE -> callText("Mobile phone")
             choice == InfraredChoice.PRINTER && error == null && title == "Infrared" -> "Printer"
             !active && InfraredChoice.linkId(choice) != null -> "$title: Unknown connection"
@@ -82,7 +89,8 @@ open class CoreLink(
             val own = when {
                 choice == InfraredChoice.MODEM && modeCommand == "serial-mode" -> "modem"
                 choice == InfraredChoice.PPP && modeCommand == "serial-mode" -> "ppp"
-                choice == InfraredChoice.SYNC_MANAGER && modeCommand == "serial-mode" -> "sync"
+                choice == InfraredChoice.SYNC_MANAGER -> "sync"
+                choice == InfraredChoice.KEYBOARD && modeCommand == "serial-mode" -> "keyboard"
                 choice == InfraredChoice.PHONE && modeCommand == "irda-mode" -> "phone"
                 choice == InfraredChoice.PRINTER && modeCommand == "irda-mode" -> "printer"
                 else -> null
@@ -100,7 +108,8 @@ open class CoreLink(
             if (id == null) {
                 detach()
                 val wasOn = attachedSync || state.value.active || state.value.choice in
-                    listOf(InfraredChoice.MODEM, InfraredChoice.PPP, InfraredChoice.PHONE, InfraredChoice.PRINTER, InfraredChoice.SYNC_MANAGER)
+                    listOf(InfraredChoice.MODEM, InfraredChoice.PPP, InfraredChoice.PHONE, InfraredChoice.PRINTER, InfraredChoice.SYNC_MANAGER,
+                        InfraredChoice.KEYBOARD)
                 state.value = Status(choice, title = title)
                 if (wasOn) {
                     val reply = control.request(modeCommand, "off", timeoutSeconds = 30)
@@ -181,7 +190,18 @@ internal fun linkRunSocket(context: Context, name: String): String? {
     return File(folder, "$name-${android.os.Process.myPid()}.sock").path
 }
 
-object IrLink : CoreLink("ir", "irda-mode", "Infrared", "ir")
+object IrLink : CoreLink("ir", "irda-mode", "Infrared", "ir") {
+    // False once frond-68k says the running ROM can't take IR HotSync (irda-sync-support), so Infrared
+    // beaming doesn't offer Sync Manager.
+    @Volatile var syncWorks = true
+
+    // Asks the core; an older core without the command keeps Sync Manager.
+    fun checkSync(control: ControlLink): Boolean {
+        val reply = control.request("irda-sync-support", timeoutSeconds = 10)
+        syncWorks = !(reply.ok && reply.message == "no")
+        return syncWorks
+    }
+}
 
 // Serial is lossless: the engine opens the core's socket only once the channel joins, so the Palm's DSR and DCD
 // mean the far port is open, and the far Palm's RTS low stops the link and drops this one's CTS.

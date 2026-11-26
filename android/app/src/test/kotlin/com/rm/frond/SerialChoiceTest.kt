@@ -32,10 +32,38 @@ class SerialChoiceTest {
         val choice = InfraredChoice.SYNC_MANAGER
         val settings = MachineSettings(serial = choice)
         assertEquals(choice, MachineSettings.from(settings.json()).serial)
-        assertEquals("off", InfraredChoice.normaliseInfrared(choice))
         assertEquals("Sync Manager", CoreLink.Status(choice, title = "Serial").text)
         assertEquals(listOf("off", choice), InfraredChoice.serialChoices("off", emptyList(), modem = false, sync = true).map { it.first })
         assertEquals(listOf("off"), InfraredChoice.serialChoices("off", emptyList(), modem = false).map { it.first })
+    }
+
+    @Test fun irHotSyncIsOnlyOfferedOnHotSyncDevicesWithInfrared() {
+        val choice = InfraredChoice.SYNC_MANAGER
+        assertEquals(choice, InfraredChoice.normaliseInfrared(choice))
+        assertEquals(choice, MachineSettings.from(MachineSettings(infrared = choice).json()).infrared)
+        val paired = listOf("aa11" to "Desk")
+        assertEquals(listOf("off", "printer", choice, "link:aa11"),
+            InfraredChoice.infraredChoices("off", paired, false, sync = true).map { it.first })
+        assertEquals(listOf("off", "printer", "link:aa11"), InfraredChoice.infraredChoices("off", paired, false).map { it.first })
+        assertEquals("Sync Manager", CoreLink.Status(choice, title = "Infrared").text)
+        val iii = requireNotNull(Device.byId("palm-iii"))
+        assertEquals(choice, MachineSettings(infrared = choice).forDevice(iii, Device.TX).infrared)
+        val rx1950 = Device.entries.firstOrNull { SyncProtocol.forDevice(it) == SyncProtocol.ACTIVE_SYNC && it.infrared }
+        if (rx1950 != null) assertEquals("off", MachineSettings(infrared = choice).forDevice(iii, rx1950).infrared)
+    }
+
+    @Test fun portableKeyboardIsOnlyOfferedWhereTheDeviceTakesIt() {
+        val keyboard = InfraredChoice.KEYBOARD
+        assertEquals(keyboard, MachineSettings.from(MachineSettings(serial = keyboard).json()).serial)
+        assertEquals("off", InfraredChoice.normaliseInfrared(keyboard))
+        val iii = requireNotNull(Device.byId("palm-iii"))
+        val iiix = requireNotNull(Device.byId("palm-iiix"))
+        assertEquals(true, iii.serialKeyboard && iiix.serialKeyboard)
+        assertEquals(keyboard, MachineSettings(serial = keyboard).forDevice(iii, iiix).serial)
+        assertEquals("off", MachineSettings(serial = keyboard).forDevice(iiix, Device.TX).serial)
+        assertEquals(listOf("off", keyboard), InfraredChoice.serialChoices("off", emptyList(), modem = false, keyboard = true).map { it.first })
+        assertEquals("Keyboard: ready", CoreLink.Status(keyboard, title = "Serial", native = "keyboard ready").text)
+        assertEquals("Keyboard: low power", CoreLink.Status(keyboard, title = "Serial", native = "keyboard low-power").text)
     }
 
     @Test fun directPppIsOnlyOfferedOnSupportedSerialPorts() {

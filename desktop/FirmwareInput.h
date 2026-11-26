@@ -73,6 +73,8 @@ inline bool isZodiac(Device device) {
 using Capabilities = DeviceCapabilities5;
 inline Capabilities capabilities(Device device) { return profile(device).capabilities; }
 inline bool infraredKeyboard(Device device) { return capabilities(device).keyboard && !isDana(device); }
+// The Palm Portable Keyboard on the serial port.
+inline bool serialKeyboard(Device device) { return device != Device::automatic && deviceProfileSerialKeyboard5(int(device)); }
 
 // DragonBall devices run in frond-68k. Their capabilities list all the hardware they have, so
 // controls for anything else are hidden rather than greyed.
