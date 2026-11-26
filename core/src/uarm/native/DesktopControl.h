@@ -676,7 +676,7 @@ class DesktopControl {
         if (command == "irda-stats") {
             if (!ctx.infrared || !caps.infrared)
                 return {false,"unsupported","This device has no infrared endpoint."};
-            if (ctx.infrared->PhoneMode() || ctx.infrared->PrinterMode()) return {true,"infrared",ctx.infrared->PhoneStats()};
+            if (ctx.infrared->PhoneMode() || ctx.infrared->PrinterMode() || ctx.infrared->SyncMode()) return {true,"infrared",ctx.infrared->PhoneStats()};
             auto* port=ctx.infrared->Port();
             const auto state=port?port->Mode():HostUartMode{};
             const auto c=ctx.infrared->GetCounters();
@@ -709,8 +709,15 @@ class DesktopControl {
                     ctx.infrared->StartPrinter(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
                 return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
             }
+            if (ctx.infrared && path == "sync") {
+                if (deviceProfileOs5(*deviceProfile5(ctx.soc->GetDeviceType())) != DeviceOs5::palmOs)
+                    return {false,"unsupported","This device has no IR HotSync."};
+                const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->StartSync(ctx.soc->InfraredHostPort(),ctx.infraredError):
+                    ctx.infrared->StartSync(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
+                return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
+            }
             HostSerial::Config config;
-            if (!ctx.infrared || !HostSerial::Parse(path,config) || config.kind==HostSerial::Kind::syncManager) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
+            if (!ctx.infrared || !HostSerial::Parse(path,config) || config.kind==HostSerial::Kind::syncManager) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone, printer or sync."};
             const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->Start(ctx.soc->InfraredHostPort(),config,ctx.infraredError):
                 ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError));
             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};

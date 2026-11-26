@@ -471,10 +471,9 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
                 break;
 
             case 8:
+                // Logged when IrDA turns on; the T|X rewrites ISR on every IR turnaround.
+                if ((val & 3) && !(uart->ISR & 3)) fprintf(stderr, "UART: IrDA mode set on UART\n");
                 uart->ISR = val;
-                if (val & 3) {
-                    fprintf(stderr, "UART: IrDA mode set on UART\n");
-                }
                 break;
         }
     } else {

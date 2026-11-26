@@ -534,8 +534,9 @@ bool gFastEngineMissing = false;
         HostSerial::Config infraredConfig;
         const bool infraredPhone = options.infrared && *options.infrared == "phone";
         const bool infraredPrinter = options.infrared && *options.infrared == "printer";
-        if (options.infrared && !infraredPhone && !infraredPrinter && (!HostSerial::Parse(*options.infrared,infraredConfig) || infraredConfig.kind==HostSerial::Kind::syncManager)) {
-            cerr << "--irda must be off, pty, tcp:PORT, unix:PATH, phone or printer" << endl; return false;
+        const bool infraredSync = options.infrared && *options.infrared == "sync";
+        if (options.infrared && !infraredPhone && !infraredPrinter && !infraredSync && !HostSerial::Parse(*options.infrared,infraredConfig)) {
+            cerr << "--irda must be off, pty, tcp:PORT, unix:PATH, phone, printer or sync" << endl; return false;
         }
         HostSerial::Config usbConfig;
         // on: the cable in with no endpoint, for a device whose USB is a network link (the rx1950's RNDIS).
@@ -1284,6 +1285,14 @@ bool gFastEngineMissing = false;
                                                        : infrared.StartPrinter(infraredPxa,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
+            cout << "infrared: " << infrared.Describe() << endl;
+        } else if (infraredSync) {
+            if (!capabilities.infrared || deviceProfileOs5(*deviceProfile5(deviceType)) != DeviceOs5::palmOs)
+                commandContext.infraredError = "This device has no IR HotSync.";
+            else if (infraredPort ? infrared.StartSync(infraredPort,commandContext.infraredError)
+                                  : infrared.StartSync(infraredPxa,commandContext.infraredError))
+                commandContext.infraredError.clear();
+            if (!infrared.SyncMode()) { cerr << "infrared: " << commandContext.infraredError << endl; return false; }
             cout << "infrared: " << infrared.Describe() << endl;
         } else if (infraredConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.infrared ||
@@ -2333,8 +2342,8 @@ int main(int argc, char** argv) {
         .implicit_value(true);
 
     program.add_argument("--irda")
-        .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, phone for the core's mobile phone or printer for its IrDA printer; exclusive with keyboard; default off")
-        .metavar("<off|pty|tcp:PORT|unix:PATH|phone|printer>");
+        .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, phone for the core's mobile phone, printer for its IrDA printer or sync for a PC running the Sync Manager (IR HotSync); exclusive with keyboard; default off")
+        .metavar("<off|pty|tcp:PORT|unix:PATH|phone|printer|sync>");
 
     program.add_argument("--usb")
         .help("connect the TX USB HotSync port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
