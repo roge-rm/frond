@@ -69,6 +69,9 @@ struct Stats {
     // and suspended pages whose blocks at their MVA a later flush dropped.
     uint64_t suspends = 0, resumes = 0, otherPidInstalls = 0, suspendedMvaDrops = 0;
     uint64_t guardExits = 0, guardAbsent = 0;
+    // ARM920T Fast blocks: page table clears for PID changes and guest TLB invalidations alone (keepClears), the
+    // entries they kept and dropped, the table line checks they made and the lines found changed.
+    uint64_t keepClears = 0, keptPages = 0, keepDrops = 0, keepLineChecks = 0, keepLinesChanged = 0;
     // ARM920T Fast blocks: mapping checks that went through every code page (the rest took only the pages
     // of table lines that changed), the pages all checks walked, the changed lines and the most lines kept.
     uint64_t fullMapChecks = 0, mapPagesChecked = 0, tableLinesChanged = 0, tableLines = 0;
@@ -171,6 +174,9 @@ struct Stats {
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
                 (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
+        fprintf(stderr, "jit: keepClears %llu keptPages %llu keepDrops %llu keepLineChecks %llu keepLinesChanged %llu\n",
+                (unsigned long long)keepClears, (unsigned long long)keptPages, (unsigned long long)keepDrops,
+                (unsigned long long)keepLineChecks, (unsigned long long)keepLinesChanged);
         fprintf(stderr, "jit: guardExits %llu guardAbsent %llu\n",
                 (unsigned long long)guardExits, (unsigned long long)guardAbsent);
         fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu suspendedMvaDrops %llu\n",
@@ -492,11 +498,36 @@ struct Env final : public A32::UserCallbacks {
     // Filled page table entries by their page's domain (MMU_DOMAIN_NONE with the MMU off,
     // MMU_DOMAIN_UNKNOWN when the TLB didn't hold the page), each with what its TLB entry
     // allows while the domain is a client (cpuJitPageClientAccess).
+    // ARM920T Fast blocks: an entry also holds the page table words its walk read (Filled::words, kWordsNone when
+    // it can't be kept, 0 with the MMU off), each as a 64-byte table line (keepLines) and an offset in it, with the
+    // word's value then. A PID change drops only entries below 32 MB, and a guest TLB invalidation only those whose
+    // words changed (KeepPages), as a walk after it would give the rest again.
+    static constexpr uint8_t kWordsNone = 0xff;
     struct Filled {
         uint32_t page;
         uint8_t client;
+        uint8_t words = kWordsNone;
+        uint8_t offset[kJitPageWords] = {};
+        uint16_t line[kJitPageWords] = {};
+        uint32_t value[kJitPageWords] = {};
     };
-    std::array<std::vector<Filled>, MMU_DOMAIN_UNKNOWN + 1> filled;
+    // Two lists per domain (and one pair for an unknown domain): entries at 32 MB and up (even), below (odd).
+    std::array<std::vector<Filled>, 2 * (MMU_DOMAIN_UNKNOWN + 1)> filled;
+    // Set when an entry was noted with no words; cleared by an invalidation that found none left.
+    bool anyUnkept = false;
+    // A watched table line: its host address (64-byte aligned, null when free), a copy as of the last check, how
+    // many entries' words are in it, and changed when the next check has to look at its entries' words.
+    struct KeepLine {
+        const uint8_t *host = nullptr;
+        uint32_t uses = 0;
+        bool changed = false;
+        alignas(16) uint8_t copy[64];
+    };
+    std::vector<KeepLine> keepLines;
+    std::unordered_map<const uint8_t *, uint16_t> keepLineAt;
+    std::vector<uint16_t> keepFree;
+    bool keepOn = false;  // ARM920T Fast blocks without the memory cost model (its hint is cleared with the table)
+    uint32_t softEpoch = 0, softPid = 0, softTlb = 0;  // cpuJitSoftFlushes at the last GenChanged
     // The privilege level this JIT runs at, and the other level's Env (null until that one
     // first runs). Everything here is only used while the CPU is at this level, apart from
     // what both get: invalidations, clears, write protection and code writes.
@@ -1241,14 +1272,154 @@ struct Env final : public A32::UserCallbacks {
             list.clear();
         }
         writable.clear();
+        keepLines.clear();
+        keepLineAt.clear();
+        keepFree.clear();
     }
 
-    void NoteFilled(uint32_t page) {
+    // Drops a filled entry's page table entry and its writable listing and table lines.
+    void DropFilled(const Filled &f) {
+        uint8_t *const entry = (*pages)[f.page];
+        if (entry && !(uintptr_t(entry) & 1)) {
+            const auto it = writable.find(entry);
+            if (it != writable.end()) {
+                std::erase(it->second, f.page);
+                if (it->second.empty()) writable.erase(it);
+            }
+        }
+        SetPage(f.page, nullptr);
+        ReleaseWords(f);
+    }
+
+    void ReleaseWords(const Filled &f) {
+        if (f.words == kWordsNone) return;
+        for (uint8_t i = 0; i < f.words; i++) {
+            KeepLine &l = keepLines[f.line[i]];
+            if (--l.uses) continue;
+            keepLineAt.erase(l.host);
+            l.host = nullptr;
+            keepFree.push_back(f.line[i]);
+        }
+    }
+
+    // Notes the table words of a filled entry for host (writable when write) at page, so it can be kept (Filled).
+    void NoteWords(Filled &f, const uint8_t *host, bool write) {
+        ReleaseWords(f);
+        f.words = kWordsNone;
+        if (!keepOn || memoryCost) return;
+        const uint8_t *words[kJitPageWords];
+        const int n = cpuJitPageWords(cpu, f.page << 12, host, write, words);
+        if (n < 0) {
+            anyUnkept = true;
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            const uint8_t *const at = (const uint8_t *)(uintptr_t(words[i]) & ~uintptr_t(63));
+            auto [it, added] = keepLineAt.try_emplace(at, 0);
+            if (added) {
+                if (keepFree.empty()) {
+                    if (keepLines.size() > 0xfffe) {  // no line index left: this entry isn't kept
+                        keepLineAt.erase(it);
+                        f.words = uint8_t(i);
+                        ReleaseWords(f);
+                        f.words = kWordsNone;
+                        anyUnkept = true;
+                        return;
+                    }
+                    it->second = uint16_t(keepLines.size());
+                    keepLines.emplace_back();
+                } else {
+                    it->second = keepFree.back();
+                    keepFree.pop_back();
+                }
+                KeepLine &l = keepLines[it->second];
+                l.host = at;
+                l.changed = false;
+                std::memcpy(l.copy, at, 64);
+            }
+            KeepLine &l = keepLines[it->second];
+            l.uses++;
+            f.line[i] = it->second;
+            f.offset[i] = uint8_t(words[i] - at);
+            std::memcpy(&f.value[i], words[i], 4);
+            // A word that moved on since the copy: the next check looks at this line's entries whatever it holds then.
+            if (std::memcmp(l.copy + f.offset[i], words[i], 4)) l.changed = true;
+        }
+        f.words = uint8_t(n);
+    }
+
+    // After PID changes (pid) and guest TLB invalidations (tlb) alone: entries below 32 MB go with a PID change,
+    // and with an invalidation each entry whose walk read a table word that now differs, or that has none noted.
+    // A changed line's copy is brought up to date once its entries are checked.
+    void KeepPages(bool pid, bool tlb) {
+        stats.keepClears++;
+        bool changed = false;
+        if (tlb) {
+            for (KeepLine &l : keepLines) {
+                if (!l.host) continue;
+                stats.keepLineChecks++;
+                l.changed = l.changed || std::memcmp(l.copy, l.host, 64) != 0;
+                changed |= l.changed;
+            }
+        }
+        // With no changed line and every entry noted, an invalidation leaves the entries at 32 MB and up as they are.
+        const bool all = tlb && (changed || anyUnkept);
+        if (all) anyUnkept = false;
+        for (size_t d = 0; d < filled.size(); d++) {
+            const bool low = d & 1;
+            if (!all && !(pid && low)) continue;
+            auto &list = filled[d];
+            if (pid && low) {
+                stats.keepDrops += list.size();
+                for (Filled &f : list) DropFilled(f);
+                list.clear();
+                continue;
+            }
+            size_t kept = 0;
+            for (Filled &f : list) {
+                bool drop = f.words == kWordsNone;
+                for (uint8_t i = 0; i < f.words && !drop; i++) {
+                    const KeepLine &l = keepLines[f.line[i]];
+                    uint32_t now;
+                    std::memcpy(&now, l.host + f.offset[i], 4);
+                    drop = l.changed && now != f.value[i];
+                }
+                if (drop) {
+                    stats.keepDrops++;
+                    DropFilled(f);
+                } else {
+                    stats.keptPages++;
+                    list[kept++] = f;
+                }
+            }
+            list.resize(kept);
+        }
+        if (changed) {
+            for (KeepLine &l : keepLines) {
+                if (!l.host || !l.changed) continue;
+                stats.keepLinesChanged++;
+                std::memcpy(l.copy, l.host, 64);
+                l.changed = false;
+            }
+        }
+    }
+
+    void NoteFilled(uint32_t page, const uint8_t *host, bool write) {
         const int access = cpuJitPageClientAccess(cpu, page << 12, privileged);
-        if (access < 0)
-            filled[MMU_DOMAIN_UNKNOWN].push_back({page, 0});
-        else
-            filled[access >> 2].push_back({page, uint8_t(access & 3)});
+        auto &list = filled[2 * (access < 0 ? MMU_DOMAIN_UNKNOWN : access >> 2) + (page < 0x2000)];
+        list.push_back({page, uint8_t(access < 0 ? 0 : access & 3)});
+        NoteWords(list.back(), host, write);
+    }
+
+    // A read-only entry made writable: its words are noted again for the store, or it goes at the next invalidation.
+    void NoteWritable(uint32_t page, const uint8_t *host) {
+        if (!keepOn || memoryCost) return;
+        for (auto &list : filled)
+            for (Filled &f : list)
+                if (f.page == page) {
+                    NoteWords(f, host, true);
+                    return;
+                }
     }
 
     // Only the DACR changed since the pages were filled, so each page has the mapping and
@@ -1260,15 +1431,16 @@ struct Env final : public A32::UserCallbacks {
         stats.domainChecks++;
         for (unsigned d = 0; d < 16; d++) {
             const uint32_t before = (from >> (2 * d)) & 3, now = (to >> (2 * d)) & 3;
-            if (mmuDomainRank(now) < mmuDomainRank(before)) CheckDomain(filled[d], now);
+            if (mmuDomainRank(now) < mmuDomainRank(before))
+                for (unsigned low = 0; low < 2; low++) CheckDomain(filled[2 * d + low], now);
         }
-        CheckDomain(filled[MMU_DOMAIN_UNKNOWN], 0);
+        for (unsigned low = 0; low < 2; low++) CheckDomain(filled[2 * MMU_DOMAIN_UNKNOWN + low], 0);
     }
 
     // The pages of one domain whose two DACR bits are now bits.
     void CheckDomain(std::vector<Filled> &list, uint32_t bits) {
         size_t kept = 0;
-        for (const Filled f : list) {
+        for (const Filled &f : list) {
             const unsigned access = bits == 3 ? 3 : bits == 1 ? f.client : 0;
             uint8_t *const entry = (*pages)[f.page];
             const bool writableEntry = entry && !(uintptr_t(entry) & 1);
@@ -1285,6 +1457,7 @@ struct Env final : public A32::UserCallbacks {
                     stats.pageReadOnly++;
                 } else {
                     SetPage(f.page, nullptr);
+                    ReleaseWords(f);
                     stats.pageDrops++;
                     continue;
                 }
@@ -1306,7 +1479,17 @@ struct Env final : public A32::UserCallbacks {
 
     [[gnu::noinline]] void GenChanged(uint64_t g) {
         const uint32_t d = cpuJitGetDomain(cpu);
-        if (gen == ~0ull || (g >> 32) != (gen >> 32))
+        uint32_t epoch, pid, tlb;
+        cpuJitSoftFlushes(cpu, &epoch, &pid, &tlb);
+        // Every epoch step since the last look was a PID change or a guest TLB invalidation.
+        const bool soft =
+            keepOn && !memoryCost && gen != ~0ull && epoch - softEpoch == (pid - softPid) + (tlb - softTlb);
+        const bool keepPid = pid != softPid, keepTlb = tlb != softTlb;
+        softEpoch = epoch, softPid = pid, softTlb = tlb;
+        if (soft && (g >> 32) != (gen >> 32)) {
+            KeepPages(keepPid, keepTlb);
+            if (d != domains) CheckDomains(domains, d);
+        } else if (gen == ~0ull || (g >> 32) != (gen >> 32))
             ClearPages();
         else if (d != domains)
             CheckDomains(domains, d);
@@ -1423,7 +1606,7 @@ struct Env final : public A32::UserCallbacks {
             if (host && !(uintptr_t(host) & 1)) {
                 stats.pageFills++;
                 SetPage(page, ReadOnly(host));
-                NoteFilled(page);
+                NoteFilled(page, host, false);
             } else if (!memoryCost) {
                 AfterIo();
             }
@@ -1491,7 +1674,8 @@ struct Env final : public A32::UserCallbacks {
             uint8_t *host = cpuJitWritePage(cpu, va);
             if (host && !(uintptr_t(host) & 1)) {
                 stats.writeMaps++;
-                if (!entry) NoteFilled(page);
+                if (!entry) NoteFilled(page, host, true);
+                else NoteWritable(page, host);
                 SetPage(page, host);
                 writable[host].push_back(page);
             }
@@ -2280,6 +2464,7 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     conf.callbacks = &e;
     e.arm920 = cpuGetModel(j->cpu) == ArmCpuModel::arm920t;
     e.lineBound = e.arm920 && j->singleStep;
+    e.keepOn = e.arm920 && !e.lineBound && !getenv("FROND_JIT_NO_KEEP");
     conf.arch_version = e.arm920 ? A32::ArchVersion::v4T : A32::ArchVersion::v5TE;
     if (e.lineBound)
         conf.optimizations &= ~(OptimizationFlag::BlockLinking | OptimizationFlag::ReturnStackBuffer |

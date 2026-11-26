@@ -75,6 +75,12 @@ MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu*, uint32_t va, uint32_t* ac
 // Whether reads of every mapped subpage of a page with that access are allowed now in
 // this mode.
 bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged);
+// A walk of va's page in the tables, never the TLB, with the table words it read recorded in memo (n 0xff when one
+// isn't plain memory). access as mmuTranslateCodeAccess gives it. The MMU must be on.
+MMUTranslateResult mmuWalkPageMemo(ArmMmu*, uint32_t va, uint32_t* access, MmuCodeWalkMemo* memo,
+                                   const uint8_t* (*host)(void*, uint32_t pa), void* ctx);
+// Whether every subpage of a page with that access is mapped and allows the access now in this mode.
+bool mmuAccessWhollyAllows(struct ArmMmu *mmu, uint32_t access, bool privileged, bool write);
 // hook(ctx) runs when the TLB, domains, S or R change.
 void mmuSetPermHook(struct ArmMmu *mmu, void (*hook)(void *), void *ctx);
 uint32_t mmuGetTTP(struct ArmMmu *mmu);
@@ -112,6 +118,8 @@ int mmuPageClientAccess(struct ArmMmu *mmu, uint32_t va, bool privileged);
 void mmuSetDomainCfg(struct ArmMmu *mmu, uint32_t val);
 
 void mmuTlbFlush(struct ArmMmu *mmu);
+// mmuTlbFlush for the guest's TLB invalidate operations: the tables and TTB stay as they were.
+void mmuTlbInvalidate(struct ArmMmu *mmu);
 
 void mmuDump(struct ArmMmu *mmu);  // for calling in GDB :)
 

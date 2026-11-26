@@ -56,6 +56,9 @@ struct HostTlb {
     uint32_t epoch;
     // Moves on with a domain change that only adds rights, which keeps every entry.
     uint32_t gains;
+    // Flushes (each moves epoch on once) for an ARM920T PID change and for a guest TLB invalidation, so the JIT
+    // can keep page table entries those leave as they were.
+    uint32_t pidFlushes, tlbFlushes;
     struct ArmRam *ram;  // primary RAM when the write entries were filled
     struct HostTlbEntry read[HOST_TLB_SIZE];
     struct HostTlbEntry write[HOST_TLB_SIZE];
@@ -88,6 +91,16 @@ static inline void hostTlbFlushDomains(struct HostTlb *tlb) {
 static inline void hostTlbFlush(struct HostTlb *tlb) {
     tlb->epoch++;
     hostTlbFlushDomains(tlb);
+}
+
+static inline void hostTlbFlushPid(struct HostTlb *tlb) {
+    tlb->pidFlushes++;
+    hostTlbFlush(tlb);
+}
+
+static inline void hostTlbFlushGuestTlb(struct HostTlb *tlb) {
+    tlb->tlbFlushes++;
+    hostTlbFlush(tlb);
 }
 
 struct ArmMem {

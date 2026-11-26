@@ -6242,6 +6242,29 @@ bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, 
     return true;
 }
 
+int cpuJitPageWords(ArmCpu *cpu, uint32_t va, const uint8_t *hostPage, bool write, const uint8_t **words) {
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return -1;
+    ArmMmu *mmu = cpu->memorySystem.mmu;
+    if (mmuGetTTP(mmu) == MMU_DISABLED_TTP) return 0;
+    MmuCodeWalkMemo memo;
+    uint32_t access;
+    const MMUTranslateResult r = mmuWalkPageMemo(mmu, cpuPrvMva(cpu, va), &access, &memo, cpuPrvTableWord, cpu);
+    if (!MMU_TRANSLATE_RESULT_OK(r) || memo.n == 0xff || !mmuAccessWhollyAllows(mmu, access, cpu->privileged, write))
+        return -1;
+    bool counted;
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, false, &counted);
+    if (page != hostPage) return -1;
+    int n = 0;
+    for (uint8_t i = 0; i < memo.n; i++) {
+        bool seen = false;
+        for (int k = 0; k < n; k++) seen |= words[k] == memo.word[i];
+        if (seen) continue;
+        if (n == kJitPageWords) return -1;
+        words[n++] = memo.word[i];
+    }
+    return n;
+}
+
 bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access) {
     return mmuAccessReadable(cpu->memorySystem.mmu, access, cpu->privileged);
 }
@@ -6345,6 +6368,13 @@ uint32_t cpuJitMapGen(ArmCpu *cpu) { return mmuFlushCount(cpu->memorySystem.mmu)
 // The host TLB's keys hold the privilege, so its generation alone covers both levels. A
 // domain change that only adds rights keeps the host TLB, so gains are counted in too.
 uint64_t cpuJitPageGen(ArmCpu *cpu) { return cpuPrvJitPageGen(cpu); }
+
+void cpuJitSoftFlushes(ArmCpu *cpu, uint32_t *epoch, uint32_t *pid, uint32_t *tlb) {
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    *epoch = t.epoch;
+    *pid = t.pidFlushes;
+    *tlb = t.tlbFlushes;
+}
 
 int cpuJitPageClientAccess(ArmCpu *cpu, uint32_t va, bool privileged) {
     if (cpu->model == ArmCpuModel::arm920t) va = cpuPrvMva(cpu, va);
@@ -7608,7 +7638,7 @@ void cpuSetPid(struct ArmCpu *cpu, uint32_t pid) {
     // The ARM920T Fast engine's lean host TLB and its JIT's page table are keyed by VA: a change flushes
     // them, so none outlives the address space it was filled in. Decode lines are by MVA and stay; Fast
     // blocks are keyed by PID (jitRun).
-    if (cpu->model == ArmCpuModel::arm920t && pid != cpu->pid) hostTlbFlush(&cpu->mem->hostTlb);
+    if (cpu->model == ArmCpuModel::arm920t && pid != cpu->pid) hostTlbFlushPid(&cpu->mem->hostTlb);
     cpu->pid = pid;
 }
 

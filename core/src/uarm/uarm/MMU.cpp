@@ -42,6 +42,15 @@ void mmuTlbFlush(struct ArmMmu *mmu) {
     mmuPrvNextGen(mmu);
 }
 
+void mmuTlbInvalidate(struct ArmMmu *mmu) {
+    mmu->tlbWrites++;
+    hostTlbFlushGuestTlb(&mmu->mem->hostTlb);
+    if (mmu->permChanged) mmu->permChanged(mmu->permChangedCtx);
+    mmu->flushes++;
+    mmu->revision = mmu->revision % 15 + 1;
+    mmuPrvNextGen(mmu);
+}
+
 void mmuReset(struct ArmMmu *mmu) {
     mmu->transTablPA = MMU_DISABLED_TTP;
     mmu->dcOn = 0;
@@ -462,6 +471,23 @@ MMUTranslateResult mmuTranslateCodeAccessMemo(ArmMmu* mmu, uint32_t addr, uint32
     memo->result = r;
     memo->access = *access;
     return r;
+}
+
+MMUTranslateResult mmuWalkPageMemo(ArmMmu* mmu, uint32_t addr, uint32_t* access, MmuCodeWalkMemo* memo,
+                                   const uint8_t* (*host)(void*, uint32_t), void* ctx) {
+    memo->n = 0;
+    memo->ttb = mmu->transTablPA;
+    *access = 0;
+    return codeAccessWalk(mmu, addr, access, memo, host, ctx);
+}
+
+bool mmuAccessWhollyAllows(struct ArmMmu *mmu, uint32_t access, bool privileged, bool write) {
+    if (access == MMU_ACCESS_ANY) return true;
+    if (access & 0xf000u) return false;
+    const uint32_t domain = (access >> 8) & 15;
+    for (uint32_t k = 0; k < 4; ++k)
+        if (checkPermissions(mmu, (access >> (2 * k)) & 3, domain, false, privileged, write)) return false;
+    return true;
 }
 
 bool mmuPageWhollyAllowed(struct ArmMmu *mmu, uint32_t va, bool privileged, bool write) {

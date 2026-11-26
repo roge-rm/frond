@@ -3,6 +3,8 @@
 // walks the new entry. Then a data load fills the TLB from the old entry and the table is changed back with
 // no flush, so the stale TLB entry keeps the old page. Last the entry is made a fault one and flushed, then
 // set to a third page with no flush (as WinCE maps a slot back). Fast runs the same code as Exact each time.
+// Data pages are kept across PID changes and TLB invalidations too: loads at 32 MB and up and below it go on
+// with the mapping each change leaves.
 
 #include <cassert>
 #include <cstdint>
@@ -248,6 +250,82 @@ void testSuspendedSlot() {
     assert(fast.reg(2) == 0x10506);
 }
 
+void testKeptData() {
+    constexpr uint32_t slot = 0x04000000, slotTable = l2 + 0x800, slotPte = slotTable + 8;
+    constexpr uint32_t kernel = 0xc0000400, park = 0xc0000440, loads = 0xc0000500;
+    constexpr uint32_t dtlbInvalidate = 0xee080f16;  // MCR p15, 0, r0, c8, c6, 0
+    Machine exact;
+    Machine fast;
+    for (auto* machine : {&exact, &fast}) {
+        machine->setup();
+        machine->word(ttb + (slot >> 20) * 4, slotTable | 0x11);
+        machine->word(slotPte, 0x102ff2);
+        machine->word(l2 + 8, 0x281ff2);
+        machine->word(0x102010, 0x11111111);
+        machine->word(0x202010, 0x22222222);
+        machine->word(0x281010, 0x33333333);
+        machine->word(0x400, mcr(13, 0));
+        machine->word(0x404, str(0, 13));
+        machine->word(0x408, tlbFlush);
+        machine->word(0x40c, dtlbInvalidate);
+        machine->word(0x440, loop);
+        machine->word(0x500, ldr(1, 10));
+        machine->word(0x504, ldr(2, 11));
+        machine->word(0x508, movPc(8));
+        cpuSetReg(machine->cpu, 8, park);
+        cpuSetReg(machine->cpu, 10, slot + 0x2010);
+        cpuSetReg(machine->cpu, 11, 0x2010);
+        cpuSetReg(machine->cpu, 13, 0xd0300000 + slotPte - ttb);
+    }
+    enableJit(fast);
+    auto step = [&](uint32_t pc, uint32_t value = 0) {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 0, value);
+            cpuSetReg(machine->cpu, 15, pc);
+            machine->step();
+        }
+    };
+    auto run = [&] {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 1, 0);
+            cpuSetReg(machine->cpu, 2, 0);
+            cpuSetReg(machine->cpu, 15, loads);
+        }
+        uint32_t ran = 0;
+        int stop = arm920JitExit;
+        cpuArm920RunJit(fast.cpu, 16, &stop, 16, &ran);
+        assert(stop == arm920JitBudget && ran);
+        for (uint32_t i = 0; i < ran; ++i) exact.step();
+        for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
+    };
+
+    step(kernel, 0);
+    run();
+    run();
+    assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x33333333);
+    // PID 2: VA 0x2010 is MVA 0x04002010, the page the slot load reads.
+    step(kernel, slot);
+    run();
+    assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x11111111);
+    // The slot entry moves to B and the D TLB is invalidated: both loads read B.
+    step(kernel + 4, 0x202ff2);
+    step(kernel + 12);
+    run();
+    assert(fast.reg(1) == 0x22222222 && fast.reg(2) == 0x22222222);
+    // PID 0 again: the low load goes back to its own page, the slot load stays on B.
+    step(kernel, 0);
+    run();
+    assert(fast.reg(1) == 0x22222222 && fast.reg(2) == 0x33333333);
+    // An invalidation with no table change keeps both, then a flush after moving the slot entry back to A.
+    step(kernel + 12);
+    run();
+    assert(fast.reg(1) == 0x22222222 && fast.reg(2) == 0x33333333);
+    step(kernel + 4, 0x102ff2);
+    step(kernel + 8);
+    run();
+    assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x33333333);
+}
+
 }
 
 int main() {
@@ -297,6 +375,7 @@ int main() {
     assert(exact.reg(2) == 40 + 0x10000 + 1 + 0x100);
     assert(translated > 0);
     testSuspendedSlot();
+    testKeptData();
     std::printf("Fast: %llu of the instructions in translated blocks\n", (unsigned long long)translated);
     std::printf("PASS: ARM920T table edits and suspended FCSE code\n");
 }
