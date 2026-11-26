@@ -424,6 +424,17 @@ test-dana-keyboard-art: $(if $(filter core,$(DANA_ART_SOURCE)),prepare)
 		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_ART_BUILD)/test-dana-keyboard-art
 	$(DANA_ART_BUILD)/test-dana-keyboard-art
 
+.PHONY: test-sony-candidate-art
+test: test-sony-candidate-art
+# Art for CLIEs not emulated yet. SONY_CANDIDATE_ART_OUT=folder also writes preview PNGs there.
+test-sony-candidate-art: prepare
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/common \
+		tests/sony-candidate-art.cpp core/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(OBJ_ROOT)/test-sony-candidate-art
+	$(OBJ_ROOT)/test-sony-candidate-art $(SONY_CANDIDATE_ART_OUT)
+
 .PHONY: test-dana-view
 test: test-dana-view
 DANA_VIEW_SOURCE ?= core

@@ -1377,9 +1377,10 @@ void paintT415Silkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
                 },[&](float,float,Rgb) {return print;});
                 break;
             }
-            case SilkscreenIcon::contrast: {
-                // A small circle, its right half filled, on the panel's left edge.
-                const float gx=5,gy=cy;
+            case SilkscreenIcon::contrast:
+            case SilkscreenIcon::brightness: {
+                // A small circle, its right half filled, on the panel's left edge or its spot's middle.
+                const float gx=std::max(5.f,cx),gy=cy;
                 canvas.paint(gx-5,gy-5,gx+5,gy+5,[&](float x,float y) {
                     x-=gx;y-=gy;
                     float d=std::fabs(std::hypot(x,y)-3.2f)-0.5f;

@@ -553,6 +553,19 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     };
     static const DeviceControlProfile t415Profile{320,104,t415,std::size(t415),{0,0,0,0},0,{0,0,0,0},
                                                   DeviceControlStyle::t415,0.5f,1,0,0,clieJogTab(-424,208),clieJogWidth,0,0,128};
+    // CLIE PEG-T615C: the T415's body and bar. Its silkscreen is 120 rows to the T415's 128, so the
+    // side tab's top moves up by the difference to stay beside the same LCD rows.
+    static const DeviceButton t615c[] = {
+        {keyIdHard1, {4,40,66,38}, "Date Book", DeviceControlIcon::calendar, 3},
+        {keyIdHard2, {72,40,66,38}, "Address", DeviceControlIcon::phone, 3},
+        {keyIdHard3, {182,40,66,38}, "To Do", DeviceControlIcon::tasks, 3},
+        {keyIdHard4, {250,40,66,38}, "Memo Pad", DeviceControlIcon::memo, 3},
+        {keyIdUp, {143,40,34,19}, "Up", DeviceControlIcon::up, 3, DeviceControlSection::main, {143,40,34,38}},
+        {keyIdDown, {143,59,34,19}, "Down", DeviceControlIcon::down, 3, DeviceControlSection::main, {143,40,34,38}},
+        clieJogKey(0,-416),clieJogKey(1,-416),clieJogKey(2,-416),clieJogKey(3,-416),
+    };
+    static const DeviceControlProfile t615cProfile{320,104,t615c,std::size(t615c),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::t415,0.5f,1,0,0,clieJogTab(-416,208),clieJogWidth,0,0,120};
     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
     switch(art) {
         case DeviceArt::tx: return txProfile;
@@ -575,6 +588,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::iiic: return iiicProfile;
         case DeviceArt::tg50: return gamepad ? tg50GamepadProfile : tg50Profile;
         case DeviceArt::t415: return t415Profile;
+        case DeviceArt::t615c: return t615cProfile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
         case DeviceArt::hpIpaqRx1950: return rx1950Profile;
@@ -1156,6 +1170,20 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     };
     static const DeviceSilkscreen t415Silkscreen{320,128,t415,std::size(t415),{52,16,122,106},{174,16,94,108},
                                                  SilkscreenStyle::t415,1};
+    // T615C: its own SilkScreenVenice 'silk' 10000, doubled from row 160 as for the T415, with
+    // Brightness (key 0x122) at the bottom left in place of Contrast. The panel ends at Palm OS row
+    // 220, below the lowest rectangle (216).
+    static const SilkscreenButton t615c[] = {
+        {{0,14,40,40}, "Home", SilkscreenIcon::home},
+        {{2,66,38,40}, "Menu", SilkscreenIcon::menu},
+        {{280,14,40,40}, "Calc", SilkscreenIcon::calc},
+        {{280,66,40,40}, "Find", SilkscreenIcon::find},
+        {{56,94,16,18}, "Letter keyboard", SilkscreenIcon::letters},
+        {{246,94,16,18}, "Number keyboard", SilkscreenIcon::numbers},
+        {{0,94,4,18}, "Brightness", SilkscreenIcon::brightness},
+    };
+    static const DeviceSilkscreen t615cSilkscreen{320,120,t615c,std::size(t615c),{54,14,118,94},{174,14,88,94},
+                                                  SilkscreenStyle::t415,1};
     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
     switch(art) {
         case DeviceArt::e2: return e2Silkscreen;
@@ -1169,6 +1197,7 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
         case DeviceArt::v: case DeviceArt::vx: return vSilkscreen;
         case DeviceArt::m500: case DeviceArt::c500: return m500Silkscreen;
         case DeviceArt::t415: return t415Silkscreen;
+        case DeviceArt::t615c: return t615cSilkscreen;
         default: return none;
     }
 }
