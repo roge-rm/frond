@@ -881,7 +881,7 @@ def tg50_reset(core, root, hard):
          'marked_session_after': hashlib.sha256(session_file(root / 'marked.session').read_bytes()).hexdigest()}, indent=2) + '\n')
 
 
-def iiix_reset(core, root, hard):
+def iiix_reset(core, root, hard, launcher=iiix_launcher, setup=iiix_setup):
     """A soft reset keeps the finished setup and comes back to the launcher (4.1 by way of Date &
     Time); a hard reset asks to erase, takes Up, and starts setup again. Then new input: Date Book on the first app key, and
     the silkscreen Applications button back to the launcher."""
@@ -898,22 +898,27 @@ def iiix_reset(core, root, hard):
         # Some ROMs (m105, m125, m130, m515) go straight to the digitizer screen; iiix_setup handles both.
         core.wait_frame(root / 'reset-setup.png',
                         lambda rows: iiix_title(rows) or iiix_target(rows, 10, 10), 120)
-        iiix_setup(core, root)
+        setup(core, root)
     else:
         # 4.1 opens Preferences at Date & Time after a soft reset; Applications leaves it.
-        rows = core.wait_frame(root / 'reset-launcher.png', lambda rows: iiix_launcher(rows) or iiix_title(rows), 120)
-        if not iiix_launcher(rows):
+        rows = core.wait_frame(root / 'reset-launcher.png', lambda rows: launcher(rows) or iiix_title(rows), 120)
+        if not launcher(rows):
             (root / 'reset-prefs.png').write_bytes((root / 'reset-launcher.png').read_bytes())
             core.tap(root, 13, 178)
-            core.wait_frame(root / 'reset-launcher.png', iiix_launcher, 60)
+            core.wait_frame(root / 'reset-launcher.png', launcher, 60)
     core.key(root, 'hard1', hold_ms=300)
-    core.wait_frame(root / 'reset-input.png', lambda rows: iiix_title(rows) and not iiix_launcher(rows), 60)
+    core.wait_frame(root / 'reset-input.png', lambda rows: iiix_title(rows) and not launcher(rows), 60)
     core.tap(root, 13, 178)
-    core.wait_frame(root / 'reset-continued.png', iiix_launcher, 60)
+    core.wait_frame(root / 'reset-continued.png', launcher, 60)
     assert hashlib.sha256(marked.read_bytes()).hexdigest() == marked_hash
     (root / 'postconditions.json').write_text(json.dumps(
         {'setup_after_reset': hard, 'new_input': 'Date Book', 'final_screen': 'launcher',
          'marked_session': marked_hash}, indent=2) + '\n')
+
+
+def iii_reset(core, root, hard):
+    """The Palm III resets like the IIIx; its launcher check tells the launcher from Preferences (3.0 setup)."""
+    return iiix_reset(core, root, hard, launcher=iii_launcher, setup=iii_setup)
 
 
 def e3_formats(rows):
@@ -1050,7 +1055,7 @@ def iiix_hires_reset(core, root, hard):
     return iiix_reset(HalfCore(core), root, hard)
 
 
-RESET_RECIPES = {'dana': dana_reset, 'tg50': tg50_reset, 'iiix': iiix_reset, 'iiix-hires': iiix_hires_reset,
+RESET_RECIPES = {'dana': dana_reset, 'tg50': tg50_reset, 'iiix': iiix_reset, 'iii': iii_reset, 'iiix-hires': iiix_hires_reset,
                  'e3': e3_reset, 'e2-denvfs': e2_denvfs_reset}
 
 
