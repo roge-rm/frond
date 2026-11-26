@@ -158,8 +158,13 @@ bool Prepare(SoC& soc, bool wake) {
         static const uint16_t signature[]={0x2100,0x7171,0x2800,0xd01f};
         if (!bytes(soc.GetCpu(),0x2004d532,signature,sizeof(signature))) return false;
         if (validate(soc)) return true;
-        if (soc.RunToNativePc(waitPc|1,0,budget,budget)) return validate(soc);
-        // A 68k app waiting with no timeout leaves the UI task blocked for good.
+        // An app on its way to its event wait gets there within the first 0.1 s. One waiting with no
+        // timeout (a 68k app, the launcher) leaves the UI task blocked for good, so it's woken as soon
+        // as the guest idles; a guest still busy gets the rest of the second and then the same wake.
+        constexpr uint64_t grace=budget/10;
+        if (soc.RunToNativePc(waitPc|1,0,grace,budget)) return validate(soc);
+        if (wake && WakeIdle(soc)) return soc.RunToNativePc(waitPc|1,0,budget,budget) && validate(soc);
+        if (soc.RunToNativePc(waitPc|1,0,budget-grace,budget)) return validate(soc);
         return wake && WakeIdle(soc) && soc.RunToNativePc(waitPc|1,0,budget,budget) && validate(soc);
     } catch (const std::runtime_error&) { return false; }
 }

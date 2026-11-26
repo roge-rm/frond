@@ -9,9 +9,10 @@
 class SoC;
 struct ArmCpu;
 namespace NativeBoundary {
-// No guest calls made by the host and no host writes to guest memory. Advances at most 100M normal
-// cycles; with wake, up to 50M more after waking the UI task with WakeIdle if it doesn't reach its
-// event wait by itself. Host calls pass wake, readiness checks don't.
+// No guest calls made by the host and no host writes to guest memory. Runs up to 5M cycles to the UI
+// task's event wait; then, with wake, has WakeIdle wake the UI task when the guest idles and runs up to
+// 50M more, or without it (or when the guest doesn't idle) up to 45M more. Host calls pass wake,
+// readiness checks don't.
 // A successful return is a candidate, revalidated by Session after checkpoint.
 bool Prepare(SoC& soc, bool wake = true);
 // For a host call that is waiting: on the T|X and Zire 72 runs at most 50M normal cycles to the

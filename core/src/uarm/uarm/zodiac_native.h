@@ -14,8 +14,9 @@ class SoC;
 namespace ZodiacNative {
 // True on a Zodiac SoC.
 bool Applies(SoC& soc);
-// Runs to the boundary, at most 1 s of guest time, then with wake up to 1 s more after waking an idle UI task
-// (SocIMX1::WakeIdle). No guest calls and no guest writes. Leaves the machine stopped there.
+// Runs to the boundary, at most 0.1 s of guest time, then with wake up to 1 s more after waking an idle UI task
+// (SocIMX1::WakeIdle), or up to 0.9 s more without. No guest calls and no guest writes. Leaves the machine
+// stopped there.
 bool Prepare(SoC& soc, bool wake = true);
 
 class Session {

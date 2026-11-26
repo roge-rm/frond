@@ -115,8 +115,12 @@ bool Prepare(SoC& soc, bool wake) {
         if (!romChecks(*z)) return false;
         if (z->GuestCallPending() && z->NativeSite() == site) return validate(*z);
         if (z->GuestCallPending()) return false;
-        if (z->RunToGuestPc(site | 1, prepareBudget, hz)) return validate(*z);
-        // An app waiting with no timeout leaves the UI task blocked for good.
+        // As on the T|X: 0.1 s for an app on its way to its event wait, then one waiting with no timeout
+        // (it leaves the UI task blocked for good) is woken when the guest idles; a busy one gets the rest and then the same wake.
+        constexpr uint64_t grace = prepareBudget / 10;
+        if (z->RunToGuestPc(site | 1, grace, hz)) return validate(*z);
+        if (wake && z->WakeIdle()) return z->RunToGuestPc(site | 1, prepareBudget, hz) && validate(*z);
+        if (z->RunToGuestPc(site | 1, prepareBudget - grace, hz)) return validate(*z);
         return wake && z->WakeIdle() && z->RunToGuestPc(site | 1, prepareBudget, hz) && validate(*z);
     } catch (const std::runtime_error&) {
         return false;
