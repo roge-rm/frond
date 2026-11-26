@@ -114,7 +114,7 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'zire72-desktop'], ['palm-zire-72'])
         self.assertEqual([p['name'] for p in data['profiles']],
                          ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
-                          'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-iiie', 'palm-iiixe', 'palm-v', 'palm-vx',
+                          'palm-zire-72', 'sony-clie-tg50', 'palm-iii', 'palm-iiix', 'palm-iiie', 'palm-iiixe', 'palm-v', 'palm-vx',
                           'palm-m100', 'palm-m105', 'palm-m125', 'palm-m500', 'ibm-workpad-c500',
                           'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520',
                           'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'tapwave-zodiac-1', 'sony-clie-t415',
@@ -129,7 +129,7 @@ class DeviceInputTest(unittest.TestCase):
                           'ez68k-rom', 'vz68k-rom', 'zodiac-nor', 'rx1950-nand'})
         self.assertEqual(data['profiles'][2]['status'], 'experimental-desktop')
         self.assertEqual(data['profiles'][3]['status'], 'inherited-unverified')
-        iiix = data['profiles'][6]
+        iiix = {p['name']: p for p in data['profiles']}['palm-iiix']
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
         by_name = {p['name']: p for p in data['profiles']}
