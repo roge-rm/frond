@@ -59,7 +59,7 @@ class FirmwareInputTest : public QObject {
             return result;
         };
         QCOMPARE(ids(DeviceGroup5::palmOs5), QStringList({"palm-zire-72", "palm-e2", "palm-e2-franken", "palm-tx"}));
-        QCOMPARE(ids(DeviceGroup5::palmClassic), QStringList({"palm-iiix", "palm-v", "palm-iiie", "palm-vx", "palm-iiixe", "palm-iiic",
+        QCOMPARE(ids(DeviceGroup5::palmClassic), QStringList({"palm-iii", "palm-iiix", "palm-v", "palm-iiie", "palm-vx", "palm-iiixe", "palm-iiic",
             "palm-m100", "palm-m105", "palm-m500", "palm-m505", "palm-m125", "palm-m515", "palm-m130", "palm-m520"}));
         QCOMPARE(ids(DeviceGroup5::sonyClie), QStringList({"sony-clie-t415", "sony-clie-tg50"}));
         QCOMPARE(ids(DeviceGroup5::tapwave), QStringList({"tapwave-zodiac-1", "tapwave-zodiac-2"}));

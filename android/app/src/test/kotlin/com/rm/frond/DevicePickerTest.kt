@@ -25,7 +25,7 @@ class DevicePickerTest {
         assertEquals(listOf("sony-clie-t415", "sony-clie-tg50"), ids("Sony CLIÉ"))
         assertEquals(listOf("alphasmart-dana", "alphasmart-dana-wireless"), ids("AlphaSmart"))
         assertEquals(
-            listOf("palm-iiix", "palm-v", "palm-iiie", "palm-vx", "palm-iiixe", "palm-iiic", "palm-m100", "palm-m105", "palm-m500",
+            listOf("palm-iii", "palm-iiix", "palm-v", "palm-iiie", "palm-vx", "palm-iiixe", "palm-iiic", "palm-m100", "palm-m105", "palm-m500",
                 "palm-m505", "palm-m125", "palm-m515", "palm-m130", "palm-m520"),
             ids("Palm classic"),
         )
