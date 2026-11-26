@@ -71,6 +71,11 @@ class PalmIIIxTest {
                 assertEquals("This is a Palm III ROM. Choose Palm III.", Firmware.check(other, f, null))
         }
         assertNull(Firmware.detect(rom(0x1a8000, 5, flags = 0, company = 0x70616c6dL, hal = 0x73756d6fL)))
+        // HandEra (v4, 0x0040), Palm VII (v4, 0x0010) and Symbol (v2 and v3 with ScanMgr) aren't the Palm III's.
+        fun withText(f: File, text: String) = f.also { RandomAccessFile(it, "rw").use { r -> r.seek(0x1000); r.write(text.toByteArray()) } }
+        for (f in listOf(rom(0x200000, 4, flags = 0x0040, resetOffset = 0x8226), withText(rom(0x200000, 4, flags = 0x0010, resetOffset = 0x8226), "RAM NetIF"),
+                         withText(rom(0x200000, 2, flags = 0, resetOffset = 0x8226), "ScanMgr"), withText(rom(0x200000, 3, flags = 0x0010, resetOffset = 0x8226), "ScanMgr")))
+            assertNull(Firmware.detect(f))
         // An EZ ROM isn't the Palm III's.
         assertEquals("This is a Palm IIIx ROM. Choose Palm IIIx.", Firmware.check(iii, rom(0x128000, 3), null))
     }

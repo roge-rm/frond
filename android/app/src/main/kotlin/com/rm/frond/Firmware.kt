@@ -277,12 +277,15 @@ object Firmware {
             }
             return@use Rom68kInfo(device, true)
         }
-        // The Palm III's ROMs have no EZ flag: header version 2 to 5, with its HAL ID from version 5.
-        if (version in 2..5 && flags and 0x0021 == 0) {
+        // The Palm III's ROMs have no EZ, VZ or 0x0080 flag: header version 2, 3 or 5, with its HAL ID from version 5.
+        // Symbol's scanner ROMs carry ScanMgr and the Palm VII's carry "RAM NetIF"; the Palm III has neither.
+        if ((version == 2 || version == 3 || version == 5) && flags and 0x00e1 == 0) {
             val iii = devices.firstOrNull { it.id == PALM_III } ?: return@use header
             if (version == 5 && (company != iii.companyId || hal != iii.halId)) return@use header
             if (size > ROM68K_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
             if (reset < ROM68K_EZ_BASE || reset - ROM68K_EZ_BASE >= size) return@use header
+            if (hasText(file, size, "ScanMgr".toByteArray(Charsets.US_ASCII)) ||
+                hasText(file, size, "RAM NetIF".toByteArray(Charsets.US_ASCII))) return@use header
             return@use Rom68kInfo(iii, true)
         }
         if (version !in 3..5 || flags and 0x0001 != 0 || flags and 0x0020 == 0) return@use header

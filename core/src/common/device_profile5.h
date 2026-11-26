@@ -683,12 +683,14 @@ inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read)
         }
         return info;
     }
-    // The Palm III's ROMs have no EZ flag: header version 2 to 5, with the Palm III's HAL ID from version 5.
-    if (info.headerVersion >= 2 && info.headerVersion <= 5 && !(flags & 0x0021)) {
+    // The Palm III's ROMs have no EZ, VZ or 0x0080 flag: header version 2, 3 or 5, with the Palm III's HAL ID from
+    // version 5. Symbol's scanner ROMs carry ScanMgr and the Palm VII's carry "RAM NetIF"; the Palm III has neither.
+    if ((info.headerVersion == 2 || info.headerVersion == 3 || info.headerVersion == 5) && !(flags & 0x00e1)) {
         const auto* iii = deviceProfileNamed5("palm-iii");
         if (info.headerVersion == 5 && (info.companyId != iii->companyId || info.halId != iii->halId)) return info;
         if (size > rom68kMaxSize5 || size % 0x1000 || cardBytes > size) return info;
         if (reset < rom68kEzBase5 || reset - rom68kEzBase5 >= size) return info;
+        if (rom68kHasText5(size, read, "ScanMgr") || rom68kHasText5(size, read, "RAM NetIF")) return info;
         info.profile = iii;
         return info;
     }

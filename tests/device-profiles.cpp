@@ -770,6 +770,17 @@ static void palmIiiProfile() {
     refused(rom68k(0x200000, 2, 0x0001, 0, 0, base + 0x8226, 0x200000));
     refused(rom68k(0x200000, 2, 0, 0, 0, 0x00c08226, 0x200000));
     refused(rom68k((2u << 20) + 0x1000, 2, 0, 0, 0, base + 0x8226, 0x200000));
+    // Other 68328 devices with Palm III-like headers: HandEra (v4, 0x0040), Palm VII (v4, 0x0010), Symbol (v2 0, v3 0x0010).
+    refused(rom68k(0x200000, 4, 0x0040, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 4, 0x0010, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 2, 0x0080, 0, 0, base + 0x8226, 0x200000));
+    for (const char* text : {"ScanMgr", "RAM NetIF"}) {
+        for (auto [version, flags] : {std::pair<int, int>{2, 0}, {3, 0x0010}}) {
+            auto rom = rom68k(0x200000, version, flags, 0, 0, base + 0x8226, 0x200000);
+            std::copy(text, text + strlen(text), rom.begin() + 0x1000);
+            refused(rom);
+        }
+    }
     // An EZ ROM goes to the EZ devices only.
     const auto v31 = inspect68k(rom68k(0x128000, 3, ez, 0, 0, base + 0x822a, 0x128000));
     assert(v31.profile != p && !deviceProfileTakes68kRom5(*p, v31));

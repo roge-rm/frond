@@ -428,6 +428,17 @@ class FirmwareInputTest : public QObject {
             QVERIFY(!frondFirmware::validateFiles(iiix, romPath, {}).isEmpty());
             QVERIFY(!frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-iiie"), romPath, {}).isEmpty());
         }
+        // Not the Palm III's: HandEra (v4, 0x0040), Palm VII (v4, 0x0010), Symbol (v2 and v3 with ScanMgr).
+        auto refusedRom = [&](int version, quint16 flags, const char* text) {
+            rom68k(rom, 0x200000, version, flags);
+            if (text) { rom.seek(0x1000); rom.write(text); rom.flush(); }
+            QCOMPARE(frondFirmware::detectDevice(romPath), Device::automatic);
+            QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        };
+        refusedRom(4, 0x0040, nullptr);
+        refusedRom(4, 0x0010, "RAM NetIF");
+        refusedRom(2, 0x0000, "ScanMgr");
+        refusedRom(3, 0x0010, "ScanMgr");
         rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x12345678);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
         // Over the 2 MiB flash part, or truncated.
