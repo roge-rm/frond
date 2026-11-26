@@ -266,6 +266,7 @@ data class ControllerMap(
             val keys = mutableMapOf<Int, PalmButton>()
             var stickX = StickAxis(PadAxis.LEFT_X)
             var stickY = StickAxis(PadAxis.LEFT_Y)
+            val bound = mutableListOf<PadAxis>()
             for (entry in text.split(',')) {
                 val parts = entry.split(':')
                 if (parts.size != 2) continue
@@ -273,19 +274,23 @@ data class ControllerMap(
                     val preset = ControllerMap(emptyMap()).withStick(ZodiacStick.byId(parts[1]) ?: continue)
                     stickX = preset.stickX
                     stickY = preset.stickY
+                    bound += listOf(stickX.axis, stickY.axis)
                     continue
                 }
                 if (parts[0] == "stickx" || parts[0] == "sticky") {
                     val invert = parts[1].startsWith("-")
                     val axis = PadAxis.byId(parts[1].removePrefix("-")) ?: continue
-                    val bound = StickAxis(axis, axis != PadAxis.NONE && invert)
-                    if (parts[0] == "sticky") stickY = bound else stickX = bound
+                    val chosen = StickAxis(axis, axis != PadAxis.NONE && invert)
+                    if (parts[0] == "sticky") stickY = chosen else stickX = chosen
+                    bound += axis
                     continue
                 }
                 val key = parts[0].toIntOrNull() ?: continue
                 val button = PalmButton.byId(parts[1])?.takeIf { it in allowed } ?: continue
                 if (key > 0) keys[key] = button
             }
+            // The keys at the ends of an axis the stick uses are dropped, as the desktop does.
+            for (axis in bound) keys.keys.removeAll(axis.keys)
             return ControllerMap(keys, stickX, stickY)
         }
 

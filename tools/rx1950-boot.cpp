@@ -57,6 +57,7 @@
 #include "rx1950_board.h"
 #include "rx1950_power.h"
 #include "rx1950_nand_image.h"
+#include "machine_state_archive.h"
 #include "s3c2442_machine.h"
 
 namespace {
@@ -202,6 +203,7 @@ int main(int argc, char** argv) {
     std::string error;
     S3c2442Options options;
     options.rtcStart = rx1950RtcStart;
+    options.rtcBinaryYear = true;
     if (!serialCable) options.pinLevels[rx1950CablePort] &= ~(1u << rx1950CableBit);
     rx1950BatteryPins(battery, options);
     for (const auto& [port, bit] : lowPins) options.pinLevels[port] &= ~(1u << bit);
@@ -652,9 +654,13 @@ int main(int argc, char** argv) {
             return h;
         };
         cpuArm920LeanReset(machine->cpu());
-        uint64_t sfr = fnv(&machine->intc, sizeof machine->intc);
-        sfr = fnv(&machine->pwm, sizeof machine->pwm, sfr);
-        sfr = fnv(&machine->rtc, sizeof machine->rtc, sfr);
+        // The blocks' saved state, not their bytes, so struct padding and board settings don't count.
+        std::vector<uint8_t> blocks;
+        StateWriter writer(blocks);
+        machine->intc.state(writer);
+        machine->pwm.state(writer);
+        machine->rtc.state(writer);
+        uint64_t sfr = fnv(blocks.data(), blocks.size());
         sfr = fnv(machine->steppingstone, sizeof machine->steppingstone, sfr);
         std::printf("digest: retired %" PRIu64 " cycles %" PRIu64 " idle %" PRIu64 " sdram %016" PRIx64 " nand %016" PRIx64
                     " sfr %016" PRIx64 "\n",

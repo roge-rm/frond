@@ -933,9 +933,10 @@ bool gFastEngineMissing = false;
         }
         if (savestate.size && savestate.data) {
             // A saved machine opened again: its clock moves on by the time it was closed, as a device asleep that
-            // long. Runs on guest time keep the saved one so they repeat, as do sessions saved without the time.
+            // long. Runs on guest time, timed runs (--run-for) and scripts keep the saved one so they repeat, as do
+            // sessions saved without the time.
             const int64_t now = int64_t(std::time(nullptr));
-            if (sessionSavedAt && !options.emulatedTime && now > *sessionSavedAt)
+            if (sessionSavedAt && !options.emulatedTime && !options.runFor && !options.script && now > *sessionSavedAt)
                 soc->ForwardClock(uint64_t(now - *sessionSavedAt));
         }
         // A swapped slot is ejected now and its card goes in later, in the guest loop below. The

@@ -226,6 +226,13 @@ static void zodiacStickAxes() {
     map.setStick(PadStick::left);
     assert(map.preset() == PadStick::left);
     assert(decodeControllerMap("stickx:sideways,sticky:-", zodiac).preset() == PadStick::left);
+    // Keys at an axis the text binds come off, whichever comes first in the text.
+    for (const char* text : {"lefty-:app2,lefty+:app3,leftx-:app1,stickx:rightx,sticky:lefty",
+                             "stickx:rightx,sticky:lefty,lefty-:app2,lefty+:app3,leftx-:app1"}) {
+        const auto decoded = decodeControllerMap(text, zodiac);
+        assert(!decoded.keys.count(PadKey::leftUp) && !decoded.keys.count(PadKey::leftDown));
+        assert(decoded.keys.count(PadKey::leftLeft));
+    }
 }
 
 static void clieDefaults() {

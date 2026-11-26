@@ -278,6 +278,15 @@ class ZodiacTest {
         assertTrue(custom.encode().endsWith(",stickx:rightx,sticky:-lefty"))
         assertEquals(custom, ControllerMap.decode(custom.encode(), zodiac))
         assertEquals(ZodiacStick.LEFT, ControllerMap.decode("stickx:sideways,sticky:-", zodiac).stick)
+        // Keys at an axis the text binds come off, whichever comes first.
+        val leftUpKey = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.UP)
+        val leftLeftKey = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.LEFT)
+        for (text in listOf("$leftUpKey:app2,$leftLeftKey:app1,stickx:rightx,sticky:lefty",
+                            "stickx:rightx,sticky:lefty,$leftUpKey:app2,$leftLeftKey:app1")) {
+            val decoded = ControllerMap.decode(text, zodiac)
+            assertFalse(leftUpKey in decoded.keys)
+            assertTrue(leftLeftKey in decoded.keys)
+        }
 
         val events = mutableListOf<ZodiacPad.Event>()
         val pad = ZodiacPad(custom) { events += it }

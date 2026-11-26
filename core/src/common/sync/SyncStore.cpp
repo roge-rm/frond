@@ -695,18 +695,29 @@ bool SyncProfile::SetActiveSyncSerial(const std::string& deviceKey, bool serial,
 }
 
 std::string SyncProfile::ActiveSyncPairing(const std::string& deviceKey) {
-    // Nothing stored pairs on the next sync; "declined" is a cancelled request.
-    const auto value = DeviceValue(deviceKey, "activesync-pair");
-    return value.empty() ? "requested" : value == "declined" ? "" : value;
+    // No row pairs on the next sync; a stored empty value is a cancelled request, as before.
+    Query q(db, "SELECT value FROM device_value WHERE device_key=? AND key='activesync-pair'");
+    q.Bind(1, deviceKey);
+    if (!q.Row()) return "requested";
+    const auto value = q.Text(0);
+    return value == "declined" ? std::string() : value;
 }
 
 bool SyncProfile::RequestActiveSyncPairing(const std::string& deviceKey, bool request, std::string& error) {
     if (!request && ActiveSyncPairing(deviceKey) != "requested") return true;
-    return SetDeviceValue(deviceKey, "activesync-pair", request ? "requested" : "declined", &error);
+    return SetDeviceValue(deviceKey, "activesync-pair", request ? "requested" : "", &error);
 }
 
 bool SyncProfile::ConfirmActiveSyncPairing(const std::string& deviceKey, std::string& error) {
     return SetDeviceValue(deviceKey, "activesync-pair", "confirmed", &error);
+}
+
+bool SyncProfile::ForgetActiveSyncPairing(const std::string& deviceKey, std::string& error) {
+    Query q(db, "DELETE FROM device_value WHERE device_key=? AND key='activesync-pair'");
+    q.Bind(1, deviceKey);
+    if (q.Run()) return true;
+    error = LastError(db);
+    return false;
 }
 
 bool SyncProfile::ClearConfirmedActiveSyncPairing(const std::string& deviceKey, std::string& error) {

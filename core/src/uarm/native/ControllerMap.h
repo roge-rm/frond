@@ -326,6 +326,7 @@ inline ControllerMap controllerDefaults(const DeviceProfile5& profile) {
 inline ControllerMap decodeControllerMap(const std::string& text, const DeviceProfile5& profile) {
     ControllerMap map;
     const auto allowed = controllerPalmKeys(profile);
+    std::vector<PadAxis> bound;  // axes the text binds to the stick, wherever their keys come in the text
     size_t start = 0;
     while (start < text.size()) {
         const size_t comma = std::min(text.find(',', start), text.size());
@@ -339,6 +340,9 @@ inline ControllerMap decodeControllerMap(const std::string& text, const DevicePr
             if (id == "right") map.setStick(PadStick::right);
             else if (id == "none") map.setStick(PadStick::none);
             else if (id == "left") map.setStick(PadStick::left);
+            else continue;
+            bound.push_back(map.stickX.axis);
+            bound.push_back(map.stickY.axis);
             continue;
         }
         if (name == "stickx" || name == "sticky") {
@@ -346,7 +350,10 @@ inline ControllerMap decodeControllerMap(const std::string& text, const DevicePr
             const bool invert = !id.empty() && id[0] == '-';
             PadAxis axis;
             if (invert) id.erase(0, 1);
-            if (padAxisFromId(id, axis)) (name == "sticky" ? map.stickY : map.stickX) = {axis, axis != PadAxis::none && invert};
+            if (padAxisFromId(id, axis)) {
+                map.setStickAxis(name == "sticky", axis, invert);
+                bound.push_back(axis);
+            }
             continue;
         }
         PadKey key;
@@ -355,6 +362,7 @@ inline ControllerMap decodeControllerMap(const std::string& text, const DevicePr
         if (std::find(allowed.begin(), allowed.end(), button) == allowed.end()) continue;
         map.keys[key] = button;
     }
+    for (const auto axis : bound) map.freeAxis(axis);
     return map;
 }
 

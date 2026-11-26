@@ -729,7 +729,7 @@ void TestActiveSyncQuestion(const std::string& root) {
         finish(guest);
         CHECK(manager.Status().state == SyncStatus::State::done);
         CHECK(manager.Status().message.find("Connected as a guest.") != std::string::npos);
-        CHECK(profile.DeviceValue(key, "activesync-pair") == "declined");
+        CHECK(profile.DeviceValue(key, "activesync-pair").empty());
         CHECK(profile.ActiveSyncPairing(key).empty());
     }
     {
@@ -741,11 +741,11 @@ void TestActiveSyncQuestion(const std::string& root) {
         finish(again);
         CHECK(manager.Status().state == SyncStatus::State::done);
         CHECK(manager.Status().message.find("guest") == std::string::npos);
-        CHECK(profile.DeviceValue(key, "activesync-pair") == "declined");
+        CHECK(profile.DeviceValue(key, "activesync-pair").empty());
     }
     {
         // Set up pairs in the same sync; the device refusing here is noted and asked again next time.
-        CHECK(profile.SetDeviceValue(key, "activesync-pair", "", &error));
+        CHECK(profile.ForgetActiveSyncPairing(key, error));
         ActiveSyncSession setUp;
         setUp.Start();
         Handheld control{setUp.Pipe(0)}, rapi{setUp.Pipe(1)};
@@ -801,6 +801,9 @@ void TestActiveSync(const std::string& root) {
     CHECK(profile.ActiveSyncPairing(key) == "requested");
     CHECK(profile.RequestActiveSyncPairing(key, false, error));
     CHECK(profile.ActiveSyncPairing(key).empty());
+    // An older store's cancelled "" and a pending "requested" read as they did before.
+    CHECK(profile.SetDeviceValue(key, "activesync-pair", "requested", &error) && profile.ActiveSyncPairing(key) == "requested");
+    CHECK(profile.SetDeviceValue(key, "activesync-pair", "", &error) && profile.ActiveSyncPairing(key).empty());
     profile.Close();
 
     SyncOptions options;

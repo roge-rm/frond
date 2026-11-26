@@ -165,8 +165,10 @@ class DesktopControl {
                 const auto& command = request.command;
                 const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || (command == "sync-start" && request.argument == "network") || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
                 // Installs sent one after another finish together once they stop coming; any other
-                // guest work, or a quit, waits for that first.
-                if (GuestDatabaseOps::FinishWaiting() && ((work && command != "install") || command == "quit"))
+                // command except a read-only query waits for that first.
+                const bool readOnly = command == "window-id" || command == "app-active" || command == "irda-stats" ||
+                                      (command.size() > 6 && command.compare(command.size() - 6, 6, "-state") == 0);
+                if (GuestDatabaseOps::FinishWaiting() && command != "install" && !readOnly)
                     finishInstalls(ctx);
                 if (work) {
                     // Host calls only drop capture for their length; the user's choice stays and capture comes back.
