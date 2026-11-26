@@ -141,6 +141,22 @@ static void bringUpTests() {
         assert(!t.Up() && t.GetState() == RndisHost::State::init);
     }
 
+    // A short reply to the optional frame size query skips that step.
+    {
+        RndisHost t;
+        t.Start(64, 0);
+        id = command(t, RndisHost::initMsg, 0);
+        answer(t, initDone(id), ms);
+        id = command(t, RndisHost::queryMsg, ms);
+        answer(t, queryDone(id, 0, Bytes(mac, mac + 6)), 2 * ms);
+        id = command(t, RndisHost::queryMsg, 2 * ms);
+        answer(t, completion(4, id, 0, {}), 3 * ms);
+        assert(t.GetState() == RndisHost::State::query);
+        id = command(t, RndisHost::setMsg, 3 * ms);
+        answer(t, completion(5, id, 0), 4 * ms);
+        assert(t.Up());
+    }
+
     // No notification: GET_ENCAPSULATED_RESPONSE after 100 ms anyway; an empty answer waits another 100 ms.
     RndisHost w;
     w.Start(64, 0);

@@ -286,6 +286,7 @@ bool SessionFile5::SerializeAs(uint32_t writeVersion) {
     serializedSession = buffer.get();
     serializedSessionSize = cursor - buffer.get();
     version = writeVersion;
+    retiredBuffer.reset();  // the loaded sections are not read after this
 
     return true;
 }
