@@ -141,4 +141,16 @@ class LinkWireTest {
         assertEquals("Connected · 3 ms", LinkWire.connectionStatus(rows[0]))
         assertEquals("Key changed, pair again", LinkWire.connectionStatus(rows[1]))
     }
+
+    // Found by LinkWireFuzzTest: a name cut at 64 chars kept half of an emoji, which came back as '?'.
+    @Test fun namesAreCutBetweenSurrogatePairs() {
+        val name = "a".repeat(63) + "\uD83D\uDE00"
+        assertEquals("a".repeat(63), LinkWire.name64(name))
+        assertEquals("a".repeat(62) + "\uD83D\uDE00", LinkWire.name64("a".repeat(62) + "\uD83D\uDE00" + "b"))
+        val beacon = LinkWire.parseBeacon(LinkWire.beacon(LinkWire.BEACON, id, 5035, name))!!
+        assertEquals("a".repeat(63), beacon.name)
+        val frame = LinkWire.pairRequest(id, name)
+        val request = LinkWire.parsePairFrame(frame.copyOfRange(2, frame.size)) as LinkWire.PairFrame.Request
+        assertEquals("a".repeat(63), request.name)
+    }
 }
