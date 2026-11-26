@@ -272,12 +272,72 @@ void n710c(const std::string& out) {
         checkHeld(d,key,1,besideLcd);
     checkHeld(d,keyIdBack,1,besideButtons);
 }
+void nx70v(const std::string& out) {
+    const Device d{"nx70v",DeviceArt::nx70v,320,480};
+    const auto& p=profileOf(d);
+    assert(p.width==320 && p.height==372 && p.unit==1 && p.keyboardHeight==220 && p.style==DeviceControlStyle::nx70v);
+    assert(!deviceSilkscreen(d.art).count && p.sideTabWidth==clieJogWidth && p.silkscreenHeight==0);
+    // Six app keys and rocker halves, 42 keyboard keys and the jog's four.
+    assert(p.count==52);
+    int keyboard=0;
+    for(size_t i=0;i<p.count;++i)if(p.buttons[i].section==DeviceControlSection::keyboard) {
+        assert(p.buttons[i].key==nx70vKey(keyboard));
+        ++keyboard;
+    }
+    assert(keyboard==nx70vKeyCount && nx70vKey(nx70vKeyCount-1)<keyIdVoice);
+    checkViews(d);
+    renders(d,out,nx70vKey(13));
+    DeviceControlView noKeyboard;noKeyboard.keyboard=false;
+    const auto noKeyboardBelow=deviceControlView(false,JogPlacement::keyboard);
+    checkKeys(d,noKeyboard);
+    checkKeys(d,noKeyboardBelow);
+    if(!out.empty()) {
+        Image image(imageWidth(d,1,noKeyboard),imageHeight(d,1,noKeyboard));
+        drawDevice(image,d,1,0,noKeyboard);
+        image.save(out+"/nx70v-no-keyboard-1x.png");
+    }
+    // Hidden, the keyboard's rows go and its keys don't hit; with the jog set beside the keyboard it
+    // goes beside the LCD.
+    assert(deviceControlsHeight(p,320)==372 && deviceControlsHeight(p,320,noKeyboard)==152);
+    assert(deviceScreenLeft(p,noKeyboardBelow)==clieJogWidth && deviceScreenLeft(p,besideButtons)==0);
+    // Beside the keyboard the strip shrinks to the width right of the side tab.
+    assert(deviceControlsHeight(p,320,besideButtons)==int(std::ceil(372*float(320-clieJogWidth)/320)));
+
+    const int top=480,l=clieJogWidth;
+    assert(keyAt(d,l+81,top+79,besideLcd)==keyIdHard1 && keyAt(d,l+239,top+79,besideLcd)==keyIdHard4);
+    assert(keyAt(d,l+118,top+121,besideLcd)==keyIdHard2 && keyAt(d,l+202,top+121,besideLcd)==keyIdHard3);
+    assert(keyAt(d,l+160,top+66,besideLcd)==keyIdUp && keyAt(d,l+160,top+92,besideLcd)==keyIdDown);
+    assert(keyAt(d,l+120,top+79,besideLcd)==keyInvalid && keyAt(d,l+160,top+26,besideLcd)==keyInvalid);
+    assert(keyAt(d,l+160,top+121,besideLcd)==keyInvalid);
+    assert(keyAt(d,l+41,top+176,besideLcd)==nx70vKey(0) && keyAt(d,l+56,top+176,besideLcd)==keyInvalid);
+    assert(keyAt(d,l+41,top+196,besideLcd)==keyInvalid && keyAt(d,l+250,top+290,besideLcd)==nx70vKey(35));
+    assert(keyAt(d,l+41,top+176,noKeyboard)==keyInvalid);
+
+    // Colours at 2x: the bright barrel and its dark camera, pale app keys and keycaps, dark ink on
+    // Q and the blue 1 printed under it, the grey app panel.
+    Image image(imageWidth(d,2,besideLcd),imageHeight(d,2,besideLcd));
+    drawDevice(image,d,2,0,besideLcd);
+    auto pixel=[&](float x,float y) {return image.at(int((x+l)*2),int((top+y)*2));};
+    assert(brightness(pixel(160,26))>500 && brightness(pixel(36,30))<150);
+    assert(brightness(pixel(70,70))>550 && brightness(pixel(33,170))>600);
+    assert(count(image,{l+33,top+168,16,16},2,[](SDL_Color c) {return brightness(c)<300;})>8);
+    assert(count(image,{l+42,top+189,14,12},2,[](SDL_Color c) {return c.b>c.r+50;})>4);
+    const auto panel=pixel(160,140);
+    assert(brightness(panel)>420 && brightness(panel)<620);
+    assert(brightness(image.at(8,400))>400);
+
+    for(KeyId key:{keyIdHard1,keyIdHard3,keyIdUp,keyIdDown,nx70vKey(0),nx70vKey(35),nx70vKey(37),keyIdJogPress,keyIdBack})
+        checkHeld(d,key,1,besideLcd);
+    for(KeyId key:{nx70vKey(5),keyIdJogUp,keyIdHard4})checkHeld(d,key,1,besideButtons);
+    checkHeld(d,keyIdDown,1,noKeyboard);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::string out=argc>1 ? argv[1] : "";
     t615c(out);
     n710c(out);
+    nx70v(out);
     std::puts("sony candidate art ok");
     return 0;
 }

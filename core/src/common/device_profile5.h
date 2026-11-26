@@ -29,7 +29,7 @@ enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, p
 enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50, zodiac, hpIpaq210, hpIpaqRx1950, hpIpaqH4350,
                        m125, iiie, iiixe, v, vx, m100, m105, m500, c500, iiic, m505, m130, m520, t415,
                        // Art only, no device profile yet.
-                       t615c, n710c };
+                       t615c, n710c, nx70v };
 // Settings and peripherals a device supports; the desktop and core gate on these.
 // backgroundPanel: the device menu keeps the machine running without drawing and fences its audio.
 // modem: a snap-on Hayes modem for the serial port (the core's own, through PPP to slirp).
