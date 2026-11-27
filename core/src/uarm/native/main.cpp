@@ -27,6 +27,7 @@
 #include "WindowId.h"
 #include "CardSwap.h"
 #include "CardTool.h"
+#include "storage/ZaurusCf.h"
 #include "FileUtil.h"
 #include "FrondPerformance.h"
 #include "HostSerial.h"
@@ -2318,6 +2319,9 @@ int main(int argc, char** argv) {
     // The card tool: make, import or export a card file without starting a machine.
     if (argc >= 2 && std::string(argv[1]) == "--card")
         return frondCardTool::cliMain(std::vector<std::string>(argv + 2, argv + argc));
+    // The Zaurus CF builder: an SL-C3000 Microdrive image from a Sharp HDD1 archive.
+    if (argc >= 2 && std::string(argv[1]) == "--zaurus-cf")
+        return frondZaurusCf::cliMain(std::vector<std::string>(argv + 2, argv + argc));
 
     argparse::ArgumentParser program("frond-core", "0.20.0");
 

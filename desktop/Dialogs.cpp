@@ -21,7 +21,6 @@
 #include <QPushButton>
 #include <QProcess>
 #include <QProgressDialog>
-#include <QStandardPaths>
 #include <QRegularExpression>
 #include <QTimer>
 #include <QSlider>
@@ -275,37 +274,42 @@ QString FirmwareDialog::prepareZaurus() {
 
     const auto cf = stage->filePath(frondSessions::zaurusCf);
     QProgressDialog progress(create ? tr("Creating the CF image…") : tr("Copying the CF image…"), tr("Cancel"),
-                             0, create ? 0 : 1000, this);
+                             0, create ? 100 : 1000, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setAutoReset(false);
     progress.setAutoClose(false);
     if (create) {
-        QFile script(":/zaurus/create-zaurus-cf.py");
-        if (!script.open(QIODevice::ReadOnly)) return tr("The Zaurus CF builder is missing.");
-        const auto python = QStandardPaths::findExecutable("python3");
-        if (python.isEmpty()) return tr("Creating a Zaurus CF image requires Python 3, e2fsprogs and mtools.");
-        QStringList arguments{"-I", "-X", "utf8", "-", "--hdd1", input.absoluteFilePath(),
-                              "--size-gb", QString::number(cfSize->value()), "--require-fonts", "--output", cf};
+        // The core builds the image (frond-core --zaurus-cf), printing "progress N" lines in percent.
+        const auto core = frondCards::defaultCore();
+        if (core.isEmpty()) return tr("The Zaurus CF builder is missing.");
+        QStringList arguments{"--zaurus-cf", "--hdd1", input.absoluteFilePath(), "--size-gb",
+                              QString::number(cfSize->value()), "--require-fonts", "--progress", "--output", cf};
         if (!promPath.isEmpty()) arguments << "--font-rom" << QFileInfo(promPath).absoluteFilePath();
 
         QProcess builder;
-        auto environment = QProcessEnvironment::systemEnvironment();
-        const auto bundled = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../lib/frond");
-        if (QFileInfo(bundled + "/mformat").isExecutable())
-            environment.insert("PATH", bundled + QDir::listSeparator() + environment.value("PATH"));
-        builder.setProcessEnvironment(environment);
-        builder.start(python, arguments);
+        builder.start(core, arguments);
         if (!builder.waitForStarted()) return tr("Could not start the Zaurus CF builder.");
-        builder.write(script.readAll());
-        builder.closeWriteChannel();
+        progress.setValue(0);
         progress.show();
+        QByteArray output;
+        const auto readProgress = [&] {
+            output += builder.readAllStandardOutput();
+            for (int end; (end = output.indexOf('\n')) >= 0; output.remove(0, end + 1)) {
+                const auto line = output.left(end).trimmed();
+                bool number = false;
+                const int percent = line.startsWith("progress ") ? line.mid(9).toInt(&number) : 0;
+                if (number) progress.setValue(std::clamp(percent, 0, 100));
+            }
+        };
         while (builder.state() != QProcess::NotRunning && !builder.waitForFinished(40)) {
+            readProgress();
             QCoreApplication::processEvents();
             if (!progress.wasCanceled()) continue;
             builder.kill();
             builder.waitForFinished();
             return frondSessions::cancelledText();
         }
+        readProgress();
         QCoreApplication::processEvents();
         if (progress.wasCanceled()) return frondSessions::cancelledText();
         if (builder.exitStatus() != QProcess::NormalExit || builder.exitCode() != 0 || !QFileInfo(cf).isFile()) {

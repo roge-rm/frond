@@ -56,7 +56,11 @@ SOURCE_CXX = 						\
 	sync/ActiveSyncFiles.cpp \
 	sync/ActiveSyncPartnership.cpp \
 	sync/AirSync.cpp \
-	sync/Wbxml.cpp
+	sync/Wbxml.cpp \
+	storage/TarStream.cpp \
+	storage/Ext3Writer.cpp \
+	storage/Fat32Writer.cpp \
+	storage/ZaurusCf.cpp
 
 SOURCE_C_NATIVE = $(SOURCE_C)
 SOURCE_CXX_NATIVE = 				\
