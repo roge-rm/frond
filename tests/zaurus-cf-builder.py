@@ -439,6 +439,9 @@ def error_cases(work, rom):
          '8 MiB', True),
         ('broken hard link', hdd1_archive(good_seed, extra=[dict(name='hdd1/home/l', kind='hard', link='hdd1/nope')]),
          (), 'needs a regular file', True),
+        ('hard link as lost+found', hdd1_archive(seed_archive(extra=[dict(name='hdd2/lost+found', kind='hard',
+                                                                         link='hdd2/etc/passwd')])), (),
+         'must be a folder', None),
         ('cross hard link', hdd1_archive(seed_archive(extra=[dict(name='hdd2/l', kind='hard', link='hdd3/UPPER.TXT')])),
          (), 'crosses a partition', True),
         ('inside a file', hdd1_archive(seed_archive(extra=[dict(name='hdd2/etc/passwd/x')])), (),
@@ -458,6 +461,53 @@ def error_cases(work, rom):
         ('size 3 GB', hdd1_archive(good_seed), ('--size-gb', '3'), None, True),
     ]
     return cases
+
+
+def ext_header(kind, payload):
+    """A tar extension header (type g, x, ...) with its payload."""
+    info = tarfile.TarInfo('ext')
+    info.type = kind
+    info.size = len(payload)
+    return info.tobuf(tarfile.USTAR_FORMAT) + payload + b'\0' * (-len(payload) % 512)
+
+
+def tar_file(name, data):
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    return info.tobuf(tarfile.USTAR_FORMAT) + data + b'\0' * (-len(data) % 512)
+
+
+def fnv(data):
+    h = 1469598103934665603
+    for b in data:
+        h = ((h ^ b) * 1099511628211) & (2**64 - 1)
+    return h
+
+
+def gzip_boundaries(binary, work):
+    """A member ending near each 64 KiB refill, followed by more members, reads back whole."""
+    path = work / 'edge.gz'
+    tail = gzip.compress(b'tail', mtime=0) + b'\0\0\0' + gzip.compress(pattern(3, 70_000), mtime=0)
+    # Deflate data that isn't stored, so the end of the stream sits in miniz's bit buffer. Members
+    # are sized by trying data lengths until the member ends within a few bytes of a refill.
+    rng = random.Random(11)
+    source = bytes(rng.choice(b'abcdefghijklmnop') for _ in range(400_000))
+    tested = 0
+    for centre in (65536, 65552, 131072, 131088):
+        guess = centre * 100_000 // len(gzip.compress(source[:100_000], mtime=0))
+        for length in range(guess - 150, guess + 150):
+            member = gzip.compress(source[:length], mtime=0)
+            if abs(len(member) - centre) > 24:
+                continue
+            data = member + tail
+            path.write_bytes(data)
+            want = gzip.decompress(data)
+            got = run(binary, 'gunzip', path).stdout.split()
+            if got != [str(len(want)).encode(), str(fnv(want)).encode()]:
+                sys.exit(f'gzip member of {len(member)} bytes read back wrong: {got}')
+            tested += 1
+    path.unlink()
+    print(f'{tested} gzip members ending at the refill boundaries read back whole')
 
 
 def main():
@@ -528,6 +578,7 @@ def main():
     plain.unlink()
     print('an uncompressed archive on a 10 GB card gives the same trees, fsck clean')
 
+    gzip_boundaries(binary, work)
     run(binary, 'stream', archive, rom_file)
     cancelled = work / 'cancelled.img'
     run(binary, 'cancel', archive, cancelled)
@@ -539,6 +590,19 @@ def main():
     if exists.read_bytes() != b'keep' or b'already exists' not in result.stderr:
         sys.exit('an existing output was not refused')
     exists.unlink()
+
+    # Thousands of extension headers in a row must not use the stack up; the name set by the first
+    # long-name header is the one that applies.
+    chain = hdd1_archive(compress=False).rstrip(b'\0')
+    chain += b'\0' * (-len(chain) % 512)
+    chain += b''.join(ext_header(b'g', b'') for _ in range(5000))
+    chain += ext_header(b'x', b'19 comment=chained\n') + ext_header(b'g', b'') * 3
+    chain += tar_file('hdd1/home/chained', b'data') + b'\0' * 1024
+    out = work / 'chain.img'
+    builder(binary, '--hdd1', write(work / 'chain.tgz', gzip.compress(chain, mtime=0)), '--output', out)
+    (work / 'chain.tgz').unlink()
+    out.unlink()
+    print('5,000 extension headers in a row build fine')
 
     for name, data, args, message, script_refuses in error_cases(work, rom_file):
         bad = write(work / 'bad.tgz', data)

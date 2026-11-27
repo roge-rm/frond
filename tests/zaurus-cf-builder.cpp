@@ -2,10 +2,12 @@
 //   cli ARGS...                 frond --zaurus-cf ARGS...
 //   cancel ARCHIVE OUTPUT       stops a build from the progress callback, checks it's refused
 //   stream ARCHIVE [FONTS]      builds into a callback, checks the writes skip zeros and stay in bounds
+//   gunzip FILE                 reads the gzip file through GzipReader, prints its size and a checksum
 //   geometry SECTORS            prints the FAT32 layout for a partition of that many sectors
 
 #include "storage/Errors.h"
 #include "storage/Fat32Writer.h"
+#include "storage/TarStream.h"
 #include "storage/ZaurusCf.h"
 
 #include <algorithm>
@@ -88,6 +90,26 @@ int stream(const char* archive, const char* fonts) {
     return 0;
 }
 
+int gunzip(const char* path) {
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return fail("gunzip: open");
+    frondTar::FdReader file(fd);
+    frondTar::GzipReader gz(file);
+    uint64_t total = 0, hash = 1469598103934665603ull;
+    std::vector<uint8_t> buf(5000);
+    try {
+        for (size_t n; (n = gz.read(buf.data(), buf.size())) != 0;) {
+            for (size_t i = 0; i < n; ++i) hash = (hash ^ buf[i]) * 1099511628211ull;
+            total += n;
+        }
+    } catch (const frondStorage::Error& e) {
+        return fail(std::string("gunzip: ") + e.message);
+    }
+    close(fd);
+    std::cout << total << " " << hash << std::endl;
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -95,6 +117,7 @@ int main(int argc, char** argv) {
     if (mode == "cli") return frondZaurusCf::cliMain(std::vector<std::string>(argv + 2, argv + argc));
     if (mode == "cancel" && argc == 4) return cancel(argv[2], argv[3]);
     if (mode == "stream" && (argc == 3 || argc == 4)) return stream(argv[2], argc == 4 ? argv[3] : nullptr);
+    if (mode == "gunzip" && argc == 3) return gunzip(argv[2]);
     if (mode == "geometry" && argc == 3) {
         const auto g = frondFat32::geometry(uint32_t(std::strtoul(argv[2], nullptr, 10)));
         std::cout << g.clusterSectors << " " << g.fatSectors << " " << g.clusters << std::endl;

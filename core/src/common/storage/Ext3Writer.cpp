@@ -300,13 +300,13 @@ void Writer::finish(const std::vector<Node>& nodes) {
     std::vector<uint32_t> nodeIno(nodes.size(), 0);
     for (size_t i = 0; i < nodes.size(); ++i) {
         const auto& node = nodes[i];
-        if (node.type == '1') continue;
         if (node.path.empty() || node.path == "lost+found") {
             if (node.type != '5') throw Error("The archive's " + label_ + "/" + node.path + " must be a folder.");
             nodeIno[i] = node.path.empty() ? rootIno : lostFoundIno;
             apply(inodes[nodeIno[i]], node);
             continue;
         }
+        if (node.type == '1') continue;
         if (inodes.size() > inodeCount) throw Error("The archive has too many files for the " + label_ + " partition.");
         const uint32_t ino = uint32_t(inodes.size());
         inodes.emplace_back();

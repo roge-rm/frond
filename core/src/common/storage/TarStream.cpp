@@ -71,7 +71,8 @@ struct GzipReader::State {
     bool fill() {
         if (z.avail_in) return true;
         z.next_in = in;
-        z.avail_in = unsigned(source.read(in, sizeof in));
+        // The spare bytes after gzipChunk are for unread().
+        z.avail_in = unsigned(source.read(in, gzipChunk));
         return z.avail_in != 0;
     }
     bool byte(uint8_t& b) {
@@ -83,6 +84,8 @@ struct GzipReader::State {
     // Puts back bytes inflate read past the end of a member.
     void unread(const uint8_t* bytes, size_t n) {
         const size_t consumed = size_t(z.next_in - in);
+        // Inflate holds back at most 8 bytes, and in has 16 spare past gzipChunk.
+        if (n > 8 || size_t(z.avail_in) + n > sizeof in) throw Error(gzipCut);
         if (consumed >= n) {
             z.next_in -= n;
         } else {
@@ -342,81 +345,100 @@ std::string TarReader::payload(uint64_t size) {
 }
 
 bool TarReader::header(Member& m, bool dircheck, bool first) {
-    uint8_t b[block];
-    bool empty;
-    readBlock(b, empty);
-    if (empty) {
-        if (first) throw Error("The archive is empty.");
-        return false;
-    }
-    if (std::all_of(b, b + block, [](uint8_t c) { return c == 0; })) {
-        if (first) throw Error("The archive is not a tar archive.");
-        return false;
-    }
-    if (!checksumOk(b)) throw Error(first ? "The archive is not a tar archive." : "The archive has a damaged tar header.");
-
-    m = Member{};
-    m.name = nts(b, 100);
-    m.mode = uint32_t(nti(b + 100, 8));
-    m.uid = nti(b + 108, 8);
-    m.gid = nti(b + 116, 8);
-    m.size = nti(b + 124, 12);
-    m.mtime = nti(b + 136, 12);
-    m.type = char(b[156]);
-    m.linkname = nts(b + 157, 100);
-    nti(b + 329, 8);
-    nti(b + 337, 8);
-    const std::string prefix = nts(b + 345, 155);
-    if (dircheck && m.type == '\0' && !m.name.empty() && m.name.back() == '/') m.type = '5';
-    if (m.type == 'S') throw Error("The archive has sparse GNU tar entries, which aren't supported.");
-    if (m.type == '5') rstripSlash(m.name);
-    if (!prefix.empty() && m.type != 'L' && m.type != 'K') m.name = prefix + "/" + m.name;
-
-    if (m.type == 'L' || m.type == 'K') {
-        const auto text = payload(uint64_t(std::max<int64_t>(m.size, 0)));
-        const auto name = nts(reinterpret_cast<const uint8_t*>(text.data()), text.size());
-        const char type = m.type;
-        if (!header(m, false, false)) throw Error("The archive has a damaged tar header.");
-        if (type == 'L')
-            m.name = name;
-        else
-            m.linkname = name;
-        if (m.type == '5' && !m.name.empty() && m.name.back() == '/') m.name.pop_back();
-        return true;
-    }
-
-    if (m.type == 'x' || m.type == 'g' || m.type == 'X') {
-        const char type = m.type;
-        const auto buf = payload(uint64_t(std::max<int64_t>(m.size, 0)));
-        std::map<std::string, std::string> local = global_;
-        auto& pax = type == 'g' ? global_ : local;
-        size_t pos = 0;
-        while (pos < buf.size() && buf[pos] != 0) {
-            size_t digits = pos;
-            while (digits < buf.size() && buf[digits] >= '0' && buf[digits] <= '9') ++digits;
-            if (digits == pos || digits >= buf.size() || buf[digits] != ' ' || digits - pos > 9)
-                throw Error("The archive has a damaged pax header.");
-            const size_t length = size_t(std::stoul(buf.substr(pos, digits - pos)));
-            if (length < 5 || pos + length > buf.size()) throw Error("The archive has a damaged pax header.");
-            const size_t end = pos + length - 1;
-            if (end <= digits + 1 || buf[end] != '\n') throw Error("The archive has a damaged pax header.");
-            const auto record = buf.substr(digits + 1, end - digits - 1);
-            const auto equals = record.find('=');
-            if (equals == 0 || equals == std::string::npos) throw Error("The archive has a damaged pax header.");
-            const auto key = record.substr(0, equals);
-            if (key.compare(0, 11, "GNU.sparse.") == 0)
-                throw Error("The archive has sparse pax tar entries, which aren't supported.");
-            pax[key] = record.substr(equals + 1);
-            pos += length;
+    // Long name, long link and pax headers come before the header they describe. Their values wait
+    // here and are applied after it, last one first, so the earliest header wins.
+    struct Pending {
+        char type;
+        std::string name;
+        std::map<std::string, std::string> pax;
+    };
+    std::vector<Pending> pending;
+    for (;; first = false) {
+        uint8_t b[block];
+        bool empty;
+        readBlock(b, empty);
+        if (empty) {
+            if (first) throw Error("The archive is empty.");
+            if (!pending.empty()) throw Error("The archive has a damaged tar header.");
+            return false;
         }
-        if (!header(m, false, false)) throw Error("The archive has a damaged tar header.");
-        if (type != 'g') applyPax(m, local);
-        return true;
-    }
+        if (std::all_of(b, b + block, [](uint8_t c) { return c == 0; })) {
+            if (first) throw Error("The archive is not a tar archive.");
+            if (!pending.empty()) throw Error("The archive has a damaged tar header.");
+            return false;
+        }
+        if (!checksumOk(b))
+            throw Error(first ? "The archive is not a tar archive." : "The archive has a damaged tar header.");
 
-    if (m.type == '\0' || m.type == '7') m.type = '0';
-    applyPax(m, global_);
-    if (m.type == '5') rstripSlash(m.name);
+        m = Member{};
+        m.name = nts(b, 100);
+        m.mode = uint32_t(nti(b + 100, 8));
+        m.uid = nti(b + 108, 8);
+        m.gid = nti(b + 116, 8);
+        m.size = nti(b + 124, 12);
+        m.mtime = nti(b + 136, 12);
+        m.type = char(b[156]);
+        m.linkname = nts(b + 157, 100);
+        nti(b + 329, 8);
+        nti(b + 337, 8);
+        const std::string prefix = nts(b + 345, 155);
+        if (dircheck && m.type == '\0' && !m.name.empty() && m.name.back() == '/') m.type = '5';
+        if (m.type == 'S') throw Error("The archive has sparse GNU tar entries, which aren't supported.");
+        if (m.type == '5') rstripSlash(m.name);
+        if (!prefix.empty() && m.type != 'L' && m.type != 'K') m.name = prefix + "/" + m.name;
+
+        if (m.type == 'L' || m.type == 'K') {
+            const auto text = payload(uint64_t(std::max<int64_t>(m.size, 0)));
+            pending.push_back({m.type, nts(reinterpret_cast<const uint8_t*>(text.data()), text.size()), {}});
+            dircheck = false;
+            continue;
+        }
+
+        if (m.type == 'x' || m.type == 'g' || m.type == 'X') {
+            const char type = m.type;
+            const auto buf = payload(uint64_t(std::max<int64_t>(m.size, 0)));
+            std::map<std::string, std::string> local = global_;
+            auto& pax = type == 'g' ? global_ : local;
+            size_t pos = 0;
+            while (pos < buf.size() && buf[pos] != 0) {
+                size_t digits = pos;
+                while (digits < buf.size() && buf[digits] >= '0' && buf[digits] <= '9') ++digits;
+                if (digits == pos || digits >= buf.size() || buf[digits] != ' ' || digits - pos > 9)
+                    throw Error("The archive has a damaged pax header.");
+                const size_t length = size_t(std::stoul(buf.substr(pos, digits - pos)));
+                if (length < 5 || pos + length > buf.size()) throw Error("The archive has a damaged pax header.");
+                const size_t end = pos + length - 1;
+                if (end <= digits + 1 || buf[end] != '\n') throw Error("The archive has a damaged pax header.");
+                const auto record = buf.substr(digits + 1, end - digits - 1);
+                const auto equals = record.find('=');
+                if (equals == 0 || equals == std::string::npos) throw Error("The archive has a damaged pax header.");
+                const auto key = record.substr(0, equals);
+                if (key.compare(0, 11, "GNU.sparse.") == 0)
+                    throw Error("The archive has sparse pax tar entries, which aren't supported.");
+                pax[key] = record.substr(equals + 1);
+                pos += length;
+            }
+            pending.push_back({type, {}, type == 'g' ? std::map<std::string, std::string>() : std::move(local)});
+            dircheck = false;
+            continue;
+        }
+
+        if (m.type == '\0' || m.type == '7') m.type = '0';
+        applyPax(m, global_);
+        if (m.type == '5') rstripSlash(m.name);
+        break;
+    }
+    for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
+        if (it->type == 'L' || it->type == 'K') {
+            if (it->type == 'L')
+                m.name = it->name;
+            else
+                m.linkname = it->name;
+            if (m.type == '5' && !m.name.empty() && m.name.back() == '/') m.name.pop_back();
+        } else if (it->type != 'g') {
+            applyPax(m, it->pax);
+        }
+    }
     return true;
 }
 

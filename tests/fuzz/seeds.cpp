@@ -373,6 +373,12 @@ int main(int argc, char** argv) {
         hdd1 = Cat(hdd1, Bytes(1024, 0));
         Seed("zaurus-cf", hdd1);
         Seed("zaurus-cf", gz(hdd1));
+        // A long run of pax and long-name headers ahead of one entry.
+        Bytes chained = entry("hdd1", '5', {});
+        for (int i = 0; i < 1500; ++i) chained = Cat(chained, entry("ext", i % 3 ? 'g' : 'x', {}));
+        chained = Cat(chained, entry("hdd1/.sys", '5', {}));
+        chained = Cat(chained, Bytes(1024, 0));
+        Seed("zaurus-cf", chained);
     }
 
     {
