@@ -152,6 +152,8 @@ void cpuSetJitSync(bool sync);
 uint64_t cpuJitExceptionReturns();
 // ARM920T Fast blocks: stores that changed a table word a kept JIT page entry's walk read, in every CPU so far (tests).
 uint64_t cpuJitKeepStoreDrops();
+// Code pages dropped for a changed mapping, in every CPU so far (tests).
+uint64_t cpuJitMapDrops();
 // MSR CPSR writes generated code hands to the interpreter's code, in every CPU so far (tests).
 uint64_t cpuJitCpsrWrites();
 // MSR CPSRs that couldn't run in place and went to the interpreter, in every CPU so far (tests).

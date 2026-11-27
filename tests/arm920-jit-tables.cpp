@@ -5,7 +5,8 @@
 // set to a third page with no flush (as WinCE maps a slot back). Fast runs the same code as Exact each time.
 // Data pages are kept across PID changes and TLB invalidations too: loads at 32 MB and up and below it go on
 // with the mapping each change leaves, a table edit after an invalidation is seen by the next load, and a page filled
-// through a stale TLB entry's domain isn't kept.
+// through a stale TLB entry's domain isn't kept. A suspended page that left its table line's list is back on it once
+// resumed, and table edits through either copy of mirrored RAM are seen.
 
 #include <cassert>
 #include <cstdint>
@@ -36,17 +37,24 @@ constexpr uint32_t tlbFlush = 0xee080f17, icacheInvalidate = 0xee070f15;
 struct Machine {
     ArmCpu* cpu;
     uint8_t* bytes;
-    Machine() {
+    uint32_t ramEnd = ramSize;
+    // mirror: the RAM repeats once at ramSize, as the rx1950's SDRAM does through bank 6.
+    explicit Machine(bool mirror = false) {
         auto* mem = memInit();
         MemoryBuffer buffer{};
         assert(memoryBufferAllocate(&buffer, ramSize));
         bytes = buffer.buffer;
         std::memset(bytes, 0, ramSize);
         ramSetNoFramebuffer(ramInit(mem, nullptr, 0, ramSize, &buffer, true));
+        if (mirror) {
+            ramSetNoFramebuffer(ramInit(mem, nullptr, ramSize, ramSize, &buffer, false));
+            ramEnd = 2 * ramSize;
+        }
         auto* patches = initPatchDispatch();
         cpu = cpuInit(0x100, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0, patches, new PacePatch{},
                       createSystemState(), ArmCpuModel::arm920t, false);
         patchDispatchSetCpu(patches, cpu);
+        if (mirror) cpuArm920SetRamMirror(cpu, 0, ramSize, ramEnd);
     }
     void word(uint32_t pa, uint32_t value) { std::memcpy(bytes + pa, &value, 4); }
     uint32_t reg(unsigned r) const { return cpuGetRegisters(cpu)[r]; }
@@ -128,7 +136,8 @@ struct Machine {
 void enableJit(Machine& machine) {
     auto leanPage = [](void* context, uint32_t pa, bool, bool* counted) -> uint8_t* {
         *counted = true;
-        return pa < ramSize ? static_cast<Machine*>(context)->bytes + (pa & ~0xfffu) : nullptr;
+        auto* machine = static_cast<Machine*>(context);
+        return pa < machine->ramEnd ? machine->bytes + (pa & (ramSize - 1) & ~0xfffu) : nullptr;
     };
     cpuArm920SetLean(machine.cpu, leanPage, [](uint32_t, const uint32_t*, uint32_t, uint32_t) { return true; },
                     &machine);
@@ -420,7 +429,7 @@ void testKeptEdit() {
             same(exact, fast, edit, 20, pte);
         else
             step(edits[round], pte);
-        assert(cpuJitKeepStoreDrops() > drops);
+        assert(cpuJitKeepStoreDrops() == drops + 1);
         same(exact, fast, park, 20, 0);
         run();
         assert(exact.reg(1) == value && fast.reg(1) == value);
@@ -506,6 +515,135 @@ void testKeptDomain() {
     assert(exact.reg(15) == 0xffff0010 && fast.reg(15) == 0xffff0010);
 }
 
+// A suspended code page leaves its table line's list when the line changes, and the guard puts it back when it
+// resumes the page: a later move of its entry with a flush drops its code, and the next run takes the new page.
+void testSuspendedRelist() {
+    constexpr uint32_t slot = 0x02000000, otherSlot = 0x04000000;
+    constexpr uint32_t slotTable = l2 + 0x400, slotPte = slotTable + 8;
+    constexpr uint32_t original = 0x102ff2, replacement = 0x202ff2;
+    constexpr uint32_t kernel = 0xc0000400, park = 0xc0000440;
+    Machine exact;
+    Machine fast;
+    for (auto* machine : {&exact, &fast}) {
+        machine->setup();
+        machine->word(ttb + (slot >> 20) * 4, slotTable | 0x11);
+        machine->word(slotPte, original);
+        machine->word(0x102000, 0xe2822c01);  // ADD r2, r2, #0x100
+        machine->word(0x102004, movPc(8));
+        machine->word(0x202000, 0xe2822801);  // ADD r2, r2, #0x10000
+        machine->word(0x202004, movPc(8));
+        machine->word(0x400, mcr(13, 0));
+        machine->word(0x404, str(0, 13));
+        machine->word(0x408, tlbFlush);
+        machine->word(0x440, loop);
+        cpuSetReg(machine->cpu, 2, 0);
+        cpuSetReg(machine->cpu, 8, park);
+        cpuSetReg(machine->cpu, 13, 0xd0300000 + slotPte - ttb);
+    }
+    enableJit(fast);
+    auto step = [&](uint32_t pc, uint32_t value = 0) {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 0, value);
+            cpuSetReg(machine->cpu, 15, pc);
+            machine->step();
+        }
+    };
+    // A run from pc in Fast, after a guard exit if the page is guarded, then Exact over the same instructions.
+    auto run = [&](uint32_t pc) {
+        cpuSetReg(exact.cpu, 15, pc);
+        cpuSetReg(fast.cpu, 15, pc);
+        uint32_t ran = 0;
+        int stop = arm920JitExit;
+        cpuArm920RunJit(fast.cpu, 16, &stop, 16, &ran);
+        if (stop == arm920JitCold && !ran) cpuArm920RunJit(fast.cpu, 16, &stop, 16, &ran);
+        assert(stop == arm920JitBudget && ran);
+        for (uint32_t i = 0; i < ran; ++i) exact.step();
+        for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
+    };
+    // Use the high FPSCR tag bits for the slot whose page will be guarded.
+    for (uint32_t pid = 3; pid < 10; ++pid) {
+        step(kernel, pid * slot);
+        run(park);
+    }
+    step(kernel, slot);
+    run(0x2000);
+    run(0x2000);
+    assert(fast.reg(2) == 0x200);
+    // Another PID, the slot page's entry a fault one and a flush: the page is suspended.
+    step(kernel, otherSlot);
+    step(kernel + 4, 0);
+    step(kernel + 8);
+    run(park);
+    // The entry back and a flush while it is suspended: its line changed, so the page leaves the line's list.
+    step(kernel + 4, original);
+    step(kernel + 8);
+    run(park);
+    // The slot's PID again: the guard walks the page and resumes it, as it maps as before.
+    step(kernel, slot);
+    run(0x2000);
+    assert(fast.reg(2) == 0x300);
+    // The entry moves to the replacement with a flush: the check finds the page on the line's list again.
+    const uint64_t drops = cpuJitMapDrops();
+    step(kernel + 4, replacement);
+    step(kernel + 8);
+    run(0x2000);
+    assert(fast.reg(2) == 0x10300);
+    assert(cpuJitMapDrops() == drops + 1);
+}
+
+// The RAM repeats at ramSize. The code page's table entry is stored through the second copy, then through the
+// first, with no flush: each next fetch walks the new entry. (A walk through the second copy isn't remembered, as
+// that copy isn't plain RAM to the bus, so its page is checked at every mapping check.)
+void testMirror() {
+    constexpr uint32_t kernel = 0xc0000400, park = 0xc0000440;
+    Machine exact(true);
+    Machine fast(true);
+    for (auto* machine : {&exact, &fast}) {
+        machine->setup();
+        machine->word(ttb + (0xd0400000 >> 20) * 4, (0x300000 + ramSize) | 0xc12);
+        machine->word(0x400, str(0, 13));
+        machine->word(0x404, str(0, 12));
+        machine->word(0x408, tlbFlush);
+        machine->word(0x440, loop);
+        cpuSetReg(machine->cpu, 2, 0);
+        cpuSetReg(machine->cpu, 8, park);
+        cpuSetReg(machine->cpu, 12, 0xd0400000 + (l2 - ttb) + 4);
+        cpuSetReg(machine->cpu, 13, 0xd0300000 + (l2 - ttb) + 4);
+    }
+    enableJit(fast);
+    auto step = [&](uint32_t pc, uint32_t value = 0) {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 0, value);
+            cpuSetReg(machine->cpu, 15, pc);
+            machine->step();
+        }
+    };
+    auto run = [&](uint32_t pc) { same(exact, fast, pc, 8, 0); };
+    step(kernel + 8);
+    for (unsigned i = 0; i < 3; ++i) run(0x1000);
+    assert(fast.reg(2) == 3);
+    // Each edit comes after a flush and a run elsewhere: neither TLB holds the page, and the mapping check before
+    // that run walked it from the tables, so only the store can tell the next check the page moved.
+    uint64_t drops = cpuJitMapDrops();
+    step(kernel + 8);
+    run(park);
+    step(kernel + 4, pageB);
+    run(0x1000);
+    assert(fast.reg(2) == 0x10003);
+    assert(cpuJitMapDrops() == ++drops);
+    step(kernel + 8);
+    run(park);
+    step(kernel, pageC);
+    run(0x1000);
+    assert(fast.reg(2) == 0x10103);
+    assert(cpuJitMapDrops() == ++drops);
+    step(kernel + 4, pageA);
+    step(kernel + 8);
+    run(0x1000);
+    assert(fast.reg(2) == 0x10104);
+    assert(cpuJitMapDrops() == ++drops);
+}
+
 }
 
 int main() {
@@ -558,6 +696,8 @@ int main() {
     testKeptData();
     testKeptEdit();
     testKeptDomain();
+    testSuspendedRelist();
+    testMirror();
     std::printf("Fast: %llu of the instructions in translated blocks\n", (unsigned long long)translated);
     std::printf("PASS: ARM920T table edits and suspended FCSE code\n");
 }

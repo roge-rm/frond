@@ -676,17 +676,18 @@ struct Env final : public A32::UserCallbacks {
     uint32_t guardExitPage = ~0u;
     std::vector<uint32_t> scratchMoved, scratchFilled, scratchFillMoved;
     // ARM920T Fast blocks: a copy of each 64-byte line of page table words the code pages' walk memos read,
-    // with the pages that read it, so a mapping check compares those lines and walks only the pages of lines
-    // that changed, and the pages in recheck: new ones, suspended ones with code newly noted, and those whose
-    // walk couldn't be remembered or was answered by a live TLB entry. A TTB change checks everything.
-    // A line's pages may include pages that left or no longer read it; they go when it changes, and lines
-    // with no pages left go every kSweepChecks checks.
+    // with the pages that read it, so a mapping check compares the lines touched since the last one and walks
+    // only the pages of lines that changed, and the pages in recheck: new ones, suspended ones with code newly
+    // noted, and those whose walk couldn't be remembered or was answered by a live TLB entry. A TTB change
+    // checks everything. A line's pages may include pages that left or no longer read it; they go when it
+    // changes, as do suspended pages with no code noted, and lines with no pages left go every kSweepChecks checks.
     // A page walked outside a check (RevalidateGuard, NoteSuspended) against words other than a line's copy marks the
     // line dirty, so the next check takes its pages even if the words are back as copied by then.
     struct TableLine {
         const uint8_t *host;
         uint32_t pa;  // pa >> 6
         bool dirty = false;
+        bool touched = false;  // in touchedLines
         uint16_t words = 0;  // the words walks read, a bit per word; only these count as a change
         uint8_t copy[64];
         std::vector<uint32_t> pages;
@@ -705,6 +706,15 @@ struct Env final : public A32::UserCallbacks {
     uint32_t checkedTtb = ~0u, checkStamp = 0;
     std::vector<std::unique_ptr<TableLine>> tableLines;
     std::unordered_map<uint32_t, TableLine *> tableLineAt;  // by pa >> 6
+    // Lines (pa >> 6) touched since the last watched check by a store to a walked word, a walk off the copy or a
+    // newly watched word (WatchWalk): the only lines that can differ from their copies, as every store to a walked
+    // word comes through TableWordsWritten (the words are marked in the CPU's code map).
+    std::vector<uint32_t> touchedLines, scratchTouched;
+    void Touch(TableLine &l) {
+        if (l.touched) return;
+        l.touched = true;
+        touchedLines.push_back(l.pa);
+    }
     std::vector<uint32_t> recheck, scratchRecheck, scratchCheck;
 
     // The page dynarmic keeps code by (the run's VA) for a code page here (an MVA), and the code page of a VA.
@@ -734,7 +744,10 @@ struct Env final : public A32::UserCallbacks {
                 for (uint8_t i = 0; i < c.walk.n; i++) {
                     uint32_t v;
                     std::memcpy(&v, c.walkLines[i]->copy + (c.walk.pa[i] & 60), 4);
-                    if (v != c.walk.value[i]) c.walkLines[i]->dirty = true;
+                    if (v != c.walk.value[i]) {
+                        c.walkLines[i]->dirty = true;
+                        Touch(*c.walkLines[i]);
+                    }
                 }
             }
         }
@@ -764,8 +777,12 @@ struct Env final : public A32::UserCallbacks {
             c.walkLines[i] = &l;
             const unsigned word = (c.walk.pa[i] & 63) >> 2;
             if (!(l.words & (1u << word))) {
-                // No page read this word before, so its copy only has to hold what this walk read.
+                // No page read this word before, so its copy only has to hold what this walk read. A walk a live
+                // TLB entry answered may hold an older word than the table's; the next check takes the line then.
+                // Outside a check, translated code may still store to a newly marked page through its page table
+                // until its next run starts (CheckGen), so the next check, which comes after that, takes the line.
                 l.words |= uint16_t(1u << word);
+                if (!checking || std::memcmp(l.host + word * 4, &c.walk.value[i], 4)) Touch(l);
                 std::memcpy(l.copy + word * 4, &c.walk.value[i], 4);
                 cpuJitWatchTableWord(cpu, (l.pa << 6) | (word << 2));
             }
@@ -971,10 +988,12 @@ struct Env final : public A32::UserCallbacks {
                 if (old == now) continue;
                 if (!(old & 3)) {
                     stats.tableFaultFills++;
+                    Touch(l);
                     continue;
                 }
             }
             l.dirty = true;
+            Touch(l);
             tablesWritten = true;
         }
     }
@@ -1138,15 +1157,27 @@ struct Env final : public A32::UserCallbacks {
         if (checkStamp % kSweepChecks == 0) SweepTableLines();
         std::vector<uint32_t> &pages = scratchCheck;
         pages.clear();
-        for (const auto &line : tableLines) {
-            TableLine &l = *line;
+        std::vector<uint32_t> &touched = scratchTouched;
+        touched.clear();
+        touched.swap(touchedLines);
+        for (uint32_t key : touched) {
+            const auto at = tableLineAt.find(key);
+            if (at == tableLineAt.end()) continue;
+            TableLine &l = *at->second;
+            l.touched = false;
             if (!l.dirty && !l.Moved()) continue;
             std::memcpy(l.copy, l.host, 64);
             l.dirty = false;
             stats.tableLinesChanged++;
+            // A suspended page with no code noted leaves the list: RevalidateGuard and NoteSuspended walk it again
+            // before its code can run, and their CodePa puts it back (watched no longer matches walks).
             std::erase_if(l.pages, [&](uint32_t page) {
                 const auto c = code.find(page);
                 if (c == code.end() || !WalkUses(c->second, l.pa)) return true;
+                if (c->second.suspended && !c->second.noted) {
+                    c->second.watched = c->second.walk.walks - 1;
+                    return true;
+                }
                 if (c->second.stamp != checkStamp) {
                     c->second.stamp = checkStamp;
                     pages.push_back(page);
@@ -1260,6 +1291,7 @@ struct Env final : public A32::UserCallbacks {
         std::fill(guard.begin(), guard.end(), 0);
         tableLines.clear();
         tableLineAt.clear();
+        touchedLines.clear();
         recheck.clear();
         checkedTtb = ~0u;
         cpuJitForgetCode(cpu);
@@ -2846,6 +2878,7 @@ bool jitCodeWritten(FrondJit *j, uint8_t *hostPage, uint32_t offset, uint32_t si
 }
 
 uint64_t jitKeepStoreDrops() { return stats.keepStoreDrops; }
+uint64_t jitMapDrops() { return stats.mapChanged; }
 
 void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size, const void *data) {
     bool dropped = false;

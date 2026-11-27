@@ -6498,6 +6498,7 @@ uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask
 static uint64_t jitExceptionReturns;
 uint64_t cpuJitExceptionReturns() { return jitExceptionReturns; }
 uint64_t cpuJitKeepStoreDrops() { return jitKeepStoreDrops(); }
+uint64_t cpuJitMapDrops() { return jitMapDrops(); }
 
 uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target) {
     ++jitExceptionReturns;
@@ -7430,6 +7431,7 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span,
 #else
 uint64_t cpuJitExceptionReturns() { return 0; }
 uint64_t cpuJitKeepStoreDrops() { return 0; }
+uint64_t cpuJitMapDrops() { return 0; }
 uint64_t cpuJitDomainCalls() { return 0; }
 uint64_t cpuJitCpsrWrites() { return 0; }
 uint64_t cpuJitCpsrInterprets() { return 0; }
