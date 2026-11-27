@@ -81,7 +81,8 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
         buttons->addWidget(b);
         return b;
     };
-    connect(add(tr("Install…"), "installApp"), &QPushButton::clicked, this, &AppsPanel::installRequested);
+    installButton = add(tr("Install…"), "installApp");
+    connect(installButton, &QPushButton::clicked, this, &AppsPanel::installRequested);
     otherButton = add(tr("Other…"), "otherApp");
     connect(otherButton, &QPushButton::clicked, this, &AppsPanel::otherRequested);
     exportAllButton = add(tr("Export all…"), "exportRam");
@@ -109,7 +110,14 @@ void AppsPanel::setInstallOnly(bool on) {
     list->clear();
     list->setVisible(!on);
     empty->setText(on ? tr("Not available yet") : tr("No applications"));
-    empty->show();
+    empty->setVisible(!packageQueue);
+}
+
+void AppsPanel::setPackageQueue(bool on) {
+    if (on == packageQueue) return;
+    packageQueue = on;
+    installButton->setText(on ? tr("Queue IPK…") : tr("Install…"));
+    empty->setVisible(!on);
 }
 
 QStringList AppsPanel::names() const {
@@ -150,5 +158,5 @@ void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, con
     }
     if (row >= 0 && row < list->count()) list->setCurrentRow(row);
     empty->setText(installOnly ? tr("Not available yet") : note.isEmpty() ? tr("No applications") : note);
-    empty->setVisible(apps.empty());
+    empty->setVisible(apps.empty() && !packageQueue);
 }

@@ -23,6 +23,7 @@
 #include "device.h"
 #include "device_configuration.h"
 #include "keys.h"
+#include "net/WifiRouter.h"
 #include "pace_patch.h"
 #include "patch68k.h"
 #include "patch_dispatch.h"
@@ -32,6 +33,7 @@
 #include "pxa255_UDC.h"
 #include "pxa270_IMC.h"
 #include "pxa270_KPC.h"
+#include "pxa270_OHCI.h"
 #include "pxa270_UDC.h"
 #include "pxa270_WMMX.h"
 #include "pxa_AC97.h"
@@ -45,6 +47,8 @@
 #include "pxa_MemCtrl.h"
 #include "pxa_PWM.h"
 #include "pxa_PwrClk.h"
+#include "spitz_nand.h"
+#include "spitz_pcmcia.h"
 #include "pxa_RTC.h"
 #include "pxa_SSP.h"
 #include "pxa_TIMR.h"
@@ -78,7 +82,8 @@
 #define PCM_HZ_DISABLED (44100 / 3)
 
 SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, const uint32_t romSize,
-               uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev) {
+               uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev,
+               bool deferSpitzBoot) {
     RomInfo5 romInfo(romData, romSize);
     const auto* variant = romInfo.GetFirmwareVariant();
     disableSleep = variant && variant->deviceType == deviceType && variant->disableSleep;
@@ -86,9 +91,11 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     struct Reschedule rescheduleCb = {.rescheduleCb = RescheduleCB, .ctx = this};
     struct GetEmuTime getEmuTime = {.getTimeF = GetTimeCB, .userdata = this};
 
+    const bool spitz = deviceType == deviceTypeSpitz;
+    if (spitz) socRev = 2;
     this->socRev = socRev;
 
-    if (ramSize == 0) ramSize = 16 << 20;
+    if (ramSize == 0) ramSize = spitz ? 64 << 20 : 16 << 20;
     if (!deviceConfigurationSupportsRamSize(deviceType, ramSize))
         ERR("unsupported RAM size %u\n", ramSize);
 
@@ -108,6 +115,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
                       : socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
                   socRev == 2 ? 0x0B1AA1AAUL : 0x0B16A16AUL, patchDispatch, pacePatch, systemState);
 
+    if (spitz && gdbPort < 0) cpuSetAbortLogLimit(cpu, true);
 #if defined(__ANDROID__) && defined(__aarch64__)
     if (deviceType == DeviceType5::deviceTypeTX && socRev == 2 && gdbPort < 0)
         cpuSetAbortLogLimit(cpu, true);
@@ -117,7 +125,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     cpuSetCostModel(cpu, true, uint8_t(socRev == 2 ? cost::Core::pxa27x : cost::Core::pxa25x), true);
 
     cpuSetDebugSoc(cpu,this);
-    cpuSetM68kSyscallHandler(cpu, NetworkSimulation::Dispatch, &networkSimulation);
+    if (!spitz) cpuSetM68kSyscallHandler(cpu, NetworkSimulation::Dispatch, &networkSimulation);
     patchDispatchSetCpu(patchDispatch, cpu);
 
     syscallDispatch = initSyscallDispatch(this);
@@ -125,7 +133,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     // Retail E2 keeps SysSleep and auto-off. Firmware with Power disabled uses
     // the inherited no-sleep patch, as does the patched FrankenE2 ROM.
     // The Zire 72's 5.2.8 ROM runs unpatched, like the TX.
-    if (deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72)
+    if (!spitz && deviceType != deviceTypeTG50 && deviceType != deviceTypeTX && deviceType != deviceTypeZire72)
         patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState,
             deviceType == DeviceType5::deviceTypeE2 && !disableSleep ? PATCH_FEATURE_ALL & ~PATCH_FEATURE_NO_SLEEP
                                                      : PATCH_FEATURE_ALL);
@@ -146,10 +154,18 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
         }
     }
     rom = romInit(mem, ROM_BASE, romData, romSize, true);
+    if (spitz && !memRegionAdd(mem, 0x00800000, 0x03800000,
+            [](void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
+                // Stock software reads the 8 MiB chip through higher CS0 addresses.
+                return memAccess(static_cast<ArmMem*>(context), address & 0x007fffff, size, write, data);
+            }, mem)) {
+        ERR("cannot map the Spitz CS0 alias");
+    }
+
 
     void *peepholeBuffer = romGetPeepholeBuffer(rom);
 
-    if (deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72) {
+    if (!spitz && deviceType != deviceTypeTG50 && deviceType != deviceTypeTX && deviceType != deviceTypeZire72) {
         pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
         peepholeOptimize((uint32_t *)peepholeBuffer, romSize);
     }
@@ -158,12 +174,12 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     if (deviceType == DeviceType5::deviceTypeZire72) pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
     if (deviceType == deviceTypeTG50)
         pacePatchInitTg50(pacePatch, ROM_BASE, romGetData(rom), peepholeBuffer, romSize);
-    patch68kInit(deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && romInfo.NeedsNandPatch()
+    patch68kInit(!spitz && deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && romInfo.NeedsNandPatch()
                      ? PATCH_68K_NVFS : 0);
 
-    vSD = vsdInit(sdCardRead, sdCardWrite, 0);
+    vSD = vsdInit(sdCardRead, sdCardWrite, 0, spitz);
 
-    switch (deviceGetRamTerminationStyle()) {
+    switch (spitz ? RamTerminationNone : deviceGetRamTerminationStyle()) {
         case RamTerminationMirror:
 
             // ram mirror for ram probe code
@@ -205,7 +221,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     cpuSetDelayTimer(cpu, kPxaTimrOscrPa, OscrPeekCB, this);
     // GPIO levels change only at scheduler events, for the Fast poll skip.
     cpuSetPollPeek(cpu, GpioPeekCB, this);
-    rtc = pxaRtcInit(mem, ic);
+    rtc = pxaRtcInit(mem, ic, spitz);
     ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
     stUart = pxaUartInit(mem, rescheduleCb, ic, PXA_STUART_BASE, PXA_I_STUART, socRev == 2);
     btUart = pxaUartInit(mem, rescheduleCb, ic, PXA_BTUART_BASE, PXA_I_BTUART, socRev == 2);
@@ -237,6 +253,34 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
 
     if (socRev == 2) {
         pwrI2c = pxaI2cInit(mem, ic, dma, PXA_PWR_I2C_BASE, PXA_I_PWR_I2C);
+        if (spitz && !pxaI2cDeviceAdd(pwrI2c, [](void* context, ActionI2C action, uint_fast8_t byte) -> uint_fast8_t {
+                auto& soc = *static_cast<SocPXA*>(context);
+                switch (action) {
+                    case i2cStart:
+                    case i2cRestart:
+                        soc.spitzRegulatorPhase = 1;
+                        break;
+                    case i2cStop:
+                        soc.spitzRegulatorPhase = 0;
+                        break;
+                    case i2cTx:
+                        if (soc.spitzRegulatorPhase == 1) {
+                            // The ISL6271A takes a write to address 0x0c.
+                            soc.spitzRegulatorPhase = byte == 0x18 ? 2 : 0;
+                            return soc.spitzRegulatorPhase == 2;
+                        }
+                        if (soc.spitzRegulatorPhase == 2) {
+                            soc.spitzRegulatorVoltage = byte;
+                            return 1;
+                        }
+                        break;
+                    case i2cRx:
+                        break;
+                }
+                return 0;
+            }, this)) {
+            ERR("cannot attach the Spitz core regulator");
+        }
     }
 
     i2c = pxaI2cInit(mem, ic, dma, PXA_I2C_BASE, PXA_I_I2C);
@@ -291,9 +335,9 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
         deviceConfigurationDisplayConfigForDevice(deviceType, deviceConfigurationDefaultDisplayMode(deviceType));
 
     lcd = pxaLcdInit(mem, this, ic, &bufferLcd, displayConfiguration.width,
-                     displayConfiguration.height, socRev == 2);
+                     displayConfiguration.height, socRev == 2, spitz);
 
-    kp = keypadInit(gpio, true);
+    kp = keypadInit(gpio, !spitz);
 
     struct SocPeriphs sp = {};
     sp.mem = mem;
@@ -313,8 +357,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     irUart = deviceType == deviceTypeTG50 ? ffUart : stUart;
     // The E2's FFUART is its serial port (the T|X's runs paced as a PXA27x); a host endpoint needs the paced model.
     if (deviceProfileIsE2Board5(deviceType)) pxaUartSetPacing(ffUart, true);
-    if (deviceType==DeviceType5::deviceTypeTX || deviceProfileIsE2Board5(deviceType) ||
-        deviceType==DeviceType5::deviceTypeZire72 || deviceType==deviceTypeTG50) {
+    if (profile && profile->capabilities.infrared) {
         pxaUartSetPacing(irUart,true);
         pxaUartSetModeObserver(irUart,RefreshIrConfiguration,this);
         pxaGpioSetConfigurationObserver(gpio,RefreshIrConfiguration,this);
@@ -350,6 +393,40 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     dev = deviceSetup(deviceType, &sp, rescheduleCb, getEmuTime, kp, vSD, nandContent, nandSize,
                       &bufferNand);
     deviceSetTransportObserver(dev, RefreshTransportPins, this);
+    if (spitz) {
+        spitzOhci = std::make_unique<Pxa270Ohci>(mem, [this](bool active) { pxaIcInt(ic, PXA_I_USBH1, active); },
+                                                   [this] { KickUsbHost(); });
+        pxa270UdcUsePort2(udc2, [](void* context) {
+            auto& soc = *static_cast<SocPXA*>(context);
+            return !soc.PowerSleeping() && (pxaPwrClkClockMask(soc.pwrClk) & (1u << 11)) &&
+                   pxaGpioInputLevel(soc.gpio, spitzUsbDeviceRole) && soc.UsbTestCableAttached() &&
+                   pxaGpioGetState(soc.gpio, spitzUsbHostPower) != PxaGpioStateHigh;
+        }, this, [](void* context) {
+            static_cast<SocPXA*>(context)->RefreshSpitzUsbHost();
+        });
+        pxaGpioSetConfigurationObserver(gpio, [](void* context) {
+            auto& soc = *static_cast<SocPXA*>(context);
+            RefreshIrConfiguration(context);
+            if (!soc.irReplacementDepth && !soc.restoringPowerState) soc.RefreshSpitzUsbHost();
+        }, this);
+        for (unsigned pin : {spitzUsbVbus, spitzUsbDeviceRole, spitzUsbHostPower}) {
+            pxaGpioSetNotif(gpio, pin, [](void* context, uint32_t, bool, bool) {
+                auto& soc = *static_cast<SocPXA*>(context);
+                if (!soc.irReplacementDepth && !soc.restoringPowerState) {
+                    pxa270UdcRefreshPort2(soc.udc2);
+                    soc.RefreshSpitzUsbHost();
+                }
+            }, this);
+        }
+        pxaPwrClkSetClockObserver(pwrClk, this, [](void* context) {
+            auto& soc = *static_cast<SocPXA*>(context);
+            RefreshIrConfiguration(context);
+            if (!soc.restoringPowerState) {
+                pxa270UdcRefreshPort2(soc.udc2);
+                soc.RefreshSpitzUsbHost();
+            }
+        });
+    }
     // The default battery, full on the charger, on the board's pins before the power-on state is taken.
     deviceSetBattery(dev, battery);
     if (pxaI2sHasCodec(i2s)) scheduler->ScheduleTask(SCHEDULER_TASK_I2S, 20_usec, 1);
@@ -360,11 +437,192 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     ApplySdWriteProtect(false);
     pxaPwrClkConnectWakeSources(pwrClk, gpio, rtc, socRev == 2 ? kpc : nullptr);
 
+    if (spitz) {
+        deviceSetSdCardInserted(dev, false);
+        deviceObserveSpitzSdPower(dev, [](void* context) {
+            static_cast<SocPXA*>(context)->OnSpitzSdPowerChanged();
+        }, this);
+        spitzDirectBoot = *static_cast<const uint32_t*>(romData) == UINT32_MAX;
+        pxaGpioSetPolledInput(gpio, 22, [](void* context) {
+            auto* self = static_cast<SocPXA*>(context);
+            const uint64_t now = self->GetTime() + self->scheduler->ElapsedNsec(
+                cpuCyclesInProgress(self->cpu), self->runningCyclesPerSecond);
+            return pxaLcdSpitzHsync(self->lcd, now, pxaPwrClkLcdHz(self->pwrClk));
+        }, this);
+        pxaUartSetFuncs(ffUart, nullptr, [](uint_fast16_t value, void*) {
+            std::fputc(value & 0xff, stderr);
+        }, nullptr, nullptr, nullptr);
+    }
+
     if (deviceType == DeviceType5::deviceTypeTX)
         scheduler->ScheduleTask(SCHEDULER_TASK_AUX_3, 1_msec, 1);
 
     if (!powerOnState->Save(*this)) ERR("failed to capture power-on state");
     SdEject();
+    if (spitzDirectBoot && !deferSpitzBoot) BootSpitzKernel(true);
+}
+
+bool SocPXA::MountMicrodrive(const char* path, bool writable, const char* mediaId) {
+    return deviceMountMicrodrive(dev, path, writable, mediaId);
+}
+
+bool SocPXA::FlushMicrodrive() const { return deviceFlushMicrodrive(dev); }
+
+bool SocPXA::ForEachMicrodriveChange(const CardBacking::OverlayFn& fn) const {
+    return deviceForEachMicrodriveChange(dev, fn);
+}
+
+bool SocPXA::WriteMicrodriveBase(uint64_t offset, const void* data, size_t count) {
+    return deviceWriteMicrodriveBase(dev, offset, data, count);
+}
+
+bool SocPXA::ResetMicrodriveOverlay() { return deviceResetMicrodriveOverlay(dev); }
+
+bool SocPXA::InsertCompactFlash(bool writeProtected) {
+    return deviceInsertCompactFlash(dev, writeProtected);
+}
+
+void SocPXA::EjectCompactFlash() { deviceEjectCompactFlash(dev); }
+
+bool SocPXA::CompactFlashInserted() const { return deviceCompactFlashInserted(dev); }
+
+bool SocPXA::SetSpitzCfNetwork(SpitzCfNetwork mode) {
+    auto* socket = deviceSpitzPcmcia(dev);
+    if (!socket) return false;
+    const auto attached = GetSpitzCfNetwork();
+    if (mode == SpitzCfNetwork::off) {
+        spitzPcmciaEthernetTransmit(socket, nullptr, nullptr);
+        spitzPcmciaWifiTransmit(socket, nullptr, nullptr);
+        spitzPcmciaWifiNetworkAvailable(socket, false);
+        spitzPcmciaEjectEthernet(socket);
+        spitzPcmciaEjectWifi(socket);
+        spitzCfRouter.reset();
+        return true;
+    }
+    if (attached != SpitzCfNetwork::off && attached != mode) return false;
+    if (spitzCfRouter) return true;
+
+    auto router = std::make_unique<frondNet::WifiRouter>();
+    if (!router->Valid()) return false;
+    const bool wifi = mode == SpitzCfNetwork::wifi;
+    if (attached == SpitzCfNetwork::off) {
+        auto insert = wifi ? spitzPcmciaInsertWifi : spitzPcmciaInsertEthernet;
+        if (!insert(socket)) return false;
+    }
+
+    spitzCfRouter = std::move(router);
+    spitzCfPollAt = spitzCfTx = spitzCfRx = 0;
+    auto setTransmit = wifi ? spitzPcmciaWifiTransmit : spitzPcmciaEthernetTransmit;
+    setTransmit(socket, [](void* context, const uint8_t* frame, size_t size) {
+        auto& soc = *static_cast<SocPXA*>(context);
+        if (!soc.spitzCfRouter || soc.UsbHostIoPaused()) return;
+        ++soc.spitzCfTx;
+        soc.spitzCfRouter->Input(frame, size, soc.GetTime());
+    }, this);
+    if (wifi) spitzPcmciaWifiNetworkAvailable(socket, true);
+    return true;
+}
+
+SpitzCfNetwork SocPXA::GetSpitzCfNetwork() const {
+    auto* socket = deviceSpitzPcmcia(dev);
+    if (!socket) return SpitzCfNetwork::off;
+    if (spitzPcmciaEthernetInserted(socket)) return SpitzCfNetwork::ethernet;
+    if (spitzPcmciaWifiInserted(socket)) return SpitzCfNetwork::wifi;
+    return SpitzCfNetwork::off;
+}
+
+std::string SocPXA::SpitzCfNetworkState() const {
+    const auto mode = GetSpitzCfNetwork();
+    if (mode == SpitzCfNetwork::off) return "off";
+    std::string state = mode == SpitzCfNetwork::wifi ? "wifi" : "ethernet";
+    if (!spitzCfRouter) return state + " offline";
+    if (mode == SpitzCfNetwork::wifi)
+        state += spitzPcmciaWifiAssociated(deviceSpitzPcmcia(dev)) ? " associated" : " unassociated";
+    return state + " tx=" + std::to_string(spitzCfTx) + " rx=" + std::to_string(spitzCfRx);
+}
+
+void SocPXA::SetCompactFlashWriteProtect(bool locked) {
+    deviceSetCompactFlashWriteProtect(dev, locked);
+}
+
+void SocPXA::SetCompactFlashSwapOnLoad(bool allow) {
+    deviceSetCompactFlashSwapOnLoad(dev, allow);
+}
+
+bool SocPXA::SetSpitzMmcCard(bool legacyMmc) {
+    if (GetDeviceType() != deviceTypeSpitz || (cardInserted && SpitzMmcCard() != legacyMmc)) return false;
+    vsdSetLegacyMmc(vSD, legacyMmc);
+    return true;
+}
+
+bool SocPXA::SpitzMmcCard() const { return vsdLegacyMmc(vSD); }
+
+void SocPXA::ConfigureSpitzMemoryAndClocks() {
+    const std::pair<uint32_t, uint32_t> registers[] = {
+        {0x48000000, 0x1ac81ac9},  // MDCNFG
+        {0x48000004, 0x001bc030},  // MDREFR
+        {0x48000008, 0x7ff02dd8},  // MSC0
+        {0x4800000c, 0x249434d4},
+        {0x48000010, 0x7ff034d4},
+        {0x48000014, 0x00000003},  // MECR
+        {0x48000028, 0x00018786},  // MCMEM0
+        {0x4800002c, 0x00018786},
+        {0x48000030, 0x00020e06},  // MCATT0
+        {0x48000034, 0x00020e06},
+        {0x48000038, 0x00018f8e},  // MCIO0
+        {0x4800003c, 0x00018f94},
+        {0x48000040, 0x00020002},  // MDMRS
+        {0x41300000, 0x02000210},  // CCCR
+        {0x41300004, 0x00400240},  // CKEN
+    };
+    for (auto [address, value] : registers)
+        if (!memAccess(mem, address, sizeof(value), true, &value))
+            ERR("cannot set Spitz boot register 0x%08x", address);
+    pxaPwrClkSetClockConfig(pwrClk, 0x9);
+}
+
+void SocPXA::BootSpitzKernel(bool rtcReset) {
+    constexpr uint32_t paramsOffset = 0x100;
+    constexpr uint32_t imageOffset = 0x800000;
+    constexpr uint32_t stockMachineId = 0x135;
+    std::string cmdline =
+        "console=ttyS0 root=/dev/mtdblock2 "
+        "mtdparts=sharpsl-nand:7168k@0k(smf),5120k@7168k(root),-(home) "
+        "jffs2_orphaned_inodes=delete RTC_RESET=";
+    cmdline += rtcReset ? '1' : '0';
+    cmdline += " EQUIPMENT=4 LOGOLANG=1 DEFYEAR=2005 LOGO=1 LAUNCH=q";
+    std::vector<uint8_t> kernel;
+    const auto image = nandGetData(nand);
+    if (!spitzExtractKernel(static_cast<const uint8_t*>(image.data), image.size, kernel) ||
+        kernel.size() > ramSize - imageOffset) {
+        ERR("Spitz NAND does not contain a stock zImage");
+    }
+
+    ConfigureSpitzMemoryAndClocks();
+
+    // The Sharp loader leaves the legacy ARM parameter block here. The kernel
+    // supplies the full 64 MiB bank in its Spitz fixup.
+    constexpr uint32_t paramsSize = 0x900;
+    constexpr uint32_t commandOffset = 0x500;
+    constexpr uint8_t params[] = {
+        0, 0x10, 0, 0,  // Page size
+        0, 0x20, 0, 0,  // Page count
+        0, 0, 0, 0,     // Ramdisk size
+        13, 0, 0, 0,    // Flags
+        255, 0, 0, 0,   // Root device
+    };
+    auto* bytes = static_cast<uint8_t*>(bufferMemory.buffer);
+    memcpy(bytes + imageOffset, kernel.data(), kernel.size());
+    memset(bytes + paramsOffset, 0, paramsSize);
+    memcpy(bytes + paramsOffset, params, sizeof(params));
+    memcpy(bytes + paramsOffset + commandOffset, cmdline.c_str(), cmdline.size() + 1);
+    memoryBufferMarkRangeDirty(&bufferMemory, paramsOffset, paramsSize);
+    memoryBufferMarkRangeDirty(&bufferMemory, imageOffset, kernel.size());
+    cpuInvalidateCodeCache(cpu);
+    cpuSetReg(cpu, 0, 0);
+    cpuSetReg(cpu, 1, stockMachineId);
+    cpuSetReg(cpu, 2, RAM_BASE + paramsOffset);
+    cpuSetReg(cpu, 15, RAM_BASE + imageOffset);
 }
 
 uint32_t *SocPXA::GetPendingFrame(uint32_t &firstDirtyLine, uint32_t &lastDirtyLine) {
@@ -386,7 +644,11 @@ void SocPXA::SuspendTimerInterrupts(bool suspendInterrupts) {
     pxaTimrSuspendInterrupts(tmr, suspendInterrupts);
 }
 
-bool SocPXA::LcdEnabled() { return pxaLcdIsEnabled(lcd) && devicePanelEnabled(dev); }
+bool SocPXA::LcdEnabled() {
+    if (GetDeviceType() == deviceTypeSpitz &&
+        (PowerSleeping() || !pxaPwrClkLcdHz(pwrClk) || !deviceSpitzPanelBrightness(dev))) return false;
+    return pxaLcdIsEnabled(lcd) && devicePanelEnabled(dev);
+}
 bool SocPXA::HoldSwitchSupported() const {
     return deviceProfile5(deviceGetType(dev))->frontend.holdSupported;
 }
@@ -405,29 +667,60 @@ bool SocPXA::SetBattery(const BatteryPower& value) {
     return true;
 }
 
+bool SocPXA::SetSpitzPower(unsigned batteryPercent, bool acConnected, bool batteryDoorLocked) {
+    const BatteryPower value{BatteryPower::Mode::level, batteryPercent, acConnected};
+    if (!deviceSetSpitzPower(dev, value, batteryDoorLocked)) return false;
+    battery = value;
+    return true;
+}
+
+bool SocPXA::SetSpitzBatteryDoorLocked(bool locked) {
+    return deviceSetSpitzBatteryDoorLocked(dev, locked);
+}
+
+bool SocPXA::GetSpitzPower(SpitzPowerState& state) const {
+    return deviceGetSpitzPower(dev, state);
+}
+
 int SocPXA::HeadphoneDetectPin() const {
     const auto type = deviceGetType(dev);
     // The T|X DAL at 0x200960c8 and the E2 DAL at 0x200a3df6 read these pins.
+    if (type == deviceTypeSpitz) return 116;
     if (type == deviceTypeTX) return 107;
     if (deviceProfileIsE2Board5(type)) return 12;
     return -1;
 }
 
 bool SocPXA::HeadphonesSupported() const {
-    return deviceProfileHasPalmBoardInputs5(deviceGetType(dev));
+    const auto type = deviceGetType(dev);
+    return type == deviceTypeSpitz || deviceProfileHasPalmBoardInputs5(type);
 }
 
 void SocPXA::ApplyHeadphones() {
     const int pin = HeadphoneDetectPin();
-    if (pin >= 0) pxaGpioSetState(gpio, pin, headphones);
+    if (pin >= 0) pxaGpioSetState(gpio, pin, HeadphonesIn());
     else if (deviceGetType(dev) == deviceTypeZire72) deviceSetCodecHeadphones(dev, headphones);
 }
 
 bool SocPXA::SetHeadphones(bool in) {
     if (!HeadphonesSupported()) return false;
+    if (GetDeviceType() == deviceTypeSpitz) deviceSetSpitzRemote(dev, false);
     headphones = in;
     ApplyHeadphones();
     return true;
+}
+
+bool SocPXA::SpitzRemoteInserted() const { return deviceSpitzRemoteInserted(dev); }
+
+void SocPXA::SetSpitzRemote(bool inserted) {
+    if (GetDeviceType() != deviceTypeSpitz || SpitzRemoteInserted() == inserted) return;
+    deviceSetSpitzRemote(dev, inserted);
+    headphones = false;
+    ApplyHeadphones();
+}
+
+bool SocPXA::SetSpitzRemoteKey(SpitzRemoteKey key, bool down) {
+    return GetDeviceType() == deviceTypeSpitz && deviceSetSpitzRemoteKey(dev, key, down);
 }
 
 bool SocPXA::SetHoldSwitch(bool on) {
@@ -453,7 +746,11 @@ uint32_t SocPXA::DispatchTicks(uint32_t clientType, uint32_t batchedTicks) {
             return 1;
 
         case SCHEDULER_TASK_LCD:
-            pxaLcdTick(lcd);
+            if (GetDeviceType() == deviceTypeSpitz)
+                pxaLcdTickSpitz(lcd, GetTime(), pxaPwrClkLcdHz(pwrClk),
+                                deviceSpitzPanelBrightness(dev), deviceSpitzPanelQvga(dev));
+            else
+                pxaLcdTick(lcd);
             return 1;
 
         case SCHEDULER_TASK_I2S:
@@ -500,6 +797,10 @@ void SocPXA::OnSetFramebufferDirty() { pxaLcdSetFramebufferDirty(lcd); }
 
 bool SocPXA::OnSleep() {
     if (PowerSleeping()) {
+        if (spitzOhci) {
+            pxa270UdcRefreshPort2(udc2);
+            RefreshSpitzUsbHost();
+        }
         deviceSuspendBluetooth(dev);
         if (!checkpointFenceDepth && !irReplacementDepth) deviceDisarmInput(dev);
         else microphoneInvalidatePending = true;
@@ -563,6 +864,7 @@ void SocPXA::LoadSleepReset(SavestateLoader<ChunkType>& loader) {
     pxaIcLoad(ic, loader);
     for (auto* uart : {ffUart, stUart, btUart, hwUart})
         if (uart) pxaUartResync(uart);  // after deassertions from reset peripherals
+    if (spitzOhci) spitzOhci->Load(loader);
     pxaRtcRefreshInterrupts(rtc);  // retained alarm lines survive the IC reset
 }
 
@@ -588,6 +890,20 @@ void SocPXA::ResumePowerSleep() {
         memoryBufferMarkRangeDirty(&bufferSram, bank * 0x10000, 0x10000);
     }
     pxaPwrClkFinishSleep(pwrClk);
+    RefreshSpitzUsbHost();
+    if (spitzDirectBoot) {
+        // CS0 sets up the retained SDRAM and enters the guest's physical PSPR
+        // address after a sleep reset.
+        uint32_t resumeAddress = 0;
+        if (memAccess(mem, 0x40f00008, sizeof(resumeAddress), false, &resumeAddress) &&
+            !(resumeAddress & 3) && resumeAddress >= RAM_BASE && resumeAddress - RAM_BASE < ramSize) {
+            ConfigureSpitzMemoryAndClocks();
+            uint32_t releaseHolds = 0x30;  // PSSR[PH] | PSSR[RDH]
+            if (!memAccess(mem, 0x40f00004, sizeof(releaseHolds), true, &releaseHolds))
+                ERR("cannot release Spitz sleep holds");
+            cpuSetReg(cpu, 15, resumeAddress);
+        }
+    }
     // The TX's PACE patch is in RAM and found again later; the Zire's is in NOR and stays.
     if (GetDeviceType() == deviceTypeTG50) {
         pacePatchInitTg50(pacePatch, ROM_BASE, romGetData(rom), romGetPeepholeBuffer(rom), romGetSize(rom));
@@ -676,11 +992,15 @@ void SocPXA::ResumePowerSleep25x() {
 
 void SocPXA::OnSetAudioQueue(struct AudioQueue *audioQueue) {
     if (fastAudio) fastAudio->SetQueue(audioQueue);
-    deviceSetAudioQueue(dev, ((GetDeviceType() == deviceTypeTG50 && !pcmEnabled) || audioOutputFenced || checkpointFenceDepth || fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+    const auto device = GetDeviceType();
+    const bool pcmOff = !pcmEnabled && (device == deviceTypeTG50 || device == deviceTypeSpitz);
+    const bool fenced = audioOutputFenced || checkpointFenceDepth || fastAudioRouted ||
+                        (fastAudio && fastAudio->OutputFenced());
+    deviceSetAudioQueue(dev, pcmOff || fenced ? nullptr : audioQueue);
 }
 
 void SocPXA::OnSetPcmOutputEnabled() {
-    if (GetDeviceType() == deviceTypeTG50) RestoreFastAudioRoute();
+    if (GetDeviceType() == deviceTypeTG50 || GetDeviceType() == deviceTypeSpitz) RestoreFastAudioRoute();
     if (fastAudio) fastAudio->RestartOutput();
     SchedulePcmTask();
 }
@@ -742,11 +1062,12 @@ bool SocPXA::LoadPalmWifi(SavestateLoader<ChunkType>& loader) {
 
 void SocPXA::ApplySdWriteProtect(bool inserted) {
     const auto type = GetDeviceType();
-    if (!deviceProfileHasPalmBoardInputs5(type)) return;
+    if (type != deviceTypeSpitz && !deviceProfileHasPalmBoardInputs5(type)) return;
     const bool locked = inserted && sdProtected;
     vsdSetWriteProtect(vSD, locked);
-    // The SlotDrivers read active-high switches (T|X 0x208d3e10, E2 0x20182400, Zire 72 0x2011cd90).
-    pxaGpioSetState(gpio, deviceProfileIsE2Board5(type) ? 51 : 115, locked);
+    // Sharp's stock pxa_sd_write_protected reads an active-high switch on GPIO81.
+    const unsigned pin = type == deviceTypeSpitz ? 81 : (deviceProfileIsE2Board5(type) ? 51 : 115);
+    pxaGpioSetState(gpio, pin, locked);
 }
 
 void SocPXA::SetSdWriteProtect(bool on) {
@@ -758,15 +1079,30 @@ void SocPXA::OnSdInsert() {
     EjectPalmWifi();
     vsdReset(vSD, sdCardSectorCount());
     ApplySdWriteProtect(true);
-    pxaMmcInsert(mmc, vSD);
+    if (GetDeviceType() != deviceTypeSpitz || deviceSpitzSdPowered(dev)) pxaMmcInsert(mmc, vSD);
     deviceSetSdCardInserted(dev, true);
 }
 
-void SocPXA::OnSdRemount() { pxaMmcInsert(mmc, vSD); }
+void SocPXA::OnSdRemount() {
+    if (GetDeviceType() == deviceTypeSpitz) {
+        pxaMmcRestoreMemoryCard(mmc, deviceSpitzSdPowered(dev) ? vSD : nullptr);
+        deviceSetSdCardInserted(dev, true);
+    } else {
+        pxaMmcInsert(mmc, vSD);
+    }
+}
+
+void SocPXA::OnSpitzSdPowerChanged() {
+    if (!cardInserted) return;
+    const bool powered = deviceSpitzSdPowered(dev);
+    vsdReset(vSD, powered ? sdCardSectorCount() : 0);
+    ApplySdWriteProtect(true);
+    pxaMmcInsert(mmc, powered ? vSD : nullptr);
+}
 
 std::optional<bool> SocPXA::SdRemovalHandled() {
     if (GetDeviceType() == deviceTypeTG50) return std::nullopt;
-    return pxaMmcClockStoppedSinceRemoval(mmc);
+    return !cardInserted && pxaMmcClockStoppedSinceRemoval(mmc);
 }
 
 void SocPXA::OnSdEject() {
@@ -777,14 +1113,55 @@ void SocPXA::OnSdEject() {
 }
 
 // USB cable detect: Linux palmtx.h TX GPIO13 and palmte2.h E2 GPIO35 are active low; the Zire's
-// GPIO15 is active high (palmz72.c palm27x_udc_init(15, 95, 0)).
+// GPIO15 is active high (palmz72.c palm27x_udc_init(15, 95, 0)). Sharp's pxa_bi uses active-high VBUS.
 static int UsbDetectPin(DeviceType5 type) {
     return type==deviceTypeTX ? 13 : deviceProfileIsE2Board5(type) ? 35 : type==deviceTypeZire72 ? 15 : -1;
 }
 
+static bool UsbDetectActiveHigh(DeviceType5 type) {
+    return type == deviceTypeZire72;
+}
+
 uint16_t SocPXA::Tg50ConnectorAux() { return deviceTg50AccessoryAuxCode(dev); }
 
+void SocPXA::RefreshSpitzUsbHost() {
+    if (!spitzOhci) return;
+    const bool clock = !PowerSleeping() && (pxaPwrClkClockMask(pwrClk) & (1u << 10));
+    // Sharp selects port 2 in UP2OCR and sets the power latch even with GPIO37 left as an input.
+    const bool power = spitzOhci->Attached() && !pxaGpioInputLevel(gpio, spitzUsbDeviceRole) &&
+                       pxa270UdcPort2HostSelected(udc2) &&
+                       pxaGpioGetState(gpio, spitzUsbHostPower) != PxaGpioStateLow;
+    spitzOhci->SetBus(clock, power, GetTime());
+}
+
+bool SocPXA::SetSpitzUsbDrive(const std::string& path) {
+    if (!spitzOhci) return false;
+    if (path.empty()) {
+        spitzOhci->Eject();
+        pxaGpioSetState(gpio, spitzUsbDeviceRole, true);
+    } else {
+        if (UsbTestCableAttached() || !spitzOhci->OpenDrive(path)) return false;
+        pxaGpioSetState(gpio, spitzUsbDeviceRole, false);
+    }
+    RefreshSpitzUsbHost();
+    return true;
+}
+
+bool SocPXA::SpitzUsbDriveAttached() const {
+    return spitzOhci && spitzOhci->Attached();
+}
+
+std::string SocPXA::SpitzUsbHostState() const {
+    return spitzOhci ? spitzOhci->Diagnostics() : "off";
+}
+
 bool SocPXA::SetUsbTestCable(bool connected) {
+    if (GetDeviceType() == deviceTypeSpitz) {
+        if (connected && SpitzUsbDriveAttached()) return false;
+        spitzUsbCableAttached = connected;
+        pxaGpioSetState(gpio, spitzUsbVbus, connected);
+        return true;
+    }
     if (GetDeviceType() == deviceTypeTG50) {
         // One accessory on the connector: the pad's ID resistor stays while it's in.
         if (gamepad.Attached()) return !connected;
@@ -793,14 +1170,15 @@ bool SocPXA::SetUsbTestCable(bool connected) {
     }
     const int pin=UsbDetectPin(GetDeviceType());
     if(pin<0)return false;
-    pxaGpioSetState(gpio, pin, GetDeviceType()==deviceTypeZire72 ? connected : !connected);
+    pxaGpioSetState(gpio, pin, UsbDetectActiveHigh(GetDeviceType()) ? connected : !connected);
     return true;
 }
 
 bool SocPXA::UsbTestCableAttached() {
+    if (GetDeviceType() == deviceTypeSpitz) return spitzUsbCableAttached;
     if (GetDeviceType() == deviceTypeTG50) return deviceTg50UsbCableAttached(dev);
     const int pin=UsbDetectPin(GetDeviceType());
-    return pin>=0 && pxaGpioInputLevel(gpio,pin)==(GetDeviceType()==deviceTypeZire72);
+    return pin>=0 && pxaGpioInputLevel(gpio,pin)==UsbDetectActiveHigh(GetDeviceType());
 }
 
 void SocPXA::KickUsbHost() {
@@ -809,6 +1187,20 @@ void SocPXA::KickUsbHost() {
 }
 
 void SocPXA::OnTouch(int x, int y) { deviceTouch(dev, x, y); }
+
+bool SocPXA::SetSpitzLid(bool closed, bool swivelled) {
+    if (deviceGetType(dev) != deviceTypeSpitz) return false;
+    deviceSetSpitzLid(dev, closed, swivelled);
+    return true;
+}
+
+bool SocPXA::SpitzLidClosed() const {
+    return deviceGetType(dev) == deviceTypeSpitz && deviceSpitzLidClosed(dev);
+}
+
+bool SocPXA::SpitzSwivelled() const {
+    return deviceGetType(dev) == deviceTypeSpitz && deviceSpitzSwivelled(dev);
+}
 
 bool SocPXA::HoldKeyEvent(const KeyEvent& event) {
     const bool zire = GetDeviceType() == DeviceType5::deviceTypeZire72;
@@ -828,7 +1220,7 @@ bool SocPXA::HoldKeyEvent(const KeyEvent& event) {
 }
 
 void SocPXA::OnEngageKey(KeyId key, bool down) {
-    if (key >= keyIdPadUp && key <= keyIdPadHold) {
+    if (key >= keyIdPadUp && key <= keyIdPadHold && GetDeviceType() != deviceTypeSpitz) {
         // The pad's buttons only reach the guest through the pad.
         if (gamepad.Key(key, down, GetTime())) RescheduleCB(this, RESCHEDULE_TASK_UART);
         SyncGamepadLine();
@@ -858,18 +1250,24 @@ void SocPXA::OnBeforeReset() {
     else microphoneInvalidatePending = true;
     resetRtc = pxaRtcRetained(rtc);
     resetHold = deviceHoldSwitchOn(dev);
+    resetSpitzLidClosed = SpitzLidClosed();
+    resetSpitzSwivelled = SpitzSwivelled();
+    if (GetDeviceType() == deviceTypeSpitz) resetSpitzMmcCard = SpitzMmcCard();
     deviceBeginReset(dev);
 }
 
 void SocPXA::OnReset() {
     deviceEndReset(dev);
+    resetSpitzMmcCard.reset();
     if (std::exchange(reinsertPalmWifi, false)) InsertPalmWifi();
     if (resetHold) deviceKey(dev, keyIdHold, true);
+    if (GetDeviceType() == deviceTypeSpitz) SetSpitzLid(resetSpitzLidClosed, resetSpitzSwivelled);
     pxaLcdResetPaletteBuffer(lcd);
     if (nand) nandResetPageBuffer(nand);
     // RAM-backed stores retain their reset-pin cause and running RTC. A power-on
     // cause lets the small ROM invalidate the store on boards that request it.
-    if (GetDeviceType() == deviceTypeZire72 || GetDeviceType() == deviceTypeTG50) {
+    if (GetDeviceType() == deviceTypeZire72 || GetDeviceType() == deviceTypeTG50 ||
+        GetDeviceType() == deviceTypeSpitz) {
         pxaPwrClkSetResetCause(pwrClk, powerOnReset ? 1 : 8);
         pxaRtcRestoreRetained(rtc, resetRtc);
     }
@@ -877,6 +1275,7 @@ void SocPXA::OnReset() {
         pacePatchInitTg50(pacePatch, ROM_BASE, romGetData(rom), romGetPeepholeBuffer(rom), romGetSize(rom));
         cpuInvalidateCodeCache(cpu);
     }
+    if (spitzDirectBoot) BootSpitzKernel(powerOnReset);
     powerOnReset = false;
     powerKeyDownAt = powerPressHeldSince = 0;
 }
@@ -912,6 +1311,7 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
         }
     } restoreGuard{*this};
     vsdLoad(vSD, loader);
+    if (resetSpitzMmcCard) vsdSetLegacyMmc(vSD, *resetSpitzMmcCard);
 
     pxaUartLoad(ffUart, loader, 0);
     if (socRev != 2) pxaUartLoad(hwUart, loader, 1);
@@ -930,11 +1330,24 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     pxaI2sLoad(i2s, loader);
     pxaI2cLoad(i2c, loader, 0);
     pxaIcLoad(ic, loader);
+    if (GetDeviceType() == deviceTypeSpitz) {
+        // The current cable drives VBUS even if the saved session had a different cable.
+        pxaGpioSetState(gpio, spitzUsbVbus, spitzUsbCableAttached);
+        pxaGpioSetState(gpio, spitzUsbDeviceRole, !spitzOhci->Attached());
+        spitzOhci->Load(loader);
+    }
     for (auto* uart : {ffUart, stUart, btUart, hwUart})
         if (uart) pxaUartResync(uart);
     pxaMemCtrlrLoad(memCtrl, loader);
     pxaPwrClkLoad(pwrClk, loader);
     if (socRev == 2) pxaI2cLoad(pwrI2c, loader, 1);
+    if (GetDeviceType() == deviceTypeSpitz) {
+        auto chunk = loader.GetChunkOrFail(ChunkType::spitzRegulator, 0, "Spitz core regulator");
+        if (!chunk) return;
+        LoadChunkHelper helper(*chunk);
+        helper.Do(decltype(helper)::Pack8() << spitzRegulatorPhase << spitzRegulatorVoltage);
+        if (spitzRegulatorPhase > 2) loader.NotifyError();
+    }
 
     pxaPwmLoad(pwm[0], loader, 0);
     pxaPwmLoad(pwm[1], loader, 1);
@@ -962,6 +1375,10 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     if (pxaI2sHasCodec(i2s))
         pxaI2sSetClockEnabled(i2s, pxaPwrClkI2sClock(pwrClk), false);
     deviceLoad(dev, loader, RestoringCheckpoint());
+    if (GetDeviceType() == deviceTypeSpitz) {
+        pxaMmcRestoreMemoryCard(mmc, cardInserted && deviceSpitzSdPowered(dev) ? vSD : nullptr);
+        deviceSetSdCardInserted(dev, cardInserted);
+    }
     if (palmSdioWifi) {
         deviceSetSdCardInserted(dev, true);
         pxaMmcSdioIrqChanged(mmc);
@@ -1057,6 +1474,13 @@ void SocPXA::OnSave(T &savestate) {
     pxaMemCtrlrSave(memCtrl, savestate);
     pxaPwrClkSave(pwrClk, savestate);
     if (socRev == 2) pxaI2cSave(pwrI2c, savestate, 1);
+    if (spitzOhci) {
+        spitzOhci->Save(savestate);
+        auto chunk = savestate.GetChunk(ChunkType::spitzRegulator, 0);
+        if (!chunk) ERR("cannot allocate Spitz core regulator state");
+        SaveChunkHelper helper(*chunk);
+        helper.Do(typename decltype(helper)::Pack8() << spitzRegulatorPhase << spitzRegulatorVoltage);
+    }
 
     pxaPwmSave(pwm[0], savestate, 0);
     pxaPwmSave(pwm[1], savestate, 1);
@@ -1139,6 +1563,7 @@ void SocPXA::SchedulePcmTask() { UpdateSchedulePcm(); }
 std::function<void()> SocPXA::CapturePeripheralInput() {
     auto keypad = keypadCaptureInput(kp);
     auto device = deviceCaptureInput(dev);
+    auto usbDrive = spitzOhci ? spitzOhci->CaptureDriveState() : std::function<void()>{};
     // InputCheckpoint exists before checkpointed guest work and before a load.
     // Sharing the scope through the restoration closure fences output until the
     // checkpoint lifetime ends, including refused-load recovery.
@@ -1180,11 +1605,12 @@ std::function<void()> SocPXA::CapturePeripheralInput() {
     if (checkpointFence) fence = std::make_shared<FenceScope>(*this);
     const uint64_t keyDownAt=powerKeyDownAt, heldSince=powerPressHeldSince;
     std::weak_ptr<int> lifetime = checkpointLifetime;
-    return [this, keypad, device, audio, fence, keyDownAt, heldSince, lifetime] {
+    return [this, keypad, device, usbDrive, audio, fence, keyDownAt, heldSince, lifetime] {
         if (lifetime.expired()) return;
         if(audio)audio->Restore();
         if(fence) microphoneInvalidatePending = fence->previousInvalidation;
         keypad();device();
+        if (usbDrive) usbDrive();
         powerKeyDownAt=keyDownAt;powerPressHeldSince=heldSince;
     };
 }
@@ -1225,7 +1651,15 @@ void SocPXA::StateReplacementRefused(const std::function<void()>& restore) {
 void SocPXA::StateReplaced() {
     displacedPalmSdioWifi.reset();
     if (!RestoringCheckpoint()) {
+        if (SpitzRemoteInserted()) headphones = false;
+        if (spitzOhci) {
+            SetSpitzUsbDrive({});
+            spitzOhci->MediaStateReplaced();
+        }
         if (palmSdioWifi) palmSdioWifi->DropHost();
+        // Connecting the CF card to the host network is a live diagnostic choice.
+        spitzCfRouter.reset();
+        if (auto* socket = deviceSpitzPcmcia(dev)) spitzPcmciaWifiNetworkAvailable(socket, false);
         if (checkpointFenceDepth) microphoneInvalidatePending = true;
         else { deviceDisarmInput(dev); microphoneInvalidatePending = false; }
     }
@@ -1255,6 +1689,7 @@ void SocPXA::EndSerialCheckpoint() {
     if (usbHostPaused) --usbHostPaused;
     deviceEndBluetoothCheckpoint(dev,PowerSleeping());
     serialResumePending = true;
+    if (spitzOhci && !UsbHostIoPaused() && spitzOhci->Wake() != UINT64_MAX) KickUsbHost();
     if (!usbHostPaused && PowerSleeping() && irHostHooks.replaced)
         irHostHooks.replaced(irHostHooks.context);
     if (!usbHostPaused && PowerSleeping() && serialHostHooks.replaced)
@@ -1276,6 +1711,17 @@ uint64_t SocPXA::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         palmSdioWifi->Poll(GetTime());
         pxaMmcSdioIrqChanged(mmc);
     }
+    if (spitzCfRouter && !UsbHostIoPaused() && GetTime() >= spitzCfPollAt) {
+        const uint64_t now = GetTime();
+        spitzCfPollAt = now + 1_msec;
+        spitzCfRouter->Poll(now);
+        auto* socket = deviceSpitzPcmcia(dev);
+        auto receive = spitzPcmciaWifiInserted(socket) ? spitzPcmciaWifiReceive : spitzPcmciaEthernetReceive;
+        std::vector<uint8_t> frame;
+        for (unsigned i = 0; i < 64 && spitzCfRouter->Receive(frame); ++i) {
+            if (receive(socket, frame.data(), frame.size())) ++spitzCfRx;
+        }
+    }
     return SocGeneric<SocPXA>::Run(maxCycles, cyclesPerSecond);
 }
 
@@ -1289,6 +1735,8 @@ void SocPXA::CycleBatch0() {
         if (ssp[i]) pxaSspPeriodic(ssp[i]);
     }
     devicePeriodic(dev, DEVICE_PERIODIC_TIER0);
+    if (spitzOhci && !UsbHostIoPaused() && spitzOhci->Wake() <= GetTime())
+        spitzOhci->Tick(GetTime());
     if (usbHostHooks.tick && !usbHostPaused &&
         (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= GetTime()))
         usbHostHooks.tick(usbHostHooks.context, GetTime());
@@ -1322,6 +1770,7 @@ bool SocPXA::Batch0Required() {
 uint32_t SocPXA::Batch0Ticks() {
     if (Batch0Required()) return 1;
     uint64_t wake = usbHostHooks.wake && !usbHostPaused ? usbHostHooks.wake(usbHostHooks.context) : UINT64_MAX;
+    if (spitzOhci && !UsbHostIoPaused()) wake = std::min(wake, spitzOhci->Wake());
     if (gamepad.Attached() && !usbHostPaused) wake = std::min(wake, gamepad.Wake(GetTime()));
     if (wake == UINT64_MAX) return 0;
     const uint64_t now = GetTime(), period = 36_sec / 3686400ULL;
@@ -1509,7 +1958,7 @@ void SocPXA::UpdateFastAudioRoute() {
     const bool bypass = fastAudio && fastAudio->Bypass();
     if (bypass == fastAudioRouted) return;
     fastAudioRouted = bypass;
-    deviceSetAudioQueue(dev,((GetDeviceType() == deviceTypeTG50 && !pcmEnabled) || audioOutputFenced || checkpointFenceDepth || bypass || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+    OnSetAudioQueue(audioQueue);
     UpdateSchedulePcm();
     cpuSetSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
 }
@@ -1526,8 +1975,10 @@ void SocPXA::RefreshIrMode(void* context) {
 void SocPXA::RefreshIrConfiguration(void* context) {
     RefreshIrMode(context);
     auto& soc=*static_cast<SocPXA*>(context);
-    if (!soc.restoringPowerState && !soc.irReplacementDepth && soc.GetDeviceType()==deviceTypeTG50 &&
-        soc.irKeyboard.Pending() && soc.IrPowerEnabled())
+    if (soc.restoringPowerState || soc.irReplacementDepth) return;
+    if (soc.GetDeviceType() == deviceTypeSpitz && soc.irHostHooks.pending && soc.IrPowerEnabled())
+        pxaUartKick(soc.irUart);
+    if (soc.GetDeviceType() == deviceTypeTG50 && soc.irKeyboard.Pending() && soc.IrPowerEnabled())
         RescheduleCB(&soc,RESCHEDULE_TASK_UART);
 }
 
@@ -1536,6 +1987,10 @@ bool SocPXA::IrPowerEnabled() {
     // An input/alternate-function pin has not explicitly powered this link on.
     const auto type=GetDeviceType();
     if (type == deviceTypeTG50) return deviceTg50IrPowerEnabled(dev);
+    if (type == deviceTypeSpitz) {
+        constexpr uint32_t stUartClock = 1u << 5;
+        return !PowerSleeping() && (pxaPwrClkClockMask(pwrClk) & stUartClock) && deviceSpitzIrPowerEnabled(dev);
+    }
     return pxaGpioGetState(gpio,type==deviceTypeTX?40:type==deviceTypeZire72?49:48)==PxaGpioStateLow;
 }
 
@@ -1631,9 +2086,9 @@ std::string SocPXA::GamepadState() const {
 // guest's, whoever owns the line next.
 bool SocPXA::SetIrHostHooks(const IrHostHooks* hooks) {
     if (hooks) {
+        const auto* profile = deviceProfile5(GetDeviceType());
         if (!hooks->context || !hooks->read || !hooks->write || !hooks->pending || !hooks->replaced ||
-            (GetDeviceType()!=deviceTypeTX && !deviceProfileIsE2Board5(GetDeviceType()) &&
-             GetDeviceType()!=deviceTypeZire72 && GetDeviceType()!=deviceTypeTG50) ||
+            !profile || !profile->capabilities.infrared ||
             irHostHooks.context || serialHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
             pxaUartIrState(irUart).sending) return false;
     }
@@ -1674,7 +2129,7 @@ SocPXA::~SocPXA() {
 
 void SocPXA::RestoreFastAudioRoute() {
     fastAudioRouted=fastAudio && fastAudio->Bypass();
-    deviceSetAudioQueue(dev,((GetDeviceType() == deviceTypeTG50 && !pcmEnabled) || audioOutputFenced || checkpointFenceDepth || fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+    OnSetAudioQueue(audioQueue);
 }
 
 bool SocPXA::UsbBoardListening() { return GetDeviceType() != deviceTypeTG50 || deviceTg50UsbListening(dev); }

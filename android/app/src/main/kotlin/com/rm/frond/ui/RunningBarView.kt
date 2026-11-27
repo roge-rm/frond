@@ -120,25 +120,28 @@ class RunningBarActions(
 @Composable
 fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
     FrondTheme(dark = true) {
-        // The view is the whole screen while a sheet is open, so its scrim catches every touch.
         val menuOpen = state.menuOpen
-        val sheetOpen = state.sheet != null
-        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment || state.model?.let { it.busy != null || it.path != null || it.log != null } == true
-        if (RunningBar.autoHides(state.mode, state.shown, menuOpen, sheetOpen, dialogOpen)) {
-            LaunchedEffect(state.touches, menuOpen, sheetOpen, dialogOpen) {
+        val pcLinkOpen = state.model?.pcLink != null
+        val overlayOpen = state.sheet != null || pcLinkOpen
+        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment ||
+            state.model?.let { it.busy != null || it.path != null || it.log != null } == true
+        if (RunningBar.autoHides(state.mode, state.shown, menuOpen, overlayOpen, dialogOpen)) {
+            LaunchedEffect(state.touches, menuOpen, overlayOpen, dialogOpen) {
                 delay(RunningBar.AUTO_HIDE_MS)
                 actions.autoHide()
             }
         }
-        Box(if (state.sheet != null) Modifier.fillMaxSize() else Modifier) {
-            if (state.shown) Bar(state, actions) else Handle(actions, Modifier.align(Alignment.TopCenter))
-            state.sheet?.let { SheetLayer(it, state, actions) }
-            state.model?.let { model ->
-                val printers = listOfNotNull(model.printer?.jobs, model.irPrinter)
+        Box(if (overlayOpen) Modifier.fillMaxSize() else Modifier) {
+            if (!pcLinkOpen) {
+                if (state.shown) Bar(state, actions) else Handle(actions, Modifier.align(Alignment.TopCenter))
+                state.sheet?.let { SheetLayer(it, state, actions) }
+                val printers = state.model?.let { listOfNotNull(it.printer?.jobs, it.irPrinter) }.orEmpty()
                 if (printers.isNotEmpty()) PrinterPrompt(printers, if (state.shown) RunningBar.heightDp(state.portrait).dp else 24.dp) {
                     actions.openSheet(RunningSheets.Sheet.CONNECTIONS)
                 }
             }
+            // Keep window focus while PC Link uses the running guest.
+            state.model?.takeIf { it.device.zaurus }?.let { ZaurusPcLinkScreen(it) }
         }
         MenuDialogs(state, actions)
     }
@@ -214,6 +217,7 @@ private fun Menu(state: RunningBarState, actions: RunningBarActions) {
     val rows = RunningMenu.rows(device, RunningMenu.State(
         hold = model.hold, keyboard = model.keyboard, beamOff = !model.beam.active,
         gamepad = model.gamepad, microphone = model.microphone, network = model.network, busy = model.busy != null,
+        zaurusUsbCable = model.zaurusUsbCable, zaurusUsbDriveAttached = model.zaurusUsbDriveAttached,
     ))
     DropdownMenu(state.menuOpen, { state.menuOpen = false }) {
         var group = rows.first().group

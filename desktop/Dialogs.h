@@ -1,6 +1,7 @@
 #pragma once
 #include <functional>
 #include <QDialog>
+#include <QTemporaryDir>
 #include "FirmwareInput.h"
 #include "SessionStore.h"
 #include <QWidget>
@@ -111,15 +112,22 @@ class FirmwareDialog : public QDialog {
     // `sessions`; chosenCards() has a card id or an empty string per slot.
     void offerCards(const QString& sessions);
     QStringList chosenCards() const;
+    QString storeZaurus(QString& path);
  private:
+    QString prepareZaurus();
     void fillCards();
     QString root, sessions;
     QFormLayout* form{nullptr};
     QComboBox* cards[2]{};
     QComboBox* device;
     QLineEdit *nor, *nand;
+    QComboBox* cfMode{nullptr};
+    QLineEdit *cfImage{nullptr}, *cfArchive{nullptr};
+    QSpinBox* cfSize{nullptr};
+    std::unique_ptr<QTemporaryDir> zaurusStage;
     QLabel* norLabel{nullptr};
     QLabel* nandLabel{nullptr};
+    QLabel *cfImageLabel{nullptr}, *cfArchiveLabel{nullptr};
     QCheckBox* anyFirmware{nullptr};
     frondFirmware::Device stored{frondFirmware::Device::automatic};
 };

@@ -1,8 +1,10 @@
 #ifndef FROND_USB_BUS_HOST_H
 #define FROND_USB_BUS_HOST_H
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -40,6 +42,7 @@ class UsbBusHost {
         std::function<size_t(uint8_t*, size_t)> receive;         // host to guest
         std::function<size_t()> pending;                         // host to guest bytes waiting
     };
+    enum class Mode { normal, enumerationOnly, storageProbe, zaurusNetwork };
     enum class Phase { detached, waitEnable, connect, reset, enumerate, running, failed };
     static constexpr uint64_t frameNs = 1000000;
     static constexpr uint64_t nakRetryNs = 10000;
@@ -55,9 +58,15 @@ class UsbBusHost {
         uint64_t frames{}, transactions{}, naks{}, bytesIn{}, bytesOut{}, enumerations{}, setupRetries{}, ticks{};
     };
 
-    UsbBusHost(std::function<UsbDevicePort()> udc, Link link);
+    UsbBusHost(std::function<UsbDevicePort()> udc, Link link, Mode mode = Mode::normal);
 
     void Attach();     // cable in: waits for the device to listen, then resets and enumerates
+    static constexpr unsigned storageSectorSize = 512;
+    struct StorageWriteCheck {
+        uint32_t lba;
+        std::array<uint8_t, storageSectorSize> expected, replacement;
+    };
+    bool ArmStorageWriteCheck(StorageWriteCheck check);
     bool ReadStringDescriptor(uint8_t index, uint16_t language);
     void Detach();     // cable out: forgets the device
     void Tick(uint64_t nowNs);
@@ -68,6 +77,11 @@ class UsbBusHost {
     // Emulated time the next Tick is needed by: 0 for at once, UINT64_MAX for none
     // (detached, failed, or waiting for the guest to turn the UDC on).
     uint64_t NextWake() const;
+    bool ZaurusNetworkActive() const { return mode == Mode::zaurusNetwork && phase == Phase::running; }
+    uint64_t ZaurusNetworkTxAt() const { return outRequestAt; }
+    bool ZaurusNetworkCanSend() const { return ZaurusNetworkActive() && zaurusSend.empty() && !outPending; }
+    bool ZaurusNetworkSend(const uint8_t* frame, size_t size);
+    std::function<void(const uint8_t*, size_t)> zaurusFrameFromDevice;
     // The guest wrote to the UDC: tick soon and retry a NAKed token.
     void Poke() { poked = true; }
     // Bytes or room arrived on the link while the bridge was idle; Poke if so.
@@ -105,12 +119,17 @@ class UsbBusHost {
     enum class Result { ok, stall, timeout, error };
 
     void Restart(const char* why);
+    void FailBulk(const char* why);
     void StartControl(uint8_t type, uint8_t request, uint16_t value, uint16_t index, uint16_t length, Completion completion = Completion::enumeration);
     void ControlDone(Result result);
     void EnumerationStep(Result result);
     bool ParseConfiguration();
     bool SelectEndpoints();
     bool FindRndis();
+    bool SelectZaurusStorage();
+    bool SelectZaurusNetwork();
+    void ZaurusNetworkIn(const uint8_t* data, unsigned size);
+    void StorageReply(const uint8_t* data, unsigned size);
     void StopRndis();
     bool StartTransaction();
     void FinishTransaction();
@@ -122,6 +141,7 @@ class UsbBusHost {
 
     std::function<UsbDevicePort()> udc;
     Link link;
+    const Mode mode;
     Phase phase{Phase::detached};
     uint64_t now{0}, phaseAt{0}, nextSof{0}, lastSof{0}, busyUntil{0}, retryAt{0}, lastControlEnd{0};
     bool sofRunning{false}, poked{false}, waitSpace{false};
@@ -157,6 +177,21 @@ class UsbBusHost {
     uint8_t rndisInterface{0}, intEndpoint{0}, intMps{0};
     uint64_t intRequestAt{0};
     uint8_t interruptMps[16]{};
+    // The read-only Bulk-Only Transport probe keeps one command in flight.
+    struct StorageProbe {
+        enum class Stage { idle, command, data, writeData, status };
+        Stage stage{Stage::idle};
+        unsigned command{0}, received{0}, failedCommand{0}, retries{0};
+        uint32_t tag{1};
+        uint64_t deadline{0};
+        uint8_t data[storageSectorSize]{};
+        bool writingCheck{false};
+    } storage;
+    std::optional<StorageWriteCheck> storageWriteCheck;
+    bool storageWriteArmed{false};
+    std::vector<uint8_t> zaurusSend, zaurusReceive;
+    size_t zaurusSent{0};
+    bool zaurusDiscard{false};
     Counters counters;
     std::vector<std::string> messages;
 };

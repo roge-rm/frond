@@ -24,6 +24,34 @@
 // Version 3 adds CLKCFG's HT and B, version 4 the CCCR the clocks were last taken from.
 #define SAVESTATE_VERSION 4
 
+namespace {
+constexpr uint32_t pmuEnable = 1u << 0, pmuResetClock = 1u << 2, pmuDivideClock = 1u << 3;
+constexpr uint32_t pmuId = 0x14000000;
+
+struct PmuCycleCounter {
+    uint64_t anchor;
+    uint32_t count, control;
+    uint8_t dividerPhase;
+
+    void Sync(ArmCpu* cpu) {
+        const uint64_t now = cpuCoreCycles(cpu);
+        if (control & pmuEnable) {
+            uint64_t elapsed = now >= anchor ? now - anchor : 0;
+            if (control & pmuDivideClock) {
+                elapsed += dividerPhase;
+                dividerPhase = elapsed & 63;
+                elapsed >>= 6;
+            }
+            count += uint32_t(elapsed);
+        }
+        anchor = now;
+    }
+
+    template <typename T>
+    void DoSaveLoad(T& helper) { helper.Do32(count).Do32(control).Do8(dividerPhase); }
+};
+}  // namespace
+
 struct PxaPwrClk {
     PxaI2s *i2s;
     Pxa255Udc *udc;
@@ -40,6 +68,7 @@ struct PxaPwrClk {
     uint64_t coreHz;  // the core clock CCCR and CLKCFG gave at the last CLKCFG write, reset, wake or load
     uint32_t cccrActive;  // the CCCR the cost clocks and coreHz came from; a CCCR write waits for CLKCFG
     uint32_t clkcfgBits;  // CLKCFG HT (bit 2) and B (bit 3) from the last write, PXA27x only
+    PmuCycleCounter pmu;
     bool sleeping, wakePending;
     bool restoring;
     PxaGpio* gpio;
@@ -108,6 +137,23 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, 
 
     if (!read) val = cpuGetRegExternal(cpu, Rx);
 
+    // PXA27x XSC2 PMNC and CCNT, Intel XScale Core Developer's Manual §8.3.
+    if (pc->isPXA270 && CRm == 1 && !op1 && !op2 && !two && CRn <= 1) {
+        auto& pmu = pc->pmu;
+        pmu.Sync(cpu);
+        if (CRn == 0) {
+            if (read) val = pmuId | pmu.control;
+            else {
+                if ((val & pmuResetClock) || ((val ^ pmu.control) & pmuDivideClock))
+                    pmu.dividerPhase = 0;
+                if (val & pmuResetClock) pmu.count = 0;
+                pmu.control = val & (pmuDivideClock | pmuEnable);
+            }
+        } else if (read) val = pmu.count;
+        else pmu.count = val;
+        goto success;
+    }
+
     if (CRm == 0 && op1 == 0 && !two) {
         switch (CRn) {
             case 6:
@@ -115,12 +161,7 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, 
                 if (read)  // CLKCFG: PXA27x reads back T, HT and B; F reads 0
                     val = pc->isPXA270 ? (pc->turbo ? 1 : 0) | pc->clkcfgBits : 0;
                 else {
-                    pc->turbo = (val & 1) != 0;
-                    if (pc->isPXA270) pc->clkcfgBits = val & 0xc;
-                    const uint64_t before = pc->coreHz;
-                    pxaPwrClkPrvSyncCost(pc);
-                    // A new clock ends the batch at this instruction, so Original runs the rest at the new rate.
-                    if (pc->coreHz != before && pc->soc->FollowsCoreClock()) cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+                    pxaPwrClkSetClockConfig(pc, val);
                     if (val & 2)
                         fprintf(stderr, "Set speed mode (CCCR + cp14 reg6) to 0x%08lx 0x%08lx\n",
                                 (unsigned long)pc->CCCR, (unsigned long)val);
@@ -458,6 +499,13 @@ void pxaPwrClkConnectWakeSources(PxaPwrClk* pc, PxaGpio* gpio, PxaRtc* rtc, PxaK
 
 void pxaPwrClkSetResetCause(PxaPwrClk* pc, uint32_t rcsr) { pc->RCSR = rcsr; }
 uint64_t pxaPwrClkCoreHz(const PxaPwrClk* pc) { return pc ? pc->coreHz : 0; }
+uint32_t pxaPwrClkLcdHz(const PxaPwrClk* pc) {
+    constexpr uint32_t lcdClockEnable = 1u << 16;
+    if (!(pc->CKEN & lcdClockEnable)) return 0;
+    const uint32_t multiplier = pc->cccrActive & 31;
+    const uint32_t divisor = multiplier < 8 ? 1 : multiplier <= 16 ? 2 : 4;
+    return 13000000 * multiplier / divisor;
+}
 bool pxaPwrClkSleeping(const PxaPwrClk* pc) { return pc && pc->sleeping; }
 void pxaPwrClkRestoreInProgress(PxaPwrClk* pc, bool restoring) { pc->restoring = restoring; }
 uint32_t pxaPwrClkSleepRetention(const PxaPwrClk* pc) { return pc->PMFW; }
@@ -492,7 +540,13 @@ bool pxaPwrClkWakePending(PxaPwrClk* pc) {
     return pc->wakePending;
 }
 
+static void pxaPwrClkResetPmu(PxaPwrClk* pc) {
+    pc->pmu = {};
+    pc->pmu.anchor = cpuCoreCycles(pc->cpu);
+}
+
 void pxaPwrClkFinishSleep(PxaPwrClk* pc) {
+    if (pc->isPXA270) pxaPwrClkResetPmu(pc);
     // Table 3-2: retain wake configuration/status, scratchpad, RTC and clocks.
     memset(pc->PGSR, 0, sizeof(pc->PGSR));
     if (!pxaPwrClkRetainPowerI2c(pc)) {
@@ -511,7 +565,18 @@ void pxaPwrClkFinishSleep(PxaPwrClk* pc) {
     }
 }
 
+void pxaPwrClkSetClockConfig(PxaPwrClk* pc, uint32_t value) {
+    pc->turbo = (value & 1) != 0;
+    if (pc->isPXA270) pc->clkcfgBits = value & 0xc;
+    const uint64_t before = pc->coreHz;
+    pxaPwrClkPrvSyncCost(pc);
+    // End the current batch so Original takes the new clock on the next one.
+    if (pc->coreHz != before && pc->soc->FollowsCoreClock())
+        cpuSetSlowPath(pc->cpu, SLOW_PATH_REASON_RESCHEDULE);
+}
+
 void pxaPwrClkReset(struct PxaPwrClk *pc) {
+    if (pc->isPXA270) pxaPwrClkResetPmu(pc);
     pc->sleeping = pc->wakePending = false;
     pc->clkcfgBits = 0;
     // PXA25x: almost the default (we use mult 32 not 27). PXA27x: L 16, 2N 3, the 208 MHz run
@@ -551,6 +616,13 @@ void pxaPwrClkSave(struct PxaPwrClk *pc, T &savestate) {
 
     SaveChunkHelper helper(*chunk);
     pc->DoSaveLoad(helper, version);
+    if (pc->isPXA270) {
+        auto counter = savestate.GetChunk(ChunkType::pxa27xPmuCycleCounter, 0);
+        if (!counter) ERR("unable to allocate PXA27x PMU cycle counter chunk");
+        SaveChunkHelper pmuHelper(*counter);
+        pc->pmu.Sync(pc->cpu);
+        pc->pmu.DoSaveLoad(pmuHelper);
+    }
 }
 
 template <typename T>
@@ -571,6 +643,18 @@ void pxaPwrClkLoad(struct PxaPwrClk *pc, T &loader) {
     pc->DoSaveLoad(helper, version);
     if (version < 4) pc->cccrActive = pc->CCCR;  // before v4 the CCCR in effect is the one saved
     if (pc->wakePending && !pc->sleeping) loader.NotifyError();
+    if (pc->isPXA270) {
+        pxaPwrClkResetPmu(pc);
+        if (loader.HasChunk(ChunkType::pxa27xPmuCycleCounter)) {
+            auto counter = loader.GetChunkOrFail(ChunkType::pxa27xPmuCycleCounter, 0, "PXA27x PMU cycle counter");
+            if (!counter) return;
+            LoadChunkHelper pmuHelper(*counter);
+            pc->pmu.DoSaveLoad(pmuHelper);
+            const auto& pmu = pc->pmu;
+            if (counter->HasError() || (pmu.control & ~(pmuEnable | pmuDivideClock)) ||
+                pmu.dividerPhase >= ((pmu.control & pmuDivideClock) ? 64 : 1)) loader.NotifyError();
+        }
+    }
     pxaPwrClkPrvSyncCost(pc, false);
     // The later UDC load refreshes requests from its restored FIFO state.
     pxaPwrClkSyncUdc(pc,false);

@@ -1,5 +1,7 @@
 package com.rm.frond.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -20,8 +22,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import com.rm.frond.Device
 import com.rm.frond.HomeModel
+import com.rm.frond.HostFiles
 import com.rm.frond.BluetoothChoice
 import com.rm.frond.InfraredChoice
 import com.rm.frond.SyncProtocol
@@ -39,7 +43,18 @@ fun MachineSettingsScreen(model: HomeModel) {
     val syncId = draft.sessionId?.takeIf { SyncProtocol.forDevice(draft.device) != null }
     if (syncOpen && syncId != null) SyncDeviceDialog(syncId, onClose = { syncOpen = false },
         protocol = SyncProtocol.forDevice(draft.device), networkHotSync = draft.device.supportsNetworkHotSync())
-    val ready = model.firmwareReady[draft.device] == true
+    val zSetup = !editing && draft.device.zaurus
+    val ready = if (zSetup) draft.zaurus.ready else model.firmwareReady[draft.device] == true
+    val pickNand = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.chooseZaurusImages { it.copy(nand = uri) }
+    }
+    val pickCf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.chooseZaurusImages { it.copy(cf = uri) }
+    }
+    val pickProm = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.chooseZaurusImages { it.copy(prom = uri) }
+    }
+    if (zSetup) CopyingDialog(model)
     model.alert?.let { (title, text) ->
         AlertDialog(onDismissRequest = { model.alert = null }, title = { Text(title) }, text = { Text(text) },
             confirmButton = { TextButton(onClick = { model.alert = null }) { Text("OK") } })
@@ -52,8 +67,9 @@ fun MachineSettingsScreen(model: HomeModel) {
                     TextButton(onClick = { model.cancelMachine() }) { Text("Cancel") }
                 },
                 actions = {
-                    TextButton(onClick = { model.saveMachine() }, enabled = !model.copying && !model.running) {
-                        Text(if (editing) "Save" else if (ready) "Add" else "Import firmware")
+                    TextButton(onClick = { model.saveMachine() },
+                        enabled = !model.copying && !model.running && (!zSetup || ready)) {
+                        Text(if (editing) "Save" else if (ready || zSetup) "Add" else "Import firmware")
                     }
                 },
             )
@@ -62,6 +78,14 @@ fun MachineSettingsScreen(model: HomeModel) {
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
             if (!editing) Choice("Device", draft.device, Device.shown.sortedBy { it.label.lowercase() }, { it.listLabel }) {
                 model.chooseMachine(it)
+            }
+            if (zSetup) {
+                Header("Zaurus images")
+                ZaurusImagePicker("NAND backup", draft.zaurus.nand) { pickNand.launch(arrayOf("*/*")) }
+                ZaurusImagePicker("Existing CF image", draft.zaurus.cf) { pickCf.launch(arrayOf("*/*")) }
+                ZaurusImagePicker("CS0 boot PROM (optional)", draft.zaurus.prom) { pickProm.launch(arrayOf("*/*")) }
+                if (draft.zaurus.prom != null)
+                    TextButton(onClick = { model.chooseZaurusImages { it.copy(prom = null) } }) { Text("Remove boot PROM") }
             }
             // A card for each slot of a two-slot machine.
             if (!editing && com.rm.frond.Cards.hasSlot(draft.device, 1)) {
@@ -120,5 +144,14 @@ fun MachineSettingsScreen(model: HomeModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ZaurusImagePicker(label: String, uri: android.net.Uri?, pick: () -> Unit) {
+    val resolver = LocalContext.current.contentResolver
+    val name = remember(resolver, uri) { uri?.let { HostFiles.displayName(resolver, it) } }
+    TextButton(onClick = pick) {
+        Text(if (name == null) label else "$label ($name)", maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

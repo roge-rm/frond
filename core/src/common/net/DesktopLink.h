@@ -46,6 +46,9 @@ class DesktopLink {
     uint32_t Server() const { return server; }
     // True once the host's connect request port is forwarded to the handheld.
     bool ConnectForward() const { return forwarding; }
+    // Forward a local TCP listener to the handheld after it leases the desktop an address.
+    int AddTcpForward(uint16_t hostPort, uint16_t guestPort);
+    int AddUnixTcpForward(const std::string& path, uint16_t guestPort);
 
     // DHCP frames, public for tests: a DISCOVER or REQUEST from mac, and the type (2 OFFER, 5 ACK, 6 NAK, 0 none)
     // of a frame that answers xid for mac, with its yiaddr, server ID and netmask.

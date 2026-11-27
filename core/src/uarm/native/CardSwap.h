@@ -119,6 +119,8 @@ inline SdResult openFileCard(const std::filesystem::path& folder, uint32_t kind,
         return frondSdCandidate::fail("card", "The card file is missing or damaged.");
     const bool fits = kind == frondMachine::kindMsPro
                           ? msProCreateAllowed(deviceType, frondMsPro::mibOfBytes(media.physicalSize))
+                      : kind == frondMachine::kindCf
+                          ? deviceType == deviceTypeSpitz && frondSdFile::validPayloadSize(media.physicalSize)
                           : sdImageFits(deviceType, media.physicalSize);
     if (!fits) return frondSdCandidate::fail("size", "This machine doesn't take a card of that size.");
     char id[SD_CARD_ID_MAX_LEN + 1]{};

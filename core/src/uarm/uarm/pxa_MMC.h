@@ -15,6 +15,8 @@ class SdioCard;
 struct PxaMmc* pxaMmcInit(struct ArmMem* physMem, struct PxaIc* ic, struct PxaDma* dma, bool wordFifo = false);
 
 void pxaMmcInsert(struct PxaMmc* mmc, struct VSD* vsd);  // NULL also acceptable
+// Reconnect a memory card from board state without changing the restored FIFO or IRQs.
+void pxaMmcRestoreMemoryCard(struct PxaMmc* mmc, struct VSD* vsd);
 // Replaces the slot contents. The caller owns the card and must detach it before destroying it.
 // The board drives card detect and any external SDIO interrupt routing.
 // The card owner must save and restore its state before using this in a machine session.

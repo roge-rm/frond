@@ -87,6 +87,13 @@ void SoC::PenDown(int x, int y) {
                       displayConfiguration.height + displayConfiguration.graffitiHeight)));
 }
 
+bool SoC::SpitzTabletKeyDown(unsigned index) {
+    if (GetDeviceType() != deviceTypeSpitz || index >= 5) return false;
+    // Stock Qt sees five 96-pixel tablet keys just below the 480×640 LCD.
+    penEventQueue->Push(PenEvent::PenDown(48 + 96 * index, spitzTabletKeyY));
+    return true;
+}
+
 void SoC::PenUp() { penEventQueue->Push(PenEvent::PenUp()); }
 
 void SoC::SetFramebufferDirty(uint32_t pa, uint32_t size) {

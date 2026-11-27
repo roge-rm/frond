@@ -23,6 +23,7 @@ struct Traits {
     bool palmOs{true};
     // Hard reset works: Palm OS with guest services, or a Windows CE clean boot.
     bool hardReset{true};
+    bool saveCopy{true};
     // Install copies onto the SD card (Windows CE).
     bool cardInstall{false};
     // Takes the CLIÉ game controller on its connector.
@@ -47,8 +48,10 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.guestServices = t.palmOs && frondFirmware::guestServices(device);
     t.cardInstall = frondFirmware::installsToCard(device);
     t.hardReset = t.guestServices || frondFirmware::ceHardReset(device);
+    t.saveCopy = !frondFirmware::isZaurus(device);
     t.cardSlot = profile.frontend.sdSlot || profile.frontend.memoryStick;
-    t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
+    t.powerKey = frondFirmware::isZaurus(device) ||
+                 QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
     t.gamepad = profile.frontend.clieGamepad;
     t.controls = !controllerPalmKeys(profile).empty();
     return t;
@@ -113,7 +116,7 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     out.push_back({Id::FullScreen, s.fullScreen ? QObject::tr("Leave full screen") : QObject::tr("Full screen"), std::nullopt, {},
                    s.embedded, false, 2});
     out.push_back({Id::Save, QObject::tr("Save"), std::nullopt, {}, ready, false, 2});
-    out.push_back({Id::SaveCopy, QObject::tr("Save a copy…"), std::nullopt, {}, ready, false, 2});
+    out.push_back({Id::SaveCopy, QObject::tr("Save a copy…"), std::nullopt, {}, ready && t.saveCopy, false, 2});
     out.push_back({Id::Log, QObject::tr("Emulator log"), std::nullopt, {}, true, false, 2});
     out.push_back({Id::Reset, QObject::tr("Reset…"), std::nullopt, {}, ready, false, 3});
     out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready && t.hardReset, true, 3});
@@ -322,7 +325,10 @@ inline QString snapshotReplay(const QString& path) {
     quoted.replace('\\', "\\\\").replace('"', "\\\"");
     return "0 snapshot \"" + quoted + "\"\n";
 }
-inline QString powerReplay() { return QStringLiteral("0 key-down power\n80 key-up power\n"); }
+inline QString powerReplay(frondFirmware::Device device = frondFirmware::Device::automatic) {
+    const int holdMs = frondFirmware::isZaurus(device) ? 2750 : 80;
+    return QStringLiteral("0 key-down power\n%1 key-up power\n").arg(holdMs);
+}
 
 // A RAM database as `db-list` gives it.
 struct Database {

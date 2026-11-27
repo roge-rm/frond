@@ -69,11 +69,12 @@ int main() {
                 : p.deviceType == deviceTypeDana ? ram == (8u << 20)
                 : p.deviceType == deviceTypeDanaWireless ? ram == (16u << 20)
                 : p.deviceType == deviceTypeRx1950 ? ram == (32u << 20)
+                : p.deviceType == deviceTypeSpitz ? ram == (64u << 20)
                 : ram == (32u << 20) || (p.deviceType != deviceTypeTX && p.deviceType != deviceTypeZire72 && ram == (16u << 20));
             assert(deviceConfigurationSupportsRamSize(p.deviceType, ram) == expected);
         }
         for (int mode : {INT_MIN, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, INT_MAX}) {
-            const bool expected = mode >= 1 && mode <= 10 &&
+            const bool expected = mode >= 1 && mode <= 11 &&
                 ((p.deviceType == deviceTypePV && mode <= 8) || mode == int(p.defaultDisplay));
             assert(deviceConfigurationDeviceSupportsDisplayMode(p.deviceType, DisplayMode(mode)) == expected);
         }
@@ -114,7 +115,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 25 && names.size() == 28 && types.size() == 26);
+    assert(desktopCount == 25 && names.size() == 29 && types.size() == 27);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -122,7 +123,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 26, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 27, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -364,7 +365,7 @@ int main() {
 
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.microphone == (p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZire72 ||
-                                             p.deviceType == deviceTypeRx1950));
+                                             p.deviceType == deviceTypeRx1950 || p.deviceType == deviceTypeSpitz));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.backgroundPanel == (p.deviceType == deviceTypeTG50));
     // The snap-on modem: the III series and the V series connectors; the m100 series and the T415 (USB cradle) have none.
     for (const auto& p : deviceProfiles5)
@@ -373,7 +374,7 @@ int main() {
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.irPhone == (p.board == DeviceBoard5::ez328 || vzPalm(p) || p.deviceType == deviceTypeTX ||
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
-                                          p.deviceType == deviceTypeZire72));
+                                          p.deviceType == deviceTypeZire72 || p.deviceType == deviceTypeSpitz));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbPrinter == deviceTypeIsDana5(p.deviceType));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbWifi == (p.deviceType == deviceTypeDana));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.builtInWifi == (p.deviceType == deviceTypeDanaWireless));
@@ -563,13 +564,14 @@ static Device68kRomInfo5 inspect68k(const std::vector<uint8_t>& rom) {
 }
 
 // Original's fallback clock before the guest sets one: the profile's CPU clock (312 MHz PXA270, 200 MHz
-// PXA25x, 296.35 MHz S3C2442), 100 MHz for the rest (the 68k devices run their own clock).
+// PXA25x, 416 MHz Spitz, 296.35 MHz S3C2442), 100 MHz for the rest (the 68k devices run their own clock).
 static void originalHz() {
     for (const auto& p : deviceProfiles5) {
         const bool pxa270 = p.deviceType == deviceTypeTX || p.deviceType == deviceTypeZire72;
         const bool pxa25x = p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeFrankenE2 || p.deviceType == deviceTypeTG50;
         assert(deviceProfileOriginalHz5(p.deviceType) ==
-               (pxa270 ? 312000000u : pxa25x ? 200000000u : p.deviceType == deviceTypeRx1950 ? 296352000u : 100000000u));
+               (pxa270 ? 312000000u : pxa25x ? 200000000u : p.deviceType == deviceTypeRx1950 ? 296352000u :
+                p.deviceType == deviceTypeSpitz ? 416000000u : 100000000u));
     }
     assert(deviceProfileOriginalHz5(deviceTypeInvalid) == 100000000 && deviceProfileOriginalHz5(deviceTypeIIIx) == 100000000);
 }

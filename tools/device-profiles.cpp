@@ -16,6 +16,7 @@ static const char* cohortName(DeviceCohort5 cohort) {
         case DeviceCohort5::zodiacNor: return "zodiac-nor";
         case DeviceCohort5::vz68k: return "vz68k-rom";
         case DeviceCohort5::rx1950Nand: return "rx1950-nand";
+        case DeviceCohort5::spitzNand: return "spitz-nand";
     }
     return "unknown";
 }
@@ -47,7 +48,8 @@ int main() {
                   << ",\"hot_sync_button\":" << (deviceProfileHasHotSyncButton5(p.deviceType) ? "true" : "false")
                   << ",\"pending_usb\":" << std::quoted(deviceProfilePendingUsb5(p.deviceType))
                   << ",\"colour_lcd\":" << (deviceProfileColourLcd5(p.deviceType) ? "true" : "false")
-                  << ",\"os\":\"" << (deviceProfileOs5(p) == DeviceOs5::windowsCe ? "windows-ce" : "palm-os") << "\""
+                  << ",\"os\":\"" << (deviceProfileOs5(p) == DeviceOs5::linuxOs ? "linux" :
+                                      deviceProfileOs5(p) == DeviceOs5::windowsCe ? "windows-ce" : "palm-os") << "\""
                   << ",\"cpu_hz\":" << p.cpuHz
                   << ",\"original_hz\":" << deviceProfileOriginalHz5(p.deviceType)
                   << ",\"sound\":" << (p.capabilities.sound ? "true" : "false")

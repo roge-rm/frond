@@ -113,7 +113,7 @@ data class Device internal constructor(
     val installsToCard: Boolean get() = rx1950
     val hardResetWorks: Boolean get() = palmOs || rx1950
     // The USB link is a network (RNDIS): on or off, with no endpoint.
-    val usbNetwork: Boolean get() = !palmOs
+    val usbNetwork: Boolean get() = !palmOs && !zaurus
     // The name in the Add device and Import firmware lists.
     val listLabel: String get() = label
 
@@ -131,8 +131,8 @@ data class Device internal constructor(
     val palmWifiCard: Boolean get() = pxaPalm && id != "palm-tx"
     val networkSupported: Boolean get() = network || palmWifiCard
     val networkWifiOnly: Boolean get() = wifiOnlyNetwork || (palmWifiCard && !network)
-    val headphonesSupported: Boolean get() = pxaPalm
-    val sdWriteProtection: Boolean get() = pxaPalm || id == "tapwave-zodiac-2"
+    val headphonesSupported: Boolean get() = pxaPalm || zaurus
+    val sdWriteProtection: Boolean get() = pxaPalm || zaurus || id == "tapwave-zodiac-2"
     // A 68k device's slots take linked card files through frond-68k's sd-, sd2- and ms- commands (SdCard, Cards).
     val linkedCards: Boolean get() = runs68k && storageSlots.isNotEmpty()
     // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
@@ -161,9 +161,10 @@ data class Device internal constructor(
     val zodiac: Boolean get() = id == ZODIAC_ID
     // The HP iPAQ rx1950 (Windows Mobile 5): HP's CEBL.nbf as the NOR and CEOS.nbf as the NAND.
     val rx1950: Boolean get() = id == RX1950_ID
+    val zaurus: Boolean get() = id == ZAURUS_ID
     // New machines of the Zodiac, rx1950, T|X and Zire 72 start on Fast; they fall behind Original speed on Exact.
     val defaultEngine: Engine get() =
-        if (zodiac || rx1950 || id == "palm-tx" || id == "palm-zire-72") Engine.FAST else Engine.EXACT
+        if (zodiac || rx1950 || zaurus || id == "palm-tx" || id == "palm-zire-72") Engine.FAST else Engine.EXACT
     val buttons: List<String> get() = buttonsText.split('|')
 
     internal fun unresolvedFirmware(): Device = withFirmware(firmwareVariants.firstOrNull { !it.powerSupported })
@@ -176,6 +177,7 @@ data class Device internal constructor(
         val SD_SIZES = listOf(32, 64, 128, 256, 512, 1024, 1886)
         const val ZODIAC_ID = "tapwave-zodiac-2"
         const val RX1950_ID = "hp-ipaq-rx1950"
+        const val ZAURUS_ID = "sharp-zaurus-sl-c3000"
         fun sizeLabel(mib: Int) = if (mib >= 1024) "${(mib + 512) / 1024} GB" else "$mib MB"
         fun sizeLabel(bytes: Long) = if (bytes >= 1L shl 30) "${bytes shr 30} GB" else "${bytes shr 20} MB"
         // Classic Memory Stick physical bytes: each MB is 2048 pages of 512 + 9 bytes.

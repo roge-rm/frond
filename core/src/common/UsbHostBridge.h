@@ -1,5 +1,6 @@
 #ifndef FROND_USB_HOST_BRIDGE_H
 #define FROND_USB_HOST_BRIDGE_H
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -34,13 +35,15 @@ class UsbHostBridge {
         std::function<void()> kick;
         std::function<void(const UsbHostHooks*)> hooks;
         std::function<bool()> canPlug;  // optional: false while something else holds the connector
-        // Optional host network for an RNDIS device (UsbBusHost's RNDIS mode): Ethernet frames from the
+        // Optional USB host network: Ethernet frames from the
         // guest, a poll of the host side at most once a millisecond with the host's MAC address (the one the
-        // device gave as its permanent address) and a link number that changes each time RNDIS comes up again,
+        // device gave as its permanent address for RNDIS, or null for the Zaurus) and a link generation,
         // and the frames it has for the guest.
         std::function<void(const uint8_t*, size_t, uint64_t)> ethernetOut;
         std::function<void(uint64_t, const uint8_t*, uint32_t)> ethernetPoll;
         std::function<bool(std::vector<uint8_t>&)> ethernetIn;
+        UsbBusHost::Mode mode{UsbBusHost::Mode::normal};
+        std::function<void()> ethernetDown{};
     };
     bool Start(Backend backend, const Config& config, std::string& error);
     UsbHostBridge();
@@ -55,6 +58,14 @@ class UsbHostBridge {
     static bool NetworkLink(SoC* soc);
     // The cable in on such a device, with the host network behind it; describes as "on PHASE ...".
     bool StartCable(SoC* soc, std::string& error);
+    bool StartZaurusProbe(SocPXA* soc, bool readStorage, std::string& error);
+    bool ArmStorageWriteCheck(UsbBusHost::StorageWriteCheck check);
+    struct ZaurusFilesEndpoint {
+        std::string path;
+        std::atomic<int> status{0};  // 0 while waiting for DHCP, 1 when listening, -errno on failure
+    };
+    bool StartZaurusNetworkProbe(SocPXA* soc, std::string& error, uint16_t filesPort = 0,
+                                 std::shared_ptr<ZaurusFilesEndpoint> files = {});
     void Stop();  // unplugs the cable and closes the endpoint
     // Like Stop, but the host endpoint (a PTY's path, a TCP port) stays open for a Start with
     // the same transport.

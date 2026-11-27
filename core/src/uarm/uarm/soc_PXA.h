@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "CardBacking.h"
 #include "CPU.h"
 #include "ClieGamepad.h"
 #include "IrKeyboard.h"
@@ -38,7 +39,14 @@ struct PxaPwm;
 struct PxaTimr;
 struct PxaMmc;
 class PalmSdioWifi;
+class Pxa270Ohci;
+namespace frondNet { class WifiRouter; }
 struct PxaRtc;
+enum class SpitzCfNetwork { off, ethernet, wifi };
+struct SpitzPowerState {
+    unsigned batteryPercent;
+    bool acConnected, batteryDoorLocked, chargeEnabled, chargeLed, diskLed;
+};
 struct PxaLcd;
 struct Pxa270wmmx;
 struct Pxa270Udc;
@@ -56,6 +64,16 @@ struct VSD;
 class SocPXA : public SocGeneric<SocPXA> {
     friend SocGeneric<SocPXA>;
     bool disableSleep{false};
+    bool spitzDirectBoot{false};
+    bool spitzUsbCableAttached{false};
+    std::unique_ptr<Pxa270Ohci> spitzOhci;
+    void RefreshSpitzUsbHost();
+    std::unique_ptr<frondNet::WifiRouter> spitzCfRouter;
+    uint64_t spitzCfPollAt{}, spitzCfTx{}, spitzCfRx{};
+    uint8_t spitzRegulatorPhase{0};
+    uint8_t spitzRegulatorVoltage{0};
+    void ConfigureSpitzMemoryAndClocks();
+    void BootSpitzKernel(bool rtcReset);
     std::vector<uint8_t> e3WifiRom;
     bool e3WifiCompatible = false;
 
@@ -71,8 +89,30 @@ class SocPXA : public SocGeneric<SocPXA> {
 
    public:
     SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, const uint32_t romSize,
-           uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev);
+           uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev,
+           bool deferSpitzBoot = false);
 
+    bool MountMicrodrive(const char* path, bool writable, const char* mediaId = nullptr);
+    bool FlushMicrodrive() const;
+    // The guest is paused while the machine save journals and applies these pages.
+    bool ForEachMicrodriveChange(const CardBacking::OverlayFn& fn) const;
+    bool WriteMicrodriveBase(uint64_t offset, const void* data, size_t count);
+    bool ResetMicrodriveOverlay();
+    // The external CF socket uses the card in sdCardStore(1).
+    bool InsertCompactFlash(bool writeProtected);
+    void EjectCompactFlash();
+    bool CompactFlashInserted() const;
+    void SetCompactFlashWriteProtect(bool locked);
+    void SetCompactFlashSwapOnLoad(bool allow);
+    bool SetSpitzCfNetwork(SpitzCfNetwork mode);
+    bool SetSpitzUsbDrive(const std::string& path);
+    bool SpitzUsbDriveAttached() const;
+    std::string SpitzUsbHostState() const;
+    SpitzCfNetwork GetSpitzCfNetwork() const;
+    std::string SpitzCfNetworkState() const;
+    // Select the protocol of the next card in the SD/MMC slot.
+    bool SetSpitzMmcCard(bool legacyMmc);
+    bool SpitzMmcCard() const;
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     uint64_t CoreHz() const override;
     std::optional<bool> SdRemovalHandled() override;
@@ -91,12 +131,21 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool HoldSwitchSupported() const override;
     bool BatterySupported() const override;
     bool SetBattery(const BatteryPower&) override;
+    bool SetSpitzPower(unsigned batteryPercent, bool acConnected, bool batteryDoorLocked);
+    bool SetSpitzBatteryDoorLocked(bool locked);
+    bool GetSpitzPower(SpitzPowerState&) const;
     bool HeadphonesSupported() const override;
-    bool HeadphonesIn() const override { return headphones; }
+    bool HeadphonesIn() const override { return headphones || SpitzRemoteInserted(); }
     bool SetHeadphones(bool in) override;
+    bool SpitzRemoteInserted() const;
+    void SetSpitzRemote(bool inserted);
+    bool SetSpitzRemoteKey(SpitzRemoteKey key, bool down);
     void SetSdWriteProtect(bool on) override;
     bool HoldSwitchOn() const override;
     bool SetHoldSwitch(bool on) override;
+    bool SetSpitzLid(bool closed, bool swivelled) override;
+    bool SpitzLidClosed() const override;
+    bool SpitzSwivelled() const override;
     bool PowerButtonSupported() const override { return !disableSleep; }
     bool PowerSleeping() const override;
     // Wakes from PXA sleep since the process started, for tests. Not saved.
@@ -145,9 +194,10 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool SerialEnabled();
 
     // Non-owning development-probe access; use only on this SoC's execution
-    // thread. The cable method drives the TX detector input, not a USB host.
+    // thread. The cable method drives the board's detector input.
     Pxa270Udc* GetUsbController() {
-        return GetDeviceType() == deviceTypeTX || GetDeviceType() == deviceTypeZire72 ? udc2 : nullptr;
+        const auto type = GetDeviceType();
+        return type == deviceTypeTX || type == deviceTypeZire72 || type == deviceTypeSpitz ? udc2 : nullptr;
     }
     UsbDevicePort GetUsbPort() {
         if(GetDeviceType()==deviceTypeTX || GetDeviceType()==deviceTypeZire72)return UsbDevicePort(udc2);
@@ -211,6 +261,8 @@ class SocPXA : public SocGeneric<SocPXA> {
     void OnSave(T &savestate);
 
     // When the power key last went down; time of the first held-back power press, or 0 (Zire only).
+    bool resetSpitzLidClosed{false}, resetSpitzSwivelled{false};
+    std::optional<bool> resetSpitzMmcCard;
     uint64_t powerKeyDownAt{0};
     uint64_t powerPressHeldSince{0};
 
@@ -249,6 +301,7 @@ class SocPXA : public SocGeneric<SocPXA> {
     int HeadphoneDetectPin() const;
     void ApplyHeadphones();
     void ApplySdWriteProtect(bool inserted);
+    void OnSpitzSdPowerChanged();
     bool headphones{false};
     bool sdProtected{false};
 

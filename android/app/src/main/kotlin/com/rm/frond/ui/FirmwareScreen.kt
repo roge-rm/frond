@@ -137,7 +137,7 @@ fun FirmwareScreen(model: HomeModel) {
                                 choosing = false
                                 changeDevice(null)
                             })
-                            for (d in Device.shown.sortedBy { it.label.lowercase() }) {
+                            for (d in Device.shown.filterNot { it.zaurus }.sortedBy { it.label.lowercase() }) {
                                 DropdownMenuItem(text = { Text(d.listLabel) }, onClick = {
                                     choosing = false
                                     changeDevice(d)

@@ -89,12 +89,12 @@ inline SdResult createSdCard(const std::filesystem::path& folder, int32_t device
 // Replaces the card with a copy of a raw image. Images above 128 MiB stream into a candidate.
 inline SdResult loadSdImage(const std::filesystem::path& folder, int32_t deviceType,
                             const std::filesystem::path& source, const frondSdCandidate::Progress& progress = {},
-                            unsigned slot = 0) {
+                            unsigned slot = 0, bool compactFlash = false) {
     struct stat st{};
     if (::stat(source.c_str(), &st) < 0 || !S_ISREG(st.st_mode))
         return frondSdCandidate::fail("read", "Could not read the card image.");
     const uint64_t bytes = uint64_t(st.st_size);
-    if (!sdImageFits(deviceType, bytes)) return frondSdCandidate::fail("size", "sd card image has bad size");
+    if (!(compactFlash ? frondSdFile::validPayloadSize(bytes) : sdImageFits(deviceType, bytes))) return frondSdCandidate::fail("size", "sd card image has bad size");
     if (bytes <= frondSdCandidate::ramMaxBytes) {
         std::vector<uint8_t> image;
         if (!frondMachine::readBytes(source, image) || image.size() != bytes)

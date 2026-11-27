@@ -81,6 +81,10 @@ class SdlEventHandler {
     void Capture(bool on);
     void ReleaseInputs();
     bool OnScreen(int x, int y) const;
+    SDL_Rect ScreenRect() const;
+    int TabletKeyAt(int x, int y) const;
+    bool MovePen(int x, int y);
+    KeyId ControlAt(int x, int y, KeyId* also = nullptr) const;
     int ScreenWidth() const;
     int ScreenHeight() const;
     int RotateX(int x, int y);

@@ -1,5 +1,6 @@
 //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <array>
@@ -19,7 +20,11 @@
 #include "pxa270_KPC.h"
 #include "LibertasCF.h"
 #include "i2cdev_OV9640.h"
+#include "i2cdev_WM8750.h"
 #include "pxa27x_QCI.h"
+#include "soc_PXA.h"
+#include "spitz_nand.h"
+#include "spitz_pcmcia.h"
 
 // clang-format off
 /*
@@ -115,6 +120,22 @@
 
 struct Device {
     Tg50Board *tg50;
+    SpitzNand* spitzNand;
+    SpitzPcmcia* spitzPcmcia;
+    PxaSsp* spitzSsp;
+    PxaI2c* spitzI2c;
+    PxaI2s* spitzI2s;
+    Wm8750* spitzCodec;
+    uint8_t spitzAdcPhase, spitzAdcSample;
+    bool spitzRemoteInserted;
+    SpitzRemoteKey spitzRemoteKey;
+    bool spitzBatteryDoorLocked;
+    void (*spitzTransportObserver)(void*);
+    void* spitzTransportContext;
+    uint16_t spitzTouchX, spitzTouchY, spitzTouchSample;
+    bool spitzPenDown;
+    uint8_t spitzPanelRegisters[8];
+    uint8_t spitzPanelWritten;
     struct WM9712L *wm9712L;
     struct DirectNAND *nand;
     struct Bcm2035 *bcm2035;
@@ -142,9 +163,44 @@ struct Device {
 // the count each DAL reads as the set percent (pxa_battery.h). The charger: the TG50's uc A13 and A14 (tg50BoardSetCharging), the Zire 72's
 // GPIO99 low (DAL dock status 0x2009c344), the TX's GPIO90 high (DAL dock status 0x2009b7d0) and
 // the E2's GPIO9 high (DAL dock status 0x2009c66c).
+namespace {
+constexpr unsigned spitzFatalBattery = 21, spitzBatteryDoor = 90, spitzChargeFull = 101, spitzAcIn = 115;
+constexpr uint16_t spitzDiskLed = 1u << 1, spitzChargeOn = 1u << 3, spitzChargeLed = 1u << 7,
+                   spitzTemperatureOn = 1u << 9;
+
+AudioInputDemand spitzMicDemand(const Device& dev, uint32_t numerator, uint32_t denominator) {
+    constexpr uint16_t micBias = 0x200;
+    return dev.spitzCodec->InputDemand(pxaI2sReceiveEnabled(dev.spitzI2s),
+        spitzPcmciaGpioOutputs(dev.spitzPcmcia, 1) & micBias, numerator, denominator);
+}
+
+uint8_t spitzBatteryCount(const Device& dev) {
+    // MAX1111 counts for 0%, 10%, ... 100%, from the SharpSL battery thresholds.
+    constexpr uint16_t battery[] = {169, 178, 182, 186, 189, 191, 195, 199, 203, 207, 214};
+    constexpr uint16_t charger[] = {181, 181, 185, 189, 192, 194, 198, 202, 206, 210, 214};
+    const auto outputs = spitzPcmciaGpioOutputs(dev.spitzPcmcia, 0);
+    const auto& curve = dev.battery.ExternalPower() && (outputs & spitzChargeOn) ? charger : battery;
+    return BatteryPower::CurveCentivolts(curve, dev.battery.Percent());
+}
+
+void spitzApplyBattery(Device& dev) {
+    const bool ac = dev.battery.ExternalPower();
+    const auto outputs = spitzPcmciaGpioOutputs(dev.spitzPcmcia, 0);
+    pxaGpioSetState(dev.gpio, spitzAcIn, !ac);
+    pxaGpioSetState(dev.gpio, spitzBatteryDoor, dev.spitzBatteryDoorLocked);
+    pxaGpioSetState(dev.gpio, spitzFatalBattery, ac || dev.battery.Percent() != 0);
+    pxaGpioSetState(dev.gpio, spitzChargeFull,
+                   ac && dev.spitzBatteryDoorLocked && (outputs & spitzChargeOn) && dev.battery.Percent() == 100);
+}
+}
+
 static void deviceApplyBattery(Device *dev) {
     const bool charging = dev->battery.ExternalPower();
     const unsigned percent = dev->battery.Percent();
+    if (dev->spitzPcmcia) {
+        spitzApplyBattery(*dev);
+        return;
+    }
     if (dev->tg50) {
         tg50BoardSetBatteryCount(dev->tg50, pxaBatteryCount(PxaBatteryBoard::tg50, percent, charging));
         tg50BoardSetCharging(dev->tg50, charging, dev->battery.ChargeInProgress());
@@ -160,12 +216,33 @@ static void deviceApplyBattery(Device *dev) {
     else if (deviceProfileIsE2Board5(dev->type)) pxaGpioSetState(dev->gpio, 9, charging);
 }
 
-bool deviceBatterySupported(Device *dev) { return dev->tg50 || dev->wm9712L; }
+bool deviceBatterySupported(Device *dev) { return dev->spitzPcmcia || dev->tg50 || dev->wm9712L; }
 
 bool deviceSetBattery(Device *dev, const BatteryPower &battery) {
     if (!deviceBatterySupported(dev)) return false;
     dev->battery = battery;
     deviceApplyBattery(dev);
+    return true;
+}
+
+bool deviceSetSpitzPower(Device* dev, const BatteryPower& battery, bool locked) {
+    if (!dev->spitzPcmcia) return false;
+    dev->spitzBatteryDoorLocked = locked;
+    return deviceSetBattery(dev, battery);
+}
+
+bool deviceSetSpitzBatteryDoorLocked(Device* dev, bool locked) {
+    if (!dev->spitzPcmcia) return false;
+    dev->spitzBatteryDoorLocked = locked;
+    spitzApplyBattery(*dev);
+    return true;
+}
+
+bool deviceGetSpitzPower(const Device* dev, SpitzPowerState& state) {
+    if (!dev->spitzPcmcia) return false;
+    const auto outputs = spitzPcmciaGpioOutputs(dev->spitzPcmcia, 0);
+    state = {dev->battery.Percent(), dev->battery.ExternalPower(), dev->spitzBatteryDoorLocked,
+             bool(outputs & spitzChargeOn), bool(outputs & spitzChargeLed), bool(outputs & spitzDiskLed)};
     return true;
 }
 
@@ -227,6 +304,97 @@ static void devicePrvReschedule(void *ctx, uint32_t task) {
         dev->reschedule.rescheduleCb(dev->reschedule.ctx, RESCHEDULE_TASK_DEVICE_TIER0);
 }
 
+constexpr unsigned spitzAdcSelect = 20;
+constexpr unsigned spitzPenIrq = 11;
+constexpr unsigned spitzRemoteIrq = 13;
+constexpr uint16_t spitzRemotePullup = 1u << 2;
+constexpr unsigned spitzTouchSelect = 14;
+constexpr unsigned spitzPowerKey = 95;
+constexpr unsigned spitzHingeA = 97;
+constexpr unsigned spitzHingeB = 96;
+constexpr unsigned spitzPanelSelect = 53;
+
+enum SpitzPanelRegister { panelResolution = 0, panelDuty = 2, panelPower = 4, panelPicture = 6 };
+const auto spitzAdcChunk = ChunkType::spitzRegulator + 1;
+
+static void spitzUpdateRemoteIrq(Device& board) {
+    const bool pullup = spitzPcmciaGpioOutputs(board.spitzPcmcia, 1) & spitzRemotePullup;
+    // An idle CE-RH2 holds the interrupt line low with the pull-up on.
+    const bool idleRemote = board.spitzRemoteInserted && board.spitzRemoteKey == SpitzRemoteKey::none;
+    pxaGpioSetState(board.gpio, spitzRemoteIrq, pullup && !idleRemote);
+}
+
+bool deviceSpitzRemoteInserted(const Device* dev) { return dev->spitzRemoteInserted; }
+
+void deviceSetSpitzRemote(Device* dev, bool inserted) {
+    if (dev->spitzRemoteInserted == inserted) return;
+    dev->spitzRemoteInserted = inserted;
+    dev->spitzRemoteKey = SpitzRemoteKey::none;
+    spitzUpdateRemoteIrq(*dev);
+}
+
+bool deviceSetSpitzRemoteKey(Device* dev, SpitzRemoteKey key, bool down) {
+    if (!dev->spitzRemoteInserted) return false;
+    if (down) dev->spitzRemoteKey = key;
+    else if (dev->spitzRemoteKey == key) dev->spitzRemoteKey = SpitzRemoteKey::none;
+    spitzUpdateRemoteIrq(*dev);
+    return true;
+}
+
+static uint8_t spitzRemoteSample(const Device& board) {
+    // Each value sits inside the corresponding band in the Sharp driver.
+    constexpr uint8_t ladder[] = {255, 220, 185, 151, 119, 89, 59, 27};
+    return board.spitzRemoteInserted ? ladder[unsigned(board.spitzRemoteKey)] : 0;
+}
+
+static uint_fast16_t spitzSspTransfer(void* context, uint_fast8_t bits, uint_fast16_t value) {
+    auto& board = *static_cast<Device*>(context);
+    if (bits == 12 && pxaGpioGetState(board.gpio, spitzTouchSelect) == PxaGpioStateLow) {
+        // Sharp clocks a command and reads the preceding ADS7846 conversion in each SSP word.
+        const auto previous = board.spitzTouchSample;
+        if (!board.spitzPenDown || !(value & 0x80)) {
+            board.spitzTouchSample = 0;
+        } else {
+            switch ((value >> 4) & 7) {
+                case 1: board.spitzTouchSample = board.spitzTouchY; break;
+                case 3: board.spitzTouchSample = 1000; break;  // Z1
+                case 4: board.spitzTouchSample = 1300; break;  // Z2
+                case 5: board.spitzTouchSample = board.spitzTouchX; break;
+                default: board.spitzTouchSample = 0; break;
+            }
+        }
+        return previous;
+    }
+
+    if (bits == 8 && pxaGpioGetState(board.gpio, spitzPanelSelect) == PxaGpioStateLow) {
+        const unsigned address = (value >> 5) & 7;
+        board.spitzPanelRegisters[address] = value & 31;
+        board.spitzPanelWritten |= 1u << address;
+    }
+
+    if (bits != 8 || pxaGpioGetState(board.gpio, spitzAdcSelect) != PxaGpioStateLow) return 0;
+
+    switch (board.spitzAdcPhase) {
+        case 1:
+            board.spitzAdcPhase = 2;
+            return board.spitzAdcSample >> 2;
+        case 2:
+            board.spitzAdcPhase = 0;
+            return (board.spitzAdcSample & 3) << 6;
+        default:
+            if (value & 0x80) {
+                const auto outputs = spitzPcmciaGpioOutputs(board.spitzPcmcia, 0);
+                const uint8_t samples[] = {spitzRemoteSample(board), spitzBatteryCount(board),
+                    uint8_t(outputs & spitzTemperatureOn ? 210 : 0),
+                    uint8_t(board.battery.ExternalPower() ? 128 : 0)};
+                const unsigned channel = ((value >> 6) & 1) | ((value >> 4) & 2);
+                board.spitzAdcSample = samples[channel];
+                board.spitzAdcPhase = 1;
+            }
+            return 0;
+    }
+}
+
 struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
                            struct Reschedule reschedule, struct GetEmuTime getTime,
                            struct Keypad *kp, struct VSD *vsd, uint8_t *nandContent,
@@ -255,6 +423,59 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
     struct Reschedule deviceReschedule = {.rescheduleCb = devicePrvReschedule, .ctx = dev};
 
     dev->reschedule = reschedule;
+
+    if (type == deviceTypeSpitz) {
+        dev->spitzNand = spitzNandInit(sp->mem, deviceReschedule, nandContent, nandSize, pageBuffer);
+        dev->spitzPcmcia = spitzPcmciaInit(sp->mem, sp->gpio);
+        dev->spitzSsp = sp->ssp2;
+        dev->spitzI2c = sp->i2c;
+        dev->spitzI2s = sp->i2s;
+        dev->spitzCodec = new Wm8750;
+        if (!dev->spitzCodec->Attach(dev->spitzI2c)) ERR("cannot attach the Spitz audio codec");
+        dev->spitzBatteryDoorLocked = true;
+        if (!pxaSspAddClient(dev->spitzSsp, spitzSspTransfer, dev))
+            ERR("cannot attach the Spitz SSP devices");
+        pxaGpioSetNotif(sp->gpio, spitzAdcSelect, [](void* context, uint32_t, bool, bool high) {
+            if (high) static_cast<Device*>(context)->spitzAdcPhase = 0;
+        }, dev);
+        if (!dev->spitzNand || !dev->spitzPcmcia || !keypadAddGpioKey(kp, keyIdPower, spitzPowerKey, true) ||
+            !keypadAddGpioKey(kp, keyIdHotSync, 16, true))
+            ERR("cannot initialise Spitz board");
+        spitzPcmciaObserveGpioOutputs(dev->spitzPcmcia, [](void* context, unsigned slot) {
+            auto& board = *static_cast<Device*>(context);
+            if (slot == 0) spitzApplyBattery(board);
+            else {
+                spitzUpdateRemoteIrq(board);
+                if (board.spitzTransportObserver) board.spitzTransportObserver(board.spitzTransportContext);
+            }
+        }, dev);
+        // Spitz drives 11 strobes high and reads seven sense lines with pull-downs.
+        constexpr int8_t strobes[] = {88, 23, 24, 25, 26, 27, 52, 103, 107, 108, 114};
+        constexpr int8_t senses[] = {12, 17, 91, 34, 36, 38, 39};
+        for (unsigned i = 0; i < std::size(strobes); ++i) keypadDefineRow(kp, i, strobes[i]);
+        for (unsigned i = 0; i < std::size(senses); ++i) keypadDefineCol(kp, i, senses[i]);
+        for (unsigned sense = 0; sense < std::size(senses); ++sense) {
+            for (unsigned strobe = 0; strobe < std::size(strobes); ++strobe) {
+                const KeyId key = spitzKey(sense, strobe);
+                if (key != keyInvalid && !keypadAddMatrixKey(kp, key, strobe, sense))
+                    ERR("cannot wire a Spitz matrix key");
+            }
+        }
+        keypadSetWakeGpio(kp, 0, spitzPowerKey);
+        deviceSetSpitzLid(dev, false, false);
+        pxaI2sAttach(sp->i2s, dev, [](void* context, uint32_t frame, bool playing, bool msb,
+                                      uint32_t numerator, uint32_t denominator) -> uint32_t {
+            const auto* board = static_cast<Device*>(context);
+            board->spitzCodec->Output(frame, playing, msb, numerator, denominator,
+                                       pxaGpioInputLevel(board->gpio, 116),
+                                       spitzPcmciaGpioOutputs(board->spitzPcmcia, 0));
+            return board->spitzCodec->InputFrame(spitzMicDemand(*board, numerator, denominator));
+        }, [](void* context) { static_cast<Device*>(context)->spitzCodec->Boundary(); });
+        sp->nand = spitzNandGetNand(dev->spitzNand);
+        for (unsigned pin : {1u, 9u, spitzPenIrq, spitzUsbDeviceRole, 83u, 84u, 94u})
+            pxaGpioSetState(sp->gpio, pin, true);
+        return dev;
+    }
 
     if (type == deviceTypeTG50) {
         dev->tg50 = tg50BoardSetup(sp, kp,reschedule,getTime);
@@ -413,16 +634,32 @@ void devicePeriodic(struct Device *dev, uint32_t tier) {
         if (tier == DEVICE_PERIODIC_TIER0) tg50BoardPeriodic(dev->tg50);
         return;
     }
+    if (dev->spitzNand) {
+        if (tier == DEVICE_PERIODIC_TIER0) nandPeriodic(spitzNandGetNand(dev->spitzNand));
+        return;
+    }
     if (tier == DEVICE_PERIODIC_TIER0) {if(dev->nand)directNandPeriodic(dev->nand);
 if(dev->qci)pxaQciPeriodic(dev->qci);
 if(dev->wifi)dev->wifi->Tick();
 }
 }
 
-void devicePcmPeriodic(struct Device *dev) { if (!dev->tg50) wm9712Lperiodic(dev->wm9712L); }
+void devicePcmPeriodic(struct Device *dev) { if (dev->wm9712L) wm9712Lperiodic(dev->wm9712L); }
 
 void deviceTouch(struct Device *dev, int x, int y) {
     if (dev->tg50) { tg50BoardTouch(dev->tg50, x, y); return; }
+    if (dev->spitzNand) {
+        dev->spitzPenDown = x >= 0 && y >= 0;
+        if (dev->spitzPenDown) {
+            // Panel X increases down the scanout. Panel Y decreases toward the right.
+            const int panelY = y == spitzTabletKeyY ? y : std::min(y, 639);
+            dev->spitzTouchX = 250 + 3500 * panelY / 639;
+            dev->spitzTouchY = 3750 - 3500 * std::min(x, 479) / 479;
+        }
+        pxaGpioSetState(dev->gpio, spitzPenIrq, !dev->spitzPenDown);
+        return;
+    }
+    if (!dev->wm9712L) return;
     if (dev->type == DeviceType5::deviceTypeTX) {
         if (x < 0 || y < 0) {
             wm9712LsetPen(dev->wm9712L, -1, -1, 0);
@@ -480,6 +717,8 @@ void deviceKey(struct Device *dev, uint32_t key, bool down) {
 
 bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
     if (dev->tg50) return tier==DEVICE_PERIODIC_TIER0&&tg50BoardTaskRequired(dev->tg50);
+    if (dev->spitzNand)
+        return tier == DEVICE_PERIODIC_TIER0 && nandTaskRequired(spitzNandGetNand(dev->spitzNand));
     if (tier == DEVICE_PERIODIC_TIER0) {
         return (dev->nand && directNandTaskRequired(dev->nand))
             || (dev->qci && pxaQciTaskRequired(dev->qci))
@@ -492,25 +731,112 @@ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
 
 void deviceSetAudioQueue(struct Device *dev, struct AudioQueue *audioQueue) {
     if (dev->tg50) { tg50BoardSetAudioQueue(dev->tg50, audioQueue); return; }
-    wm9712LsetAudioQueue(dev->wm9712L, audioQueue);
+    if (dev->spitzCodec) dev->spitzCodec->SetQueue(audioQueue);
+    if (dev->wm9712L) wm9712LsetAudioQueue(dev->wm9712L, audioQueue);
 }
 
 bool deviceI2sConnected() { return false; }
 
 void deviceSetSdCardInserted(struct Device *dev, bool inserted) {
     if (dev->tg50) return;
-    pxaGpioSetState(dev->gpio, dev->type == DeviceType5::deviceTypeTX ||
-                    dev->type == DeviceType5::deviceTypeZire72 ? 14 : 10, !inserted);
+    const unsigned pin = dev->spitzNand ? 9 : (dev->type == deviceTypeTX ||
+                         dev->type == deviceTypeZire72 ? 14 : 10);
+    pxaGpioSetState(dev->gpio, pin, !inserted);
 }
 
 bool devicePanelEnabled(Device *dev) {
     return !dev->tg50 || tg50BoardPanelEnabled(dev->tg50);
 }
+uint8_t deviceSpitzPanelBrightness(const Device* dev) {
+    constexpr uint16_t backlightOn = 1u << 7, backlightCont = 1u << 6;
+    constexpr uint8_t panelRails = 7, picturePowerDown = 4;
+    const auto& regs = dev->spitzPanelRegisters;
+    const uint8_t written = dev->spitzPanelWritten;
+    if (((written & (1u << panelPower)) && (regs[panelPower] & panelRails) != panelRails) ||
+        (regs[panelPicture] & picturePowerDown)) return 0;
+
+    const uint16_t pins = spitzPcmciaGpioOutputs(dev->spitzPcmcia, 1);
+    // Early boot and Z1 checkpoints can lack the timing generator's backlight write.
+    if (!(written & (1u << panelDuty))) return 255;
+    if (!(pins & backlightOn)) return 0;
+
+    // The active-low CONT pin selects the high range. The stock steps skip duty values 17..32.
+    const unsigned duty = regs[panelDuty] + (pins & backlightCont ? 0 : 16);
+    return std::min(duty, 32u) * 255 / 32;
+}
+
+bool deviceSpitzPanelQvga(const Device* dev) {
+    return dev->spitzPanelRegisters[panelResolution] & 1;
+}
+
 bool deviceHoldSwitchOn(Device *dev) {
     return dev->tg50 && tg50BoardHoldSwitchOn(dev->tg50);
 }
 
+void deviceSetSpitzLid(Device* dev, bool closed, bool swivelled) {
+    pxaGpioSetState(dev->gpio, spitzHingeA, closed);
+    pxaGpioSetState(dev->gpio, spitzHingeB, closed || swivelled);
+}
+
+bool deviceSpitzLidClosed(const Device* dev) {
+    return pxaGpioInputLevel(dev->gpio, spitzHingeA);
+}
+
+bool deviceSpitzSwivelled(const Device* dev) {
+    return !deviceSpitzLidClosed(dev) && pxaGpioInputLevel(dev->gpio, spitzHingeB);
+}
+
 enum DeviceType5 deviceGetType(struct Device *dev) { return dev->type; }
+
+bool deviceMountMicrodrive(Device* dev, const char* path, bool writable, const char* mediaId) {
+    return dev->spitzPcmcia && spitzPcmciaMount(dev->spitzPcmcia, path, writable, mediaId);
+}
+
+bool deviceFlushMicrodrive(const Device* dev) {
+    return !dev->spitzPcmcia || spitzPcmciaFlushMicrodrive(dev->spitzPcmcia);
+}
+
+bool deviceForEachMicrodriveChange(const Device* dev, const CardBacking::OverlayFn& fn) {
+    return !dev->spitzPcmcia || spitzPcmciaForEachMicrodriveChange(dev->spitzPcmcia, fn);
+}
+
+bool deviceWriteMicrodriveBase(Device* dev, uint64_t offset, const void* data, size_t count) {
+    return dev->spitzPcmcia && spitzPcmciaWriteMicrodriveBase(dev->spitzPcmcia, offset, data, count);
+}
+
+bool deviceResetMicrodriveOverlay(Device* dev) {
+    return !dev->spitzPcmcia || spitzPcmciaResetMicrodriveOverlay(dev->spitzPcmcia);
+}
+
+SpitzPcmcia* deviceSpitzPcmcia(Device* dev) { return dev->spitzPcmcia; }
+
+bool deviceInsertCompactFlash(Device* dev, bool writeProtected) {
+    return dev->spitzPcmcia && spitzPcmciaInsertCompactFlash(dev->spitzPcmcia, writeProtected);
+}
+
+void deviceEjectCompactFlash(Device* dev) {
+    if (dev->spitzPcmcia) spitzPcmciaEjectCompactFlash(dev->spitzPcmcia);
+}
+
+bool deviceCompactFlashInserted(const Device* dev) {
+    return dev->spitzPcmcia && spitzPcmciaCompactFlashInserted(dev->spitzPcmcia);
+}
+
+void deviceSetCompactFlashWriteProtect(Device* dev, bool locked) {
+    if (dev->spitzPcmcia) spitzPcmciaSetCompactFlashWriteProtect(dev->spitzPcmcia, locked);
+}
+
+void deviceSetCompactFlashSwapOnLoad(Device* dev, bool allow) {
+    if (dev->spitzPcmcia) spitzPcmciaSetCompactFlashSwapOnLoad(dev->spitzPcmcia, allow);
+}
+
+bool deviceSpitzSdPowered(const Device* dev) {
+    return dev->spitzPcmcia && spitzPcmciaSdPowered(dev->spitzPcmcia);
+}
+
+void deviceObserveSpitzSdPower(Device* dev, void (*callback)(void*), void* context) {
+    if (dev->spitzPcmcia) spitzPcmciaObserveSdPower(dev->spitzPcmcia, callback, context);
+}
 
 template <typename T>
 void deviceSave(struct Device *dev, T &savestate) {
@@ -520,6 +846,30 @@ void deviceSave(struct Device *dev, T &savestate) {
         if (!chunk) ERR("cannot allocate Bluetooth address state");
         SaveChunkHelper helper(*chunk);
         helper.DoBuffer(dev->bluetoothAddress.data(), dev->bluetoothAddress.size());
+    }
+    if (dev->spitzNand) {
+        spitzNandSave(dev->spitzNand, savestate);
+        spitzPcmciaSave(dev->spitzPcmcia, savestate);
+        dev->spitzCodec->Save(savestate);
+        auto chunk = savestate.GetChunk(spitzAdcChunk, 0);
+        if (!chunk) ERR("cannot allocate Spitz ADC state");
+        SaveChunkHelper helper(*chunk);
+        helper.Do(typename decltype(helper)::Pack8() << dev->spitzAdcPhase << dev->spitzAdcSample);
+        auto touch = savestate.GetChunk(ChunkType::spitzTouch, 0);
+        if (!touch) ERR("cannot allocate Spitz touch state");
+        SaveChunkHelper touchHelper(*touch);
+        touchHelper.Do16(dev->spitzTouchSample);
+
+        auto remote = savestate.GetChunk(ChunkType::spitzRemote, 0);
+        if (!remote) ERR("cannot allocate Spitz remote state");
+        SaveChunkHelper(*remote).DoBool(dev->spitzRemoteInserted);
+
+        auto panel = savestate.GetChunk(ChunkType::spitzPanel, 0);
+        if (!panel) ERR("cannot allocate Spitz panel state");
+        SaveChunkHelper panelHelper(*panel);
+        panelHelper.DoBuffer(dev->spitzPanelRegisters, sizeof(dev->spitzPanelRegisters))
+            .Do8(dev->spitzPanelWritten);
+        return;
     }
     if (dev->tg50) { tg50BoardSave(dev->tg50, savestate); return; }
     if (dev->type == DeviceType5::deviceTypeTX) {
@@ -538,12 +888,75 @@ void deviceSave(struct Device *dev, T &savestate) {
 
 std::function<void()> deviceCaptureInput(struct Device *dev) {
     if (dev->tg50) return tg50BoardCaptureInput(dev->tg50);
+    if (dev->spitzNand) {
+        const auto x = dev->spitzTouchX, y = dev->spitzTouchY;
+        const bool down = dev->spitzPenDown;
+        const auto remoteKey = dev->spitzRemoteKey;
+        return [dev, x, y, down, remoteKey] {
+            dev->spitzRemoteKey = remoteKey;
+            dev->spitzTouchX = x;
+            dev->spitzTouchY = y;
+            dev->spitzPenDown = down;
+            pxaGpioSetState(dev->gpio, spitzPenIrq, !down);
+        };
+    }
     auto touch=wm9712CaptureInput(dev->wm9712L);auto radio=bcm2035CaptureInput(dev->bcm2035);
     return [touch,radio]{touch();if(radio)radio();};
 }
 
 template <typename T>
 void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
+    if (dev->spitzNand) {
+        spitzNandLoad(dev->spitzNand, loader);
+        spitzPcmciaLoad(dev->spitzPcmcia, loader, dev->resetting);
+        dev->spitzCodec->Load(loader);
+        if (loader.HasChunk(spitzAdcChunk)) {
+            auto chunk = loader.GetChunkOrFail(spitzAdcChunk, 0, "Spitz ADC");
+            if (!chunk) return;
+            LoadChunkHelper helper(*chunk);
+            helper.Do(typename decltype(helper)::Pack8() << dev->spitzAdcPhase << dev->spitzAdcSample);
+            if (dev->spitzAdcPhase > 2) loader.NotifyError();
+        } else {
+            dev->spitzAdcPhase = dev->spitzAdcSample = 0;
+        }
+        dev->spitzTouchSample = 0;
+        if (loader.HasChunk(ChunkType::spitzTouch)) {
+            auto touch = loader.GetChunkOrFail(ChunkType::spitzTouch, 0, "Spitz touch");
+            if (!touch) return;
+            LoadChunkHelper touchHelper(*touch);
+            touchHelper.Do16(dev->spitzTouchSample);
+            if (touch->HasError() || dev->spitzTouchSample > 4095) loader.NotifyError();
+        }
+        memset(dev->spitzPanelRegisters, 0, sizeof(dev->spitzPanelRegisters));
+        dev->spitzPanelWritten = 0;
+        if (loader.HasChunk(ChunkType::spitzPanel)) {
+            auto panel = loader.GetChunkOrFail(ChunkType::spitzPanel, 0, "Spitz panel");
+            if (!panel) return;
+            LoadChunkHelper panelHelper(*panel);
+            panelHelper.DoBuffer(dev->spitzPanelRegisters, sizeof(dev->spitzPanelRegisters))
+                .Do8(dev->spitzPanelWritten);
+            for (uint8_t reg : dev->spitzPanelRegisters)
+                if (reg > 31) loader.NotifyError();
+            if (panel->HasError()) loader.NotifyError();
+        }
+        if (!dev->resetting) {
+            dev->spitzRemoteInserted = false;
+            if (loader.HasChunk(ChunkType::spitzRemote)) {
+                auto remote = loader.GetChunkOrFail(ChunkType::spitzRemote, 0, "Spitz remote");
+                if (!remote) return;
+                LoadChunkHelper(*remote).DoBool(dev->spitzRemoteInserted);
+                if (remote->HasError()) loader.NotifyError();
+            }
+        }
+        if (!preserveInput || !dev->spitzRemoteInserted) dev->spitzRemoteKey = SpitzRemoteKey::none;
+        spitzUpdateRemoteIrq(*dev);
+        if (!preserveInput) dev->spitzPenDown = false;
+        pxaGpioSetState(dev->gpio, spitzPenIrq, !dev->spitzPenDown);
+        // GPIO90 retains the door position. Z1 kept it pulled high.
+        if (!dev->resetting) dev->spitzBatteryDoorLocked = pxaGpioInputLevel(dev->gpio, spitzBatteryDoor);
+        spitzApplyBattery(*dev);
+        return;
+    }
     // Sessions from before the address was kept have no chunk, and an unused radio saves
     // zeros; both keep the current address.
     if (deviceHasBluetooth(dev) && !dev->resetting && loader.HasChunk(ChunkType::bluetoothAddress)) {
@@ -618,9 +1031,19 @@ void deviceStopBluetooth(Device* dev){
 }
 
 void deviceDestroy(Device *dev) {
-    // Existing boards keep their lifetime policy; TG50 unregisters its new contexts.
-    if (!dev || !dev->tg50) return;
-    tg50BoardDestroy(dev->tg50);
+    if (!dev) return;
+    if (dev->spitzNand) {
+        pxaSspRemoveClient(dev->spitzSsp, dev);
+        pxaI2cDeviceRemove(dev->spitzI2c, dev->spitzCodec);
+        delete dev->spitzCodec;
+        pxaGpioSetNotif(dev->gpio, spitzAdcSelect, nullptr, nullptr);
+        spitzPcmciaDeinit(dev->spitzPcmcia);
+        spitzNandDestroy(dev->spitzNand);
+    } else if (dev->tg50) {
+        tg50BoardDestroy(dev->tg50);
+    } else {
+        return;
+    }
     free(dev);
 }
 
@@ -638,8 +1061,18 @@ void deviceAudioSleepReset(Device *dev) { if (dev->tg50) tg50BoardAudioSleepRese
 bool deviceTg50IrPowerEnabled(Device *dev) {
     return dev && dev->tg50 && tg50BoardIrPowerEnabled(dev->tg50);
 }
+bool deviceSpitzIrPowerEnabled(const Device* dev) {
+    // SCOOP #2 PA11 drives the transceiver's active-high shutdown input.
+    constexpr uint16_t irShutdown = 1u << 1;
+    return dev && dev->spitzPcmcia && spitzPcmciaGpioDrivenLow(dev->spitzPcmcia, 1, irShutdown);
+}
+
 void deviceSetTransportObserver(Device *dev, void (*observer)(void *), void *context) {
     if (dev && dev->tg50) tg50BoardSetTransportObserver(dev->tg50, observer, context);
+    if (dev && dev->spitzPcmcia) {
+        dev->spitzTransportObserver = observer;
+        dev->spitzTransportContext = context;
+    }
 }
 
 void deviceTg50SetUsbCable(Device *dev, bool connected) {
@@ -663,16 +1096,19 @@ MemoryStickController* deviceMemoryStick(Device* d){return d&&d->tg50?tg50BoardM
 
 // The TG50's AK4534 or the WM9712L; the WM9712L ignores these unless its ADC model is on.
 void deviceSetInputSource(Device *d, const AudioInputSource *s) {
-    if (d->tg50) tg50BoardSetInputSource(d->tg50, s);
+    if (d->spitzCodec) d->spitzCodec->SetInputSource(s);
+    else if (d->tg50) tg50BoardSetInputSource(d->tg50, s);
     else if (d->wm9712L) wm9712LSetInputSource(d->wm9712L, s);
 }
 void deviceFenceInput(Device *d, bool fence) {
-    if (d->tg50) tg50BoardFenceInput(d->tg50, fence);
+    if (d->spitzCodec) d->spitzCodec->FenceInput(fence);
+    else if (d->tg50) tg50BoardFenceInput(d->tg50, fence);
     else if (d->wm9712L) wm9712LFenceInput(d->wm9712L, fence);
     if (d->qci) pxaQciFenceSource(d->qci, fence);
 }
 void deviceDisarmInput(Device *d) {
-    if (d->tg50) tg50BoardDisarmInput(d->tg50);
+    if (d->spitzCodec) d->spitzCodec->SetInputSource(nullptr);
+    else if (d->tg50) tg50BoardDisarmInput(d->tg50);
     else if (d->wm9712L) wm9712LDisarmInput(d->wm9712L);
     if (d->qci) pxaQciDisarmSource(d->qci);
 }
@@ -686,6 +1122,11 @@ bool deviceHasCamera(Device *d) { return d && d->qci; }
 void deviceCameraSleepReset(Device *d) { if (d->qci) pxaQciReset(d->qci); }
 
 AudioInputDemand deviceInputDemand(Device *d) {
+    if (d->spitzCodec) {
+        uint32_t numerator{}, denominator{};
+        pxaI2sGetRate(d->spitzI2s, numerator, denominator);
+        return spitzMicDemand(*d, numerator, denominator);
+    }
     if (d->tg50) return tg50BoardInputDemand(d->tg50);
     return d->wm9712L ? wm9712LInputDemand(d->wm9712L) : AudioInputDemand{};
 }

@@ -7,6 +7,7 @@
 #include <csignal>
 #include <unistd.h>
 
+#include <charconv>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -79,6 +80,7 @@ void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp);
 #include "soc_IMX1.h"
 #include "soc_S3C2442.h"
 #include "rx1950_nand_image.h"
+#include "spitz_nand.h"
 #include "CPU.h"
 #include "MachineSession.h"
 #include "MsProCards.h"
@@ -130,6 +132,9 @@ struct Options {
     optional<string> serial;
     optional<string> infrared;
     optional<string> usb;
+    bool zaurusUsbProbe, zaurusUsbStorageProbe, zaurusUsbNetworkProbe;
+    optional<vector<string>> zaurusUsbWriteCheck;
+    optional<unsigned> zaurusPcLinkFiles;
     bool syncNetwork{false};
     optional<string> syncFolder, syncProfile, syncMachine, syncUser;  // --sync-*
     optional<string> bluetooth;
@@ -139,7 +144,13 @@ struct Options {
     bool cardSwap;                  // the frontend changed the card files while the machine was off
     optional<string> cardIdentity;  // the card put in: 64 hex digits
     bool cardProtected;
-    bool fastEngine;  // --engine fast
+    optional<string> engine;
+    optional<string> spitzProm;
+    optional<string> microdrive;
+    bool microdriveWritable;
+    optional<string> compactFlash;
+    bool compactFlashProtected;
+    bool spitzMmc;
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
     optional<string> controllerMap;  // --controller-map
@@ -150,8 +161,6 @@ struct Options {
 
 namespace {
 
-// Set when --engine fast was asked for and this build has no Fast engine for the ARM9 machines.
-bool gFastEngineMissing = false;
     // The session has a Memory Stick Pro, opened into the SD card store by applySession.
     bool msProCard = false;
     // Under --card-swap, a slot that holds another card than the one saved, the same card changed
@@ -159,8 +168,10 @@ bool gFastEngineMissing = false;
     // run swapInsertDelay awake, as a hot swap would. The stick's write protection is set from
     // `msProtect`.
     bool sdSwapped = false, msSwapped = false, msProtect = false;
+    bool sdInsertOnSwap = true;
     // The session's second SD card (the Zodiac's slot 2) was saved in its slot.
     bool secondCardIn = false;
+    bool cfIn = false, cfSwapped = false;
     // A v9 session's NAND, attached from nand.frondnand once the SoC is made. A NAND in RAM came
     // from malloc (a session) or new[] (--nand or a blank one), freed that way once a save moves
     // it onto a file.
@@ -224,17 +235,16 @@ bool gFastEngineMissing = false;
 
         atexit(SDL_Quit);
 
+        const auto size = deviceControlSize(controls, windowWidth(displayConfiguration, rotation),
+                                            windowHeight(displayConfiguration, rotation), controlView);
         SDL_Rect usable{};
         if (scale == 0) {
             scale = SDL_GetDisplayUsableBounds(0, &usable) == 0
-                ? fittingWindowScale(deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
-                                     windowHeight(displayConfiguration, rotation) + deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView),
-                                     usable.w, usable.h)
+                ? fittingWindowScale(size.x, size.y, usable.w, usable.h)
                 : 1.f;
         }
         auto window = SDL_CreateWindow(title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                                       scale * deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
-                                       scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView)),
+                                       scale * size.x, scale * size.y,
                                        SDL_WINDOW_ALLOW_HIGHDPI | (resizable ? SDL_WINDOW_RESIZABLE : 0) |
                                        (hidden ? SDL_WINDOW_HIDDEN : 0));
 
@@ -243,8 +253,9 @@ bool gFastEngineMissing = false;
 
     void sdlResizeWindow(SDL_Window* window, DisplayConfiguration& displayConfiguration, float scale,
                          Rotation rotation, const DeviceControlProfile& controls, const DeviceControlView& controlView) {
-        SDL_SetWindowSize(window, scale * deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
-                          scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView)));
+        const auto size = deviceControlSize(controls, windowWidth(displayConfiguration, rotation),
+                                            windowHeight(displayConfiguration, rotation), controlView);
+        SDL_SetWindowSize(window, scale * size.x, scale * size.y);
     }
 
     void copy(Buffer& buffer, size_t size, const void* data) {
@@ -284,7 +295,16 @@ bool gFastEngineMissing = false;
             cerr << "separate NAND image cannot be used with session file" << endl;
             return false;
         }
-        sessionAnyFirmware = std::string(contents.metadata.begin(), contents.metadata.end()) == frondNative::anyFirmwareRecord;
+        const std::string metadata(contents.metadata.begin(), contents.metadata.end());
+        sessionAnyFirmware = metadata == frondNative::anyFirmwareRecord;
+        if (sessionDevice == deviceTypeSpitz) {
+            const std::string_view prefix(frondNative::microdriveRecord);
+            if (metadata.compare(0, prefix.size(), prefix) == 0) {
+                const auto token = metadata.substr(prefix.size());
+                if (!frondNative::validMicrodriveToken(token)) return false;
+                frondNative::microdriveGeneration() = token;
+            }
+        }
         ramSize = contents.ramSize;
         if (ramSize == 0) ramSize = ramSizeFromMemorySize(contents.memory.size());
         displayMode = static_cast<DisplayMode>(contents.displayMode);
@@ -362,16 +382,33 @@ bool gFastEngineMissing = false;
             secondCardIn = media.inserted;
             frondNative::slotCards().sd2Protected = media.writeProtected;
         }
+        for (const auto& media : contents.media) {
+            if (media.kind != frondMachine::kindCf) continue;
+            if (profile->deviceType != deviceTypeSpitz || options.compactFlash ||
+                !frondNative::attachFolderMedia(contents, folder, frondMachine::kindCf)) {
+                cerr << "session CF card is unsupported, missing or unreadable" << endl;
+                return false;
+            }
+            cfIn = media.inserted;
+            frondNative::slotCards().cfProtected = media.writeProtected;
+        }
+        cfSwapped = contents.cfSwapped;
+        if (cfSwapped && std::filesystem::exists(folder / frondMachine::cfSibling))
+            frondNative::noteTakenOut(frondMachine::cfSibling, true);
         // What the slots carry outside the card store, kept to the next save.
         for (const auto& media : contents.media) {
-            if (media.kind == frondMachine::kindSd) frondNative::slotCards().sdProtected = media.writeProtected;
+            if (media.kind == frondMachine::kindSd) {
+                frondNative::slotCards().sdProtected = media.writeProtected;
+                sdInsertOnSwap = media.inserted;
+            }
             if (media.kind == frondMachine::kindMs) frondNative::msOpened(media.identity, media.contentGeneration);
             if (media.kind == frondMachine::kindMs || media.kind == frondMachine::kindMsPro) msProtect = media.writeProtected;
         }
         sdSwapped = contents.sdSwapped;
         msSwapped = contents.msSwapped;
         romInfo = RomInfo5(nor.data, nor.size);
-        if (profile->detect != DeviceDetect5::norSize && romInfo.GetDeviceType() != sessionDevice) {
+        if (sessionDevice != deviceTypeSpitz && profile->detect != DeviceDetect5::norSize &&
+            romInfo.GetDeviceType() != sessionDevice) {
             cerr << "session device profile does not match ROM" << endl;
             return false;
         }
@@ -434,6 +471,41 @@ bool gFastEngineMissing = false;
             }
             cerr << "invalid session image" << endl;
             return false;
+        } else if (requestedDevice == deviceTypeSpitz) {
+            if (options.nand) {
+                cerr << "Give the Zaurus NAND backup as the main input file" << endl;
+                return false;
+            }
+            vector<uint8_t> flash;
+            if (norOrSessionLen == spitzNandRawSize) {
+                flash.assign(norOrSessionData.get(), norOrSessionData.get() + norOrSessionLen);
+            } else if (!spitzImportDbk(norOrSessionData.get(), norOrSessionLen, flash)) {
+                cerr << "Expected an SL-C3000 SYSTC300.DBK or raw NAND image with spare bytes" << endl;
+                return false;
+            }
+
+            unique_ptr<uint8_t[]> prom;
+            size_t promSize = deviceProfile5(deviceTypeSpitz)->norSize;
+            if (options.spitzProm) {
+                if (!util::ReadFile(*options.spitzProm, prom, promSize)) return false;
+                if (promSize != deviceProfile5(deviceTypeSpitz)->norSize ||
+                    memcmp(prom.get(), "\xff\xff\xff\xff", 4) == 0) {
+                    cerr << "Expected an 8 MiB SL-C3000 CS0 boot PROM" << endl;
+                    return false;
+                }
+            } else {
+                vector<uint8_t> kernel;
+                if (!spitzExtractKernel(flash.data(), flash.size(), kernel)) {
+                    cerr << "The NAND image does not contain a stock Sharp zImage" << endl;
+                    return false;
+                }
+                prom = make_unique<uint8_t[]>(promSize);
+                memset(prom.get(), 0xff, promSize);
+            }
+            nor = {promSize, prom.release()};
+            nand = {flash.size(), new uint8_t[flash.size()]};
+            memcpy(nand.data, flash.data(), flash.size());
+            return true;
         } else {
             romInfo = RomInfo5(norOrSessionData.get(), norOrSessionLen);
             // Devices without a card header are only started by name.
@@ -470,6 +542,11 @@ bool gFastEngineMissing = false;
     }
 
     bool run(const Options& requested) {
+        frondNative::managedMicrodriveFolder().clear();
+        frondNative::microdriveGeneration().clear();
+        cfIn = cfSwapped = false;
+        sdInsertOnSwap = true;
+        frondNative::slotCards().cfProtected = false;
         Options options = requested;
         if (!options.cardSwap && (options.cardIdentity || options.cardProtected)) {
             cerr << "--card-identity and --card-protected go with --card-swap" << endl;
@@ -517,6 +594,36 @@ bool gFastEngineMissing = false;
         const bool infraredPrinter = options.infrared && *options.infrared == "printer";
         if (options.infrared && !infraredPhone && !infraredPrinter && (!HostSerial::Parse(*options.infrared,infraredConfig) || infraredConfig.kind==HostSerial::Kind::syncManager)) {
             cerr << "--irda must be off, pty, tcp:PORT, unix:PATH, phone or printer" << endl; return false;
+        }
+        const unsigned zaurusUsbProbe = options.zaurusUsbProbe + options.zaurusUsbStorageProbe +
+                                        options.zaurusUsbNetworkProbe + options.zaurusUsbWriteCheck.has_value() +
+                                        options.zaurusPcLinkFiles.has_value();
+        if (options.zaurusPcLinkFiles && (!*options.zaurusPcLinkFiles || *options.zaurusPcLinkFiles > UINT16_MAX)) {
+            cerr << "--zaurus-pc-link-files needs a TCP port from 1 to 65535" << endl;
+            return false;
+        }
+        if (zaurusUsbProbe > 1 || (zaurusUsbProbe && options.usb)) {
+            cerr << "Choose only one USB connection or Zaurus USB probe" << endl;
+            return false;
+        }
+        optional<UsbBusHost::StorageWriteCheck> storageWriteCheck;
+        if (options.zaurusUsbWriteCheck) {
+            const auto& args = *options.zaurusUsbWriteCheck;
+            UsbBusHost::StorageWriteCheck check{};
+            const auto& lba = args[0];
+            const auto parsed = std::from_chars(lba.data(), lba.data() + lba.size(), check.lba);
+            const auto readSector = [](const string& path, auto& sector) {
+                std::ifstream input(path, std::ios::binary);
+                return input.read(reinterpret_cast<char*>(sector.data()), sector.size()) &&
+                       input.peek() == std::char_traits<char>::eof();
+            };
+            if (parsed.ec != std::errc{} || parsed.ptr != lba.data() + lba.size() || !check.lba ||
+                !readSector(args[1], check.expected) || !readSector(args[2], check.replacement) ||
+                check.expected == check.replacement) {
+                cerr << "The Zaurus Drive write check needs a nonzero decimal LBA and two different 512-byte files." << endl;
+                return false;
+            }
+            storageWriteCheck = std::move(check);
         }
         HostSerial::Config usbConfig;
         // on: the cable in with no endpoint, for a device whose USB is a network link (the rx1950's RNDIS).
@@ -583,12 +690,23 @@ bool gFastEngineMissing = false;
         const DeviceType5 deviceType = sessionDevice != DeviceType5::deviceTypeInvalid
             ? sessionDevice : requestedDevice != deviceTypeInvalid ? requestedDevice
                                                                    : romInfo.GetDeviceType();
-        if (romInfo.IsValid() && deviceProfile5(romInfo.GetDeviceType()) &&
+        const bool spitz = deviceType == deviceTypeSpitz;
+        const bool fastEngine = options.engine.value_or(spitz ? "fast" : "exact") == "fast";
+        if ((!spitz && (options.spitzProm || options.microdrive || options.compactFlash)) ||
+            (options.compactFlashProtected && !options.compactFlash) ||
+            (options.compactFlash && cfSwapped) ||
+            (options.spitzMmc && (!spitz || !options.sd || sessionDevice != deviceTypeInvalid)) ||
+            (options.microdriveWritable && !options.microdrive) ||
+            (options.spitzProm && sessionDevice != deviceTypeInvalid)) {
+            cerr << "Zaurus boot and storage options require the matching device and input files" << endl;
+            return false;
+        }
+        if (!spitz && romInfo.IsValid() && deviceProfile5(romInfo.GetDeviceType()) &&
             romInfo.GetDeviceType() != deviceType) {
             cerr << "selected device profile does not match ROM" << endl;
             return false;
         }
-        if (romInfo.IsValid() && romInfo.GetDeviceType() == deviceTypeInvalid &&
+        if (!spitz && romInfo.IsValid() && romInfo.GetDeviceType() == deviceTypeInvalid &&
             (romInfo.GetCompanyId() == 0x736f6e79 /* sony */ || !deviceProfile5(deviceType) ||
              deviceProfile5(deviceType)->detect != DeviceDetect5::norSize)) {
             cerr << romInfo << "unknown ROM device identity" << endl;
@@ -618,11 +736,11 @@ bool gFastEngineMissing = false;
                 cerr << "TX requires a 16 MiB NOR image and an explicit --nand image" << endl;
                 return false;
             }
-        } else if (!rx1950) {
+        } else if (!rx1950 && !spitz) {
             cerr << romInfo;
         }
 
-        if (!sizeDetected && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
+        if (!spitz && !sizeDetected && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
             return false;
 
         // A new rx1950 takes HP's CEBL.nbf as its NOR and an OS .nbf (HP's CEOS.nbf, or one that lays out the same) as --nand, made into the 64 MB flash here.
@@ -675,7 +793,7 @@ bool gFastEngineMissing = false;
         if (ramSize == 0) ramSize = isTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
         // The Zodiac 2 has one RAM size, which its ROM header doesn't give.
         if (!options.ramSize && sessionDevice == deviceTypeInvalid &&
-            (deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac || rx1950))
+            (deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac || rx1950 || spitz))
             ramSize = deviceProfile5(deviceType)->minRam;
 
         if (!deviceConfigurationSupportsRamSize(deviceType, ramSize)) {
@@ -695,7 +813,7 @@ bool gFastEngineMissing = false;
         }
 
         auto firmwareError = deviceProfileValidateFirmware5(deviceType, nor.size, nand.size,
-            sessionDevice != deviceTypeInvalid, options.nand.has_value(), romInfo.GetFirmwareVariant());
+            sessionDevice != deviceTypeInvalid, options.nand.has_value() || spitz, romInfo.GetFirmwareVariant());
         if (firmwareError == DeviceFirmwareError5::none && romInfo.IsValid())
             firmwareError = deviceProfileValidateNorLayout5(deviceType, romInfo.GetHeaderOffset(),
                                                             sessionDevice != deviceTypeInvalid,
@@ -718,7 +836,7 @@ bool gFastEngineMissing = false;
         }
 
         // The rx1950 runs here but isn't a runner device (frond-run, recipes and count-check are Palm OS only).
-        if (!deviceProfileRunnerEligible5(deviceType) && !rx1950) {
+        if (!deviceProfileRunnerEligible5(deviceType) && !rx1950 && !spitz) {
             cerr << deviceName5(deviceType) << ": native board is not implemented" << endl;
             return false;
         }
@@ -740,9 +858,17 @@ bool gFastEngineMissing = false;
             }
         }
 
+        if (options.compactFlash) {
+            const auto loaded = frondNative::loadSdImage(sessionFolder, deviceType, *options.compactFlash, {}, 1, true);
+            if (!loaded.ok) {
+                cerr << "CF: " << loaded.message << endl;
+                return false;
+            }
+            frondNative::slotCards().cfProtected = options.compactFlashProtected;
+        }
         const int gdbPort = options.gdbPort ? static_cast<int>(*options.gdbPort) : -1;
 
-        if (options.desktopSocket && !deviceProfileSupportsDesktop5(deviceType)) {
+        if (options.desktopSocket && !spitz && !deviceProfileSupportsDesktop5(deviceType)) {
             cerr << deviceProfile5(deviceType)->displayName << " doesn't run in the desktop app yet" << endl;
             return false;
         }
@@ -765,7 +891,7 @@ bool gFastEngineMissing = false;
         }
 
         const auto board = deviceProfile5(deviceType)->board;
-        const bool pxa270 = board == DeviceBoard5::pxa270Tx || board == DeviceBoard5::pxa270Zire72;
+        const bool pxa270 = board == DeviceBoard5::pxa270Tx || board == DeviceBoard5::pxa270Zire72 || spitz;
         if (sessionDevice == deviceTypeTG50 &&
             (memory.size != tg50RamBackingSize + 2 * MEMORY_BUFFER_GRANULARITY || !savestate.size)) {
             cerr << "TG50 session requires complete RAM and CPU/peripheral state" << endl;
@@ -799,7 +925,7 @@ bool gFastEngineMissing = false;
                 }
             }
 #endif
-            if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
+            if (fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
             // With a SoundFont or a MIDI out taking the events, the hooks don't print them.
             if (options.musicHooks || options.musicSoundFont || options.musicMidiOut)
@@ -821,15 +947,16 @@ bool gFastEngineMissing = false;
                 return false;
             }
             static_cast<SocS3C2442*>(soc)->SetInputGuestTime(options.emulatedTime);
-            if (options.fastEngine && !static_cast<SocS3C2442*>(soc)->SetFastEngine(true))
+            if (fastEngine && !static_cast<SocS3C2442*>(soc)->SetFastEngine(true))
                 cerr << "HP iPAQ rx1950: the Fast engine is not available here, running Exact" << endl;
         } else {
-            if (gFastEngineMissing) cerr << "the Fast engine isn't built in here, running Exact" << endl;
+            if (!cpuSetFastEngine(fastEngine)) cerr << "the Fast engine isn't built in here, running Exact" << endl;
             soc = (board == DeviceBoard5::paravirtual)
                 ? static_cast<SoC*>(new SocPV(ramSize, nor.data, nor.size, *displayMode, gdbPort))
                 : static_cast<SoC*>(new SocPXA(deviceType, ramSize, nor.data, nor.size,
                                                reinterpret_cast<uint8_t*>(nand.data), nand.size,
-                                               gdbPort, pxa270 ? 2 : deviceGetSocRev()));
+                                               gdbPort, pxa270 ? 2 : deviceGetSocRev(),
+                                               sessionDevice != deviceTypeInvalid));
         }
 
         if (board != DeviceBoard5::imx1Zodiac && (options.musicHooks || options.musicSoundFont || options.musicMidiOut))
@@ -838,7 +965,7 @@ bool gFastEngineMissing = false;
         // Before the load, which applies it again over the session's saved inputs.
         if (soc->BatterySupported()) soc->SetBattery(options.battery);
         else if (options.battery != BatteryPower{}) cerr << "this device's battery can't be set yet, it stays full" << endl;
-        if (options.headphonesIn && deviceProfileHasPalmBoardInputs5(soc->GetDeviceType())) soc->SetHeadphones(true);
+        if (options.headphonesIn && soc->HeadphonesSupported()) soc->SetHeadphones(true);
         // A Zodiac starts in its cradle, where it normally syncs; the cradle option takes it out.
         if (soc->CradleSupported()) soc->SetCradle(true);
 
@@ -860,9 +987,10 @@ bool gFastEngineMissing = false;
             cerr << "RAM size mismatch" << endl;
             return false;
         }
-        if (sessionDevice == DeviceType5::deviceTypeTX &&
+        if ((sessionDevice == deviceTypeTX || sessionDevice == deviceTypeSpitz) &&
             (memory.size != soc->GetMemoryData().size || !savestate.size)) {
-            cerr << "TX session requires complete RAM and CPU/peripheral state" << endl;
+            cerr << (sessionDevice == deviceTypeTX ? "TX" : "Spitz")
+                 << " session requires complete RAM and CPU/peripheral state" << endl;
             return false;
         }
 
@@ -872,6 +1000,36 @@ bool gFastEngineMissing = false;
         }
 
         auto* socPxa = dynamic_cast<SocPXA*>(soc);
+        if (spitz) {
+            const std::filesystem::path folder(sessionFolder);
+            const auto ownDisk = folder / frondMachine::microdriveSibling;
+            std::filesystem::path disk;
+            std::error_code ec;
+            bool writable = options.microdriveWritable;
+            if (options.microdrive) disk = *options.microdrive;
+            else if (!folder.empty() && std::filesystem::is_regular_file(ownDisk, ec)) {
+                disk = ownDisk;
+                writable = true;
+            }
+            string identity;
+            const bool managed = !disk.empty() && !folder.empty() && std::filesystem::equivalent(disk, ownDisk, ec);
+            std::filesystem::path previous;
+            if (managed && sessionDevice == deviceTypeInvalid && frondMachine::sessionFile(folder, previous)) {
+                cerr << "Reopen the saved Zaurus session to use its Microdrive" << endl;
+                return false;
+            }
+            if (managed && !frondNative::microdriveIdFor(folder, identity)) {
+                cerr << "Could not read or establish the Zaurus Microdrive identity" << endl;
+                return false;
+            }
+            if (!disk.empty() && !socPxa->MountMicrodrive(disk.string().c_str(), writable,
+                                                         managed ? identity.c_str() : nullptr)) {
+                cerr << "Could not open the Zaurus Microdrive image" << endl;
+                return false;
+            }
+            if (managed) frondNative::managedMicrodriveFolder() = folder;
+            if (options.spitzMmc && !socPxa->SetSpitzMmcCard(true)) return false;
+        }
         auto* memoryStick = socPxa ? socPxa->GetMemoryStick() : nullptr;
         if (msProCard) {
             if (!frondNative::attachMsPro(memoryStick, false) ||
@@ -907,9 +1065,30 @@ bool gFastEngineMissing = false;
             cerr << "session second SD card could not be put in" << endl;
             return false;
         }
+        if (spitz) {
+            socPxa->SetCompactFlashSwapOnLoad(cfSwapped);
+            if (cfIn && !socPxa->InsertCompactFlash(frondNative::slotCards().cfProtected)) {
+                cerr << "session CF card could not be inserted" << endl;
+                return false;
+            }
+        }
         if (!soc->Load(savestate.size, savestate.data)) {
             cerr << "failed to restore savestate" << endl;
             return false;
+        }
+        if (spitz) {
+            const auto& managed = frondNative::managedMicrodriveFolder();
+            const auto& generation = frondNative::microdriveGeneration();
+            if ((!managed.empty() && !frondNative::settleMicrodrive(managed, *socPxa, generation, true)) ||
+                (managed.empty() && !generation.empty())) {
+                cerr << "Could not recover the matching Zaurus Microdrive generation" << endl;
+                return false;
+            }
+            socPxa->SetCompactFlashSwapOnLoad(false);
+            if (options.compactFlash && !socPxa->InsertCompactFlash(options.compactFlashProtected)) {
+                cerr << "CF card could not be inserted" << endl;
+                return false;
+            }
         }
         // A swapped slot is ejected now and its card goes in later, in the guest loop below. The
         // stick's detect line drops here, after the restore, so a guest asleep at the save wakes
@@ -935,7 +1114,7 @@ bool gFastEngineMissing = false;
             if (socPxa && sdCardInitialized()) socPxa->EjectPalmWifi();
             // The saved card is gone: eject it as a hot eject would; the one there now goes in later.
             soc->SdEject();
-            sdInsertPending = sdCardInitialized();
+            sdInsertPending = sdCardInitialized() && sdInsertOnSwap;
         } else if (auto* zodiac = dynamic_cast<SocIMX1*>(soc); zodiac && zodiac->CardSwappedOnLoad()) {
             // The Zodiac found another card than the saved one: in later, as a new card, so the guest
             // sees the slot empty first.
@@ -982,7 +1161,9 @@ bool gFastEngineMissing = false;
         // The button bar draws the LED only where the device has one.
         const auto* attentionProfile = deviceProfile5(soc->GetDeviceType());
         const uint8_t ledColours = attentionProfile ? attentionProfile->capabilities.ledColours : 0;
-        int guestTurns = 0;
+        bool spitzSwivelled = spitz && soc->SpitzSwivelled();
+        int guestTurns = spitz && !spitzSwivelled && !options.viewFollowsWindow ? 1 : 0;
+        rotation = Rotation(guestTurns);
 
         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
 
@@ -1006,6 +1187,7 @@ bool gFastEngineMissing = false;
                                 options.jogLandscape.value_or(JogLandscape::beside)};
         DeviceControlView controlView = deviceType == deviceTypeTG50
             ? deviceControlView(display.keyboard, display.jog) : DeviceControlView{};
+        if (spitz) controlView.zaurus = spitzSwivelled ? ZaurusStyle::view : ZaurusStyle::clamshell;
         controlView.gamepad = display.gamepad;
         display.buttons = !options.hideButtons;
         controlView.bare = !display.buttons;
@@ -1171,7 +1353,7 @@ bool gFastEngineMissing = false;
             : rx1950Soc ? std::make_unique<ZodiacSpeed>(5000000, "rx1950 speed") : nullptr;
         uint64_t replayStartedAt = options.emulatedTime ? soc->GetTime() / 1000 : startedAt;
         commands::Context commandContext{
-            .soc = soc, .mainLoop = mainLoop, .audioDriver = audioDriver, .rotation = rotation,
+            .soc = soc, .mainLoop = mainLoop, .audioDriver = audioDriver, .rotation = Rotation::portrait_0,
             .replay = replay, .replayStartedAt = replayStartedAt, .emulatedTime = options.emulatedTime,
             .screenWidth = displayConfiguration.width,
             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
@@ -1273,7 +1455,21 @@ bool gFastEngineMissing = false;
         }
         UsbHostBridge usb;
         commandContext.usb = &usb;
-        if (usbCable || usbConfig.kind != HostSerial::Kind::off) {
+        if (zaurusUsbProbe) {
+            auto* pxa = dynamic_cast<SocPXA*>(soc);
+            const bool started = options.zaurusUsbNetworkProbe || options.zaurusPcLinkFiles
+                ? usb.StartZaurusNetworkProbe(pxa, commandContext.usbError, uint16_t(options.zaurusPcLinkFiles.value_or(0)))
+                : usb.StartZaurusProbe(pxa, options.zaurusUsbStorageProbe || storageWriteCheck.has_value(),
+                                       commandContext.usbError);
+            if (!started) {
+                cerr << "usb: " << commandContext.usbError << endl;
+                return false;
+            }
+            if (storageWriteCheck && !usb.ArmStorageWriteCheck(std::move(*storageWriteCheck))) {
+                cerr << "Could not arm the Zaurus Drive write check." << endl;
+                return false;
+            }
+        } else if (usbCable || usbConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.usb) {
                 cerr << "--usb needs a Palm TX, Tungsten E2, Zire 72, TG50, Zodiac or iPAQ rx1950" << endl;
                 return false;
@@ -1339,6 +1535,10 @@ bool gFastEngineMissing = false;
 #endif
         };
         sdlEventHandler.SetDirectCapture(false);
+#ifdef __ANDROID__
+        // Android uses the control socket but has no desktop shortcuts for the Zaurus.
+        if (!spitz)
+#endif
         if (desktop) sdlEventHandler.SetShortcutSink([&](const string& name) { desktop->event("shortcut", name); });
         // The controller map from --controller-map and the desktop's controller-map, on the guest thread like the events.
         if (const auto* profile = deviceProfile5(soc->GetDeviceType())) {
@@ -1384,6 +1584,7 @@ bool gFastEngineMissing = false;
 
         // SDL thread state: what it drew last, whether the app is hidden, and whether the
         // window needs drawing again (redraw) or the whole frame uploaded again (redrawAll).
+        const Rotation startingRotation = rotation;
         bool appBackground = false;
         DeviceKeyMask shownButtons = 0;
         DeviceStick shownStick{};
@@ -1458,6 +1659,11 @@ bool gFastEngineMissing = false;
                 DeviceStick stick = sdlEventHandler.Stick();
                 stick.lamp = attention.Shown().ledColour;
                 stick.lampShown = ledColours != 0;
+                if (spitz) {
+                    SpitzPowerState power{};
+                    static_cast<SocPXA*>(soc)->GetSpitzPower(power);
+                    stick.lamp = uint8_t(power.chargeLed) | (uint8_t(power.diskLed) << 1);
+                }
                 const bool redrawRequested = sdlEventHandler.RedrawRequested();
                 if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
                     link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
@@ -1474,6 +1680,9 @@ bool gFastEngineMissing = false;
             // a frame comes early by however long the host had left of the slice, which changes from slice to
             // slice and makes even motion judder (Firehammer's scrolling).
             const bool handOffAtSliceEnd = zodiac != nullptr;
+#ifdef __ANDROID__
+            if (spitz) frondGuestOrientationChanged(spitzSwivelled ? 1 : 2);
+#endif
             while (!link.Stopped()) {
                 uint64_t now = timestampUsec();
                 performance.BeginWork();
@@ -1481,6 +1690,14 @@ bool gFastEngineMissing = false;
                     cout << "bounded run complete; PC=0x" << hex
                          << (soc->GetCpu() ? cpuGetRegExternal(soc->GetCpu(), 15) : 0) << dec
                          << ", LCD=" << soc->LcdEnabled() << endl;
+                    if (spitz) {
+                        cout << "Spitz: " << soc->GetTime() / 1000000 << " ms guest time at "
+                             << soc->CoreHz() << " Hz";
+                        uint64_t blocks = 0, clocks = 0;
+                        if (cpuJitExecutionCounts(soc->GetCpu(), &blocks, &clocks) && clocks)
+                            cout << ", Dynarmic ran";
+                        cout << endl;
+                    }
                     if (zodiac) {
                         const auto status = zodiac->Status();
                         cout << "zodiac: " << status.retired - zodiacStart.retired << " instructions and "
@@ -1735,6 +1952,17 @@ bool gFastEngineMissing = false;
                 if (desktop && desktop->poll(commandContext)) break;
                 if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
 
+                if (spitz && spitzSwivelled != soc->SpitzSwivelled()) {
+                    spitzSwivelled = soc->SpitzSwivelled();
+                    guestTurns = !spitzSwivelled && !options.viewFollowsWindow ? 1 : 0;
+                    DisplayChange change;
+                    change.zaurus = spitzSwivelled ? ZaurusStyle::view : ZaurusStyle::clamshell;
+                    commandContext.changeDisplay(change);
+#ifdef __ANDROID__
+                    frondGuestOrientationChanged(spitzSwivelled ? 1 : 2);
+#endif
+                }
+
                 // The SDL thread resizes the window and sends the new layout back with the
                 // rotation; input uses the old rotation until then.
                 const Rotation wanted = Rotation((int(commandContext.rotation) + guestTurns) % 4);
@@ -1776,7 +2004,7 @@ bool gFastEngineMissing = false;
         exception_ptr renderError;
         try {
             bool captured = false;
-            Rotation shownRotation = rotation;
+            Rotation shownRotation = startingRotation;
             // A new renderer or rotation waits while the app is in the background, as Android
             // may have no surface to draw on until it is back.
             bool rebuild = !sdlRenderer->Valid(), rendererFailed = false;
@@ -1853,6 +2081,7 @@ bool gFastEngineMissing = false;
                 // new renderer below lays the device out with the new controls.
                 if (!appBackground && displayPending) {
                     display.Apply(*displayPending);
+                    if (displayPending->zaurus) controlView.zaurus = displayPending->zaurus;
                     displayPending.reset();
                     if (deviceType == deviceTypeTG50) {
                         controlView = deviceControlView(display.keyboard, display.jog);
@@ -2018,11 +2247,19 @@ int main(int argc, char** argv) {
 
     argparse::ArgumentParser program("frond-core", "0.20.0");
 
-    program.add_description("Frond Palm OS emulator");
+    program.add_description("Frond handheld emulator");
 
-    program.add_argument("nor_or_session").help("NOR rom or saved session").required();
+    program.add_argument("nor_or_session").help("Firmware image or saved session").required();
 
     program.add_argument("--nand", "-n").help("NAND rom file").metavar("<nand file>");
+    program.add_argument("--spitz-prom").help("Boot the Zaurus from an SL-C3000 CS0 PROM dump").metavar("<prom file>");
+    program.add_argument("--microdrive").help("SL-C3000 Microdrive disk image").metavar("<disk image>");
+    program.add_argument("--microdrive-writable").help("Let the Zaurus write to the Microdrive image").default_value(false).implicit_value(true);
+
+    program.add_argument("--cf").help("Raw image for the SL-C3000 external CF slot").metavar("<disk image>");
+    program.add_argument("--cf-protected").help("Write-protect the CF card").default_value(false).implicit_value(true);
+    program.add_argument("--mmc").help("Use a legacy MMC for the Zaurus --sd image on cold boot")
+        .default_value(false).implicit_value(true);
 
     program.add_argument("--device")
         .help("device profile name for raw firmware; detected from firmware when omitted")
@@ -2056,7 +2293,6 @@ int main(int argc, char** argv) {
     program.add_argument("--engine")
         .help("CPU engine: exact (the interpreter) or fast (the JIT where it's built in, the Zodiac's own Fast path)")
         .metavar("<exact|fast>")
-        .default_value(string("exact"))
         .action([](const string& value) {
             if (value != "exact" && value != "fast") throw runtime_error("--engine is exact or fast");
             return value;
@@ -2282,6 +2518,26 @@ int main(int argc, char** argv) {
               "its RNDIS link going to the host network; default off")
         .metavar("<off|on|pty|tcp:PORT|unix:PATH|sync>");
 
+    program.add_argument("--zaurus-usb-probe")
+        .help("attach a virtual USB host and log standard enumeration on the SL-C3000")
+        .default_value(false).implicit_value(true);
+
+    program.add_argument("--zaurus-usb-storage-probe")
+        .help("read Zaurus Drive capacity and its first sector through the SL-C3000 USB connection")
+        .default_value(false).implicit_value(true);
+
+    program.add_argument("--zaurus-usb-storage-write-check")
+        .help("compare, replace and read back one sector through Zaurus Drive on disposable media")
+        .metavar("<LBA> <expected sector> <replacement sector>").nargs(3);
+
+    program.add_argument("--zaurus-pc-link-files")
+        .help("forward a local TCP port to the Sharp PC Link file server over USB")
+        .metavar("<port>").scan<'u', unsigned>();
+
+    program.add_argument("--zaurus-usb-network-probe")
+        .help("attach a virtual desktop to the SL-C3000 stock PC Link USB TCP/IP mode")
+        .default_value(false).implicit_value(true);
+
     program.add_argument("--sync-network").help("route Network HotSync to the built-in sync manager").default_value(false).implicit_value(true);
     program.add_argument("--sync-folder")
         .help("the sync manager's folder of profiles and backups; default the user's data folder")
@@ -2361,6 +2617,11 @@ int main(int argc, char** argv) {
                        .serial = program.present("--serial"),
                        .infrared = program.present("--irda"),
                        .usb = program.present("--usb"),
+                       .zaurusUsbProbe = program.get<bool>("--zaurus-usb-probe"),
+                       .zaurusUsbStorageProbe = program.get<bool>("--zaurus-usb-storage-probe"),
+                       .zaurusUsbNetworkProbe = program.get<bool>("--zaurus-usb-network-probe"),
+                       .zaurusUsbWriteCheck = program.present<vector<string>>("--zaurus-usb-storage-write-check"),
+                       .zaurusPcLinkFiles = program.present<unsigned>("--zaurus-pc-link-files"),
                        .syncNetwork = program.get<bool>("--sync-network"),
                        .syncFolder = program.present("--sync-folder"),
                        .syncProfile = program.present("--sync-profile"),
@@ -2373,7 +2634,13 @@ int main(int argc, char** argv) {
                        .cardSwap = program.get<bool>("--card-swap"),
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),
-                       .fastEngine = program.get("--engine") == "fast",
+                       .engine = program.present("--engine"),
+                       .spitzProm = program.present("--spitz-prom"),
+                       .microdrive = program.present("--microdrive"),
+                       .microdriveWritable = program.get<bool>("--microdrive-writable"),
+                       .compactFlash = program.present("--cf"),
+                       .compactFlashProtected = program.get<bool>("--cf-protected"),
+                       .spitzMmc = program.get<bool>("--mmc"),
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),
                        .controllerMap = program.present("--controller-map"),
@@ -2382,9 +2649,6 @@ int main(int argc, char** argv) {
     BatteryPower::Parse(program.get("--battery"), options.battery);
 
     logEnable();
-
-    // Said once the machine is known: the Zodiac has its own Fast engine and doesn't need this one.
-    gFastEngineMissing = !cpuSetFastEngine(program.get("--engine") == "fast");
 
     try {
         if (!run(options)) return 1;

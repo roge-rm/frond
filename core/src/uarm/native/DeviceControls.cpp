@@ -1,4 +1,5 @@
 #include "DeviceControls.h"
+#include "ZaurusGlyphs.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -3187,6 +3188,491 @@ void paintZodiacControls(Canvas& canvas, const DeviceControlProfile& profile, De
         }
     }
 }
+
+// Sharp Zaurus SL-C3000: white keys with navy legends on a brushed silver plate, blue second
+// legends printed above the keys, a white cursor ring with a blue OK in a chrome surround that
+// runs on round Cancel, and five round app keys along the bottom. The lid's bezel is black with
+// grey hard icons; the hinge edge has a black roller and black OK and Cancel keys.
+const Rgb zaurusInk{36,42,62},zaurusBlue{40,84,176},zaurusGlow{226,146,44};
+
+// Filled or stroked glyphs for the app keys and hard icons, about 20 units across, centred.
+float zaurusGlyph(ZaurusMark mark, float x, float y) {
+    switch(mark) {
+        case ZaurusMark::calendar: {
+            // A 3x3 grid of small squares.
+            float d=1e9f;
+            for(int i=-1;i<=1;++i)for(int j=-1;j<=1;++j)
+                d=std::min(d,box(x,y,i*6.f-2.2f,j*6.f-2.2f,i*6.f+2.2f,j*6.f+2.2f));
+            return d;
+        }
+        case ZaurusMark::address: {
+            const float head=std::hypot(x,y+4.5f)-3.6f;
+            const float body=std::max((std::hypot(x/7.5f,(y-7.5f)/6.5f)-1)*6.5f,y-7.5f);
+            return std::min(head,body);
+        }
+        case ZaurusMark::mail:
+            return std::min({std::fabs(box(x,y,-9,-6,9,6))-0.9f,segment(x,y,-9,-6,0,1.5f)-0.9f,
+                             segment(x,y,9,-6,0,1.5f)-0.9f});
+        case ZaurusMark::home: {
+            const float house=polygon<5>(x,y,{{{-8,-0.5f},{0,-8.5f},{8,-0.5f},{8,8},{-8,8}}});
+            return std::max(house,-box(x,y,-2.2f,2.2f,2.2f,8.5f));
+        }
+        case ZaurusMark::menu:
+            return std::min({box(x,y,-8,-7,4,-4.6f),box(x,y,-8,-1.2f,4,1.2f),box(x,y,-8,4.6f,0,7),
+                             polygon<3>(x,y,{{{3,3},{9,6},{3,9}}})});
+        case ZaurusMark::dictionary: {
+            // An open book, pages meeting at the spine.
+            const float l=polygon<4>(x,y,{{{-0.6f,-5},{-9.5f,-7.5f},{-9.5f,6},{-0.6f,8.5f}}});
+            const float r=polygon<4>(x,y,{{{0.6f,-5},{9.5f,-7.5f},{9.5f,6},{0.6f,8.5f}}});
+            return std::min(std::fabs(l),std::fabs(r))-0.9f;
+        }
+        default: return 1e9f;
+    }
+}
+
+// The Japanese legends come from ZaurusGlyphs.h: each bitmap is smoothed once, then read with
+// bilinear filtering, whose half-way contour is the glyph's outline.
+struct ZaurusGlyphMap { uint32_t code; float advance; std::vector<float> c; };
+const ZaurusGlyphMap* zaurusGlyphMap(uint32_t code) {
+    static const auto maps=[] {
+        std::vector<ZaurusGlyphMap> m;
+        const int n=zaurusGlyphGrid;
+        for(const auto& g : zaurusGlyphs) {
+            std::vector<float> bits(size_t(n)*n),smooth(size_t(n)*n);
+            for(int y=0;y<n;++y)for(int x=0;x<n;++x) {
+                const char h=g.rows[y*(n/4)+x/4];
+                const int v=h<='9' ? h-'0' : h-'a'+10;
+                bits[size_t(y)*n+x]=float((v>>(3-x%4))&1);
+            }
+            auto at=[&](int x,int y) {return x<0 || y<0 || x>=n || y>=n ? 0.f : bits[size_t(y)*n+x];};
+            for(int y=0;y<n;++y)for(int x=0;x<n;++x) {
+                float sum=0;
+                for(int j=-1;j<=1;++j)for(int i=-1;i<=1;++i)sum+=at(x+i,y+j)*float((2-std::abs(i))*(2-std::abs(j)));
+                smooth[size_t(y)*n+x]=sum/16;
+            }
+            m.push_back({g.code,float(g.advance)/n,std::move(smooth)});
+        }
+        return m;
+    }();
+    for(const auto& g : maps) if(g.code==code) return &g;
+    return nullptr;
+}
+float zaurusGlyphSample(const ZaurusGlyphMap& g, float u, float v) {
+    const int n=zaurusGlyphGrid;
+    u-=0.5f;v-=0.5f;
+    const int x=int(std::floor(u)),y=int(std::floor(v));
+    const float fx=u-x,fy=v-y;
+    auto at=[&](int i,int j) {return i<0 || j<0 || i>=n || j>=n ? 0.f : g.c[size_t(j)*n+i];};
+    return (at(x,y)*(1-fx)+at(x+1,y)*fx)*(1-fy)+(at(x,y+1)*(1-fx)+at(x+1,y+1)*fx)*fy;
+}
+uint32_t zaurusNextCode(const char*& p) {
+    const auto b=static_cast<unsigned char>(*p++);
+    if(b<0x80)return b;
+    const int more=b>=0xf0 ? 3 : b>=0xe0 ? 2 : 1;
+    uint32_t c=b&(0x3f>>more);
+    for(int i=0;i<more && *p;++i)c=(c<<6)|(static_cast<unsigned char>(*p++)&0x3f);
+    return c;
+}
+// Japanese characters are an em of zaurusEm stroke font cells, on the Latin baseline.
+constexpr float zaurusEm=8.f;
+struct ZaurusTextItem { uint32_t code; float advance; };
+std::vector<ZaurusTextItem> zaurusTextItems(const char* text, float& total) {
+    std::vector<ZaurusTextItem> items;
+    total=0;
+    bool lastLatin=false;
+    for(const char* p=text;*p;) {
+        const uint32_t c=zaurusNextCode(p);
+        const auto* g=c>=0x80 ? zaurusGlyphMap(c) : nullptr;
+        const float advance=c<0x80 ? tg50Glyph(char(c)).advance : g ? g->advance*zaurusEm : 0;
+        items.push_back({c,advance});
+        total+=advance;
+        lastLatin=c<0x80;
+    }
+    // The stroke font's advance ends in a gap.
+    if(lastLatin)total-=1.8f;
+    return items;
+}
+float zaurusTextWidth(const char* text, float size) {
+    float total;
+    zaurusTextItems(text,total);
+    return std::max(0.f,total)*size;
+}
+// Latin and Japanese on one line, centred on cx, the Latin capitals from top to top+6*size.
+void paintZaurusText(Canvas& canvas, const char* text, float cx, float top, float size, Rgb colour) {
+    if(!*text)return;
+    float total;
+    const auto items=zaurusTextItems(text,total);
+    const float w=total*size,weight=std::max(0.4f,0.4f*size+0.1f);
+    const float em=zaurusEm*size,emTop=top+(6-zaurusGlyphAscent*zaurusEm)*size;
+    const float texel=em/zaurusGlyphGrid,texelPx=texel*canvas.s;
+    // Samples per pixel side when the glyph is drawn smaller than its bitmap.
+    const int k=std::min(4,std::max(1,int(std::ceil(1/texelPx))));
+    canvas.paint(cx-w*0.5f-3,emTop-1,cx+w*0.5f+3,top+8*size+1,[&](float x,float y) {
+        float stroke=1e9f,jp=0,pen=cx-w*0.5f;
+        for(const auto& item : items) {
+            if(item.code<0x80) {
+                const auto& g=tg50Glyph(char(item.code));
+                const float gx=(x-pen)/size+g.left,gy=(y-top)/size;
+                for(const auto& s : g.segments)stroke=std::min(stroke,segment(gx,gy,s[0],s[1],s[2],s[3]));
+            } else if(const auto* g=zaurusGlyphMap(item.code)) {
+                const float u=(x-pen)/texel,v=(y-emTop)/texel;
+                if(u>-2 && v>-2 && u<zaurusGlyphGrid+2 && v<zaurusGlyphGrid+2) {
+                    float sum=0;
+                    for(int j=0;j<k;++j)for(int i=0;i<k;++i) {
+                        const float du=((i+0.5f)/k-0.5f)/texelPx,dv=((j+0.5f)/k-0.5f)/texelPx;
+                        sum+=clamp01((zaurusGlyphSample(*g,u+du,v+dv)-0.5f)*std::max(1.f,texelPx*1.4f)+0.5f);
+                    }
+                    jp=std::max(jp,sum/(k*k));
+                }
+            }
+            pen+=item.advance*size;
+        }
+        return std::max(canvas.edge(stroke*size-weight),jp);
+    },[&](float,float,Rgb) {return colour;});
+}
+// The number of characters in a UTF-8 string.
+size_t zaurusLength(const char* text) {
+    size_t n=0;
+    for(const char* p=text;*p;++p)n+=(static_cast<unsigned char>(*p)&0xc0)!=0x80;
+    return n;
+}
+// Small blue marks printed over the number row: zoom out and in, and the backlight down and up.
+float zaurusBlueMark(const char* name, float x, float y) {
+    const bool zoom=name[0]=='z',more=std::strchr(name,'+')!=nullptr;
+    if(zoom) {
+        float d=std::min(ring(x,y,-0.8f,-0.8f,2.6f),segment(x,y,1.2f,1.2f,3.4f,3.4f));
+        d=std::min(d,segment(x,y,-2.2f,-0.8f,0.6f,-0.8f));
+        if(more)d=std::min(d,segment(x,y,-0.8f,-2.2f,-0.8f,0.6f));
+        return d-0.55f;
+    }
+    // A sun with a small triangle beside it pointing up or down.
+    float d=ring(x,y,1.8f,0,1.4f)-0.5f;
+    for(int i=0;i<8;++i) {
+        const float a=degrees(45.f*i),c=std::cos(a),s=std::sin(a);
+        d=std::min(d,segment(x,y,1.8f+c*2.4f,s*2.4f,1.8f+c*3.4f,s*3.4f)-0.45f);
+    }
+    const float t=more ? polygon<3>(x,y,{{{-5.6f,1.6f},{-1.6f,1.6f},{-3.6f,-1.8f}}})
+                       : polygon<3>(x,y,{{{-5.6f,-1.6f},{-1.6f,-1.6f},{-3.6f,1.8f}}});
+    return std::min(d,t);
+}
+
+void paintZaurusCap(Canvas& canvas, const ZaurusKeyArt& key, bool held) {
+    const SDL_Rect& b=key.bounds;
+    const SDL_Rect cap{b.x+1,b.y+1,b.w-2,b.h-2};
+    const float corner=std::min(cap.w,cap.h)*0.2f,sink=held ? 1.f : 0;
+    auto outer=[&](float x,float y) {return deviceRoundedDistance(cap,corner,x,y);};
+    // Soft shadow on the plate under the key.
+    canvas.paint(cap.x-2,cap.y,cap.x+cap.w+2,cap.y+cap.h+3,[&](float x,float y) {
+        return clamp01(1-outer(x,y-1.6f)/2.2f)*(held ? 0.12f : 0.28f);
+    },[](float,float,Rgb) {return Rgb{90,94,104};});
+    // Skirt, lighter at the top, then the outline.
+    canvas.paint(cap.x-1,cap.y-1,cap.x+cap.w+1,cap.y+cap.h+1,[&](float x,float y) {return canvas.edge(outer(x,y));},
+                 [&](float,float y,Rgb) {
+        const Rgb c=mix(Rgb{238,240,244},Rgb{168,172,182},clamp01((y-cap.y)/cap.h));
+        return held ? c*0.82f : c;
+    });
+    canvas.paint(cap.x-1,cap.y-1,cap.x+cap.w+1,cap.y+cap.h+1,[&](float x,float y) {
+        return canvas.edge(std::fabs(outer(x,y)+0.3f)-0.35f)*0.7f;
+    },[](float,float,Rgb) {return Rgb{118,122,134};});
+    // Top face, a little in from the skirt and lower down when held.
+    const SDL_Rect face{cap.x+2,cap.y+1+int(sink),cap.w-4,cap.h-4};
+    canvas.paint(face.x-1,face.y-1,face.x+face.w+1,face.y+face.h+1,[&](float x,float y) {
+        return canvas.edge(deviceRoundedDistance(face,corner*0.8f,x,y));
+    },[&](float x,float y,Rgb) {
+        const float t=clamp01((y-face.y)/face.h),side=std::fabs(x-face.x-face.w*0.5f)/(face.w*0.5f);
+        const Rgb c=mix(Rgb{252,252,253},Rgb{230,232,236},t)*(1-0.04f*side*side);
+        return held ? c*0.8f : c;
+    });
+    // Fn wears a blue ring.
+    if(std::strcmp(key.name,"fn")==0)
+        canvas.paint(cap.x-2,cap.y-2,cap.x+cap.w+2,cap.y+cap.h+2,[&](float x,float y) {
+            return canvas.edge(std::fabs(outer(x,y)-0.6f)-0.6f);
+        },[](float,float,Rgb) {return zaurusBlue;});
+
+    const Rgb ink=held ? zaurusGlow : zaurusInk;
+    const float cx=face.x+face.w*0.5f,cy=face.y+face.h*0.5f;
+    auto fit=[&](const char* t,float size) {return std::min(size,(face.w-3)/std::max(1.f,zaurusTextWidth(t,1)));};
+    if(*key.upper && zaurusLength(key.legend)>1) {
+        // Comma and full stop: the shifted character at the top, the Japanese and Latin marks below.
+        paintZaurusText(canvas,key.upper,cx,face.y+3,1.15f,ink);
+        paintZaurusText(canvas,key.legend,cx,face.y+face.h-10.5f,1.3f,ink);
+    } else if(*key.upper) {
+        // Shifted character at the upper left, the main one lower right.
+        const bool tall=face.h>24;
+        paintZaurusText(canvas,key.upper,face.x+7,face.y+(tall ? 3.f : 2.5f),tall ? 1.15f : 0.95f,ink);
+        paintZaurusText(canvas,key.legend,face.x+face.w-9,face.y+(tall ? 11.f : 8.f),tall ? 1.6f : 1.4f,ink);
+    } else if(key.mark==ZaurusMark::enter) {
+        paintZaurusText(canvas,key.legend,cx,face.y+3,fit(key.legend,1.15f),ink);
+        canvas.paint(face.x,face.y,face.x+face.w,face.y+face.h,[&](float x,float y) {
+            const float r=face.x+face.w-5,l=r-13,ay=face.y+face.h-6;
+            float d=std::min(segment(x,y,r,ay-5,r,ay),segment(x,y,r,ay,l,ay));
+            d=std::min({d,segment(x,y,l,ay,l+3.2f,ay-2.6f),segment(x,y,l,ay,l+3.2f,ay+2.6f)});
+            return canvas.edge(d-0.75f);
+        },[&](float,float,Rgb) {return ink;});
+    } else if(key.mark==ZaurusMark::backspace) {
+        paintZaurusText(canvas,key.legend,cx+5,cy-3.5f,1.15f,ink);
+        canvas.paint(face.x,face.y,face.x+face.w,face.y+face.h,[&](float x,float y) {
+            const float l=face.x+4,r=l+8;
+            return canvas.edge(std::min(segment(x,y,l,cy,r,cy)-0.7f,
+                                        polygon<3>(x,y,{{{l-1,cy},{l+3.5f,cy-3},{l+3.5f,cy+3}}})));
+        },[&](float,float,Rgb) {return ink;});
+    } else if(zaurusLength(key.legend)==1) {
+        const float size=face.h>20 ? 2.f : 1.5f;
+        paintZaurusText(canvas,key.legend,cx,cy-3*size,size,ink);
+    } else if(std::strchr(key.legend,'\n')) {
+        // Two short lines.
+        const char* nl=std::strchr(key.legend,'\n');
+        const std::string a(key.legend,nl),c(nl+1);
+        const float size=std::min(fit(a.c_str(),0.95f),fit(c.c_str(),0.95f));
+        paintZaurusText(canvas,a.c_str(),cx,cy-7.5f*size,size,ink);
+        paintZaurusText(canvas,c.c_str(),cx,cy+1.5f*size,size,ink);
+    } else if(*key.legend) {
+        const float size=fit(key.legend,key.bounds.w>60 ? 1.35f : 1.15f);
+        paintZaurusText(canvas,key.legend,cx,cy-3*size,size,ink);
+    }
+}
+
+// Round app key with its label and glyph printed above, and the Fn layer's word below.
+void paintZaurusAppKey(Canvas& canvas, const ZaurusKeyArt& key, bool held) {
+    const SDL_Rect& b=key.bounds;
+    const float cx=b.x+b.w*0.5f,cy=b.y+b.h*0.5f,r=b.w*0.5f;
+    canvas.paint(cx-r-2,cy-r-2,cx+r+3,cy+r+4,[&](float x,float y) {
+        return clamp01(1-(std::hypot(x-cx,y-cy-1.8f)-r)/2.4f)*0.3f;
+    },[](float,float,Rgb) {return Rgb{90,94,104};});
+    canvas.paint(cx-r-1,cy-r-1,cx+r+1,cy+r+1,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-cy)-r);},
+                 [&](float,float y,Rgb) {return mix(Rgb{150,154,162},Rgb{108,112,122},clamp01((y-b.y)/b.h));});
+    const float face=r-3;
+    canvas.paint(cx-r,cy-r,cx+r,cy+r,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-cy-(held ? 0.6f : 0))-face);},
+                 [&](float x,float y,Rgb) {
+        const float t=clamp01((y-cy+face)/(2*face)),hl=clamp01(1-std::hypot(x-cx+3,y-cy+4)/face);
+        const Rgb c=mix(Rgb{238,240,243},Rgb{198,201,207},t)+Rgb{14,14,14}*hl;
+        return held ? c*0.78f : c;
+    });
+    // Label and glyph above; Home's are white on a black tab.
+    const bool home=key.mark==ZaurusMark::home;
+    const float labelTop=b.y-31,glyphY=b.y-10;
+    if(home) {
+        const SDL_Rect tab{int(cx-14),int(labelTop-3),28,30};
+        canvas.paint(tab.x-1,tab.y-1,tab.x+tab.w+1,tab.y+tab.h+1,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(tab,2.5f,x,y));
+        },[](float,float,Rgb) {return Rgb{24,26,32};});
+    }
+    const Rgb ink=held ? zaurusGlow : home ? Rgb{246,246,248} : zaurusInk;
+    paintZaurusText(canvas,key.legend,cx,labelTop,0.92f,ink);
+    const float k=0.5f;
+    canvas.paint(cx-7,glyphY-7,cx+7,glyphY+7,[&](float x,float y) {
+        return canvas.edge(zaurusGlyph(key.mark,(x-cx)/k,(y-glyphY)/k)*k);
+    },[&](float,float,Rgb) {return ink;});
+    if(*key.blue)paintZaurusText(canvas,key.blue,cx,b.y+b.h+4,0.85f,zaurusInk);
+}
+
+void paintZaurusKeyboard(Canvas& canvas, const ZaurusKeysHeld& held) {
+    const float W=zaurusKeyboardWidth,H=zaurusKeyboardHeight;
+    const auto& art=zaurusArt();
+    // Brushed silver body, a slightly lighter plate inset from its edge, and two screws.
+    canvas.paint(-1e5f,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        const float t=clamp01(y/H);
+        return mix(Rgb{196,199,205},Rgb{168,171,178},t)+Rgb{3,3,3}*std::sin(y*3.1f+std::sin(x*0.05f)*2.f);
+    });
+    const SDL_Rect plate{5,6,int(W)-10,int(H)-12};
+    canvas.paint(0,0,W,H,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(plate,12,x,y));},
+                 [&](float x,float y,Rgb) {
+        const float t=clamp01((y-plate.y)/plate.h);
+        return mix(Rgb{214,217,222},Rgb{190,193,200},t)+Rgb{3,3,3}*std::sin(y*2.7f+std::sin(x*0.04f)*2.f);
+    });
+    canvas.paint(0,0,W,H,[&](float x,float y) {
+        return canvas.edge(std::fabs(deviceRoundedDistance(plate,12,x,y)+0.6f)-0.5f)*0.6f;
+    },[&](float,float y,Rgb) {return y<H*0.5f ? Rgb{150,154,162} : Rgb{246,247,250};});
+    for(float sx : {15.f,W-15}) {
+        canvas.paint(sx-4,H-23,sx+4,H-15,[&](float x,float y) {return canvas.edge(std::hypot(x-sx,y-H+19)-2.6f);},
+                     [&](float x,float,Rgb) {return mix(Rgb{120,124,132},Rgb{220,222,226},clamp01((x-sx+2.6f)/5.2f));});
+    }
+    // The shadow of the hinge along the top edge.
+    canvas.paint(0,0,W,4,[&](float,float y) {return clamp01(1-y/3.5f)*0.7f;},[](float,float,Rgb) {return Rgb{40,42,48};});
+
+    // Chrome surround of the cursor ring running on round Cancel.
+    const ZaurusKeyArt* ok=nullptr;const ZaurusKeyArt* cancel=nullptr;
+    for(size_t i=0;i<art.count;++i) {
+        if(art.keys[i].part!=ZaurusPart::keyboard)continue;
+        if(art.keys[i].mark==ZaurusMark::ok)ok=&art.keys[i];
+        if(art.keys[i].mark==ZaurusMark::cancel)cancel=&art.keys[i];
+    }
+    auto held_=[&](const ZaurusKeyArt* k) {return k && held.Held(size_t(k-art.keys));};
+    if(ok && cancel) {
+        const float px=ok->bounds.x+ok->bounds.w*0.5f,py=ok->bounds.y+ok->bounds.h*0.5f;
+        const float qx=cancel->bounds.x+cancel->bounds.w*0.5f,qy=cancel->bounds.y+cancel->bounds.h*0.5f;
+        const float R=56,rc=cancel->bounds.w*0.5f;
+        auto surround=[&](float x,float y) {
+            return gcSmoothMin(std::hypot(x-px,y-py)-R-4,std::hypot(x-qx,y-qy)-rc-5,9);
+        };
+        canvas.paint(qx-rc-12,py-R-12,px+R+12,py+R+12,[&](float x,float y) {return canvas.edge(surround(x,y));},
+                     [&](float x,float y,Rgb) {
+            // Polished: bright bands at the top left, dark at the bottom right.
+            const float a=std::atan2(y-py,x-px);
+            const float band=0.5f+0.5f*std::cos(a+2.3f);
+            return mix(Rgb{92,96,106},Rgb{248,249,252},std::pow(band,0.8f))*(0.9f+0.1f*std::sin(y*0.8f));
+        });
+        canvas.paint(qx-rc-12,py-R-12,px+R+12,py+R+12,[&](float x,float y) {
+            return canvas.edge(std::fabs(surround(x,y)+0.4f)-0.4f)*0.8f;
+        },[](float,float,Rgb) {return Rgb{70,74,84};});
+        // White ring, its held quarter darker, and the arrows on it.
+        int quarter=-1;
+        for(size_t i=0;i<art.count;++i) {
+            const auto& k=art.keys[i];
+            if(k.part==ZaurusPart::keyboard && k.mark>=ZaurusMark::up && k.mark<=ZaurusMark::right && held.Held(i))
+                quarter=int(k.mark)-int(ZaurusMark::up);
+        }
+        auto inQuarter=[&](float x,float y,int q) {
+            const float dx=x-px,dy=y-py;
+            if(std::fabs(dx)>std::fabs(dy))return q==(dx<0 ? 2 : 3);
+            return q==(dy<0 ? 0 : 1);
+        };
+        canvas.paint(px-R,py-R,px+R,py+R,[&](float x,float y) {return canvas.edge(std::hypot(x-px,y-py)-(R-1));},
+                     [&](float x,float y,Rgb) {
+            const float d=std::hypot(x-px,y-py)/R,t=clamp01((y-py+R)/(2*R));
+            Rgb c=mix(Rgb{252,252,253},Rgb{220,223,228},t)*(1-0.06f*d*d);
+            if(quarter>=0 && inQuarter(x,y,quarter))c=c*0.8f;
+            return c;
+        });
+        for(int q=0;q<4;++q) {
+            const float dx=q==2 ? -1.f : q==3 ? 1.f : 0.f,dy=q==0 ? -1.f : q==1 ? 1.f : 0.f;
+            const float ax=px+dx*40,ay=py+dy*40;
+            const Rgb c=q==quarter ? zaurusGlow : zaurusInk;
+            canvas.paint(ax-6,ay-6,ax+6,ay+6,[&](float x,float y) {
+                const float u=(x-ax)*dx+(y-ay)*dy,v=(x-ax)*dy-(y-ay)*dx;
+                return canvas.edge(polygon<3>(u,v,{{{3.5f,0},{-2.5f,-3.8f},{-2.5f,3.8f}}}));
+            },[&](float,float,Rgb) {return c;});
+        }
+        // Blue OK in the middle.
+        const float r=21,s=held_(ok) ? 0.75f : 1.f;
+        canvas.paint(px-r-2,py-r-2,px+r+2,py+r+2,[&](float x,float y) {return canvas.edge(std::hypot(x-px,y-py)-r);},
+                     [&](float x,float y,Rgb) {
+            const float t=clamp01((y-py+r)/(2*r)),hl=clamp01(1-std::hypot(x-px+6,y-py+8)/r);
+            return (mix(Rgb{112,142,186},Rgb{64,92,140},t)+Rgb{40,40,40}*hl)*s;
+        });
+        paintZaurusText(canvas,"OK",px,py-4.2f,1.4f,held_(ok) ? zaurusGlow : Rgb{248,249,252});
+        // Round Cancel with its cross, and its name printed over it.
+        const float cr=rc-2,cs=held_(cancel) ? 0.78f : 1.f;
+        canvas.paint(qx-cr-1,qy-cr-1,qx+cr+1,qy+cr+1,[&](float x,float y) {return canvas.edge(std::hypot(x-qx,y-qy)-cr);},
+                     [&](float,float y,Rgb) {
+            return mix(Rgb{252,252,253},Rgb{214,217,223},clamp01((y-qy+cr)/(2*cr)))*cs;
+        });
+        canvas.paint(qx-6,qy-6,qx+6,qy+6,[&](float x,float y) {
+            return canvas.edge(std::min(segment(x,y,qx-3.6f,qy-3.6f,qx+3.6f,qy+3.6f),
+                                        segment(x,y,qx+3.6f,qy-3.6f,qx-3.6f,qy+3.6f))-1.1f);
+        },[&](float,float,Rgb) {return held_(cancel) ? zaurusGlow : zaurusInk;});
+        paintZaurusText(canvas,cancel->legend,qx-4,qy-rc-14,0.88f,zaurusInk);
+    }
+    for(size_t i=0;i<art.count;++i) {
+        const auto& k=art.keys[i];
+        if(k.part!=ZaurusPart::keyboard)continue;
+        const bool down=held.Held(i);
+        if(k.mark>=ZaurusMark::up && k.mark<=ZaurusMark::cancel)continue;
+        if(k.mark>=ZaurusMark::calendar && k.mark<=ZaurusMark::menu) {paintZaurusAppKey(canvas,k,down);continue;}
+        paintZaurusCap(canvas,k,down);
+        // Blue legend on the plate above the key.
+        if(*k.blue) {
+            const float bx=k.bounds.x+k.bounds.w*0.5f,by=k.bounds.y-7.5f;
+            const bool mark=std::strncmp(k.blue,"zoom",4)==0 || std::strcmp(k.blue,"dim+")==0 ||
+                            std::strcmp(k.blue,"dim-")==0;
+            if(mark)
+                canvas.paint(bx-7,by-4,bx+7,by+9,[&](float x,float y) {
+                    return canvas.edge(zaurusBlueMark(k.blue,(x-bx)*1.15f,(y-by-2.4f)*1.15f)/1.15f);
+                },[](float,float,Rgb) {return zaurusBlue;});
+            // The 0 key's A is the smaller one (half-width letters, against full-width on 9).
+            else paintZaurusText(canvas,k.blue,bx,by,std::strcmp(k.name,"0")==0 ? 0.6f : 0.8f,zaurusBlue);
+        }
+    }
+}
+
+// The bezel's hard icons: grey on black. Turned, the canvas is the strip beside the clamshell
+// LCD, 64 wide and 480 tall, and the icons are drawn a quarter anticlockwise.
+void paintZaurusIcons(Canvas& canvas, bool turned, const ZaurusKeysHeld& held) {
+    const auto& art=zaurusArt();
+    const float L=zaurusIconsLength,D=zaurusIconsDepth;
+    // Strip units of a canvas point.
+    auto strip=[&](float x,float y) {return turned ? std::pair<float,float>{L-y,x} : std::pair<float,float>{x,y};};
+    canvas.paint(-1e5f,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        const float across=strip(x,y).second/D;
+        return mix(Rgb{30,31,35},Rgb{18,19,22},across)+Rgb{2,2,2}*speckle(x,y);
+    });
+    for(size_t i=0;i<art.count;++i) {
+        const auto& k=art.keys[i];
+        if(k.part!=ZaurusPart::icons)continue;
+        const float cx=k.bounds.x+k.bounds.w*0.5f,cy=k.bounds.y+k.bounds.h*0.5f;
+        const bool down=held.Held(i);
+        const float k1=0.95f;
+        canvas.paint(-1e5f,-1e5f,1e5f,1e5f,[&](float x,float y) {
+            const auto [sx,sy]=strip(x,y);
+            if(std::fabs(sx-cx)>16 || std::fabs(sy-cy)>16)return 0.f;
+            return canvas.edge(zaurusGlyph(k.mark,(sx-cx)/k1,(sy-cy)/k1)*k1);
+        },[&](float,float,Rgb) {return down ? zaurusGlow : Rgb{146,148,154};});
+    }
+}
+
+// The hinge edge in view style, left of the LCD: a ridged roller that rocks up and down, then OK
+// and Cancel, black on the silver body, with their names printed over them.
+void paintZaurusSide(Canvas& canvas, const ZaurusKeysHeld& held) {
+    const auto& art=zaurusArt();
+    const float W=zaurusSideWidth;
+    canvas.paint(-1e5f,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        const float t=clamp01(x/W);
+        return mix(Rgb{150,153,160},Rgb{212,215,220},std::sin(t*2.6f))+Rgb{2,2,2}*std::sin(y*2.9f);
+    });
+    // The LCD bezel's edge on the right.
+    canvas.paint(W-3,-1e5f,W+1,1e5f,[&](float x,float) {return clamp01(x-(W-2.5f));},
+                 [](float,float,Rgb) {return Rgb{30,31,35};});
+    const ZaurusKeyArt* up=nullptr;const ZaurusKeyArt* down=nullptr;
+    for(size_t i=0;i<art.count;++i) {
+        const auto& k=art.keys[i];
+        if(k.part!=ZaurusPart::side)continue;
+        if(k.mark==ZaurusMark::jogUp)up=&k;
+        else if(k.mark==ZaurusMark::jogDown)down=&k;
+        else {
+            // A black pill key in a dark slot.
+            const SDL_Rect& r=k.bounds;
+            const bool h=held.Held(i);
+            const float c=r.w*0.5f;
+            canvas.paint(r.x-2,r.y-2,r.x+r.w+2,r.y+r.h+2,[&](float x,float y) {
+                return canvas.edge(deviceRoundedDistance(r,c,x,y)-1.5f);
+            },[](float,float,Rgb) {return Rgb{70,72,78};});
+            canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {
+                return canvas.edge(deviceRoundedDistance(r,c,x,y));
+            },[&](float x,float,Rgb) {
+                const float t=clamp01((x-r.x)/r.w);
+                const Rgb col=mix(Rgb{22,23,27},Rgb{68,70,78},std::sin(t*3.14159265f)*0.8f);
+                return h ? col*0.6f : col;
+            });
+            paintZaurusText(canvas,k.legend,r.x+r.w*0.5f,r.y-11,0.9f,h ? zaurusGlow : Rgb{44,46,54});
+        }
+    }
+    if(up && down) {
+        const SDL_Rect r{up->bounds.x,up->bounds.y,up->bounds.w,down->bounds.y+down->bounds.h-up->bounds.y};
+        const bool hu=held.Held(size_t(up-art.keys)),hd=held.Held(size_t(down-art.keys));
+        const float mid=float(down->bounds.y);
+        canvas.paint(r.x-3,r.y-3,r.x+r.w+3,r.y+r.h+3,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(r,8,x,y)-2.5f);
+        },[](float,float,Rgb) {return Rgb{40,42,48};});
+        canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(r,7,x,y));},
+                     [&](float x,float y,Rgb) {
+            const float across=clamp01((x-r.x)/r.w),end=clamp01(std::min(y-r.y,r.y+r.h-y)/14);
+            const float ridge=0.78f+0.22f*std::cos(y*1.9f);
+            Rgb c=mix(Rgb{20,21,25},Rgb{96,98,106},std::sin(across*3.14159265f))*(ridge*(0.6f+0.4f*end));
+            if((hu && y<mid) || (hd && y>=mid))c=c*0.55f;
+            return c;
+        });
+        // Chevrons on the body above and below the roller.
+        const float cx=r.x+r.w*0.5f;
+        for(int part : {0,1}) {
+            const float cy=part ? r.y+r.h+10.f : r.y-10.f,dir=part ? 1.f : -1.f;
+            const bool h=part ? hd : hu;
+            canvas.paint(cx-7,cy-5,cx+7,cy+5,[&](float x,float y) {
+                return canvas.edge(std::min(segment(x,y,cx-5,cy-dir*2.5f,cx,cy+dir*2.5f),
+                                            segment(x,y,cx+5,cy-dir*2.5f,cx,cy+dir*2.5f))-0.9f);
+            },[&](float,float,Rgb) {return h ? zaurusGlow : Rgb{44,46,54};});
+        }
+    }
+}
 }  // namespace
 
 void drawDeviceLamp(SDL_Renderer* renderer, int x, int y, uint8_t colour) {
@@ -3493,4 +3979,93 @@ void drawDanaKeyCaps(SDL_Renderer* renderer,const SDL_Rect& dest,int width,int h
         SDL_RenderCopy(renderer,texture,nullptr,&dest);
         SDL_DestroyTexture(texture);
     }
+}
+
+const ZaurusArt& zaurusArt() {
+    // Keyboard rows, cap sizes and printed legends, Japanese included, follow photos of the
+    // SL-C3000 and C1000 (the same keyboard); row and column are the Spitz keyboard matrix (the
+    // Linux spitz keymap). Kana and Zen/Han are the matrix's two Japanese keys in that order. The
+    // hard icons are printed on the bezel and aren't in the matrix.
+    using M=ZaurusMark;
+    const auto K=ZaurusPart::keyboard,I=ZaurusPart::icons,S=ZaurusPart::side;
+    static const ZaurusKeyArt keys[] = {
+        {"1",K,{25,20,34,26},"1","!","zoom-",M::none,0,1},{"2",K,{77,20,34,26},"2","\"","zoom+",M::none,1,1},
+        {"3",K,{129,20,34,26},"3","#","dim-",M::none,0,2},{"4",K,{180,20,34,26},"4","$","dim+",M::none,1,2},
+        {"5",K,{232,20,34,26},"5","%","",M::none,0,3},{"6",K,{284,20,34,26},"6","&","あ",M::none,0,4},
+        {"7",K,{336,20,34,26},"7","'","ア",M::none,0,5},{"8",K,{388,20,34,26},"8","(","ｱ",M::none,1,5},
+        {"9",K,{439,20,34,26},"9",")","A",M::none,0,6},{"0",K,{491,20,34,26},"0","~","A",M::none,0,7},
+        {"backspace",K,{540,20,40,26},"BS","","Del",M::backspace,0,8},
+
+        {"q",K,{17,60,44,32},"Q","","",M::none,2,1},{"w",K,{75,60,44,32},"W","","^",M::none,3,1},
+        {"e",K,{133,60,44,32},"E","","=",M::none,2,2},{"r",K,{192,60,44,32},"R","","+",M::none,1,3},
+        {"t",K,{250,60,44,32},"T","","[",M::none,2,3},{"y",K,{308,60,44,32},"Y","","]",M::none,1,4},
+        {"u",K,{366,60,44,32},"U","","「",M::none,2,5},{"i",K,{424,60,44,32},"I","","」",M::none,1,6},
+        {"o",K,{483,60,44,32},"O","","",M::none,1,7},{"p",K,{541,60,44,32},"P","","",M::none,1,8},
+
+        {"tab",K,{16,106,30,32},"Tab","","Caps",M::none,2,0},
+        {"a",K,{62,106,44,32},"A","","",M::none,4,1},{"s",K,{121,106,44,32},"S","","",M::none,3,2},
+        {"d",K,{179,106,44,32},"D","",".",M::none,4,2},{"f",K,{238,106,44,32},"F","","\\",M::none,3,3},
+        {"g",K,{296,106,44,32},"G","",";",M::none,2,4},{"h",K,{355,106,44,32},"H","",":",M::none,3,5},
+        {"j",K,{413,106,44,32},"J","","*",M::none,2,6},{"k",K,{472,106,44,32},"K","","¥",M::none,2,7},
+        {"l",K,{531,106,44,32},"L","","|",M::none,3,7},
+
+        {"lshift",K,{14,152,36,32},"Shift","","",M::none,4,9},
+        {"z",K,{66,152,44,32},"Z","","",M::none,5,1},{"x",K,{124,152,44,32},"X","","Cut",M::none,5,2},
+        {"c",K,{183,152,44,32},"C","","Copy",M::none,4,3},{"v",K,{242,152,44,32},"V","","Paste",M::none,3,4},
+        {"b",K,{300,152,44,32},"B","","_",M::none,4,4},{"n",K,{359,152,44,32},"N","","",M::none,4,5},
+        {"m",K,{418,152,44,32},"M","","",M::none,3,6},
+        {"rshift",K,{485,152,36,32},"Shift","","",M::none,3,9},
+        {"enter",K,{531,152,56,34},"Enter","","",M::enter,4,8},
+
+        {"fn",K,{10,198,40,32},"Fn","","",M::none,5,10},{"ctrl",K,{60,198,34,32},"Ctrl","","",M::none,0,0},
+        {"kana",K,{104,198,36,32},"カナ\nひら","","記号",M::none,6,1},
+        {"zenhan",K,{148,198,36,32},"全/半","","漢字",M::none,6,2},
+        {"minus",K,{194,198,36,32},"-","","@",M::none,5,3},
+        {"space",K,{244,198,120,32},"前候補\nSpace/変換","","音訓",M::none,5,4},
+        {"comma",K,{380,198,34,32},"、,","/","<",M::none,5,5},{"dot",K,{424,198,34,32},"。.","?",">",M::none,4,6},
+
+        {"up",K,{510,206,40,32},"","","",M::up,5,7},{"down",K,{510,286,40,32},"","","",M::down,6,7},
+        {"left",K,{474,242,32,40},"","","",M::left,6,6},{"right",K,{554,242,32,40},"","","",M::right,6,8},
+        {"ok",K,{510,242,40,40},"OK","","",M::ok,6,4},{"cancel",K,{418,282,36,36},"Cancel","","",M::cancel,6,3},
+
+        {"calendar",K,{28,284,32,32},"Calendar","","Sync",M::calendar,4,0},
+        {"address",K,{90,284,32,32},"Address","","",M::address,3,0},
+        {"mail",K,{152,284,32,32},"Mail","","Check",M::mail,5,0},
+        {"home",K,{215,284,32,32},"Home","","",M::home,6,0},
+        {"menu",K,{278,284,32,32},"Menu","","",M::menu,6,5},
+        {"power",K,{340,284,48,32},"Power","","",M::power,-1,-1},
+
+        {"icon-dictionary",I,{8,6,80,52},"Dictionary","","",M::dictionary,-1,-1},
+        {"icon-calendar",I,{104,6,80,52},"Calendar","","",M::calendar,-1,-1},
+        {"icon-address",I,{200,6,80,52},"Address","","",M::address,-1,-1},
+        {"icon-mail",I,{296,6,80,52},"Mail","","",M::mail,-1,-1},
+        {"icon-home",I,{392,6,80,52},"Home","","",M::home,-1,-1},
+
+        {"exjogup",S,{14,40,36,50},"Scroll up","","",M::jogUp,1,10},
+        {"exjogdown",S,{14,90,36,50},"Scroll down","","",M::jogDown,1,9},
+        {"exok",S,{14,184,36,44},"OK","","",M::ok,0,9},
+        {"excancel",S,{14,252,36,44},"Cancel","","",M::cancel,0,10},
+        {"expower",S,{14,320,36,44},"Power","","",M::power,-1,-1},
+    };
+    static const ZaurusArt art{keys,std::size(keys)};
+    return art;
+}
+
+void drawZaurusControls(SDL_Renderer* renderer, const ZaurusLayout& layout, const ZaurusKeysHeld& held) {
+    // One canvas per part at window pixels, in that part's units.
+    auto draw=[&](const SDL_Rect& dest,float units,auto paint) {
+        if(dest.w<=0 || dest.h<=0)return;
+        Canvas canvas(1,1,float(dest.w)/units);
+        canvas.w=dest.w;canvas.h=dest.h;
+        canvas.pixels.assign(size_t(canvas.w)*canvas.h,Rgb{0,0,0});
+        paint(canvas);
+        if(auto* texture=canvasTexture(renderer,canvas)) {
+            SDL_RenderCopy(renderer,texture,nullptr,&dest);
+            SDL_DestroyTexture(texture);
+        }
+    };
+    draw(layout.keyboard,zaurusKeyboardWidth,[&](Canvas& c) {paintZaurusKeyboard(c,held);});
+    const bool turned=layout.style==ZaurusStyle::clamshell;
+    draw(layout.icons,turned ? zaurusIconsDepth : zaurusIconsLength,[&](Canvas& c) {paintZaurusIcons(c,turned,held);});
+    draw(layout.side,zaurusSideWidth,[&](Canvas& c) {paintZaurusSide(c,held);});
 }

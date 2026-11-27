@@ -27,9 +27,11 @@ enum SdDataReplyType {
 typedef bool (*SdSectorR)(uint32_t secNum, void *buf);
 typedef bool (*SdSectorW)(uint32_t secNum, const void *buf);
 
-struct VSD *vsdInit(SdSectorR, SdSectorW, uint32_t nSec);
+struct VSD *vsdInit(SdSectorR, SdSectorW, uint32_t nSec, bool supportsLegacyMmc = false);
 void vsdReset(struct VSD *vsd, uint32_t nSec);
 void vsdSetWriteProtect(struct VSD *vsd, bool on);
+void vsdSetLegacyMmc(VSD* vsd, bool enabled);
+bool vsdLegacyMmc(const VSD* vsd);
 // A rejected write reports WP_VIOLATION in R1 and has no data phase.
 inline bool vsdWriteRejected(uint8_t command, const uint8_t* reply) {
     return (command == 24 || command == 25) && (reply[1] & 4);

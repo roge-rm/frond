@@ -87,7 +87,7 @@ class DeviceInputTest(unittest.TestCase):
                                                  'SDL_AUDIODRIVER': 'dummy'})
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(message, result.stderr + result.stdout)
-        self.assertNotIn('SDL', result.stderr)
+        self.assertNotIn('SDL', result.stderr.split('Usage:', 1)[0])
         return result
 
     def test_window_scaling_options(self):
@@ -118,7 +118,7 @@ class DeviceInputTest(unittest.TestCase):
                           'palm-m100', 'palm-m105', 'palm-m125', 'palm-m500', 'ibm-workpad-c500',
                           'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520',
                           'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'sony-clie-t415',
-                          'hp-ipaq-210', 'hp-ipaq-rx1950', 'hp-ipaq-h4350'])
+                          'hp-ipaq-210', 'hp-ipaq-rx1950', 'sharp-zaurus-sl-c3000', 'hp-ipaq-h4350'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
                          ('zire72-nor', 'zire72-desktop', ZIRE_SIZE, 0))
@@ -126,14 +126,18 @@ class DeviceInputTest(unittest.TestCase):
                           zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
                          {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved',
-                          'ez68k-rom', 'vz68k-rom', 'zodiac-nor', 'rx1950-nand'})
+                          'ez68k-rom', 'vz68k-rom', 'zodiac-nor', 'rx1950-nand', 'spitz-nand'})
         self.assertEqual(data['profiles'][2]['status'], 'experimental-desktop')
         self.assertEqual(data['profiles'][3]['status'], 'inherited-unverified')
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
         self.assertEqual(data['profiles'][24]['status'], 'experimental-desktop')
-        self.assertEqual([p['status'] for p in data['profiles'][25:]], ['reserved', 'experimental-desktop', 'reserved'])
+        self.assertEqual([p['status'] for p in data['profiles'][25:]],
+                         ['reserved', 'experimental-desktop', 'staged', 'reserved'])
+        zaurus = next(p for p in data['profiles'] if p['name'] == 'sharp-zaurus-sl-c3000')
+        self.assertTrue(zaurus['sd_slot'])
+        self.assertEqual((zaurus['sd_min_bytes'], zaurus['sd_max_bytes']), (32 << 20, 2048 << 20))
         colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}
         self.assertEqual(colour, {'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520'})
 

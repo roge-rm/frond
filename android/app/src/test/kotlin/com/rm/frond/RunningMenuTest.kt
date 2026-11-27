@@ -1,5 +1,6 @@
 package com.rm.frond
 
+import com.rm.frond.RunningSheets.ZaurusUsbMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -15,7 +16,23 @@ class RunningMenuTest {
             RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS, RunningMenu.Id.SCREENSHOT, RunningMenu.Id.HIDE_BAR,
             RunningMenu.Id.SAVE_COPY, RunningMenu.Id.LOG, RunningMenu.Id.RESET, RunningMenu.Id.HARD_RESET,
         )
-        for (device in Device.entries) assertEquals(device.id, fixed, ids(device).filter { it in fixed })
+        for (device in Device.entries) {
+            assertEquals(device.id, fixed, ids(device).filter { it in fixed })
+            assertEquals(device.id, device.zaurus, RunningMenu.Id.PC_LINK in ids(device))
+        }
+    }
+
+    @Test fun pcLinkNeedsTheZaurusUsbPortFree() {
+        val device = Device.byId(Device.ZAURUS_ID)!!
+        fun row(s: RunningMenu.State) = rows(device, s).first { it.id == RunningMenu.Id.PC_LINK }
+        val free = RunningMenu.State(zaurusUsbCable = ZaurusUsbMode.OFF, zaurusUsbDriveAttached = false)
+        assertTrue(row(free).enabled)
+        assertFalse(row(free.copy(busy = true)).enabled)
+        assertFalse(row(free.copy(zaurusUsbCable = null)).enabled)
+        assertFalse(row(free.copy(zaurusUsbDriveAttached = null)).enabled)
+        assertFalse(row(free.copy(zaurusUsbDriveAttached = true)).enabled)
+        for (mode in ZaurusUsbMode.entries.filter { it != ZaurusUsbMode.OFF })
+            assertFalse(row(free.copy(zaurusUsbCable = mode)).enabled)
     }
 
     // The rx1950 (Windows CE) has its own hard reset, a clean boot, so the row is there and on.

@@ -23,6 +23,7 @@ class ConnectionsWindow;
 class CardsWindow;
 class SyncWindow;
 class CardFilesWindow;
+class ZaurusPcLinkDialog;
 class QFileSystemWatcher;
 class QDialog;
 class QMessageBox;
@@ -103,6 +104,8 @@ class MainWindow : public QMainWindow {
     QString sessionFile() const;
     bool send(const QString& command, const QString& argument = {});
     bool installNext();
+    bool canQueueZaurus(int slot) const;
+    bool sendInstall(const QString& path);
     bool installResult(bool ok, const QString& code, const QString& message);
     QString serialArgument() const;
     void showSerial(const QString& state);
@@ -348,6 +351,33 @@ class MainWindow : public QMainWindow {
     QLabel *serialLabel, *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
     QSlider* contrast;
     QPushButton *rotateButton, *hotSyncButton;
+    QLabel* zaurusLidLabel{nullptr};
+    QComboBox* zaurusLid{nullptr};
+    QCheckBox* zaurusBatteryDoor{nullptr};
+    QCheckBox* zaurusRemoteToggle{};
+    QWidget* zaurusRemoteKeys{};
+    QTimer* zaurusRemoteRelease{};
+    QString zaurusRemoteState, zaurusRemoteKey;
+    QWidget* zaurusCfPanel{};
+    QLabel* zaurusCfState{};
+    QPushButton *zaurusCfAttach{}, *zaurusCfReinsert{}, *zaurusCfEject{}, *zaurusCfFiles{}, *zaurusCfExport{}, *zaurusCfRetry{};
+    QCheckBox* zaurusCfProtect{};
+    QPushButton *zaurusEthernet{}, *zaurusWifi{}, *zaurusCfNetworkEject{}, *zaurusCfReconnect{};
+    QString zaurusCfNetwork, zaurusCfNetworkStatus;
+    QWidget* zaurusUsbDrivePanel{};
+    QPushButton* zaurusPcLinkButton{};
+    ZaurusPcLinkDialog* zaurusPcLink{};
+    QLabel* zaurusUsbDriveState{};
+    QPushButton *zaurusUsbDriveInsert{}, *zaurusUsbDriveEject{}, *zaurusUsbDriveRetry{};
+    bool zaurusUsbCableAttached{false};
+    bool zaurusUsbDriveKnown{false}, zaurusUsbDriveAttached{false}, zaurusUsbDriveStartup{false};
+    QWidget* zaurusSdFamilyRow{};
+    QComboBox* zaurusSdFamily{};
+    QString zaurusSdFamilyState;
+    bool zaurusCfKnown{false}, zaurusCfPresent{false}, zaurusCfInserted{false}, zaurusCfProtectKnown{false};
+    QString zaurusInstallSlot;
+    static constexpr int compactFlashSlot = 2;
+    void showZaurusHardware(const QString& state);
     QCheckBox* cradleToggle;
     QString cradleSetting;
     bool outOfCradle() const;
@@ -378,8 +408,8 @@ class MainWindow : public QMainWindow {
     QPointer<QMessageBox> failureBox;  // the error showing now; later errors are added to it
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     bool card2Present{false}, card2Inserted{false}, sd2Known{false};
-    bool present(int n) const { return n ? card2Present : cardPresent; }
-    bool inserted(int n) const { return n ? card2Inserted : cardInserted; }
+    bool present(int n) const { return n == compactFlashSlot ? zaurusCfPresent : n ? card2Present : cardPresent; }
+    bool inserted(int n) const { return n == compactFlashSlot ? zaurusCfInserted : n ? card2Inserted : cardInserted; }
     // The slot a card move, Files… or the picker works on; changed only while none is under way.
     int cardSlot{0};
     // Start: slot 2's card goes in once the core is up, if the core left it out; on a 68k device
@@ -387,7 +417,7 @@ class MainWindow : public QMainWindow {
     bool secondStartPending{false}, firstStartPending{false};
     // The core's put-in for slot n: put-in with the serial, or on a 68k device an attach of the
     // slot's card file by path with its key.
-    QString putInArgument(int n, const QString& identity, bool protect) const;
+    QString putInArgument(int n, const QString& identity, bool protect, bool inserted = true) const;
     // Add device: the cards picked per slot, put in once the new machine runs; empty when none.
     QStringList startCards;
     bool putInStartCard();

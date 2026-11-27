@@ -234,6 +234,10 @@ inline ControllerMap controllerDefaults(const DeviceProfile5& profile) {
             {P::leftTrigger, K::jogUp}, {P::rightTrigger, K::jogDown}, {P::rightStick, K::jogPress}, {P::leftStick, K::back}};
         for (const auto& [key, button] : keys)
             if (has(button)) map.keys[key] = button;
+        if (profile.deviceType == deviceTypeSpitz) {
+            map.keys[P::b] = K::back;
+            map.keys[P::guide] = K::power;
+        }
     }
     for (auto it = map.keys.begin(); it != map.keys.end();) it = has(it->second) ? std::next(it) : map.keys.erase(it);
     return map;

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 #include "cputil.h"
 #include "mem.h"
@@ -15,12 +16,14 @@
 #define PXA_RTC_BASE 0x40900000UL
 #define PXA_RTC_SIZE 0x00001000UL
 
-#define SAVESTATE_VERSION 1
+#define SAVESTATE_VERSION 2
 
 struct PxaRtc {
     struct PxaIc *ic;
 
     uint64_t lastAlarmCheck;
+    uint32_t counterOffset;
+    bool unixEpoch;
 
     uint32_t RTAR;  // RTC alarm
     uint32_t RTTR;  // RTC trim - we ignore this alltogether
@@ -36,6 +39,7 @@ struct PxaRtc {
         } else {
             chunkHelper.Do32(RTAR).Do32(RTTR).Do8(RTSR).Do64(lastAlarmCheck);
         }
+        if (version >= 2) chunkHelper.Do32(counterOffset);
     }
 };
 
@@ -44,16 +48,26 @@ static void pxaRtcPrvUpdateInterrupts(struct PxaRtc *rtc) {
     pxaIcInt(rtc->ic, PXA_I_RTC_HZ, !!(rtc->RTSR & 2));
 }
 
+static uint64_t pxaRtcCounter(const PxaRtc* rtc) {
+    return rtc->unixEpoch ? uint32_t(std::time(nullptr)) + rtc->counterOffset : palmEpochSeconds();
+}
+
+static void pxaRtcAlarmMatch(PxaRtc* rtc) {
+    if (rtc->RTSR & 0x04) rtc->RTSR |= 1;
+    // PXA27x 21.4.6.2: sleep wake is independent of RTSR[ALE].
+    if (rtc->wakeCallback) rtc->wakeCallback(rtc->wakeContext);
+}
+
 static void pxaRtcPrvUpdateAlarm(struct PxaRtc *rtc) {
-    if (rtc->lastAlarmCheck < rtc->RTAR) {
-        const uint64_t now = palmEpochSeconds();
-
-        if (now >= rtc->RTAR) {
-            if (rtc->RTSR & 0x04) rtc->RTSR |= 1;
-            // PXA27x 21.4.6.2: sleep wake is independent of RTSR[ALE].
-            if (rtc->wakeCallback) rtc->wakeCallback(rtc->wakeContext);
-        }
-
+    const uint64_t now = pxaRtcCounter(rtc);
+    if (rtc->unixEpoch) {
+        // Compare elapsed counts so a match can cross the 32-bit counter rollover.
+        const uint32_t elapsed = now - rtc->lastAlarmCheck;
+        const uint32_t untilMatch = rtc->RTAR - rtc->lastAlarmCheck;
+        if (elapsed < 0x80000000 && untilMatch && untilMatch <= elapsed) pxaRtcAlarmMatch(rtc);
+        rtc->lastAlarmCheck = now;
+    } else if (rtc->lastAlarmCheck < rtc->RTAR) {
+        if (now >= rtc->RTAR) pxaRtcAlarmMatch(rtc);
         rtc->lastAlarmCheck = now;
     }
 
@@ -61,11 +75,12 @@ static void pxaRtcPrvUpdateAlarm(struct PxaRtc *rtc) {
 }
 
 PxaRtcRetained pxaRtcRetained(const PxaRtc* rtc) {
-    return {rtc->lastAlarmCheck, rtc->RTAR, rtc->RTTR, rtc->RTSR};
+    return {rtc->lastAlarmCheck, rtc->counterOffset, rtc->RTAR, rtc->RTTR, rtc->RTSR};
 }
 
 void pxaRtcRestoreRetained(PxaRtc* rtc, const PxaRtcRetained& retained) {
     rtc->lastAlarmCheck = retained.lastAlarmCheck;
+    rtc->counterOffset = retained.counterOffset;
     rtc->RTAR = retained.RTAR;
     rtc->RTTR = retained.RTTR;
     rtc->RTSR = retained.RTSR;
@@ -97,14 +112,21 @@ static bool pxaRtcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
 
         switch (pa) {
             case 0:
+                if (rtc->unixEpoch) {
+                    rtc->counterOffset = val - uint32_t(std::time(nullptr));
+                    rtc->lastAlarmCheck = val;
+                    if (val == rtc->RTAR) pxaRtcAlarmMatch(rtc);
+                    pxaRtcPrvUpdateInterrupts(rtc);
+                }
                 break;
 
-            case 1:
+            case 1: {
                 rtc->RTAR = val;
-                rtc->lastAlarmCheck = palmEpochSeconds() - 1;
+                const uint64_t now = pxaRtcCounter(rtc);
+                rtc->lastAlarmCheck = rtc->unixEpoch ? uint32_t(now - 1) : now - 1;
                 pxaRtcPrvUpdateAlarm(rtc);
-
                 break;
+            }
 
             case 2:
                 rtc->RTSR = (val & ~3UL) | ((rtc->RTSR & ~val) & 3UL);
@@ -119,7 +141,7 @@ static bool pxaRtcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
     } else {
         switch (pa) {
             case 0:
-                val = palmEpochSeconds();
+                val = pxaRtcCounter(rtc);
                 break;
 
             case 1:
@@ -140,13 +162,15 @@ static bool pxaRtcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
     return true;
 }
 
-struct PxaRtc *pxaRtcInit(struct ArmMem *physMem, struct PxaIc *ic) {
+struct PxaRtc *pxaRtcInit(struct ArmMem *physMem, struct PxaIc *ic, bool unixEpoch) {
     struct PxaRtc *rtc = (struct PxaRtc *)malloc(sizeof(*rtc));
 
     if (!rtc) ERR("cannot alloc RTC");
 
     memset(rtc, 0, sizeof(*rtc));
     rtc->ic = ic;
+    rtc->unixEpoch = unixEpoch;
+    if (unixEpoch) rtc->lastAlarmCheck = pxaRtcCounter(rtc);
     rtc->RTTR = 0x7FFF;  // nice default value
 
     if (!memRegionAdd(physMem, PXA_RTC_BASE, PXA_RTC_SIZE, pxaRtcPrvMemAccessF, rtc))
@@ -169,11 +193,12 @@ void pxaRtcRefreshInterrupts(PxaRtc* rtc) { pxaRtcPrvUpdateInterrupts(rtc); }
 
 template <typename T>
 void pxaRtcSave(struct PxaRtc *rtc, T &savestate) {
-    auto chunk = savestate.GetChunk(ChunkType::pxaRtc, SAVESTATE_VERSION);
+    const uint32_t version = rtc->unixEpoch ? SAVESTATE_VERSION : 1;
+    auto chunk = savestate.GetChunk(ChunkType::pxaRtc, version);
     if (!chunk) ERR("unable to allocate chunk");
 
     SaveChunkHelper helper(*chunk);
-    rtc->DoSaveLoad(helper, SAVESTATE_VERSION);
+    rtc->DoSaveLoad(helper, version);
 }
 
 template <typename T>
@@ -185,7 +210,17 @@ void pxaRtcLoad(struct PxaRtc *rtc, T &loader) {
     LoadChunkHelper helper(*chunk);
     rtc->DoSaveLoad(helper, gotVersion);
 
-    if (gotVersion == 0) rtc->lastAlarmCheck = palmEpochSeconds();
+    if (rtc->unixEpoch && gotVersion < 2) {
+        // Older Zaurus sessions read the Palm counter. Move any future alarm
+        // with the epoch shift, retaining the current host UTC as the clock.
+        rtc->counterOffset = 0;
+        const uint64_t now = pxaRtcCounter(rtc);
+        const uint64_t oldNow = palmEpochSeconds();
+        if (rtc->RTAR >= oldNow) rtc->RTAR -= oldNow - now;
+        rtc->lastAlarmCheck = now;
+    } else if (gotVersion == 0) {
+        rtc->lastAlarmCheck = pxaRtcCounter(rtc);
+    }
 }
 
 template void pxaRtcSave<Savestate<ChunkType>>(PxaRtc *rtc, Savestate<ChunkType> &savestate);

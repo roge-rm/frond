@@ -34,6 +34,7 @@
 #include <QFileDialog>
 #include "SdImage.h"
 #include <QSettings>
+#include <QScopeGuard>
 #include <QSpinBox>
 #include <QSlider>
 #include <QProcess>
@@ -393,7 +394,7 @@ static void writeFrond(const QString& path, const QString& device, const QList<T
     for (const auto& m : media) {
         QByteArray d(100, '\0');
         putLe(d, 0, m.kind, 4);
-        const QByteArray name = m.kind == 1 ? "sd.frondsd" : m.kind == 2 ? "ms.frondms" : m.kind == 4 ? "nand.frondnand" : m.kind == 5 ? "sd2.frondsd" : "ms.frondmsp";
+        const QByteArray name = m.kind == 1 ? "sd.frondsd" : m.kind == 2 ? "ms.frondms" : m.kind == 4 ? "nand.frondnand" : m.kind == 5 ? "sd2.frondsd" : m.kind == 6 ? "cf.frondcf" : "ms.frondmsp";
         for (int i = 0; i < name.size(); ++i) d[4 + i] = name[i];
         putLe(d, 36, 1, 4);
         for (int i = 0; i < 32; ++i) d[44 + i] = m.identity.leftJustified(32, '\0', true)[i];
@@ -2633,6 +2634,363 @@ for line in s.makefile('rb'):
         }
         QSettings().clear();
     }
+    void zaurusCfSetup() {
+        cardsReset();
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const auto fixture = [&](const QString& name, qint64 size, const QByteArray& bytes) {
+            QFile file(root.filePath(name));
+            return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.resize(size);
+        };
+        const QString model = "sharp-zaurus-sl-c3000";
+        const auto zaurus = frondFirmware::deviceFromId(model);
+        QVERIFY(frondFirmware::isZaurus(zaurus));
+        QVERIFY(fixture("nand.bin", qint64(frondFirmware::profile(zaurus).nandSize), {}));
+        QVERIFY(fixture("external.img", 4 << 20, "ORIGINAL"));
+        QVERIFY(fixture("hdd1.tar", 1, "0"));
+        QVERIFY(fixture("cs0.bin", 8 << 20, "ROM"));
+        const auto corePath = root.filePath("test-core");
+        writeFrond(root.filePath("checkpoint.frond"), model, {});
+        {
+            QFile core(corePath);
+            QVERIFY(core.open(QIODevice::WriteOnly));
+            core.write(R"PY(#!/usr/bin/python3
+import pathlib, shutil, socket, sys
+directory = pathlib.Path(sys.argv[0]).parent
+(directory / 'args').write_text('\n'.join(sys.argv[1:]))
+with open(sys.argv[sys.argv.index('--microdrive') + 1], 'r+b') as cf:
+    cf.write(b'MACHINE!')
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[sys.argv.index('--desktop-socket') + 1])
+s.sendall(b'0\tevent\tready\t\n')
+cf_state = b'ejected'
+usb_mode = b'off'
+for line in s.makefile('rb'):
+    i, cmd, arg = line.rstrip(b'\n').split(b'\t')
+    with (directory / 'commands').open('ab') as commands:
+        commands.write(cmd + b'\t' + bytes.fromhex(arg.decode()) + b'\n')
+    message = b'sharp-zaurus-sl-c3000' if cmd == b'device-state' else b'done'
+    if cmd == b'sd-state':
+        message = b'none'
+    if cmd == b'cf-reinsert':
+        cf_state = b'inserted'
+    if cmd == b'cf-eject':
+        cf_state = b'ejected'
+    if cmd in [b'cf-state', b'cf-reinsert', b'cf-eject']:
+        message = cf_state
+    if cmd == b'cf-protection':
+        message = b'writable'
+    if cmd == b'zaurus-usb-host':
+        message = b'off'
+    if cmd == b'usb-mode':
+        usb_mode = bytes.fromhex(arg.decode())
+    if cmd in [b'usb-mode', b'usb-state']:
+        message = usb_mode if usb_mode == b'off' else usb_mode + b' running'
+    if cmd == b'zaurus-sd-family':
+        message = bytes.fromhex(arg.decode()) or b'sd'
+    if cmd == b'zaurus-install':
+        message = b'queued'
+    if cmd == b'save':
+        shutil.copyfile(directory / 'checkpoint.frond', bytes.fromhex(arg.decode()).decode())
+    if cmd == b'input-replay':
+        shutil.copyfile(bytes.fromhex(arg.decode()).decode(), directory / 'power')
+    s.sendall(i + b'\tok\tresult\t' + message.hex().encode() + b'\n')
+    if cmd == b'quit': break
+)PY");
+            QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        }
+        const auto args = [&]() {
+            QFile log(root.filePath("args"));
+            return log.open(QIODevice::ReadOnly) ? QString::fromUtf8(log.readAll()).split('\n') : QStringList{};
+        };
+        QSettings().clear();
+        MainWindow window(corePath);
+        window.show();
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = window.findChild<FirmwareDialog*>();
+            if (!dialog) return;
+            auto* device = dialog->findChild<QComboBox*>("device");
+            device->setCurrentIndex(device->findData(model));
+            dialog->findChild<QLineEdit*>("nand")->setText(root.filePath("nand.bin"));
+            dialog->findChild<QLineEdit*>("nor")->setText(root.filePath("cs0.bin"));
+            dialog->findChild<QLineEdit*>("zaurusCfImage")->setText(root.filePath("external.img"));
+            dialog->findChild<QPushButton*>("import")->click();
+        });
+        window.findChild<QPushButton*>("addDevice")->click();
+        auto* stop = window.findChild<QPushButton*>("stop");
+        QTRY_VERIFY(stop->isEnabled());
+        const auto name = frondFirmware::deviceName(zaurus);
+        const auto path = frondSessions::filePath(cardsSessions(), name);
+        const auto directory = QFileInfo(frondSessions::machineDirOf(path)).canonicalFilePath();
+        const auto cf = directory + '/' + frondSessions::zaurusCf;
+        QCOMPARE(QFileInfo(cf).size(), qint64(4 << 20));
+        QCOMPARE(args().value(args().indexOf("--engine") + 1), QString("fast"));
+        QCOMPARE(frondAudio::lowLatencyOption(zaurus, {}, {}), QString("--low-latency-queue"));
+        QVERIFY(args().contains("--microdrive-writable"));
+        QCOMPARE(args().value(args().indexOf("--microdrive") + 1), cf);
+        QCOMPARE(args().value(args().indexOf("--spitz-prom") + 1), directory + '/' + frondSessions::zaurusProm);
+        QCOMPARE(args().value(args().indexOf("--device") + 2), directory + '/' + frondSessions::zaurusNand);
+        QFile original(root.filePath("external.img"));
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(original.read(8), QByteArray("ORIGINAL"));
+        QVERIFY(!window.findChild<QPushButton*>("saveCopy")->isEnabled());
+        auto* power = window.findChild<QAction*>("barPower");
+        QTRY_VERIFY(power->isVisible() && power->isEnabled());
+        power->trigger();
+        QTRY_VERIFY(QFileInfo(root.filePath("power")).size() > 0);
+        QFile replay(root.filePath("power"));
+        QVERIFY(replay.open(QIODevice::ReadOnly));
+        QCOMPARE(replay.readAll(), QByteArray("0 key-down power\n2750 key-up power\n"));
+        const auto commands = [&] {
+            QFile file(root.filePath("commands"));
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        };
+        auto* usbMode = window.findChild<QComboBox*>("usbMode");
+        auto* flashInsert = window.findChild<QPushButton*>("zaurusUsbDriveInsert");
+        QTRY_VERIFY(usbMode->isEnabled() && flashInsert->isEnabled());
+        for (const QString mode : {"storage-probe", "pc-link", "off"}) {
+            const auto index = usbMode->findData(mode);
+            QVERIFY(index >= 0 && usbMode->model()->flags(usbMode->model()->index(index, 0)).testFlag(Qt::ItemIsEnabled));
+            usbMode->setCurrentIndex(index);
+            emit usbMode->activated(index);
+            QTRY_VERIFY(commands().contains("usb-mode\t" + mode.toUtf8() + '\n'));
+            QTRY_VERIFY(usbMode->isEnabled());
+            QCOMPARE(usbMode->currentData().toString(), mode);
+            QCOMPARE(flashInsert->isEnabled(), mode == "off");
+        }
+        frondSessions::Preferences prefs;
+        QVERIFY(frondSessions::readPreferences(path, &prefs));
+        QCOMPARE(prefs.usb, QString("off"));
+        QTRY_VERIFY(commands().contains("cf-protection\t"));
+        QTRY_COMPARE(window.findChild<QLabel*>("cfState")->text(), QString("Ejected"));
+        QTRY_VERIFY(window.findChild<QCheckBox*>("cfProtect")->isEnabled());
+        auto* sdFamily = window.findChild<QComboBox*>("zaurusSdFamily");
+        QTRY_COMPARE(sdFamily->currentData().toString(), QString("sd"));
+        QVERIFY(sdFamily->isEnabled());
+        sdFamily->setCurrentIndex(sdFamily->findData("mmc"));
+        emit sdFamily->activated(sdFamily->currentIndex());
+        QTRY_VERIFY(commands().contains("zaurus-sd-family\tmmc"));
+        QTRY_VERIFY(window.findChild<QCheckBox*>("cfProtect")->isEnabled());
+        QVERIFY(fixture("Package.ipk", 24, "fake IPK"));
+        window.installFiles({root.filePath("Package.ipk")});
+        QTRY_VERIFY(commands().contains("zaurus-install\tcf " + root.filePath("Package.ipk").toUtf8()));
+        QTRY_VERIFY(window.findChild<QPushButton*>("cfReinsert")->isEnabled());
+        window.findChild<QPushButton*>("cfReinsert")->click();
+        QTRY_COMPARE(window.findChild<QLabel*>("cfState")->text(), QString("Inserted"));
+        QTRY_VERIFY(stop->isEnabled());
+        stop->click();
+        QTRY_VERIFY(!stop->isEnabled() && QFileInfo(path).isFile());
+        QTRY_VERIFY(window.findChild<QPushButton*>("addDevice")->isEnabled());
+        window.openSession(path, true);
+        QTRY_VERIFY(stop->isEnabled());
+        QTRY_COMPARE(args().value(0), QFileInfo(path).canonicalFilePath());
+        QCOMPARE(args().value(args().indexOf("--microdrive") + 1), cf);
+        QVERIFY(!args().contains("--spitz-prom"));
+        stop->click();
+        QTRY_VERIFY(window.findChild<QPushButton*>("addDevice")->isEnabled());
+        window.close();
+
+        // The builder receives the selected capacity and the optional font source.
+        QFile python(root.filePath("python3"));
+        QVERIFY(python.open(QIODevice::WriteOnly));
+        python.write(R"PY(#!/usr/bin/python3
+import pathlib, sys
+assert 'def create_image' in sys.stdin.read()
+assert '--require-fonts' in sys.argv
+assert pathlib.Path(sys.argv[sys.argv.index('--font-rom') + 1]).name == 'cs0.bin'
+output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])
+with output.open('wb') as image:
+    image.truncate(int(sys.argv[sys.argv.index('--size-gb') + 1]) * 10**9)
+)PY");
+        python.close();
+        QVERIFY(python.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto oldPath = qgetenv("PATH");
+        const auto restorePath = qScopeGuard([&] { qputenv("PATH", oldPath); });
+        qputenv("PATH", root.path().toLocal8Bit() + ':' + oldPath);
+        const frondSessions::Preferences fresh;
+        FirmwareDialog dialog(root.path(), zaurus, nullptr, &fresh);
+        dialog.offerCards(cardsSessions());
+        dialog.show();
+        auto* mode = dialog.findChild<QComboBox*>("zaurusCfMode");
+        auto* size = dialog.findChild<QSpinBox*>("zaurusCfSize");
+        auto* image = dialog.findChild<QLineEdit*>("zaurusCfImage");
+        auto* archive = dialog.findChild<QLineEdit*>("zaurusCfArchive");
+        QVERIFY(image->isVisible() && !archive->isVisible() && !size->isVisible());
+        mode->setCurrentIndex(1);
+        QVERIFY(!image->isVisible() && archive->isVisible() && size->isVisible());
+        QCOMPARE(size->minimum(), 4);
+        QCOMPARE(size->maximum(), 32);
+        size->setValue(32);
+        archive->setText(root.filePath("hdd1.tar"));
+        dialog.findChild<QLineEdit*>("nand")->setText(root.filePath("nand.bin"));
+        dialog.findChild<QLineEdit*>("nor")->setText(root.filePath("cs0.bin"));
+        QCOMPARE(dialog.importImages(), QString());
+        QString created;
+        QCOMPARE(dialog.storeZaurus(created), QString());
+        const auto createdDir = frondSessions::machineDirOf(created);
+        QCOMPARE(QFileInfo(createdDir + '/' + frondSessions::zaurusCf).size(), qint64(32'000'000'000));
+        QVERIFY(!QFileInfo::exists(createdDir + '/' + frondSessions::zaurusProm));
+        QSettings().clear();
+    }
+
+    void zaurusStorageSessions() {
+        cardsReset();
+        QTemporaryDir root(QDir::currentPath() + "/build/zaurus-storage-XXXXXX");
+        QVERIFY(root.isValid());
+        const auto path = frondSessions::filePath(cardsSessions(), "Zaurus");
+        const auto dir = frondSessions::machineDirOf(path);
+        const QByteArray id("0123456789abcdef0123456789abcdef");
+        const QByteArray cfIdentity(32, 'c');
+        constexpr int cfSize = 2 << 20;
+        writeFrond(path, "sharp-zaurus-sl-c3000", {TestMedia{6, cfSize, cfSize, 1, cfIdentity}}, 9);
+        auto write = [&](const QString& at, const QByteArray& bytes, qint64 count = -1) {
+            QFile file(dir + '/' + at);
+            return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() &&
+                   (count < 0 || file.resize(count));
+        };
+#ifdef __linux__
+        constexpr qint64 internalSize = 32'000'000'000;
+#else
+        constexpr qint64 internalSize = 32ll << 20;
+#endif
+        QVERIFY(write(frondSessions::zaurusCf, "microdrive", internalSize));
+        const auto rawNandBytes = 528ll * 32 * 1024;
+        QVERIFY(write(frondSessions::zaurusNand, "[I]JFFS2TOP:", rawNandBytes + 16 * (1024 + 1)));
+        QVERIFY(frondSessions::checkZaurusCompanions(dir, true).contains("NAND backup"));
+        QVERIFY(write(frondSessions::zaurusNand, {}, rawNandBytes));
+        QVERIFY(write(frondSessions::zaurusProm, "PROM", 8 << 20));
+        QVERIFY(write(frondSessions::zaurusExternalCf, frondCardFile::encodeV2(QByteArray(cfSize, 'X'), 1)));
+
+        const auto info = frondSessions::describe(path);
+        const auto exported = root.filePath("Portable");
+        QVERIFY(frondSessions::exportFile(info, exported).contains("save it once"));
+        QVERIFY(write(frondSessions::zaurusCfId, id));
+        QVERIFY(write(frondSessions::zaurusCfCommit, QByteArray(32, 'c')));
+        const auto journal = QString("microdrive.journal-") + QString::fromLatin1(id);
+        QVERIFY(write(journal, "journal"));
+        QVERIFY(frondSessions::exportFile(info, exported).contains("finish its internal CF save"));
+        QVERIFY(QFile::remove(dir + '/' + journal));
+        {
+            QLockFile live(path + ".lock");
+            live.setStaleLockTime(0);
+            QVERIFY(frondSessions::tryLockSession(live, path));
+            QVERIFY(frondSessions::exportFile(info, exported).contains("Stop the Zaurus"));
+            QVERIFY(frondSessions::duplicate(cardsSessions(), info).contains("open in another Frond"));
+        }
+
+        QString copy;
+        QCOMPARE(frondSessions::duplicate(cardsSessions(), info, &copy), QString());
+        QCOMPARE(frondSessions::exportFile(info, exported), QString());
+        QCOMPARE(frondSessions::exportFile(info, exported), QString());
+        QString imported;
+        QCOMPARE(frondSessions::importFile(cardsSessions(), exported + "/Portable.frond", &imported), QString());
+        for (const auto& instance : {frondSessions::machineDir(cardsSessions(), copy),
+                                     frondSessions::machineDir(cardsSessions(), imported), exported}) {
+            QFile internal(instance + '/' + frondSessions::zaurusCf);
+            QVERIFY(internal.open(QIODevice::ReadOnly));
+            QCOMPARE(internal.read(10), QByteArray("microdrive"));
+            QCOMPARE(internal.size(), internalSize);
+            QCOMPARE(digest(instance + '/' + frondSessions::zaurusCfId), digest(dir + '/' + frondSessions::zaurusCfId));
+            QCOMPARE(digest(instance + '/' + frondSessions::zaurusCfCommit), digest(dir + '/' + frondSessions::zaurusCfCommit));
+            QCOMPARE(digest(instance + '/' + frondSessions::zaurusExternalCf), digest(dir + '/' + frondSessions::zaurusExternalCf));
+            QCOMPARE(digest(instance + '/' + frondSessions::zaurusNand), digest(dir + '/' + frondSessions::zaurusNand));
+            QCOMPARE(digest(instance + '/' + frondSessions::zaurusProm), digest(dir + '/' + frondSessions::zaurusProm));
+        }
+        // Files may commit a newer CF generation while a saved, ejected disk is detached.
+        QVERIFY(write(frondSessions::zaurusExternalCf, frondCardFile::encodeV2(QByteArray(cfSize, 'Y'), 2)));
+        QVERIFY(frondSessions::exportFile(info, exported).contains("card files don't match"));
+        QVERIFY(frondSessions::writeZaurusCfSwap(dir, {cfIdentity.toHex(), true, false}));
+        QCOMPARE(frondSessions::exportFile(info, exported), QString());
+        QCOMPARE(frondSessions::importFile(cardsSessions(), exported, &imported), QString());
+        const auto restored = frondSessions::machineDir(cardsSessions(), imported);
+        const auto slot = frondSessions::zaurusCfSwapOf(restored);
+        QVERIFY(slot && slot->identity == cfIdentity.toHex() && slot->writeProtected && !slot->inserted);
+        QCOMPARE(digest(restored + '/' + frondSessions::zaurusExternalCf), digest(dir + '/' + frondSessions::zaurusExternalCf));
+        // A save that reached its .frond after Files takes precedence over the swap marker.
+        writeFrond(path, "sharp-zaurus-sl-c3000", {TestMedia{6, cfSize, cfSize, 3, cfIdentity}}, 9);
+        const auto full = QString(frondSessions::zaurusExternalCf) + ".journal-3.full";
+        QVERIFY(write(full, frondCardFile::encodeV2(QByteArray(cfSize, 'Z'), 3)));
+        QCOMPARE(frondSessions::exportFile(info, exported), QString());
+        QCOMPARE(digest(exported + '/' + frondSessions::zaurusExternalCf), digest(dir + '/' + full));
+        QVERIFY(write(full, frondCardFile::encodeV2(QByteArray(cfSize, 'Z'), 4)));
+        QVERIFY(frondSessions::exportFile(info, exported).contains("finish the external CF save"));
+        // Copying without the committed Microdrive identity would leave a session unable to resume.
+        QVERIFY(QFile::remove(exported + '/' + frondSessions::zaurusCfId));
+        QVERIFY(!frondSessions::importFile(cardsSessions(), exported).isEmpty());
+    }
+    void zaurusCfEmbeddedLaunch() {
+        const auto nand = qEnvironmentVariable("FROND_TEST_ZAURUS_NAND");
+        const auto hdd1 = qEnvironmentVariable("FROND_TEST_ZAURUS_HDD1");
+        const auto fontRom = qEnvironmentVariable("FROND_TEST_ZAURUS_CS0");
+        if (nand.isEmpty() || hdd1.isEmpty() || fontRom.isEmpty()) QSKIP("Zaurus firmware inputs not set");
+        if (QGuiApplication::platformName() != "xcb") QSKIP("Zaurus embedding requires X11");
+        cardsReset();
+        QSettings().clear();
+        QSettings().setValue("resume", false);
+        MainWindow window(cardsCore());
+        window.show();
+        const QString model = "sharp-zaurus-sl-c3000";
+        QString setupError;
+        QTimer inspectErrors;
+        connect(&inspectErrors, &QTimer::timeout, &window, [&] {
+            if (auto* message = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                setupError = message->text();
+                message->accept();
+                if (auto* dialog = window.findChild<FirmwareDialog*>()) dialog->reject();
+            }
+        });
+        inspectErrors.start(50);
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = window.findChild<FirmwareDialog*>();
+            QVERIFY(dialog);
+            auto* device = dialog->findChild<QComboBox*>("device");
+            device->setCurrentIndex(device->findData(model));
+            dialog->findChild<QComboBox*>("zaurusCfMode")->setCurrentIndex(1);
+            dialog->findChild<QLineEdit*>("nand")->setText(nand);
+            dialog->findChild<QLineEdit*>("nor")->setText(fontRom);
+            dialog->findChild<QLineEdit*>("zaurusCfArchive")->setText(hdd1);
+            dialog->findChild<QPushButton*>("import")->click();
+        });
+        window.findChild<QPushButton*>("addDevice")->click();
+        QVERIFY2(setupError.isEmpty(), qPrintable(setupError));
+        auto* holder = window.findChild<PalmHolder*>("palmHolder");
+        QTRY_VERIFY_WITH_TIMEOUT(holder->embedded() || !setupError.isEmpty(), 20000);
+        QVERIFY2(setupError.isEmpty(), qPrintable(setupError));
+        auto* stop = window.findChild<QPushButton*>("stop");
+        QTRY_VERIFY(stop->isEnabled());
+        const auto zaurus = frondFirmware::deviceFromId(model);
+        const auto path = frondSessions::filePath(cardsSessions(), frondFirmware::deviceName(zaurus));
+        const auto cf = frondSessions::machineDirOf(path) + '/' + frondSessions::zaurusCf;
+        QCOMPARE(QFileInfo(cf).size(), qint64(4'095'737'856));
+        auto* lid = window.findChild<QComboBox*>("zaurusLid");
+        QTRY_VERIFY(lid->isEnabled());
+        QCOMPARE(lid->currentData().toString(), QString("open"));
+        const auto folded = lid->findData("folded");
+        lid->setCurrentIndex(folded);
+        emit lid->activated(folded);
+        QTRY_VERIFY(lid->isEnabled());
+        QCOMPARE(lid->currentData().toString(), QString("folded"));
+        stop->click();
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
+        QVERIFY2(setupError.isEmpty(), qPrintable(setupError));
+        QCOMPARE(frondSessions::readHeader(path).device, model);
+        window.openSession(path, true);
+        QTRY_VERIFY_WITH_TIMEOUT(holder->embedded() || !setupError.isEmpty(), 20000);
+        QVERIFY2(setupError.isEmpty(), qPrintable(setupError));
+        QTRY_VERIFY(stop->isEnabled());
+        QTRY_VERIFY(lid->isEnabled());
+        QCOMPARE(lid->currentData().toString(), QString("folded"));
+        const auto open = lid->findData("open");
+        lid->setCurrentIndex(open);
+        emit lid->activated(open);
+        QTRY_VERIFY(lid->isEnabled());
+        stop->click();
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
+        QVERIFY2(setupError.isEmpty(), qPrintable(setupError));
+        window.close();
+        QSettings().clear();
+    }
+
     // Add device offers a drawer card per slot for a two-slot machine, and none for others.
     void addDeviceCardChoice() {
         cardsReset();

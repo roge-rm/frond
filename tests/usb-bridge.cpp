@@ -214,7 +214,7 @@ struct Bench {
     std::vector<std::pair<uint64_t, uint64_t>> log;
     UsbBusHost host;
     uint64_t now = 0, nextHostTick = 0;
-    Bench() : host([this] { return port(); },
+    explicit Bench(UsbBusHost::Mode mode = UsbBusHost::Mode::normal) : host([this] { return port(); },
                    UsbBusHost::Link{[this] { return space - std::min(space, toHost.size()); },
                                     [this](const uint8_t* d, size_t n) { toHost.insert(toHost.end(), d, d + n); return n; },
                                     [this](uint8_t* d, size_t n) {
@@ -222,7 +222,7 @@ struct Bench {
                                         for (; i < n && !fromHost.empty(); ++i) { d[i] = fromHost.front(); fromHost.pop_front(); }
                                         return i;
                                     },
-                                    [this] { return fromHost.size(); }}) {
+                                    [this] { return fromHost.size(); }}, mode) {
         if (udc) free(udc);
         udc = pxa270UdcInit(nullptr, nullptr, nullptr);
         pxa270UdcHostSetNotify(udc, [](void* host) { static_cast<UsbBusHost*>(host)->Poke(); }, &host);
@@ -725,6 +725,186 @@ static void testCooperativeOutCredit() {
     puts("PASS: cooperative OUT credit retains bytes without tokens or ACK accounting, independent IN/control, exact resume and detach cancellation");
 }
 
+static void testEnumerationOnly() {
+    Bench bench(UsbBusHost::Mode::enumerationOnly);
+    auto& host = bench.host;
+    bench.guest.enable();
+    host.Attach();
+    bench.run(1500000000);
+    assert(bench.configSetups == 1);
+    assert(host.GetPhase() == UsbBusHost::Phase::running && host.GetCounters().enumerations == 1);
+    assert(host.Vendor() == 0x0830 && host.Product() == 0x0061);
+    assert(!host.InEndpoint() && !host.OutEndpoint());
+    for (const auto& request : bench.guest.requests) assert(request[0] == 0x80 && request[1] == 6);
+    auto messages = host.TakeMessages();
+    assert(std::any_of(messages.begin(), messages.end(), [](const std::string& message) {
+        return message.find("0830:0061, configuration 09 02 2e") != std::string::npos;
+    }));
+    puts("PASS: enumeration probe configures and reports the device without class requests");
+}
+
+static void testZaurusNetwork() {
+    Bench bench(UsbBusHost::Mode::zaurusNetwork);
+    auto& host = bench.host;
+    auto& guest = bench.guest;
+    guest.device[8] = 0xdd;
+    guest.device[9] = 0x04;
+    guest.device[10] = 0x31;
+    guest.device[11] = 0x90;
+    // The Sharp SAFE descriptor with the scripted guest's existing bulk endpoint numbers.
+    guest.config = {9, 2, 84, 0, 1, 1, 3, 0xc0, 1, 9, 4, 0, 0, 3, 2, 0x0a, 0, 4,
+                    5, 0x24, 0, 0x10, 1, 21, 0x24, 0x12, 0, 1, 0x5d, 0x34, 0xcf, 0x66,
+                    0x11, 0x18, 0x11, 0xd6, 0xa2, 0x1a, 0, 1, 2, 0xca, 0x9a, 0x7f,
+                    6, 0x24, 0x13, 0, 0, 3, 13, 0x24, 0x0f, 5, 0, 0, 0, 0, 0xea, 5, 0, 0, 0,
+                    7, 5, 0x07, 2, 64, 0, 0, 7, 5, 0x86, 2, 64, 0, 0, 7, 5, 0x85, 3, 8, 0, 0x0a};
+    guest.enable();
+    host.Attach();
+    assert(bench.runUntil(UsbBusHost::Phase::running, 1000000000));
+    assert(host.ZaurusNetworkActive() && host.InEndpoint() == 6 && host.OutEndpoint() == 7);
+    for (const auto& request : guest.requests) assert(request[0] == 0x80 && request[1] == 6);
+
+    std::vector<uint8_t> frame(60);
+    for (unsigned i = 0; i < frame.size(); ++i) frame[i] = uint8_t(i);
+    assert(host.ZaurusNetworkSend(frame.data(), frame.size()));
+    assert(!host.ZaurusNetworkSend(frame.data(), frame.size()));
+    bench.run(3900000000ull);
+    assert(guest.received.empty() && !bench.outCalls);
+    bench.run(103000000);
+    auto hostWire = frame;
+    hostWire.insert(hostWire.end(), {0, 0x8d, 0xcc, 0x00, 0x95});
+    assert(guest.received == hostWire && (guest.outPackets == std::vector<unsigned>{64, 1}));
+    assert(host.ZaurusNetworkCanSend());
+
+    std::vector<std::vector<uint8_t>> incoming;
+    host.zaurusFrameFromDevice = [&](const uint8_t* bytes, size_t size) {
+        incoming.emplace_back(bytes, bytes + size);
+    };
+    auto guestWire = frame;
+    guestWire.insert(guestWire.end(), {0xee, 0x7f, 0xec, 0xb0, 0});
+    guest.toSend.assign(guestWire.begin(), guestWire.end());
+    bench.run(3000000);
+    assert(incoming.size() == 1 && incoming.front() == frame);
+    guestWire[20] ^= 1;
+    guest.toSend.assign(guestWire.begin(), guestWire.end());
+    bench.run(3000000);
+    assert(incoming.size() == 1);
+    guest.toSend.assign(hostWire.begin(), hostWire.end());
+    bench.run(3000000);
+    frame.push_back(0);
+    assert(incoming.size() == 2 && incoming.back() == frame);
+    assert(bench.toHost.empty());
+    puts("PASS: Sharp PC Link SAFE bulk framing, CRC, padding and corrupt packet rejection");
+}
+
+static void testZaurusStorage(bool goodStatus) {
+    Bench bench(UsbBusHost::Mode::storageProbe);
+    const std::deque<uint8_t> hostBytes{0x55, 0x53, 0x42, 0x43};
+    bench.fromHost = hostBytes;
+    auto& host = bench.host;
+    bench.guest.device[8] = 0xdd;
+    bench.guest.device[9] = 0x04;
+    bench.guest.device[10] = 0x50;
+    bench.guest.device[11] = 0x90;
+    // Keep the scripted guest on its existing endpoints.
+    bench.guest.config = {9, 2, 32, 0, 1, 1, 0, 0xc0, 0,
+                          9, 4, 0, 0, 2, 8, 6, 0x50, 0,
+                          7, 5, 0x86, 2, 64, 0, 0, 7, 5, 0x07, 2, 64, 0, 0};
+    bench.guest.enable();
+    host.Attach();
+    assert(bench.runUntil(UsbBusHost::Phase::running, 1000000000));
+    const uint8_t opcodes[] = {0x12, 0x00, 0x25, 0x28};
+    const unsigned sizes[] = {36, 0, 8, 512};
+    bench.run(1500000000);
+
+    for (unsigned i = 0; i < (goodStatus ? 4u : 1u); ++i) {
+        bench.run(5000000);
+        assert(bench.guest.outPackets.size() == i + 1 && bench.guest.outPackets.back() == 31);
+        const auto* cbw = bench.guest.received.data() + i * 31;
+        assert(std::memcmp(cbw, "USBC", 4) == 0 && cbw[4] == i + 1 && cbw[12] == (sizes[i] ? 0x80 : 0));
+        assert((cbw[8] | cbw[9] << 8) == int(sizes[i]) && cbw[15] == opcodes[i]);
+        if (i == 3) assert(cbw[22] == 0 && cbw[23] == 1);
+        std::vector<uint8_t> data(sizes[i], 0);
+        if (i == 0) std::memcpy(data.data() + 8, "SHARP   ", 8);
+        if (i == 2) { data[3] = 127; data[6] = 2; }
+        bench.guest.toSend.assign(data.begin(), data.end());
+        bench.run(16000000);
+        assert(bench.guest.toSend.empty());
+        bench.guest.toSend = {'U', 'S', 'B', 'S', uint8_t(goodStatus ? i + 1 : 99), 0, 0, 0, 0, 0, 0, 0, 0};
+        bench.run(5000000);
+    }
+
+    bench.run(20000000);
+    assert(bench.guest.received.size() == (goodStatus ? 124u : 31u));
+    assert(bench.fromHost == hostBytes && bench.toHost.empty());
+    const auto messages = host.TakeMessages();
+    auto saw = [&](const std::string& what) {
+        return std::any_of(messages.begin(), messages.end(), [&](const auto& m) { return m.find(what) != std::string::npos; });
+    };
+    if (goodStatus) {
+        assert(saw("INQUIRY SHARP") && saw("128 blocks of 512 bytes") && saw("read LBA 0, FNV-1a"));
+    } else {
+        assert(saw("invalid status for INQUIRY"));
+    }
+}
+
+static void testZaurusStorageWriteCheck(bool matchingPreimage) {
+    Bench bench(UsbBusHost::Mode::storageProbe);
+    auto& host = bench.host;
+    bench.guest.device[8] = 0xdd;
+    bench.guest.device[9] = 0x04;
+    bench.guest.device[10] = 0x50;
+    bench.guest.device[11] = 0x90;
+    bench.guest.config = {9, 2, 32, 0, 1, 1, 0, 0xc0, 0,
+                          9, 4, 0, 0, 2, 8, 6, 0x50, 0,
+                          7, 5, 0x86, 2, 64, 0, 0, 7, 5, 0x07, 2, 64, 0, 0};
+    UsbBusHost::StorageWriteCheck check{};
+    check.lba = 0x010203;
+    check.replacement.fill(0xa5);
+    assert(host.ArmStorageWriteCheck(check));
+    bench.guest.enable();
+    host.Attach();
+    assert(bench.runUntil(UsbBusHost::Phase::running, 1000000000));
+    bench.run(1500000000);
+
+    size_t before = 0;
+    const auto exchange = [&](uint8_t tag, uint8_t opcode, unsigned size, uint32_t lba,
+                              const std::vector<uint8_t>& reply) {
+        bench.run(16000000);
+        const bool write = opcode == 0x2a;
+        assert(bench.guest.received.size() == before + 31 + (write ? size : 0));
+        const auto* cbw = bench.guest.received.data() + before;
+        assert(std::memcmp(cbw, "USBC", 4) == 0 && cbw[4] == tag && cbw[15] == opcode &&
+               cbw[12] == (size && !write ? 0x80 : 0));
+        assert((cbw[8] | cbw[9] << 8) == int(size));
+        assert((uint32_t(cbw[17]) << 24 | uint32_t(cbw[18]) << 16 | uint32_t(cbw[19]) << 8 | cbw[20]) == lba ||
+               opcode == 0x12);
+        if (write) assert(std::equal(check.replacement.begin(), check.replacement.end(), cbw + 31));
+        before += 31 + (write ? size : 0);
+        bench.guest.toSend.assign(reply.begin(), reply.end());
+        bench.run(16000000);
+        assert(bench.guest.toSend.empty());
+        bench.guest.toSend = {'U', 'S', 'B', 'S', tag, 0, 0, 0, 0, 0, 0, 0, 0};
+
+        const auto bytesIn = host.GetCounters().bytesIn;
+        for (unsigned i = 0; i < 8 && host.GetCounters().bytesIn == bytesIn; ++i) bench.run(200000);
+        assert(host.GetCounters().bytesIn == bytesIn + 13);
+    };
+    exchange(1, 0x12, 36, 0, std::vector<uint8_t>(36));
+    exchange(2, 0x00, 0, 0, {});
+    exchange(3, 0x25, 8, 0, {0, 2, 0, 0, 0, 0, 2, 0});
+    exchange(4, 0x28, 512, check.lba, std::vector<uint8_t>(512, matchingPreimage ? 0 : 0xff));
+    if (matchingPreimage) {
+        exchange(5, 0x2a, 512, check.lba, {});
+        exchange(6, 0x35, 0, 0, {});
+        exchange(7, 0x28, 512, check.lba, std::vector<uint8_t>(512, 0xa5));
+    }
+    bench.run(20000000);
+    assert(bench.guest.received.size() == (matchingPreimage ? 7 * 31 + 512 : 4 * 31));
+    const auto messages = host.TakeMessages();
+    const std::string expected = matchingPreimage ? "write-check verified LBA 66051" : "write-check preimage differs";
+    assert(std::any_of(messages.begin(), messages.end(), [&](const auto& m) { return m.find(expected) != std::string::npos; }));
+}
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     testBulkInReadyDuringNak();
@@ -732,6 +912,14 @@ int main() {
     testRequestCadence();
     testControlNoResponseRetry();
     testEnumerationAndFrames();
+    testEnumerationOnly();
+    testZaurusNetwork();
+    testZaurusStorage(true);
+    testZaurusStorage(false);
+    puts("PASS: Zaurus Drive read-only SCSI transfers and mismatched status rejection");
+    testZaurusStorageWriteCheck(true);
+    testZaurusStorageWriteCheck(false);
+    puts("PASS: Zaurus Drive checked sector write, synchronisation, readback and preimage guard");
     testPortLater();
     testReenableAndLostSetup();
     testFailures();

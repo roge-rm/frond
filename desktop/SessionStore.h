@@ -22,13 +22,19 @@
 #include <functional>
 #include <zlib.h>
 #include <cerrno>
+#include <cstring>
 #include <fcntl.h>
 #ifdef _WIN32
 #include "winshim/sys/file.h"
 #else
 #include <sys/file.h>
+#include <sys/stat.h>
 #endif
 #include <optional>
+#ifdef __linux__
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
 #include <unistd.h>
 #include "FirmwareInput.h"
 #include "storage/Packed.h"
@@ -304,7 +310,8 @@ inline QString importError(const Header& header) {
     if (header.magic != magic) return QStringLiteral("That isn't a Frond session.");
     if (header.version > newestVersion) return QStringLiteral("That session is from a newer Frond.");
     if (header.version < firstNamedVersion) return QStringLiteral("That session is from an older Frond and can't be opened.");
-    if (frondFirmware::deviceFromId(header.device) == frondFirmware::Device::automatic)
+    const auto device = frondFirmware::deviceFromId(header.device);
+    if (device == frondFirmware::Device::automatic)
         return QStringLiteral("That session is for a device Frond can't run here yet.");
     return {};
 }
@@ -334,6 +341,76 @@ inline quint64 storedBytesV2(const QByteArray& hdr) {
     const quint64 payload = le64(hdr, 16), side = le64(hdr, 48);
     return side ? ((payload + (1u << 20) - 1) >> 20 << 20) + side : payload;
 }
+
+inline constexpr auto zaurusCf = "microdrive.img";
+inline constexpr auto zaurusCfId = "microdrive.id";
+inline constexpr auto zaurusCfCommit = "microdrive.commit";
+inline constexpr auto zaurusCfPendingId = ".microdrive.id.pending";
+inline constexpr auto zaurusNand = "zaurus-nand.bin";
+inline constexpr auto zaurusProm = "zaurus-prom.bin";
+inline constexpr auto zaurusExternalCf = "cf.frondcf";
+inline constexpr auto zaurusExternalCfSlot = "cf-slot.json";
+
+inline bool zaurusFileName(const QString& name) {
+    return name == zaurusCf || name == zaurusCfId || name == zaurusCfCommit || name == zaurusNand || name == zaurusProm ||
+           name == zaurusExternalCf || name == zaurusExternalCfSlot;
+}
+
+inline bool validZaurusNand(QFile& nand) {
+    constexpr int blocks = 1024, headerBytes = 16, blockBytes = 528 * 32;
+    constexpr qint64 rawBytes = blocks * blockBytes, backupBytes = rawBytes + (blocks + 1) * headerBytes;
+    if (!nand.open(QIODevice::ReadOnly)) return false;
+    if (nand.size() == rawBytes) return true;
+    if (nand.size() != backupBytes) return false;
+    const auto header = nand.read(headerBytes);
+    if (header.size() != headerBytes || !header.startsWith("[I]JFFS2TOP:") || le32(header, 12) != 0x6a0000)
+        return false;
+    for (int block = 0; block < blocks; ++block) {
+        if (!nand.seek(headerBytes + qint64(block) * (headerBytes + blockBytes))) return false;
+        const auto record = nand.read(8);
+        if (record.size() != 8 || le32(record, 0) != quint32(block * 32 * 512)) return false;
+        const auto tag = QByteArrayView(record).sliced(4);
+        if (tag != "[GL]" && tag != "[GP]" && tag != "[E] ") return false;
+    }
+    return true;
+}
+
+inline QString checkZaurusCompanions(const QString& dir, bool saved) {
+    const auto plainFile = [](const QFileInfo& file) { return file.isFile() && !file.isSymLink(); };
+    for (const auto* name : {zaurusCf, zaurusCfId, zaurusCfCommit, zaurusNand, zaurusProm, zaurusExternalCf, zaurusExternalCfSlot}) {
+        const QFileInfo file(dir + '/' + name);
+        if ((file.exists() || file.isSymLink()) && !plainFile(file))
+            return QStringLiteral("That Zaurus machine has an invalid storage file.");
+    }
+    const QFileInfo cf(dir + '/' + zaurusCf);
+    if (!plainFile(cf) || cf.size() < 512 || cf.size() % 512 || cf.size() > (1ll << 37))
+        return QStringLiteral("The Zaurus machine's internal CF image is missing or invalid.");
+    QFile nand(dir + '/' + zaurusNand);
+    if (nand.exists() ? !validZaurusNand(nand) : !saved)
+        return QStringLiteral("The Zaurus machine's NAND backup is missing or invalid.");
+    const QFileInfo prom(dir + '/' + zaurusProm);
+    if (prom.exists() && prom.size() != 8ll * 1024 * 1024)
+        return QStringLiteral("The Zaurus machine's boot PROM is invalid.");
+    const auto validId = [](const QString& name) {
+        QFile file(name);
+        if (!file.open(QIODevice::ReadOnly) || file.size() != 32) return false;
+        const auto bytes = file.readAll();
+        return bytes.size() == 32 && QByteArray::fromHex(bytes).toHex() == bytes;
+    };
+    const auto id = dir + '/' + zaurusCfId, commit = dir + '/' + zaurusCfCommit;
+    if (saved && !QFileInfo::exists(id))
+        return QStringLiteral("Open this Zaurus machine and save it once before copying it.");
+    if ((QFileInfo::exists(id) && !validId(id)) || (QFileInfo::exists(commit) && !validId(commit)))
+        return QStringLiteral("The Zaurus machine's internal CF identity is invalid.");
+    const auto journals = QDir(dir).entryList({"microdrive.journal-*"}, QDir::Files | QDir::System | QDir::Hidden);
+    for (const auto& name : journals) {
+        const auto id = name.mid(int(sizeof("microdrive.journal-") - 1)).toLatin1();
+        if (id.size() == 32 && QByteArray::fromHex(id).toHex() == id)
+            return QStringLiteral("Open this Zaurus machine once to finish its internal CF save.");
+    }
+    return {};
+}
+
 inline bool classicV2(const QByteArray& hdr) { return hdr.left(8) == QByteArray("FRONDMS\0", 8) && le32(hdr, 8) == 2; }
 
 // Header, size and magic of each v7, v8 or v9 sibling. A stub shorter than the TOC is no media.
@@ -341,12 +418,14 @@ inline bool classicV2(const QByteArray& hdr) { return hdr.left(8) == QByteArray(
 // NAND file header must match; v7 descriptors are 92 bytes and go with a v1 .frondsd. With `swap` (slot.json
 // says the slot changed since the save) each card file only has to be a good card on its own;
 // nand.frondnand (v9, kind 4) is checked against its descriptor either way.
-inline QString checkImportedSiblings(const QString& dir, const QString& frond, bool swap = false) {
+inline QString checkImportedSiblings(const QString& dir, const QString& frond, bool swap = false, bool cfSwap = false, bool packedNand = false) {
     const auto mismatch = QStringLiteral("That session's card files don't match.");
     QFile file(frond);
     if (!file.open(QIODevice::ReadOnly)) return QStringLiteral("Couldn't read that file.");
     const auto head = file.read(8 + 32);
     if (head.size() < 8) return QStringLiteral("Couldn't read that file.");
+    const bool zaurus = head.size() == 40 && QString::fromLatin1(head.mid(8).constData()) == "sharp-zaurus-sl-c3000";
+    if (QFileInfo::exists(dir + '/' + zaurusExternalCf) && !zaurus) return mismatch;
     const auto version = le32(head, 4);
     if (version != 7 && version != 8 && version != 9) return {};
     const int descSize = version == 7 ? 92 : 100;
@@ -371,8 +450,10 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
             const auto logical = le64(desc, 76);
             const auto physical = le64(desc, 84);
             const quint64 generation = descSize == 100 ? le64(desc, 92) : 0;
-            if (kind == 1 || kind == 5) {
-                if (name != QLatin1String(kind == 1 ? "sd.frondsd" : "sd2.frondsd") || logical != physical || physical < 512 || physical % 512)
+            if (kind == 1 || kind == 5 || kind == 6) {
+                if ((kind == 6 && (!zaurus || version != 9)) ||
+                    name != QLatin1String(kind == 1 ? "sd.frondsd" : kind == 5 ? "sd2.frondsd" : zaurusExternalCf) ||
+                    logical != physical || physical < 512 || physical % 512 || (kind == 6 && physical > (2ull << 30)))
                     return mismatch;
             } else if (kind == 3) {
                 // Memory Stick Pro: flat sectors in an SD-style file, 256 MB to 2 GB (1886 MiB).
@@ -399,7 +480,7 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
     }
     if (swap) {
         // The cards are whatever files are there, described by their own headers.
-        cards.clear();
+        cards.removeIf([](const Card& card) { return card.kind != 6; });
         for (quint32 kind : {1u, 2u, 3u, 5u}) {
             QFile card(dir + (kind == 1 ? "/sd.frondsd" : kind == 2 ? "/ms.frondms" : kind == 5 ? "/sd2.frondsd" : "/ms.frondmsp"));
             if (!card.exists()) continue;
@@ -411,20 +492,34 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
             else cards.append({kind, le64(hdr, 16), le32(hdr, 8) == 2 ? le64(hdr, 28) : 0});
         }
     }
-    bool expectSd = false, expectSd2 = false, expectMs = false, expectPro = false;
+    if (zaurus && cfSwap) {
+        cards.removeIf([](const Card& card) { return card.kind == 6; });
+        QFile cf(dir + '/' + zaurusExternalCf);
+        if (cf.exists()) {
+            if (!cf.open(QIODevice::ReadOnly)) return mismatch;
+            const auto hdr = cf.read(64);
+            if (hdr.size() != 64 || le32(hdr, 8) != 2) return mismatch;
+            cards.append({6, le64(hdr, 16), le64(hdr, 28)});
+        }
+    }
+    bool expectSd = false, expectSd2 = false, expectMs = false, expectPro = false, expectCf = false;
     for (const auto& card : cards) {
-        if (card.kind == 1 || card.kind == 3 || card.kind == 5) {
-            auto& expect = card.kind == 1 ? expectSd : card.kind == 5 ? expectSd2 : expectPro;
+        if (card.kind == 1 || card.kind == 3 || card.kind == 5 || card.kind == 6) {
+            auto& expect = card.kind == 1 ? expectSd : card.kind == 5 ? expectSd2 : card.kind == 6 ? expectCf : expectPro;
             if (expect) return mismatch;
             expect = true;
-            QFile sd(dir + (card.kind == 1 ? "/sd.frondsd" : card.kind == 5 ? "/sd2.frondsd" : "/ms.frondmsp"));
+            const auto path = dir + '/' + (card.kind == 1 ? "sd.frondsd" : card.kind == 5 ? "sd2.frondsd"
+                                          : card.kind == 6 ? zaurusExternalCf : "ms.frondmsp");
+            QFile sd(path);
             if (!sd.open(QIODevice::ReadOnly)) return mismatch;
             const auto hdr = sd.read(64);
             if (hdr.size() != 64 || hdr.left(8) != QByteArray("FRONDSD\0", 8)) return mismatch;
             const auto sdVersion = le32(hdr, 8);
-            if ((sdVersion != 1 && sdVersion != 2) || le32(hdr, 12) != 512) return mismatch;
+            if ((sdVersion != 1 && sdVersion != 2) || (card.kind == 6 && sdVersion != 2) || le32(hdr, 12) != 512)
+                return mismatch;
             const auto payload = le64(hdr, 16);
-            if (payload != card.physical) return mismatch;
+            if (payload < 512 || payload % 512 || payload != card.physical ||
+                (card.kind == 6 && payload > (2ull << 30))) return mismatch;
             if (sdVersion == 1) {
                 if (card.generation || quint64(sd.size()) != 64 + payload) return mismatch;
                 for (int i = 28; i < 64; ++i)
@@ -437,6 +532,11 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
                     return mismatch;
                 for (int i = 48; i < 64; ++i)
                     if (hdr[i]) return mismatch;
+                if (card.kind == 6) {
+                    sd.close();
+                    frondSdFile::Info info;
+                    if (!frondStorage::verify(std::filesystem::u8path(path.toUtf8().constData()), info).ok) return mismatch;
+                }
             }
         } else {
             if (expectMs) return mismatch;
@@ -469,11 +569,13 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
             if (quint64(ms.size()) != 64 + card.physical) return mismatch;
         }
     }
+    if (!expectCf && QFileInfo::exists(dir + '/' + zaurusExternalCf)) return mismatch;
     if (!expectSd && QFileInfo::exists(dir + "/sd.frondsd")) return mismatch;
     if (!expectSd2 && QFileInfo::exists(dir + "/sd2.frondsd")) return mismatch;
     if (!expectMs && QFileInfo::exists(dir + "/ms.frondms")) return mismatch;
     if (!expectPro && QFileInfo::exists(dir + "/ms.frondmsp")) return mismatch;
     if (expectMs && expectPro) return mismatch;
+    if (nand && packedNand && QFileInfo(dir + "/nand.frondnand.gz").isFile()) return {};
     if (nand) {
         // v2 only: main bytes, then the spare bytes from the next MiB, one CRC a MiB of both.
         QFile file(dir + "/nand.frondnand");
@@ -516,7 +618,9 @@ inline bool ignoredName(const QString& name) {
     return name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
            name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") ||
            name.contains(".frondmsp.journal-") || name.contains(".frondms.journal-") || name.contains(".frondnand.tmp-") ||
-           name.contains(".frondnand.journal-") || name.contains(".gen-") ||
+           name.contains(".frondnand.journal-") || name.contains(".frondcf.journal-") || name.contains(".frondcf.tmp-") ||
+           name.contains(".gen-") || name == zaurusCfPendingId ||
+           name.startsWith("microdrive.journal-") || name.startsWith(".microdrive.journal-") ||
            name.startsWith(".dup-");
 }
 inline bool packableName(const QString& name) {
@@ -528,11 +632,12 @@ inline bool packableName(const QString& name) {
 }
 inline bool tempName(const QString& name) {
     return name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") || name.contains(".frondms.tmp-") ||
-           name.contains(".frondnand.tmp-") || (name.startsWith(".gen-") && name.contains("-tmp-"));
+           name.contains(".frondnand.tmp-") || name.contains(".frondcf.tmp-") ||
+           (name.startsWith(".gen-") && name.contains("-tmp-"));
 }
 // Files Frond keeps in a machine folder, saved or working.
 inline bool machineFileName(const QString& name) {
-    return packableName(name) || ignoredName(name) || name.endsWith(".frond.lock") || name.endsWith(".frond.new") ||
+    return zaurusFileName(name) || packableName(name) || ignoredName(name) || name.endsWith(".frond.lock") || name.endsWith(".frond.new") ||
            name.endsWith(".frond.work") || name.endsWith(".frond.core");
 }
 inline QString packableDestName(const QString& name, const QString& sessionName) {
@@ -578,7 +683,7 @@ inline QString freeName(const QString& folder, const QString& base) {
 inline qint64 packableSize(const QString& dir) {
     qint64 n = 0;
     for (const auto& entry : QDir(dir).entryInfoList(QDir::Files))
-        if (packableName(entry.fileName())) n += entry.size();
+        if (packableName(entry.fileName()) || zaurusFileName(entry.fileName())) n += entry.size();
     return n;
 }
 
@@ -782,17 +887,17 @@ inline QString reserve(const QString& folder, const QString& base, const QString
 // The content generation of the file-backed card a v8 or v9 .frond describes, or 0 for none.
 // `kind` gets the descriptor's kind, 1 for SD, 2 for a classic stick or 3 for Pro. With `nand`
 // it's the v9 internal NAND's (kind 4) instead, and with `second` the Zodiac's second SD (kind 5).
-inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr, bool nand = false, bool second = false) {
+inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr, bool nand = false, bool second = false, bool cf = false) {
     QFile file(frond);
     if (!file.open(QIODevice::ReadOnly)) return 0;
     const auto head = file.read(8 + 32 + 52);
     if (head.size() != 8 + 32 + 52 || (le32(head, 4) != 8 && le32(head, 4) != 9)) return 0;
     const auto count = le32(head, 88);
-    for (quint32 i = 0; i < count && i < 4; ++i) {
+    for (quint32 i = 0; i < count && i < 6; ++i) {
         const auto desc = file.read(100);
         if (desc.size() != 100) return 0;
         const auto found = le32(desc, 0);
-        if (second ? found == 5 : nand ? found == 4 : found == 1 || found == 2 || found == 3) {
+        if (cf ? found == 6 : second ? found == 5 : nand ? found == 4 : found == 1 || found == 2 || found == 3) {
             if (kind) *kind = found;
             return le64(desc, 92);
         }
@@ -809,13 +914,13 @@ inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr, boo
 struct SdSettle {
     QString full, journal, sibling{QStringLiteral("sd.frondsd")};
 };
-inline SdSettle sdSettleOf(const QString& dir, const QString& frond, bool nand = false, bool second = false) {
+inline SdSettle sdSettleOf(const QString& dir, const QString& frond, bool nand = false, bool second = false, bool cf = false) {
     quint32 kind = 1;
-    const auto want = sdGenerationOf(frond, &kind, nand, second);
-    if (!want) return nand ? SdSettle{{}, {}, QStringLiteral("nand.frondnand")} :
-                      second ? SdSettle{{}, {}, QStringLiteral("sd2.frondsd")} : SdSettle{};
-    const QString sibling = nand ? QStringLiteral("nand.frondnand") : second ? QStringLiteral("sd2.frondsd") : kind == 3 ? QStringLiteral("ms.frondmsp")
+    const auto want = sdGenerationOf(frond, &kind, nand, second, cf);
+    const QString sibling = cf ? QLatin1String(zaurusExternalCf) : nand ? QStringLiteral("nand.frondnand")
+                          : second ? QStringLiteral("sd2.frondsd") : kind == 3 ? QStringLiteral("ms.frondmsp")
                                   : kind == 2 ? QStringLiteral("ms.frondms") : QStringLiteral("sd.frondsd");
+    if (!want) return {{}, {}, sibling};
     QFile sd(dir + '/' + sibling);
     QByteArray hdr;
     if (sd.open(QIODevice::ReadOnly)) hdr = sd.read(64);
@@ -930,20 +1035,86 @@ inline frondStorage::Progress storageProgress(const std::function<bool(qint64, q
 // Called with bytes done and in total; returns false to cancel.
 using CopyProgress = std::function<bool(qint64, qint64)>;
 
-inline bool copyChunked(const QString& from, const QString& to, qint64* done, qint64 total, const CopyProgress& progress) {
+inline bool copyChunked(const QString& from, const QString& to, qint64* done, qint64 total, const CopyProgress& progress,
+                        bool sparse = false) {
     QFile in(from), out(to);
-    if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) return false;
+    if (!in.open(QIODevice::ReadOnly)) return false;
+#ifdef Q_OS_UNIX
+    if (sparse && ::flock(in.handle(), LOCK_SH | LOCK_NB) != 0) return false;
+#endif
+    if (!out.open(QIODevice::WriteOnly | (sparse ? QIODevice::NewOnly : QIODevice::OpenMode{}))) return false;
+#ifdef __linux__
+    if (sparse && ::ioctl(out.handle(), FICLONE, in.handle()) == 0) {
+        *done += in.size();
+        return (!progress || progress(*done, total)) && out.flush();
+    }
+#endif
     QByteArray buffer(1 << 20, Qt::Uninitialized);
+    const QByteArray zeroes(sparse ? buffer.size() : 0, '\0');
+    const auto size = in.size();
     for (;;) {
+#if defined(SEEK_DATA) && !defined(_WIN32)
+        if (sparse && in.pos() < size) {
+            const auto pos = in.pos();
+            const auto data = ::lseek(in.handle(), off_t(pos), SEEK_DATA);
+            const auto next = data < 0 && errno == ENXIO ? size : qint64(data);
+            if (next >= pos) {
+                if (!in.seek(next) || !out.seek(next)) return false;
+                *done += next - pos;
+                if (next > pos && progress && !progress(*done, total)) return false;
+            }
+        }
+#endif
         const auto n = in.read(buffer.data(), buffer.size());
         if (n < 0) return false;
         if (n == 0) break;
-        if (out.write(buffer.constData(), n) != n) return false;
+        if (sparse && std::memcmp(buffer.constData(), zeroes.constData(), n) == 0) {
+            if (!out.seek(out.pos() + n)) return false;
+        } else if (out.write(buffer.constData(), n) != n) return false;
         *done += n;
         if (progress && !progress(*done, total)) return false;
     }
-    return out.flush() && !in.error();
+    return (!sparse || out.resize(out.pos())) && out.flush() && !in.error();
 }
+
+// The guest was detached while Files held the CF. Replay any finished standalone changes
+// on the copy, leaving the source's files where they were if the copy is cancelled.
+inline QString settleZaurusCfCopy(const QString& source, const QString& target) {
+    const auto sourcePath = std::filesystem::u8path(source.toUtf8().constData());
+    const auto targetPath = std::filesystem::u8path(target.toUtf8().constData());
+    const auto changes = frondStorage::changesOf(sourcePath);
+    auto copy = [&](const std::filesystem::path& path) {
+        const auto from = QString::fromStdString(path.string());
+        const auto to = QString::fromStdString((targetPath.parent_path() / path.filename()).string());
+        return !QFileInfo(from).isSymLink() && QFile::copy(from, to);
+    };
+    for (const auto& change : changes.standalone)
+        if (!copy(change.first)) return QStringLiteral("Couldn't copy the CF card's journal.");
+    for (const auto& path : changes.pending)
+        if (!copy(path)) return QStringLiteral("Couldn't copy the CF card's journal.");
+    const auto result = frondStorage::settleChanges(targetPath);
+    return result.ok ? QString() : QString::fromStdString(result.message);
+}
+
+inline QString finishZaurusCfCopy(const QString& sourceDir, const QString& frond, const SdSettle& settle, bool swapped) {
+    const auto target = machineDirOf(frond) + '/' + zaurusExternalCf;
+    if (settle.full.isEmpty() && settle.journal.isEmpty())
+        return swapped ? settleZaurusCfCopy(sourceDir + '/' + zaurusExternalCf, target) : QString();
+    const auto failed = QStringLiteral("Couldn't finish the external CF save.");
+    if (!settle.journal.isEmpty() && (QFileInfo(settle.journal).isSymLink() || !applySdJournalCopy(settle.journal, target)))
+        return failed;
+    frondSdFile::Info info;
+    if (!frondStorage::readHeader(std::filesystem::u8path(target.toUtf8().constData()), info) ||
+        info.generation != sdGenerationOf(frond, nullptr, false, false, true)) return failed;
+    return {};
+}
+
+struct ZaurusCfSlot {
+    QByteArray identity;
+    bool writeProtected{false}, inserted{false};
+};
+
+inline std::optional<ZaurusCfSlot> zaurusCfSwapOf(const QString& dir);
 
 // Copies a machine folder's packable files into `toDir`, settling an unfinished card or NAND save
 // on the way. With `packNandFile` the NAND goes in as nand.frondnand.gz, packed straight from the
@@ -951,13 +1122,20 @@ inline bool copyChunked(const QString& from, const QString& to, qint64* done, qi
 // and packed as one count; false from it stops the copy with cancelledText().
 inline QString copyPackable(const QString& fromDir, const QString& toDir, const QString& newName,
                             const CopyProgress& progress = {}, bool packNandFile = false, bool checkedArchive = false) {
-    if (!checkedArchive && frondDanaSession::inspect(sessionFrondIn(fromDir)).wrapped)
+    const auto frond = sessionFrondIn(fromDir);
+    if (!checkedArchive && frondDanaSession::inspect(frond).wrapped)
         return QStringLiteral("This session has independent cards. Open it and export a portable folder.");
+    const bool zaurus = frondFirmware::isZaurus(frondFirmware::deviceFromId(readHeader(frond).device));
+    if (zaurus) {
+        if (const auto error = checkZaurusCompanions(fromDir, true); !error.isEmpty()) return error;
+    }
     const QString failed = QStringLiteral("Couldn't save the session.");
     if (!QDir().mkpath(toDir)) return failed;
     const auto settle = sdSettleOf(fromDir, sessionFrondIn(fromDir));
     const auto nandSettle = sdSettleOf(fromDir, sessionFrondIn(fromDir), true);
-    const auto sd2Settle = sdSettleOf(fromDir, sessionFrondIn(fromDir), false, true);
+    const auto sd2Settle = sdSettleOf(fromDir, frond, false, true);
+    const bool cfSwap = zaurus && zaurusCfSwapOf(fromDir).has_value();
+    const auto cfSettle = zaurus ? sdSettleOf(fromDir, frond, false, false, true) : SdSettle{};
     const QString nandName = QStringLiteral("nand.frondnand");
     QList<QPair<QString, QString>> jobs;  // source, destination
     QString packFrom;                     // the NAND to pack, a source file or the settled copy
@@ -975,7 +1153,12 @@ inline QString copyPackable(const QString& fromDir, const QString& toDir, const 
         total += QFileInfo(source).size();
     };
     for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
-        if (!packableName(entry.fileName())) continue;
+        if (!packableName(entry.fileName()) && !(zaurus && zaurusFileName(entry.fileName()))) continue;
+        if (zaurus && entry.isSymLink()) return failed;
+        if (zaurus && entry.fileName().endsWith(".frond") && entry.absoluteFilePath() != frond) continue;
+        if (zaurus && entry.fileName().endsWith(".frond.settings.json") && entry.absoluteFilePath() != preferencesPath(frond))
+            continue;
+        if (!cfSettle.full.isEmpty() && entry.fileName() == cfSettle.sibling) continue;
         if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) continue;
         if (!nandSettle.full.isEmpty() && entry.fileName() == nandSettle.sibling) continue;
         if (!sd2Settle.full.isEmpty() && entry.fileName() == sd2Settle.sibling) continue;
@@ -996,6 +1179,11 @@ inline QString copyPackable(const QString& fromDir, const QString& toDir, const 
         total += QFileInfo(sd2Settle.full).size();
     }
     if (!nandSettle.full.isEmpty()) addNand(nandSettle.full);
+    if (!cfSettle.full.isEmpty()) {
+        if (QFileInfo(cfSettle.full).isSymLink()) return failed;
+        jobs.append({cfSettle.full, toDir + '/' + cfSettle.sibling});
+        total += QFileInfo(cfSettle.full).size();
+    }
     qint64 done = 0;
     bool cancelled = false;
     const CopyProgress watch = [&](qint64 n, qint64 all) {
@@ -1004,12 +1192,18 @@ inline QString copyPackable(const QString& fromDir, const QString& toDir, const 
     };
     for (const auto& [source, target] : jobs) {
         QFile::remove(target);
-        if (!copyChunked(source, target, &done, total, watch)) return cancelled ? cancelledText() : failed;
+        const bool companion = zaurus && zaurusFileName(QFileInfo(target).fileName());
+        if (!copyChunked(source, target, &done, total, watch, companion)) return cancelled ? cancelledText() : failed;
+        if (zaurus && !QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) return failed;
     }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, toDir + '/' + settle.sibling)) return failed;
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, toDir + '/' + nandSettle.sibling))
         return failed;
     if (!sd2Settle.journal.isEmpty() && !applySdJournalCopy(sd2Settle.journal, toDir + '/' + sd2Settle.sibling)) return failed;
+    if (zaurus) {
+        const auto error = finishZaurusCfCopy(fromDir, toDir + '/' + newName + ".frond", cfSettle, cfSwap);
+        if (!error.isEmpty()) return error;
+    }
     if (!packFrom.isEmpty()) {
         const auto plain = std::filesystem::path((toDir + '/' + nandName).toStdString());
         const qint64 base = done;
@@ -1041,6 +1235,26 @@ inline QString unpackNand(const QString& from, const QString& to, const std::fun
         return QStringLiteral("The session's NAND file is damaged.");
     if (QFileInfo(from).canonicalFilePath() == QFileInfo(to).canonicalFilePath()) QFile::remove(packed);
     return {};
+}
+
+inline std::optional<ZaurusCfSlot> zaurusCfSwapOf(const QString& dir) {
+    QFile file(dir + '/' + zaurusExternalCfSlot);
+    if (file.size() > 4096 || !file.open(QIODevice::ReadOnly)) return {};
+    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    const auto identity = object.value("identity").toString().toLatin1();
+    if (!object.value("swap").toBool(false) || identity.size() != 64 ||
+        QByteArray::fromHex(identity).toHex() != identity ||
+        !object.value("protected").isBool() || !object.value("inserted").isBool()) return {};
+    return ZaurusCfSlot{identity, object.value("protected").toBool(), object.value("inserted").toBool()};
+}
+
+inline bool writeZaurusCfSwap(const QString& dir, const ZaurusCfSlot& slot) {
+    if (slot.identity.size() != 64) return false;
+    QSaveFile file(dir + '/' + zaurusExternalCfSlot);
+    const auto bytes = QJsonDocument(QJsonObject{
+        {"swap", true}, {"identity", QString::fromLatin1(slot.identity)}, {"protected", slot.writeProtected}, {"inserted", slot.inserted}
+    }).toJson(QJsonDocument::Compact);
+    return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
 }
 
 inline QString locate(const QString& folder, const QString& path) {
@@ -1175,6 +1389,10 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     lock.setStaleLockTime(0);
     if (!tryLockSession(lock, info.path)) return QStringLiteral("This session is open in another Frond.");
     const auto fromDir = machineDirOf(info.path);
+    const bool zaurus = frondFirmware::isZaurus(frondFirmware::deviceFromId(info.device));
+    if (zaurus) {
+        if (const auto error = checkZaurusCompanions(fromDir, info.saved); !error.isEmpty()) return error;
+    }
     const QString failed = QStringLiteral("Couldn't duplicate the session.");
     if (!QDir().mkpath(folder)) return failed;
     const auto library = frondCards::libraryFor(folder);
@@ -1219,7 +1437,7 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     };
     const auto frond = dest + '/' + name + ".frond";
     QList<QPair<QString, QString>> jobs;  // source, destination
-    SdSettle settle, nandSettle, sd2Settle;
+    SdSettle settle, nandSettle, sd2Settle, cfSettle;
     qint64 total = 0;
     const bool copyCard = choice == CardChoice::copy;
     if (info.saved) {
@@ -1236,6 +1454,7 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         if (!copyCard) sd2Settle = {};
         for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
             if (!packableName(entry.fileName()) || entry.fileName() == "slot.json" || entry.fileName() == "slot2.json") continue;
+            if (zaurus && entry.isSymLink()) return fail(failed);
             if ((frondCards::cardFiles.contains(entry.fileName()) || entry.fileName() == "sd2.frondsd") && !copyCard) continue;
             auto source = entry.absoluteFilePath();
             if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) source = settle.full;
@@ -1260,9 +1479,32 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         const auto prefs = preferencesPath(info.path);
         if (QFileInfo::exists(prefs)) jobs.append({prefs, preferencesPath(frond)});
     }
+    qint64 sparseBytes = 0, allocatedBytes = 0;
+    if (zaurus) {
+        if (info.saved) cfSettle = sdSettleOf(fromDir, info.path, false, false, true);
+        for (const auto* companion : {zaurusCf, zaurusCfId, zaurusCfCommit, zaurusNand, zaurusProm, zaurusExternalCf, zaurusExternalCfSlot}) {
+            const auto source = companion == zaurusExternalCf && !cfSettle.full.isEmpty()
+                ? cfSettle.full : fromDir + '/' + companion;
+            const QFileInfo file(source);
+            if (!file.exists()) continue;
+            if (!file.isFile() || file.isSymLink()) return fail(failed);
+            jobs.append({source, dest + '/' + companion});
+            const auto size = file.size();
+            sparseBytes += size;
+#ifdef Q_OS_UNIX
+            struct stat status{};
+            allocatedBytes += ::stat(QFile::encodeName(source).constData(), &status) == 0
+                ? std::min(qint64(status.st_blocks) * 512, size) : size;
+#else
+            allocatedBytes += size;
+#endif
+        }
+    }
     const auto free = frondCards::freeSpace()(folder);
-    if (free >= 0 && free < total + (16 << 20))
-        return fail(QStringLiteral("Not enough free space to duplicate %1. It needs %2 MB.").arg(info.name).arg(total / 1000000 + 1));
+    const auto requiredBytes = total + allocatedBytes;
+    if (free >= 0 && free < requiredBytes + (16 << 20))
+        return fail(QStringLiteral("Not enough free space to duplicate %1. It needs %2 MB.").arg(info.name).arg(requiredBytes / 1000000 + 1));
+    total += sparseBytes;
     qint64 done = 0;
     bool cancelled = false;
     const CopyProgress watch = [&](qint64 n, qint64 all) {
@@ -1271,13 +1513,22 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     };
     // The copy keeps each file's mode, so a private (0600) session stays private.
     for (const auto& [source, target] : jobs) {
-        if (!copyChunked(source, target, &done, total, watch))
+        const bool companion = zaurus && zaurusFileName(QFileInfo(target).fileName());
+        if (!copyChunked(source, target, &done, total, watch, companion))
             return fail(cancelled ? QStringLiteral("Duplicate cancelled.") : failed);
-        QFile::setPermissions(target, QFile::permissions(source));
+        if (zaurus) {
+            if (!QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) return fail(failed);
+        } else {
+            QFile::setPermissions(target, QFile::permissions(source));
+        }
     }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, dest + '/' + settle.sibling)) return fail(failed);
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, dest + '/' + nandSettle.sibling)) return fail(failed);
     if (!sd2Settle.journal.isEmpty() && !applySdJournalCopy(sd2Settle.journal, dest + '/' + sd2Settle.sibling)) return fail(failed);
+    if (zaurus) {
+        const auto error = finishZaurusCfCopy(fromDir, frond, cfSettle, zaurusCfSwapOf(dest).has_value());
+        if (!error.isEmpty()) return fail(error);
+    }
     // Each slot of the copy: its own new card, the link, or nothing. A card the .frond still
     // describes and the copy doesn't have loads as a swap.
     frondCards::Slot copySlots[frondCards::slotCount];
@@ -1298,6 +1549,10 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         copySlot.swap = c.slot.swap || had || listed;
         if (choice == CardChoice::link) copySlot.link = c.linkTo;
         if (info.saved && (c.slot.present || had || listed) && !frondCards::writeSlot(dest, copySlot, n)) return fail(failed);
+    }
+    if (zaurus && info.saved) {
+        if (const auto error = checkImportedSiblings(dest, frond, copySlots[0].swap || copySlots[1].swap,
+                                                     zaurusCfSwapOf(dest).has_value()); !error.isEmpty()) return fail(error);
     }
     frondCards::LibraryLock libraryLock(library);
     if (!libraryLock.ok) return fail(frondCards::busyMessage());
@@ -1422,6 +1677,14 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         return QStringLiteral("Importing an independent-card session isn't available yet. Keep its complete portable folder.");
     const auto header = readHeader(frond);
     if (const auto error = importError(header); !error.isEmpty()) return error;
+    const bool zaurus = frondFirmware::isZaurus(frondFirmware::deviceFromId(header.device));
+    QLockFile sourceLock(frond + ".lock");
+    sourceLock.setStaleLockTime(0);
+    if (zaurus) {
+        if (!tryLockSession(sourceLock, frond) && (sourceLock.error() != QLockFile::PermissionError || coreRunning(frond)))
+            return QStringLiteral("That session is open in another Frond.");
+        if (const auto error = checkZaurusCompanions(from, true); !error.isEmpty()) return error;
+    }
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
     if (wrapped.wrapped) {
         if (const auto error = checkAndroidCards(from, frond, wrapped, progress); !error.isEmpty()) return error;
@@ -1431,7 +1694,11 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
     const auto name = reserve(folder, base, header.device);
     if (name.isEmpty()) return QStringLiteral("Couldn't save the session.");
     const auto dest = machineDir(folder, name);
-    QFile::remove(markerPath(filePath(folder, name)));
+    const auto target = filePath(folder, name);
+    QLockFile targetLock(target + ".lock");
+    targetLock.setStaleLockTime(0);
+    if (zaurus && !tryLockSession(targetLock, target)) return QStringLiteral("That session is open in another Frond.");
+    QFile::remove(markerPath(target));
     // One count for the copy, then the NAND unpack.
     const qint64 packedBytes = QFileInfo::exists(from + "/nand.frondnand") ? 0 : QFileInfo(from + "/nand.frondnand.gz").size();
     qint64 copied = 0;
@@ -1450,7 +1717,8 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         QDir(dest).removeRecursively();
         return error;
     }
-    if (const auto error = checkImportedSiblings(dest, dest + '/' + name + ".frond", frondCards::readSlot(dest).swap || frondCards::readSlot(dest, 1).swap);
+    if (const auto error = checkImportedSiblings(dest, target, frondCards::readSlot(dest).swap || frondCards::readSlot(dest, 1).swap,
+                                                 zaurus && zaurusCfSwapOf(dest).has_value());
         !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
@@ -1480,9 +1748,13 @@ inline QString importArchive(const QString& folder, const QString& from, QString
         const auto name = QString::fromUtf8(entry.m_filename);
         if (name != "session.frond" && name != "sd.frondsd" && name != "sd2.frondsd" &&
             name != "ms.frondms" && name != "ms.frondmsp" && name != "nand.frondnand" &&
-            name != "slot.json" && name != "slot2.json" && name != "session.frond.settings.json") return invalid;
+            name != "slot.json" && name != "slot2.json" && name != "session.frond.settings.json" && !zaurusFileName(name)) return invalid;
         if (name == "session.frond" && ++sessions > 1) return invalid;
-        const quint64 limit = name.endsWith(".frond") ? 512ull << 20
+        const quint64 limit = name == zaurusCf ? (1ull << 37)
+                            : name == zaurusCfId || name == zaurusCfCommit ? 32
+                            : name == zaurusNand ? 528ull * 32 * 1024 + 16 * (1024 + 1)
+                            : name == zaurusProm ? 8ull << 20
+                            : name.endsWith(".frond") ? 512ull << 20
                             : name.endsWith(".json") ? 1ull << 20
                             : (2048ull << 20) + (1ull << 20);
         if (entry.m_uncomp_size > limit) return invalid;
@@ -1492,8 +1764,9 @@ inline QString importArchive(const QString& folder, const QString& from, QString
             QFile& file;
             const CopyProgress& progress;
             qint64 size;
+            bool sparse;
             bool cancelled = false;
-        } write{file, progress, qint64(entry.m_uncomp_size)};
+        } write{file, progress, qint64(entry.m_uncomp_size), name == zaurusCf || name == zaurusExternalCf};
         const auto append = [](void* context, mz_uint64 offset, const void* bytes, size_t size) -> size_t {
             auto& state = *static_cast<Write*>(context);
             const auto limit = mz_uint64(state.size);
@@ -1502,12 +1775,20 @@ inline QString importArchive(const QString& folder, const QString& from, QString
                 state.cancelled = true;
                 return 0;
             }
-            return state.file.write(static_cast<const char*>(bytes), qint64(size)) == qint64(size) ? size : 0;
+            const auto* data = static_cast<const char*>(bytes);
+            if (state.sparse && std::all_of(data, data + size, [](char ch) { return ch == 0; }))
+                return state.file.seek(qint64(offset + size)) ? size : 0;
+            return state.file.write(data, qint64(size)) == qint64(size) ? size : 0;
         };
-        if (!mz_zip_reader_extract_to_callback(&zip, i, append, &write, 0) || !file.flush() || file.size() != write.size)
+        if (!mz_zip_reader_extract_to_callback(&zip, i, append, &write, 0) ||
+            (write.sparse && !file.resize(file.pos())) || !file.flush() || file.size() != write.size)
             return write.cancelled ? cancelledText() : invalid;
     }
     if (sessions != 1) return invalid;
+    if (!frondFirmware::isZaurus(frondFirmware::deviceFromId(readHeader(staged.filePath("session.frond")).device))) {
+        for (const auto& entry : QDir(staged.path()).entryList(QDir::Files))
+            if (zaurusFileName(entry)) return invalid;
+    }
     return importFolder(folder, staged.path(), newName, progress, QFileInfo(from).completeBaseName());
 }
 
@@ -1521,6 +1802,12 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
         return QStringLiteral("Importing an independent-card session isn't available yet. Keep its complete portable folder.");
     const auto header = readHeader(from);
     if (const auto error = importError(header); !error.isEmpty()) return error;
+    if (frondFirmware::isZaurus(frondFirmware::deviceFromId(header.device))) {
+        const auto dir = machineDirOf(from);
+        if (QFileInfo(sessionFrondIn(dir)).canonicalFilePath() != QFileInfo(from).canonicalFilePath())
+            return QStringLiteral("Choose the session from its complete Zaurus machine folder.");
+        return importFolder(folder, dir, newName, progress);
+    }
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
     auto base = cleanName(QFileInfo(from).completeBaseName());
     if (base.isEmpty()) base = frondFirmware::deviceName(frondFirmware::deviceFromId(header.device));
@@ -1600,12 +1887,14 @@ inline bool isMachineFolder(const QString& dir) {
     if (!info.isDir() || info.isSymLink()) return false;
     const auto entries = QDir(dir).entryInfoList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
     QString stem;
+    bool zaurus = false;
     for (const auto& candidate : {info.fileName(), QStringLiteral("session")}) {
         const auto file = dir + '/' + candidate + ".frond";
         const QFileInfo session(file);
         if (!session.isFile() || session.isSymLink()) continue;
         const auto header = readHeader(file);
         if (!header.readable || header.magic != magic) return false;
+        zaurus = frondFirmware::isZaurus(frondFirmware::deviceFromId(header.device));
         stem = candidate;
         break;
     }
@@ -1613,7 +1902,8 @@ inline bool isMachineFolder(const QString& dir) {
     for (const auto& entry : entries) {
         const auto name = entry.fileName();
         if (!entry.isFile() || entry.isSymLink() || !machineFileName(name)) return false;
-        if (ignoredName(name) || name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" ||
+        if (zaurusFileName(name) && !zaurus) return false;
+        if (zaurusFileName(name) || ignoredName(name) || name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" ||
             name == "nand.frondnand.gz" ||
             name == "slot.json" || name == "slot2.json")
             continue;
@@ -1771,22 +2061,33 @@ inline QString exportFile(const Info& info, const QString& to, const std::functi
     const QFileInfo destInfo(destDir);
     if (destInfo.exists() && destInfo.canonicalFilePath() == sourceCanon) return QStringLiteral("That is the session itself.");
     if (const auto error = exportTargetError(destDir); !error.isEmpty()) return error;
-    const auto destFrond = destDir + '/' + destName + ".frond";
+    const auto destFrond = sessionFrondIn(destDir);
     if (QFileInfo::exists(destFrond + ".lock") && inUse(destFrond))
         return QStringLiteral("That session is open in another Frond.");
     QLockFile targetLock(destFrond + ".lock"); targetLock.setStaleLockTime(0);
-    if (isMachineFolder(destDir) && !targetLock.tryLock()) return QStringLiteral("That session is open in another Frond.");
+    if (isMachineFolder(destDir) && !tryLockSession(targetLock, destFrond)) return QStringLiteral("That session is open in another Frond.");
     // The session's lock for the copy, so Cards and other windows leave its media alone as they do
     // for a running machine. One held already is a running machine, which they leave alone anyway.
     QLockFile sourceLock(info.path + ".lock");
     sourceLock.setStaleLockTime(0);
-    tryLockSession(sourceLock, info.path);
+    const bool zaurus = frondFirmware::isZaurus(frondFirmware::deviceFromId(info.device));
+    if (!tryLockSession(sourceLock, info.path) && zaurus)
+        return QStringLiteral("Stop the Zaurus before exporting its session.");
     const auto staging = makeStaging(destDir);
     if (staging.isEmpty()) return QStringLiteral("Couldn't export the session.");
     const auto part = staging + '/' + destName;
     if (const auto error = copyPackable(sourceDir, part, destName, progress, true); !error.isEmpty()) {
         removeStaging(staging);
         return error;
+    }
+    if (zaurus) {
+        const auto error = checkImportedSiblings(part, part + '/' + destName + ".frond",
+                                                 frondCards::readSlot(part).swap || frondCards::readSlot(part, 1).swap,
+                                                 zaurusCfSwapOf(part).has_value(), true);
+        if (!error.isEmpty()) {
+            removeStaging(staging);
+            return error;
+        }
     }
     if (QFileInfo::exists(preferencesPath(info.path))) {
         Preferences prefs;
@@ -1797,9 +2098,24 @@ inline QString exportFile(const Info& info, const QString& to, const std::functi
             }
         }
     }
+    // Carry the destination lock through the folder rename. An Android folder can have a
+    // different session file name, so the new name is locked until the old lock is released.
+    const auto stagedLock = part + '/' + destName + ".frond.lock";
+    const auto oldLockName = QFileInfo(destFrond).fileName() + ".lock";
+    const auto oldNameInStage = part + '/' + oldLockName;
+    if (zaurus && targetLock.isLocked() &&
+        (!QFile::copy(destFrond + ".lock", stagedLock) ||
+         (oldNameInStage != stagedLock && !QFile::copy(destFrond + ".lock", oldNameInStage)))) {
+        removeStaging(staging);
+        return QStringLiteral("Couldn't lock the exported session.");
+    }
     if (const auto error = publishStaged(staging, destDir); !error.isEmpty()) {
         removeStaging(staging);
         return error;
+    }
+    if (zaurus && targetLock.isLocked()) {
+        targetLock.unlock();
+        if (oldNameInStage != stagedLock) QFile::remove(destDir + '/' + destName + ".frond.lock");
     }
     return {};
 }

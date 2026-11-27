@@ -9,11 +9,13 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 # Devices the desktop runs that the Android app has no controls for yet. They stay out of its list.
 DESKTOP_ONLY = set()
-# Devices shipped marked Experimental in the Android device list (the desktop picker checks the same id).
+# Devices with their own Android setup outside the shared firmware picker.
+ANDROID_SETUP = {'sharp-zaurus-sl-c3000'}
 
 
 def outputs(profiles):
-    available = [p for p in profiles['profiles'] if p['available'] and p['name'] not in DESKTOP_ONLY]
+    available = [p for p in profiles['profiles'] if (p['available'] or p['name'] in ANDROID_SETUP)
+                 and p['name'] not in DESKTOP_ONLY]
     fields = {
         'id': 'name', 'label': 'display_name', 'cohort': 'cohort', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',

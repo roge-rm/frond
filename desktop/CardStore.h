@@ -172,7 +172,7 @@ inline QList<Descriptor> descriptorsOf(const QString& frond, quint32* version = 
     if ((v != 7 && v != 8 && v != 9) || head.size() != 92) return result;
     const int size = v == 7 ? 92 : 100;
     const auto count = le32(head, 88);
-    for (quint32 i = 0; i < count && i < 4; ++i) {
+    for (quint32 i = 0; i < count && i < 6; ++i) {
         const auto d = file.read(size);
         if (d.size() != size) return {};
         result.append({le32(d, 0), le32(d, 36) != 0, le32(d, 40) != 0, d.mid(44, 32), le64(d, 76), le64(d, 84),

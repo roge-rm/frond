@@ -70,6 +70,61 @@ namespace {
         }
     }
 
+    KeyId zaurusKeyboardKey(SDL_Scancode scan) {
+        constexpr std::string_view letters[] = {
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+            "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"
+        };
+        constexpr std::string_view digits[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"};
+        std::string_view name;
+        if (scan >= SDL_SCANCODE_A && scan <= SDL_SCANCODE_Z) name = letters[scan - SDL_SCANCODE_A];
+        else if (scan >= SDL_SCANCODE_1 && scan <= SDL_SCANCODE_0) name = digits[scan - SDL_SCANCODE_1];
+        else switch (scan) {
+            case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: name = "enter"; break;
+            case SDL_SCANCODE_ESCAPE: name = "cancel"; break;
+            case SDL_SCANCODE_BACKSPACE: name = "backspace"; break;
+            case SDL_SCANCODE_TAB: name = "tab"; break;
+            case SDL_SCANCODE_SPACE: name = "space"; break;
+            case SDL_SCANCODE_MINUS: name = "minus"; break;
+            case SDL_SCANCODE_COMMA: case SDL_SCANCODE_SLASH: name = "comma"; break;
+            case SDL_SCANCODE_PERIOD: name = "dot"; break;
+            case SDL_SCANCODE_LSHIFT: name = "lshift"; break;
+            case SDL_SCANCODE_RSHIFT: name = "rshift"; break;
+            case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: name = "ctrl"; break;
+            case SDL_SCANCODE_LALT: case SDL_SCANCODE_RALT: name = "fn"; break;
+            case SDL_SCANCODE_LANG1: case SDL_SCANCODE_LANG3: name = "kana"; break;
+            case SDL_SCANCODE_LANG5: case SDL_SCANCODE_GRAVE: name = "zenhan"; break;
+            case SDL_SCANCODE_F1: name = "calendar"; break;
+            case SDL_SCANCODE_F2: name = "address"; break;
+            case SDL_SCANCODE_F3: name = "mail"; break;
+            case SDL_SCANCODE_F4: case SDL_SCANCODE_APPLICATION: name = "menu"; break;
+            case SDL_SCANCODE_F6: case SDL_SCANCODE_HOME: name = "home"; break;
+            case SDL_SCANCODE_F10: return keyIdPower;
+            case SDL_SCANCODE_UP: name = "up"; break;
+            case SDL_SCANCODE_DOWN: name = "down"; break;
+            case SDL_SCANCODE_LEFT: name = "left"; break;
+            case SDL_SCANCODE_RIGHT: name = "right"; break;
+            case SDL_SCANCODE_PAGEUP: name = "exjogup"; break;
+            case SDL_SCANCODE_PAGEDOWN: name = "exjogdown"; break;
+            case SDL_SCANCODE_INSERT: name = "exok"; break;
+            case SDL_SCANCODE_DELETE: name = "excancel"; break;
+            default: return keyInvalid;
+        }
+        const int index = zaurusKeyIndex(name);
+        return index < 0 ? keyInvalid : zaurusArtKey(zaurusArt().keys[index]);
+    }
+
+    KeyId zaurusControllerKey(const SDL_Keysym& key) {
+        if (key.scancode != SDL_SCANCODE_UNKNOWN) return keyInvalid;
+        switch (key.sym) {
+            case SDLK_PAGEUP: return keyIdJogUp;
+            case SDLK_PAGEDOWN: return keyIdJogDown;
+            case SDLK_END: return keyIdJogPress;
+            case SDLK_HOME: return keyIdBack;
+            default: return mapKey(key.sym);
+        }
+    }
+
     bool hasKey(const DeviceControlProfile& controls, KeyId key) {
         for (size_t i = 0; i < controls.count; ++i) if (controls.buttons[i].key == key) return true;
         return false;
@@ -143,10 +198,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 if (std::any_of(fingers.begin(), fingers.end(), [](const Finger& f) { return f.active && f.pen; })) break;
                 MapPointer(event.button.x, event.button.y);
                 ReleasePointer();
-                if (OnScreen(event.button.x,event.button.y)) {
+                if (MovePen(event.button.x, event.button.y)) {
                     penDown = true;
-                    soc->PenDown(RotateX(event.button.x,event.button.y),
-                                 RotateY(event.button.x,event.button.y));
                 } else if (deviceStickGrab(StickWell(), (event.button.x + 0.5f)/scale, (event.button.y + 0.5f)/scale)) {
                     pointerStick = true;
                     pointerDownX = (event.button.x + 0.5f)/scale;
@@ -156,8 +209,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                                                           : TouchStick(event.button.x, event.button.y);
                     UpdateStick();
                 } else if (event.button.x>=0 && event.button.y>=0) {
-                    pointerKey=deviceControlAt((*shownControls),ScreenWidth(),ScreenHeight(),
-                                                int((event.button.x + 0.5f)/scale),int((event.button.y + 0.5f)/scale),controlView);
+                    pointerKey = ControlAt(event.button.x, event.button.y);
                     if (pointerKey && !hardKeys[pointerKey] && !builtInHolds[pointerKey]) soc->KeyDown(pointerKey);
                     redrawRequested=true;
                 }
@@ -187,24 +239,28 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 if (pointerKey) {
-                    if (event.motion.x<0 || event.motion.y<0 ||
-                        deviceControlAt((*shownControls),ScreenWidth(),ScreenHeight(),
-                                        int((event.motion.x + 0.5f)/scale),int((event.motion.y + 0.5f)/scale),controlView)!=pointerKey)
+                    if (ControlAt(event.motion.x, event.motion.y) != pointerKey)
                         ReleasePointer();
                     break;
                 }
-                if (!penDown) break;
-                if (!OnScreen(event.motion.x,event.motion.y)) { ReleasePointer(); break; }
-
-                soc->PenDown(RotateX(event.motion.x, event.motion.y),
-                             RotateY(event.motion.x, event.motion.y));
+                if (penDown && !MovePen(event.motion.x, event.motion.y)) ReleasePointer();
 
                 break;
 
             case SDL_KEYDOWN: {
                 if (shortcutSink) {
-                    if (const auto name = shortcutName(event.key.keysym.sym, event.key.keysym.mod, soc->KeyboardAttached())) {
+                    if (const auto name = shortcutName(event.key.keysym.sym, event.key.keysym.mod, soc->KeyboardAttached(),
+                                                       controlView.zaurus.has_value())) {
                         if (!event.key.repeat) shortcutSink(*name);
+                        break;
+                    }
+                } else if (controlView.zaurus) {
+                    if (event.key.keysym.scancode == SDL_SCANCODE_F11) {
+                        if (!event.key.repeat) soc->SetSpitzLid(!soc->SpitzLidClosed(), false);
+                        break;
+                    }
+                    if (event.key.keysym.scancode == SDL_SCANCODE_F12) {
+                        if (!event.key.repeat) soc->SetSpitzLid(false, !soc->SpitzSwivelled());
                         break;
                     }
                 }
@@ -221,7 +277,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 KeyId builtIn = soc->GamepadAttached() ? clieGamepadHostKey(scan) : keyInvalid;
-                if (!builtIn) builtIn = builtInKeyboardKey((*inputControls), scan);
+                if (!builtIn) builtIn = controlView.zaurus ? zaurusKeyboardKey(scan) : builtInKeyboardKey(*inputControls, scan);
                 if (scan > SDL_SCANCODE_UNKNOWN && size_t(scan) < builtInHeld.size() && builtIn) {
                     if (!builtInHeld[scan]) {
                         builtInHeld[scan] = builtIn;
@@ -231,7 +287,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     }
                     break;
                 }
-                enum KeyId key = mapKey(event.key.keysym.sym);
+                const KeyId key = controlView.zaurus ? zaurusControllerKey(event.key.keysym) : mapKey(event.key.keysym.sym);
                 if (key >= keyIdFunction && !hasKey((*inputControls), key)) break;
                 if (stickKeyBit(key) && hasStick(*inputControls)) {
                     stickKeys |= stickKeyBit(key);
@@ -268,7 +324,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     if (--codeHolds[code] == 0) soc->KeyboardKey(code, false);
                     break;
                 }
-                enum KeyId key = mapKey(event.key.keysym.sym);
+                const KeyId key = controlView.zaurus ? zaurusControllerKey(event.key.keysym) : mapKey(event.key.keysym.sym);
                 if (stickKeyBit(key) && hasStick(*inputControls)) {
                     stickKeys &= uint8_t(~stickKeyBit(key));
                     UpdateStick();
@@ -404,9 +460,41 @@ int SdlEventHandler::ScreenHeight() const {
     return rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270 ? width : height;
 }
 bool SdlEventHandler::OnScreen(int x,int y) const {
-    const int left=int(scale*deviceScreenLeft((*shownControls),controlView));
-    const int top=int(scale*deviceScreenTop((*shownControls),controlView));
-    return x>=left && y>=top && x<left+int(scale*ScreenWidth()) && y<top+int(scale*ScreenHeight());
+    const auto screen = ScreenRect();
+    const SDL_Point point{x, y};
+    return SDL_PointInRect(&point, &screen);
+}
+SDL_Rect SdlEventHandler::ScreenRect() const {
+    if (controlView.zaurus && !controlView.bare)
+        return zaurusDeviceLayout(ScreenWidth(), ScreenHeight(), *controlView.zaurus, scale).screen;
+    return {int(scale * deviceScreenLeft(*shownControls, controlView)),
+            int(scale * deviceScreenTop(*shownControls, controlView)),
+            int(scale * ScreenWidth()), int(scale * ScreenHeight())};
+}
+KeyId SdlEventHandler::ControlAt(int x, int y, KeyId* also) const {
+    if (also) *also = keyInvalid;
+    if (x < 0 || y < 0) return keyInvalid;
+    if (controlView.zaurus && !controlView.bare) {
+        const int index = zaurusKeyAt(zaurusDeviceLayout(ScreenWidth(), ScreenHeight(), *controlView.zaurus, scale), x, y);
+        return index < 0 ? keyInvalid : zaurusArtKey(zaurusArt().keys[index]);
+    }
+    return deviceControlAt(*shownControls, ScreenWidth(), ScreenHeight(),
+                           int((x + 0.5f) / scale), int((y + 0.5f) / scale), controlView, also);
+}
+int SdlEventHandler::TabletKeyAt(int x, int y) const {
+    if (!controlView.zaurus || controlView.bare) return -1;
+    const auto layout = zaurusDeviceLayout(ScreenWidth(), ScreenHeight(), *controlView.zaurus, scale);
+    const int index = zaurusKeyAt(layout, x, y);
+    if (index < 0 || zaurusArt().keys[index].part != ZaurusPart::icons) return -1;
+    return index - zaurusKeyIndex("icon-dictionary");
+}
+bool SdlEventHandler::MovePen(int x, int y) {
+    if (OnScreen(x, y)) {
+        soc->PenDown(RotateX(x, y), RotateY(x, y));
+        return true;
+    }
+    const int tabletKey = TabletKeyAt(x, y);
+    return tabletKey >= 0 && soc->SpitzTabletKeyDown(unsigned(tabletKey));
 }
 void SdlEventHandler::ReleasePointer() {
     if (pointerStick) {
@@ -432,8 +520,8 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
     Finger* finger = nullptr;
     for (auto& item : fingers)
         if (item.active && item.touch == event.touchId && item.id == event.fingerId) finger = &item;
-    int windowWidth = int(scale * deviceControlsWidth((*shownControls),ScreenWidth(),controlView));
-    int windowHeight = int(scale * (ScreenHeight() + deviceControlsHeight((*shownControls),ScreenWidth(),controlView)));
+    const auto size = deviceControlSize(*shownControls, ScreenWidth(), ScreenHeight(), controlView);
+    int windowWidth = int(scale * size.x), windowHeight = int(scale * size.y);
     if (auto* window = SDL_GetWindowFromID(event.windowID)) SDL_GetWindowSize(window, &windowWidth, &windowHeight);
     int x = int(std::floor(event.x * windowWidth)), y = int(std::floor(event.y * windowHeight));
     MapPointer(x, y);
@@ -444,9 +532,7 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         if (key && --builtInHolds[key] == 0 && !hardKeys[key] && pointerKey != key) soc->KeyUp(key);
     };
     auto keysAt = [&](int x, int y, KeyId& also) {
-        also = keyInvalid;
-        return x >= 0 && y >= 0 ? deviceControlAt((*shownControls), ScreenWidth(), ScreenHeight(), int((x + 0.5f)/scale),
-                                                  int((y + 0.5f)/scale), controlView, &also) : keyInvalid;
+        return ControlAt(x, y, &also);
     };
     auto release = [&] {
         unpress(finger->key);
@@ -466,7 +552,7 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         if (finger) return;
         for (auto& item : fingers) if (!item.active) { finger = &item; break; }
         if (!finger) return;
-        const bool pen = OnScreen(x,y);
+        const bool pen = OnScreen(x, y) || TabletKeyAt(x, y) >= 0;
         // One finger at a time holds the stick; it keeps it until it lifts, even off the well.
         if (!pen && deviceStickGrab(StickWell(), (x + 0.5f)/scale, (y + 0.5f)/scale)) {
             for (const auto& item : fingers) if (item.active && item.stick) return;
@@ -498,8 +584,7 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         return;
     }
     if (finger->pen) {
-        if (OnScreen(x,y)) soc->PenDown(RotateX(x,y), RotateY(x,y));
-        else release();
+        if (!MovePen(x, y)) release();
     } else {
         // A button finger rolling onto another button lets go of the old key and presses the new
         // one; off any button it just lets go. On the pad's arrows it slides through diagonals.
@@ -670,8 +755,9 @@ DeviceKeyMask SdlEventHandler::PressedButtons() const {
 
 // Map pixel centres before truncation so fractional scales keep taps on the drawn pixel.
 int SdlEventHandler::RotateX(int x, int y) {
-    x-=int(scale*deviceScreenLeft((*shownControls),controlView));
-    y-=int(scale*deviceScreenTop((*shownControls),controlView));
+    const auto screen = ScreenRect();
+    x -= screen.x;
+    y -= screen.y;
     switch (rotation) {
         case Rotation::landscape_90:
             return int((scale * width - 0.5f - y) / scale);
@@ -688,8 +774,9 @@ int SdlEventHandler::RotateX(int x, int y) {
 }
 
 int SdlEventHandler::RotateY(int x, int y) {
-    x-=int(scale*deviceScreenLeft((*shownControls),controlView));
-    y-=int(scale*deviceScreenTop((*shownControls),controlView));
+    const auto screen = ScreenRect();
+    x -= screen.x;
+    y -= screen.y;
     switch (rotation) {
         case Rotation::landscape_90:
             return int((x + 0.5f) / scale);

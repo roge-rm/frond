@@ -12,11 +12,13 @@ struct PxaLcd;
 class SoC;
 
 struct PxaLcd *pxaLcdInit(struct ArmMem *physMem, class SoC *soc, struct PxaIc *ic,
-                          struct MemoryBuffer *buffer, uint16_t width, uint16_t heigh, bool pxa270);
+                          struct MemoryBuffer *buffer, uint16_t width, uint16_t height, bool pxa270, bool spitz = false);
 
 void pxaLcdResetPaletteBuffer(struct PxaLcd *lcd);
 
 void pxaLcdTick(struct PxaLcd *lcd);
+void pxaLcdTickSpitz(PxaLcd* lcd, uint64_t now, uint32_t clockHz, uint8_t brightness, bool qvga);
+bool pxaLcdSpitzHsync(const PxaLcd* lcd, uint64_t now, uint32_t clockHz);
 
 uint32_t *pxaLcdGetPendingFrame(struct PxaLcd *lcd);
 void pxaLcdResetPendingFrame(struct PxaLcd *lcd);

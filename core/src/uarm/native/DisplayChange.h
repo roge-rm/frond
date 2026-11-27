@@ -19,6 +19,7 @@ struct DisplayChange {
     std::optional<bool> buttons;
     // The CLIÉ game controller attached; from the core itself, not the display command.
     std::optional<bool> gamepad;
+    std::optional<ZaurusStyle> zaurus;
 
     // Later fields win.
     void Merge(const DisplayChange& later) {
@@ -29,6 +30,7 @@ struct DisplayChange {
         if (later.jogLandscape) jogLandscape = later.jogLandscape;
         if (later.buttons) buttons = later.buttons;
         if (later.gamepad) gamepad = later.gamepad;
+        if (later.zaurus) zaurus = later.zaurus;
     }
 };
 

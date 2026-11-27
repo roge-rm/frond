@@ -149,6 +149,15 @@ void DesktopLink::Bind(uint32_t desktop, uint32_t handheld, uint32_t mask) {
                 unsigned(hostConnectPort), strerror(error));
 }
 
+int DesktopLink::AddTcpForward(uint16_t hostPort, uint16_t guestPort) {
+    if (!hostPort || !guestPort) return EINVAL;
+    return router ? router->AddTcpForward(hostPort, server, guestPort) : ENOTCONN;
+}
+
+int DesktopLink::AddUnixTcpForward(const std::string& path, uint16_t guestPort) {
+    return router ? router->AddUnixTcpForward(path, server, guestPort) : ENOTCONN;
+}
+
 void DesktopLink::ActiveSyncWakeup() {
     // The WM5 RAPI service waits for this byte before opening its control socket.
     std::vector<uint8_t> frame(14 + 20 + 8 + 1);

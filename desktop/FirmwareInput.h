@@ -13,13 +13,14 @@
 namespace frondFirmware {
 // The devices the desktop starts. Settings and the core get the device's fixed name from
 // device_profile5.h, never this enum.
-enum class Device { automatic = -1, tx = deviceTypeTX, e2 = deviceTypeE2, zire72 = deviceTypeZire72 };
+enum class Device { automatic = -1, tx = deviceTypeTX, e2 = deviceTypeE2, zire72 = deviceTypeZire72, zaurus = deviceTypeSpitz };
 // The Dana and the Dana Wireless share one board, ROM, art and keyboard.
+inline bool isZaurus(Device device) { return device == Device::zaurus; }
 inline bool isDana(Device device) { return device != Device::automatic && deviceTypeIsDana5(int(device)); }
 inline const auto devices = [] {
     std::vector<Device> result;
     for (const auto& p : deviceProfiles5)
-        if (p.frontend.available) result.push_back(static_cast<Device>(p.deviceType));
+        if (p.frontend.available || p.deviceType == deviceTypeSpitz) result.push_back(static_cast<Device>(p.deviceType));
     return result;
 }();
 
@@ -74,10 +75,9 @@ inline bool installsToCard(Device device) {
 inline bool ceHardReset(Device device) { return installsToCard(device); }
 // The device's USB is a network link (RNDIS) with no host endpoint: on or off.
 inline bool usbNetwork(Device device) { return device != Device::automatic && !palmOs(device); }
-// New machines of these devices start on the Fast engine: the Zodiac, rx1950, T|X and Zire 72, which fall behind
-// Original speed on Exact.
+// These devices start on the Fast engine, as they can fall behind Original speed on Exact.
 inline bool fastByDefault(Device device) {
-    return device == Device::tx || device == Device::zire72 ||
+    return isZaurus(device) || device == Device::tx || device == Device::zire72 ||
            (device != Device::automatic && (profile(device).board == DeviceBoard5::imx1Zodiac ||
                                             profile(device).board == DeviceBoard5::s3c2442Rx1950));
 }

@@ -41,6 +41,7 @@ class AppsPanel : public QWidget {
     QStringList names() const;
     // Windows CE: only Install works (it copies onto the SD card); the list and the other buttons are greyed.
     void setInstallOnly(bool on);
+    void setPackageQueue(bool on);
  signals:
     void installRequested();
     void otherRequested();
@@ -51,6 +52,6 @@ class AppsPanel : public QWidget {
  private:
     QListWidget* list;
     QLabel* empty;
-    QPushButton *otherButton{}, *exportAllButton{};
-    bool installOnly{false};
+    QPushButton *installButton{}, *otherButton{}, *exportAllButton{};
+    bool installOnly{false}, packageQueue{false};
 };

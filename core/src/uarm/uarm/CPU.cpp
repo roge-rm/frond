@@ -5187,6 +5187,8 @@ uint32_t cpuCyclesInProgress(const ArmCpu* cpu) {
     return cpu->cyclesInProgress ? *cpu->cyclesInProgress + cpu->jitHint.pending : 0;
 }
 
+uint64_t cpuCoreCycles(const ArmCpu* cpu) { return cpu->costClock + cpuCyclesInProgress(cpu); }
+
 ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t cycleAcc = 0;
     CycleProgress progress(cpu, &cycleAcc);

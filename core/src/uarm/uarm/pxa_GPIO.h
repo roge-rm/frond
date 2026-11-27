@@ -36,7 +36,9 @@ bool pxaGpioIsInput(const PxaGpio* gpio, unsigned pin);
 bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin);
 bool pxaGpioFallingEdgeEnabled(const PxaGpio* gpio, unsigned pin);
 unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin);
-// What a read of a level register (GPLR) at pa gives, without side effects; false for other addresses.
+// An input sampled on GPLR reads, with no edge IRQs. One such input per controller.
+void pxaGpioSetPolledInput(PxaGpio* gpio, unsigned pin, bool (*read)(void*), void* context);
+// A stable level register read for Fast poll skipping. Dynamic inputs make the register ineligible.
 bool pxaGpioPeekLevel(const PxaGpio* gpio, uint32_t pa, uint32_t* value);
 void pxaGpioHoldSleepOutputs(PxaGpio* gpio, const uint32_t* levels);
 void pxaGpioReleaseSleepOutputs(PxaGpio* gpio);

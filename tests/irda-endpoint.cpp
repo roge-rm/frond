@@ -21,12 +21,14 @@
 #include "pxa_UART.h"
 #include "pxa_PWM.h"
 #include "soc_PXA.h"
+#include "spitz_nand.h"
 struct Machine {
     std::vector<uint8_t> nor,nand;
     SocPXA soc;
     Machine(DeviceType5 type):nor(type==deviceTypeTG50?4096:(type==deviceTypeTX?16:8)*1024*1024),
-      nand(type==deviceTypeTG50?0:type==deviceTypeTX?132*1024*1024:34603008,0xff),
-      soc(type,(type==deviceTypeTG50?16:32)*1024*1024,nor.data(),nor.size(),nand.data(),nand.size(),-1,type==deviceTypeTX?2:0) {
+      nand(type==deviceTypeTG50?0:type==deviceTypeTX?132*1024*1024:type==deviceTypeSpitz?spitzNandRawSize:34603008,0xff),
+      soc(type,(type==deviceTypeTG50?16:type==deviceTypeSpitz?64:32)*1024*1024,nor.data(),nor.size(),nand.data(),nand.size(),
+          -1,type==deviceTypeTX?2:0,type==deviceTypeSpitz) {
         uint32_t loop=0xeafffffe;
         std::memcpy(static_cast<uint8_t*>(soc.GetMemoryData().data)+0x3000,&loop,4);
         cpuSetReg(soc.GetCpu(),ARM_REG_NUM_CPSR,ARM_SR_MODE_SVC|ARM_SR_I|ARM_SR_F);
@@ -43,7 +45,25 @@ struct Machine {
     void write(unsigned reg,uint32_t value){assert(memAccess(cpuGetMem(soc.GetCpu()),uartBase()+4*reg,4,true,&value));}
     uint32_t read(unsigned reg){uint32_t value=0;assert(memAccess(cpuGetMem(soc.GetCpu()),uartBase()+4*reg,4,false,&value));return value;}
     void run(unsigned ms=1){assert(soc.Run(uint64_t(ms)*100000,100000000)>=uint64_t(ms)*100000);}
+    void spitzClock(bool enabled) {
+        constexpr uint32_t cken = 0x41300004;
+        constexpr uint32_t stUart = 1u << 5;
+        auto* mem = cpuGetMem(soc.GetCpu());
+        uint32_t value = 0;
+        assert(memAccess(mem, cken, 4, false, &value));
+        value = enabled ? value | stUart : value & ~stUart;
+        assert(memAccess(mem, cken, 4, true, &value));
+    }
     void power(bool enabled){
+        if (soc.GetDeviceType() == deviceTypeSpitz) {
+            auto* mem = cpuGetMem(soc.GetCpu());
+            uint32_t value = 1u << 1;
+            assert(memAccess(mem, 0x08800060, 4, true, &value));  // SCOOP #2 GPCR: PA11 output
+            value = enabled ? 0 : value;
+            assert(memAccess(mem, 0x08800064, 4, true, &value));  // GPWR: drive shutdown
+            spitzClock(true);
+            return;
+        }
         if (soc.GetDeviceType()==deviceTypeTG50) {
             auto* mem=cpuGetMem(soc.GetCpu());
             uint32_t v=1u<<10;
@@ -86,7 +106,8 @@ struct FakePeer {
 };
 static void models(DeviceType5 type){
     Machine m(type);FakePeer peer;auto hooks=peer.hooks();
-    if(type!=deviceTypeTG50){m.soc.AttachKeyboard(true);assert(!m.soc.SetIrHostHooks(&hooks));}
+    const bool testKeyboard = type != deviceTypeTG50 && type != deviceTypeSpitz;
+    if(testKeyboard){m.soc.AttachKeyboard(true);assert(!m.soc.SetIrHostHooks(&hooks));}
     m.soc.AttachKeyboard(false);assert(m.soc.SetIrHostHooks(&hooks));
     m.soc.AttachKeyboard(true);assert(!m.soc.KeyboardAttached());
     peer.rx={0xc0};m.run(5);assert(!peer.reads && !peer.tx.size());
@@ -97,6 +118,20 @@ static void models(DeviceType5 type){
     m.power(false);assert(!m.soc.IrPowerEnabled());m.write(0,0x80);m.run(3);
     assert(peer.tx==std::vector<uint8_t>{0xc1} && !peer.reads);
     m.configure(2);assert(m.receive()==0xc0);
+    if (type == deviceTypeSpitz) {
+        assert(deviceProfile5(type)->capabilities.irPhone && !deviceProfileNetworkHotSync5(*deviceProfile5(type)));
+        m.configure(3);
+        m.spitzClock(false);
+        assert(!m.soc.IrPowerEnabled());
+        const auto reads = peer.reads;
+        peer.rx = {0x37};
+        m.write(0, 0x38);
+        m.run(3);
+        assert(peer.reads == reads && peer.tx == std::vector<uint8_t>{0xc1});
+        m.spitzClock(true);
+        assert(m.receive() == 0x37);
+        m.configure(2);
+    }
     const auto serial=pxaUartIrState(m.soc.GetIrUart());
     assert(serial.baud==9600 && serial.lcr==3 && serial.receive && !serial.transmit);
     m.configure(3,8); // Negotiated SIR115200, exact bytes including escapes.
@@ -113,7 +148,7 @@ static void models(DeviceType5 type){
     peer.rx={0x31};pxaUartKick(m.soc.GetIrUart());assert(m.receive()==0x31);
     assert(m.soc.Load(saved.size(),saved.data()) && peer.replaced==1);
     m.soc.SetIrHostHooks(nullptr);assert(!m.soc.IrHostAttached());
-    if(type!=deviceTypeTG50){
+    if(testKeyboard){
     m.soc.AttachKeyboard(true);assert(m.soc.KeyboardAttached());
     m.configure(2);assert(m.soc.KeyboardKey(0x1a,true));
     for(auto c:{0xff,0xc0,0x1a,0xe5,0x7d,0xc1})assert(m.receive()==c);
@@ -125,7 +160,7 @@ static void models(DeviceType5 type){
     auto frozenReads=peer.reads,frozenPolls=peer.polls;const auto frozenTx=peer.tx.size();m.run(20);
     assert(peer.reads==frozenReads && peer.polls==frozenPolls && peer.tx.size()==frozenTx);
     m.soc.SetIrHostHooks(nullptr);
-    printf("PASS %s SIR UART direction, pacing, bytes, exclusive accessory, checkpoint and load ownership\n",type==deviceTypeTG50?"TG50":type==deviceTypeTX?"TX":"E2");
+    printf("PASS %s SIR UART direction, pacing, bytes, exclusive accessory, checkpoint and load ownership\n",type==deviceTypeTG50?"TG50":type==deviceTypeTX?"TX":type==deviceTypeSpitz?"SL-C3000":"E2");
 }
 static int connectTo(const std::string& endpoint){
     auto colon=endpoint.rfind(':');assert(colon!=std::string::npos);
@@ -318,4 +353,4 @@ static void unixEndpoints(){
     assert(rmdir(folder.c_str())==0);
     puts("PASS unix: SIR endpoint: bytes both ways, one client, reconnect, reset and sleep close and reopen, refusals");
 }
-int main(){models(deviceTypeTX);models(deviceTypeE2);models(deviceTypeTG50);endpoints();unixEndpoints();}
+int main(){models(deviceTypeTX);models(deviceTypeE2);models(deviceTypeTG50);models(deviceTypeSpitz);endpoints();unixEndpoints();}

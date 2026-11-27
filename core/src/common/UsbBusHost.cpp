@@ -1,5 +1,6 @@
 #include "UsbBusHost.h"
 
+#include "CPCrc.h"
 #include "RndisHost.h"
 
 #include <algorithm>
@@ -24,6 +25,46 @@ std::string hex4(uint16_t value) {
     std::snprintf(text, sizeof(text), "%04x", value);
     return text;
 }
+uint32_t readLe32(const uint8_t* p) {
+    return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;
+}
+
+uint32_t readBe32(const uint8_t* p) {
+    return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]);
+}
+
+void writeLe32(uint8_t* p, uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i) p[i] = uint8_t(value >> (8 * i));
+}
+
+struct StorageOperation {
+    const char* name;
+    unsigned length;
+    uint8_t cdbSize;
+    uint8_t cdb[10];
+    bool output{false};
+};
+enum StorageCommand { inquiry, ready, capacity, readSector, senseCommand, writeSector, syncCache, readBack };
+constexpr StorageOperation storageCommands[] = {
+    {"INQUIRY", 36, 6, {0x12, 0, 0, 0, 36}},
+    {"TEST UNIT READY", 0, 6, {0x00}},
+    {"READ CAPACITY(10)", 8, 10, {0x25}},
+    {"READ(10)", 512, 10, {0x28, 0, 0, 0, 0, 0, 0, 0, 1}},
+    {"REQUEST SENSE", 18, 6, {0x03, 0, 0, 0, 18}},
+    {"WRITE(10)", 512, 10, {0x2a, 0, 0, 0, 0, 0, 0, 0, 1}, true},
+    {"SYNCHRONIZE CACHE(10)", 0, 10, {0x35}},
+    {"READ(10) after write", 512, 10, {0x28, 0, 0, 0, 0, 0, 0, 0, 1}},
+};
+constexpr size_t ethernetHeader = 14, maxEthernetFrame = 1518, fcsBytes = 4;
+constexpr size_t maxZaurusTransfer = maxEthernetFrame + fcsBytes + 1;
+// Sharp 1.01 can acknowledge OUT before its network function reads the FIFOs.
+constexpr uint64_t zaurusNetworkSettleNs = 4000000000;
+constexpr unsigned storageCommandBytes = 31;
+// Sharp storage_fd starts work after a 100-jiffy timer on configuration.
+constexpr uint64_t storageSettleNs = 1500000000, storageRetryNs = 500000000;
+constexpr uint64_t storageTimeoutNs = 3000000000;
+constexpr uint32_t cbwSignature = 0x43425355, cswSignature = 0x53425355;
+
 std::string printable(const uint8_t* bytes, size_t size) {
     std::string text;
     for (size_t i = 0; i < size; ++i) text += bytes[i] >= 0x20 && bytes[i] < 0x7f ? char(bytes[i]) : '.';
@@ -31,7 +72,8 @@ std::string printable(const uint8_t* bytes, size_t size) {
 }
 }  // namespace
 
-UsbBusHost::UsbBusHost(std::function<UsbDevicePort()> udc, Link link) : udc(std::move(udc)), link(std::move(link)) {}
+UsbBusHost::UsbBusHost(std::function<UsbDevicePort()> udc, Link link, Mode mode)
+    : udc(std::move(udc)), link(std::move(link)), mode(mode) {}
 
 const char* UsbBusHost::PhaseName(Phase phase) {
     switch (phase) {
@@ -67,6 +109,10 @@ void UsbBusHost::Detach() {
     attempts = 0;
     outPending = clearHalt = false;
     outSize = 0;
+    zaurusSend.clear();
+    zaurusReceive.clear();
+    zaurusSent = 0;
+    zaurusDiscard = false;
     bulkTimeouts = 0;
     retryAt = busyUntil = lastControlEnd = requeryAt = 0;
     poked = waitSpace = false;
@@ -74,6 +120,7 @@ void UsbBusHost::Detach() {
     inEndpoint = outEndpoint = 0;
     portFunction.clear();
     configDescriptor.clear();
+    storage = {};
     inMps = outMps = 0;
     StopRndis();
 }
@@ -93,7 +140,8 @@ uint64_t UsbBusHost::NextWake() const {
 }
 
 bool UsbBusHost::LinkWaiting() const {
-    if (phase != Phase::running || !inEndpoint || inFlight != Token::none || control.active || poked) return false;
+    if (mode != Mode::normal || phase != Phase::running || !inEndpoint ||
+        inFlight != Token::none || control.active || poked) return false;
     if (rndisMode) return !outPending && rndis->OutPending();
     return (!outPending && link.pending && link.pending()) || (waitSpace && link.sendSpace && link.sendSpace() >= inMps);
 }
@@ -110,11 +158,23 @@ bool UsbBusHost::Addressed() { return udc().Address() == address; }
 // Enumeration failed: reset the port and start again a little later, a few times.
 void UsbBusHost::Restart(const char* why) {
     Message(std::string("usb: ") + why);
+    if (mode == Mode::zaurusNetwork) {
+        zaurusSend.clear();
+        zaurusReceive.clear();
+        zaurusSent = 0;
+        zaurusDiscard = outPending = false;
+        outSize = 0;
+    }
     inFlight = Token::none;
     control = {};
     sofRunning = false;
     clearHalt = false;
     inEndpoint = outEndpoint = inMps = outMps = 0;
+    if (mode == Mode::storageProbe) {
+        storage = {};
+        outPending = false;
+        outSize = 0;
+    }
     StopRndis();
     if (++attempts >= maxAttempts) {
         phase = Phase::failed;
@@ -123,6 +183,14 @@ void UsbBusHost::Restart(const char* why) {
     }
     phase = Phase::connect;
     phaseAt = now + retryNs;
+}
+
+void UsbBusHost::FailBulk(const char* why) {
+    if (mode != Mode::storageProbe) return Restart(why);
+    Message(std::string("usb storage: ") + why);
+    storage.stage = StorageProbe::Stage::idle;
+    clearHalt = outPending = false;
+    outSize = 0;
 }
 
 bool UsbBusHost::ReadStringDescriptor(uint8_t index,uint16_t language) {
@@ -154,7 +222,7 @@ void UsbBusHost::ControlDone(Result result) {
         case Completion::enumeration: EnumerationStep(result); break;
         case Completion::clearHalt:
             clearHalt = false;
-            if (result != Result::ok) Restart("could not clear a halted endpoint");
+            if (result != Result::ok) FailBulk("could not clear a halted endpoint");
             break;
         case Completion::external: break;
         case Completion::rndisCommand:
@@ -253,11 +321,203 @@ bool UsbBusHost::FindRndis() {
     return SelectEndpoints();
 }
 
+// Sharp 04dd:9031 uses CDC SAFE MDLM with both bulk endpoints on the same interface.
+bool UsbBusHost::SelectZaurusNetwork() {
+    if (vendor != 0x04dd || product != 0x9031 || configDescriptor[4] != 1) return false;
+    constexpr uint8_t safeGuid[]{0x5d, 0x34, 0xcf, 0x66, 0x11, 0x18, 0x11, 0xd6,
+                                 0xa2, 0x1a, 0x00, 0x01, 0x02, 0xca, 0x9a, 0x7f};
+    bool mdlm = false, safe = false, crcPadBefore = false;
+    uint8_t bulkIn = 0, bulkOut = 0;
+    for (size_t pos = 9; pos < configDescriptor.size(); pos += configDescriptor[pos]) {
+        const auto* desc = &configDescriptor[pos];
+        if (desc[1] == 4) {
+            mdlm = desc[3] == 0 && desc[5] == 2 && desc[6] == 0x0a && desc[7] == 0;
+        } else if (mdlm && desc[1] == 0x24) {
+            if (desc[0] == 21 && desc[2] == 0x12)
+                safe = std::equal(std::begin(safeGuid), std::end(safeGuid), desc + 5);
+            if (desc[0] == 6 && desc[2] == 0x13 && desc[3] == 0)
+                crcPadBefore = desc[5] == 3;
+        } else if (mdlm && desc[1] == 5 && desc[3] == 2) {
+            auto& endpoint = desc[2] & 0x80 ? bulkIn : bulkOut;
+            if (endpoint) return false;
+            endpoint = desc[2] & 15;
+        }
+    }
+    if (!safe || !crcPadBefore || !bulkIn || !bulkOut) return false;
+    inEndpoint = bulkIn;
+    outEndpoint = bulkOut;
+    return SelectEndpoints();
+}
+
+bool UsbBusHost::ZaurusNetworkSend(const uint8_t* frame, size_t size) {
+    if (!ZaurusNetworkCanSend() || !frame || size < ethernetHeader || size > maxEthernetFrame) return false;
+    zaurusSend.assign(frame, frame + size);
+    // PADBEFORE keeps the last OUT packet short and covers the pad with the FCS.
+    if ((size + fcsBytes) % outMps == 0) zaurusSend.push_back(0);
+    const uint32_t fcs = crc::CRC32(zaurusSend.data(), zaurusSend.size());
+    const size_t offset = zaurusSend.size();
+    zaurusSend.resize(offset + fcsBytes);
+    writeLe32(zaurusSend.data() + offset, fcs);
+    zaurusSent = 0;
+    Poke();
+    return true;
+}
+
+void UsbBusHost::ZaurusNetworkIn(const uint8_t* data, unsigned size) {
+    if (size > maxZaurusTransfer - zaurusReceive.size()) zaurusDiscard = true;
+    if (!zaurusDiscard) zaurusReceive.insert(zaurusReceive.end(), data, data + size);
+    if (size == inMps) return;
+
+    const auto* frame = zaurusReceive.data();
+    const size_t length = zaurusReceive.size();
+    size_t payload = length >= fcsBytes ? length - fcsBytes : 0;
+    auto valid = [&] {
+        return payload >= ethernetHeader && payload <= maxEthernetFrame &&
+               crc::CRC32(frame, payload) == readLe32(frame + payload);
+    };
+    if (!zaurusDiscard) {
+        // Accept a one-byte USB terminator after the FCS, as used by Linux usbnet.
+        if (!valid() && size == 1 && length > fcsBytes && !zaurusReceive.back()) --payload;
+        if (valid() && zaurusFrameFromDevice) zaurusFrameFromDevice(frame, payload);
+    }
+    zaurusReceive.clear();
+    zaurusDiscard = false;
+}
+
 void UsbBusHost::StopRndis() {
     if (rndisMode && rndis) rndis->Stop();
     rndisMode = false;
     intEndpoint = intMps = 0;
     intRequestAt = 0;
+}
+
+bool UsbBusHost::SelectZaurusStorage() {
+    if (vendor != 0x04dd || product != 0x9050 || configDescriptor[4] != 1) return false;
+    unsigned bulkIn = 0, bulkOut = 0;
+    bool massStorage = false;
+    for (size_t pos = 9; pos < configDescriptor.size(); pos += configDescriptor[pos]) {
+        const auto* desc = &configDescriptor[pos];
+        if (desc[1] == 4) {
+            massStorage = desc[3] == 0 && desc[5] == 8 && desc[6] == 6 && desc[7] == 0x50;
+        } else if (massStorage && desc[1] == 5 && desc[3] == 2) {
+            auto& ep = desc[2] & 0x80 ? bulkIn : bulkOut;
+            if (ep) return false;
+            ep = desc[2];
+        }
+    }
+    if (!bulkIn || !bulkOut || endpointMps[bulkOut] < storageCommandBytes) return false;
+    inEndpoint = uint8_t(bulkIn & 15);
+    outEndpoint = uint8_t(bulkOut & 15);
+    return SelectEndpoints();
+}
+
+bool UsbBusHost::ArmStorageWriteCheck(StorageWriteCheck check) {
+    if (mode != Mode::storageProbe || phase != Phase::detached || storageWriteCheck ||
+        !check.lba || check.expected == check.replacement) return false;
+    storageWriteCheck = std::move(check);
+    storageWriteArmed = true;
+    return true;
+}
+
+void UsbBusHost::StorageReply(const uint8_t* data, unsigned size) {
+    const auto& command = storageCommands[storage.command];
+    const bool statusPacket = size == 13 && readLe32(data) == cswSignature;
+    if (storage.stage == StorageProbe::Stage::data && size && !statusPacket &&
+        size <= command.length - storage.received) {
+        std::memcpy(storage.data + storage.received, data, size);
+        storage.received += size;
+        if (storage.received == command.length || size < inMps)
+            storage.stage = StorageProbe::Stage::status;
+        return;
+    }
+    if (!size) {
+        storage.stage = StorageProbe::Stage::status;
+        return;
+    }
+
+    const auto stop = [&] (std::string explanation) {
+        Message(std::string("usb storage: ") + std::move(explanation));
+        storage.stage = StorageProbe::Stage::idle;
+    };
+    if (!statusPacket || readLe32(data + 4) != storage.tag || readLe32(data + 8) > command.length || data[12] > 1)
+        return stop(std::string("invalid status for ") + command.name);
+
+    const auto start = [&] (unsigned next, uint64_t delay = 0) {
+        ++storage.tag;
+        storage.command = next;
+        storage.received = 0;
+        outRequestAt = std::max(outRequestAt, now + delay);
+        storage.deadline = outRequestAt + storageTimeoutNs;
+        storage.stage = StorageProbe::Stage::command;
+    };
+    if (data[12]) {
+        if (storage.command == senseCommand) return stop("REQUEST SENSE failed");
+        storage.failedCommand = storage.command;
+        return start(senseCommand);
+    }
+    if (readLe32(data + 8) || storage.received != command.length)
+        return stop(std::string("incomplete data for ") + command.name);
+
+    switch (storage.command) {
+        case inquiry:
+            Message("usb storage: INQUIRY " + printable(storage.data + 8, 28));
+            break;
+        case ready:
+            Message("usb storage: medium ready");
+            break;
+        case capacity: {
+            const auto blocks = uint64_t(readBe32(storage.data)) + 1;
+            const auto blockSize = readBe32(storage.data + 4);
+            Message("usb storage: " + std::to_string(blocks) + " blocks of " + std::to_string(blockSize) + " bytes");
+            if (blockSize != sizeof(storage.data)) return stop("unsupported block size");
+            if (storage.writingCheck && storageWriteCheck->lba >= blocks)
+                return stop("write-check LBA is outside the medium");
+            break;
+        }
+        case readSector: {
+            if (storage.writingCheck) {
+                if (!std::equal(storageWriteCheck->expected.begin(), storageWriteCheck->expected.end(),
+                                storage.data)) return stop("write-check preimage differs");
+                storageWriteArmed = false;
+                return start(writeSector);
+            }
+            uint32_t hash = 2166136261u;
+            for (uint8_t byte : storage.data) hash = (hash ^ byte) * 16777619u;
+            Message("usb storage: read LBA 0, FNV-1a " + hex4(uint16_t(hash >> 16)) + hex4(uint16_t(hash)));
+            storage.stage = StorageProbe::Stage::idle;
+            return;
+        }
+        case writeSector:
+            Message("usb storage: write acknowledged");
+            break;
+        case syncCache:
+            Message("usb storage: cache synchronised");
+            break;
+        case readBack:
+            return stop(std::equal(storageWriteCheck->replacement.begin(), storageWriteCheck->replacement.end(),
+                                   storage.data) ? "write-check verified LBA " + std::to_string(storageWriteCheck->lba)
+                                                 : "write-check readback differs");
+        case senseCommand: {
+            if ((storage.data[0] & 0x7f) != 0x70 && (storage.data[0] & 0x7f) != 0x71)
+                return stop("unsupported REQUEST SENSE format");
+            const unsigned key = storage.data[2] & 15, asc = storage.data[12], ascq = storage.data[13];
+            char code[20];
+            std::snprintf(code, sizeof(code), " %02x/%02x/%02x", key, asc, ascq);
+            const std::string parse = std::string(storageCommands[storage.failedCommand].name) + " sense" + code;
+            if (storage.failedCommand == syncCache && key == 5 && asc == 0x20) {
+                Message("usb storage: cache synchronise unsupported by guest");
+                return start(readBack);
+            }
+            if (storage.failedCommand != writeSector &&
+                (key == 6 || (key == 2 && asc == 4)) && storage.retries < 3) {
+                ++storage.retries;
+                Message("usb storage: " + parse + ", retrying");
+                return start(storage.failedCommand, storageRetryNs);
+            }
+            return stop(parse);
+        }
+    }
+    start(storage.command + 1);
 }
 
 void UsbBusHost::EnumerationStep(Result result) {
@@ -303,6 +563,39 @@ void UsbBusHost::EnumerationStep(Result result) {
             return StartControl(0x00, 9, configuration, 0, 0);
         case 5:
             if (result != Result::ok) return fail("SET_CONFIGURATION");
+            if (mode == Mode::zaurusNetwork) {
+                if (!SelectZaurusNetwork()) return fail("Sharp PC Link SAFE MDLM configuration");
+                phase = Phase::running;
+                attempts = 0;
+                ++counters.enumerations;
+                outRequestAt = now + zaurusNetworkSettleNs;
+                Message("usb: Sharp PC Link SAFE network configured");
+                return;
+            }
+            if (mode != Mode::normal) {
+                phase = Phase::running;
+                attempts = 0;
+                ++counters.enumerations;
+                std::string description = "usb: enumerated " + hex4(vendor) + ":" + hex4(product) + ", configuration";
+                constexpr char digits[] = "0123456789abcdef";
+                for (uint8_t byte : configDescriptor) {
+                    description += ' ';
+                    description += digits[byte >> 4];
+                    description += digits[byte & 15];
+                }
+                Message(description);
+                if (mode == Mode::storageProbe) {
+                    if (SelectZaurusStorage()) {
+                        storage.writingCheck = storageWriteArmed;
+                        storage.stage = StorageProbe::Stage::command;
+                        outRequestAt = now + storageSettleNs;
+                        storage.deadline = outRequestAt + storageTimeoutNs;
+                    } else {
+                        Message("usb storage: Zaurus Drive mass storage interface not found");
+                    }
+                }
+                return;
+            }
             if (rndis && FindRndis()) {
                 phase = Phase::running;
                 attempts = 0;
@@ -419,6 +712,17 @@ bool UsbBusHost::StartTransaction() {
         return false;
     }
     if (phase != Phase::running) return false;
+    const bool storageMode = mode == Mode::storageProbe;
+    if (storageMode && storage.stage != StorageProbe::Stage::idle && now >= storage.deadline) {
+        Message(std::string("usb storage: timed out waiting for ") + storageCommands[storage.command].name);
+        storage.stage = StorageProbe::Stage::idle;
+        outPending = false;
+        outSize = 0;
+    }
+    if (mode == Mode::enumerationOnly || (storageMode && storage.stage == StorageProbe::Stage::idle)) {
+        retryAt = UINT64_MAX;
+        return false;
+    }
     if (rndisMode) {
         if (clearHalt) {
             StartControl(0x02, 1, 0, haltedEndpoint, 0, Completion::clearHalt);
@@ -457,13 +761,45 @@ bool UsbBusHost::StartTransaction() {
         StartControl(0x02, 1, 0, haltedEndpoint, 0, Completion::clearHalt);
         return false;
     }
-    if (!outPending && rndisMode) {
+    if (storageMode && storage.stage == StorageProbe::Stage::command && now < outRequestAt) {
+        retryAt = outRequestAt;
+        return false;
+    }
+    if (!outPending && storageMode && storage.stage == StorageProbe::Stage::writeData) {
+        outSize = std::min<unsigned>(outMps, storageSectorSize - storage.received);
+        std::copy_n(storageWriteCheck->replacement.data() + storage.received, outSize, outPacket);
+        outPending = true;
+    } else if (!outPending && storageMode && storage.stage == StorageProbe::Stage::command) {
+        const auto& command = storageCommands[storage.command];
+        std::fill_n(outPacket, storageCommandBytes, 0);
+        writeLe32(outPacket, cbwSignature);
+        writeLe32(outPacket + 4, storage.tag);
+        writeLe32(outPacket + 8, command.length);
+        if (command.length && !command.output) outPacket[12] = 0x80;
+        outPacket[14] = command.cdbSize;
+        std::copy_n(command.cdb, command.cdbSize, outPacket + 15);
+        if (storage.writingCheck &&
+            (storage.command == readSector || storage.command == writeSector || storage.command == readBack)) {
+            const uint32_t lba = storageWriteCheck->lba;
+            for (unsigned i = 0; i < 4; ++i) outPacket[17 + i] = uint8_t(lba >> (24 - 8 * i));
+        }
+        outSize = storageCommandBytes;
+        outPending = true;
+    } else if (!outPending && rndisMode) {
         outPending = rndis->BulkOutPacket(outPacket, outMps, outSize);
-    } else if (!outPending && link.receive) {
+    } else if (!outPending && ZaurusNetworkActive()) {
+        outSize = unsigned(std::min<size_t>(outMps, zaurusSend.size() - zaurusSent));
+        if (outSize) {
+            std::copy_n(zaurusSend.begin() + zaurusSent, outSize, outPacket);
+            outPending = true;
+        }
+    } else if (!outPending && !storageMode && link.receive) {
         outSize = unsigned(link.receive(outPacket, outMps));
         outPending = outSize != 0;
     }
-    const bool wantIn = rndisMode || (link.sendSpace && link.sendSpace() >= inMps);
+    const bool wantIn = storageMode ? storage.stage == StorageProbe::Stage::data ||
+                                         storage.stage == StorageProbe::Stage::status :
+        rndisMode || ZaurusNetworkActive() || (link.sendSpace && link.sendSpace() >= inMps);
     // A cooperative adapter may hold this request without putting an OUT token on the bus.
     const bool outReady = outPending && (!Addressed() || u.OutReady(outEndpoint,std::min<unsigned>(outSize,outMps)));
     if (outReady && now >= outRequestAt && (preferOut || !wantIn || now < inRequestAt)) {
@@ -486,7 +822,7 @@ bool UsbBusHost::StartTransaction() {
     inFlightEndpoint = uint8_t(0x80 | inEndpoint);
     unsigned size = 0;
     const R r = Addressed() ? u.PeekIn(inFlightEndpoint, &size) : R::Timeout;
-    if (r == R::Ack && size > inMps) { Restart("oversized bulk IN packet"); return false; }
+    if (r == R::Ack && size > inMps) { FailBulk("oversized bulk IN packet"); return false; }
     inFlightBytes = r == R::Ack ? int(size) : -1;
     return Begin(Token::bulkIn, unsigned(r == R::Ack ? transactionBits(size) : r == R::Timeout ? timeoutBits : nakBits));
 }
@@ -581,7 +917,7 @@ void UsbBusHost::FinishTransaction() {
             uint8_t data[64];
             unsigned size = 0;
             if (addressed && u.PeekIn(inFlightEndpoint, &size) == R::Ack) {
-                if (size > inMps || size > sizeof(data)) return Restart("oversized bulk IN packet");
+                if (size > inMps || size > sizeof(data)) return FailBulk("oversized bulk IN packet");
                 // Data queued during a NAK needs a new transaction with time for the data packet.
                 if (int(size) > inFlightBytes) {
                     nak();
@@ -592,7 +928,7 @@ void UsbBusHost::FinishTransaction() {
             const R r = addressed ? u.EpIn(inFlightEndpoint, data, &size) : R::Timeout;
             if (r == R::Ack) {
                 bulkTimeouts = 0;
-                if (size > inMps) return Restart("oversized bulk IN packet");
+                if (size > inMps) return FailBulk("oversized bulk IN packet");
                 counters.bytesIn += size;
                 if (rndisMode) {
                     // RNDIS transfers run packet after packet, ending on a short one.
@@ -600,7 +936,13 @@ void UsbBusHost::FinishTransaction() {
                     inRequestAt = now;
                     return;
                 }
-                if (size) link.send(data, size);
+                if (ZaurusNetworkActive()) {
+                    ZaurusNetworkIn(data, size);
+                    inRequestAt = now + frameNs;
+                    return;
+                }
+                if (mode == Mode::storageProbe) StorageReply(data, size);
+                else if (size) link.send(data, size);
                 // Host software policy: retire this one-packet request and resubmit later.
                 inRequestAt = now + frameNs;
                 return;
@@ -611,7 +953,7 @@ void UsbBusHost::FinishTransaction() {
                 haltedEndpoint = inFlightEndpoint;
                 return;
             }
-            if (++bulkTimeouts >= 100) Restart("the bulk IN endpoint stopped answering");
+            if (++bulkTimeouts >= 100) FailBulk("the bulk IN endpoint stopped answering");
             else retryAt = now + nakRetryNs;
             return;
         }
@@ -640,10 +982,27 @@ void UsbBusHost::FinishTransaction() {
             if (r == R::Ack) {
                 bulkTimeouts = 0;
                 outRequestAt = rndisMode ? now : now + frameNs;
+                if (ZaurusNetworkActive()) {
+                    zaurusSent += outFlightSize;
+                    if (zaurusSent == zaurusSend.size()) {
+                        zaurusSent = 0;
+                        zaurusSend.clear();
+                    }
+                }
                 counters.bytesOut += outFlightSize;
                 outSize -= outFlightSize;
                 std::memmove(outPacket, outPacket + outFlightSize, outSize);
                 outPending = outSize != 0;
+                if (mode == Mode::storageProbe && !outPending) {
+                    if (storage.stage == StorageProbe::Stage::writeData) {
+                        storage.received += outFlightSize;
+                        if (storage.received == storageSectorSize) storage.stage = StorageProbe::Stage::status;
+                    } else {
+                        const auto& command = storageCommands[storage.command];
+                        storage.stage = !command.length ? StorageProbe::Stage::status :
+                             command.output ? StorageProbe::Stage::writeData : StorageProbe::Stage::data;
+                    }
+                }
                 return;
             }
             if (r == R::Nak) return nak();
@@ -652,7 +1011,7 @@ void UsbBusHost::FinishTransaction() {
                 haltedEndpoint = inFlightEndpoint;
                 return;
             }
-            if (++bulkTimeouts >= 100) Restart("the bulk OUT endpoint stopped answering");
+            if (++bulkTimeouts >= 100) FailBulk("the bulk OUT endpoint stopped answering");
             else retryAt = now + nakRetryNs;
             return;
         }
@@ -675,7 +1034,7 @@ void UsbBusHost::Tick(uint64_t nowNs) {
     if (!present || reconnected) {
         if (phase != Phase::waitEnable) {
             Message(present ? "usb: the device left the bus and came back" : "usb: the device left the bus; waiting");
-            const unsigned pendingSize = outPending ? outSize : 0;
+            const unsigned pendingSize = outPending && mode == Mode::normal ? outSize : 0;
             Detach();
             outSize = pendingSize;
             outPending = outSize != 0;

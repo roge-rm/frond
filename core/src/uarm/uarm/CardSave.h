@@ -27,7 +27,7 @@ namespace frondNative {
 using StoreIdentity = std::array<uint8_t, frondMachine::identityBytes>;
 
 // The card store index a kind of card lives in.
-inline unsigned cardStoreSlot(uint32_t kind) { return kind == frondMachine::kindSd2 ? 1 : 0; }
+inline unsigned cardStoreSlot(uint32_t kind) { return kind == frondMachine::kindSd2 || kind == frondMachine::kindCf ? 1 : 0; }
 inline SdCardStore& cardStore(uint32_t kind) { return sdCardStore(cardStoreSlot(kind)); }
 
 // `identity` replaces the card store's id, for a classic stick whose identity is raw bytes.
@@ -321,12 +321,12 @@ inline bool unsettledSd(const std::filesystem::path& folder, uint32_t kind = fro
 // replaying it under a live card would change bytes the card's overlay was compared against.
 inline bool beginSdSave(const std::filesystem::path& folder, frondMachine::Media& media, bool inserted,
                         SdSave& save, uint32_t kind = frondMachine::kindSd, bool writeProtected = false,
-                        const StoreIdentity* identity = nullptr) {
+                        const StoreIdentity* identity = nullptr, bool synchronousRollbackPin = false) {
     save = {};
     save.kind = kind;
     const auto sidecar = folder / frondMachine::fileCardSibling(kind);
     auto& store = cardStore(kind);
-    if (!unsettledSd(folder, kind) && store.backedBy(sidecar.c_str()) && !store.pinned()) {
+    if (!unsettledSd(folder, kind) && store.backedBy(sidecar.c_str()) && (!store.pinned() || synchronousRollbackPin)) {
         fillSdMedia(media, inserted, kind, writeProtected, identity);
         frondSdFile::Info info;
         if (frondMachine::readSdHeader(sidecar, info) == frondMachine::SiblingStatus::ok &&

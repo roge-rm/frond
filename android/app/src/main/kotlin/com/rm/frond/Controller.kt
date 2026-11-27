@@ -154,6 +154,10 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
                 keys[KeyEvent.KEYCODE_BUTTON_B] = PalmButton.PAD_B
                 keys[KeyEvent.KEYCODE_BUTTON_THUMBR] = PalmButton.PAD_HOLD
             }
+            if (device.zaurus) {
+                keys[KeyEvent.KEYCODE_BUTTON_B] = PalmButton.BACK
+                keys[KeyEvent.KEYCODE_BUTTON_MODE] = PalmButton.POWER
+            }
             val allowed = PalmButton.on(device)
             return ControllerMap(keys.filterValues { it in allowed })
         }

@@ -18,6 +18,7 @@ void pxaI2sSetClockEnabled(PxaI2s *, bool, bool discontinuity = true);
 void pxaI2sOutputBoundary(PxaI2s *);
 bool pxaI2sLinkEnabled(const PxaI2s *);
 bool pxaI2sClocking(const PxaI2s *);
+bool pxaI2sReceiveEnabled(const PxaI2s *);
 bool pxaI2sClockStateValid(const PxaI2s *);
 bool pxaI2sLegacyState(const PxaI2s *);
 void pxaI2sGetRate(const PxaI2s *, uint32_t &numerator, uint32_t &denominator);

@@ -1,8 +1,10 @@
 package com.rm.frond
 
+import com.rm.frond.RunningSheets.ZaurusUsbMode
+
 // The rows of the running bar's menu for a device, and their states. A 68k device lists only the hardware it has, the others grey out what isn't done yet.
 object RunningMenu {
-    enum class Id { HOLD, KEYBOARD, GAMEPAD, MICROPHONE, NETWORK, SYNC_MANAGER, DISPLAY, CONNECTIONS, SCREENSHOT, HIDE_BAR, SAVE_COPY, LOG, RESET, HARD_RESET }
+    enum class Id { HOLD, KEYBOARD, GAMEPAD, MICROPHONE, NETWORK, SYNC_MANAGER, DISPLAY, CONNECTIONS, PC_LINK, SCREENSHOT, HIDE_BAR, SAVE_COPY, LOG, RESET, HARD_RESET }
 
     // value is the state shown at the row's end; group sets where the dividers go.
     data class Row(
@@ -24,6 +26,8 @@ object RunningMenu {
         val busy: Boolean = false,
         // The CLIE game controller: "attached", "detached", "busy" (the connector is in use) or null until the core says.
         val gamepad: String? = null,
+        val zaurusUsbCable: ZaurusUsbMode? = null,
+        val zaurusUsbDriveAttached: Boolean? = null,
     )
 
     fun rows(device: Device, s: State): List<Row> {
@@ -40,9 +44,18 @@ object RunningMenu {
         if (SyncProtocol.forDevice(device) != null) rows += Row(Id.SYNC_MANAGER, "Sync Manager…", group = 1)
         rows += Row(Id.DISPLAY, "Settings…", group = 1)
         rows += Row(Id.CONNECTIONS, "Connections…", group = 1)
+        if (device.zaurus) {
+            val portUse = when {
+                s.zaurusUsbDriveAttached == true -> "USB flash drive inserted"
+                s.zaurusUsbCable != null && s.zaurusUsbCable != ZaurusUsbMode.OFF -> "USB cable connected"
+                else -> null
+            }
+            rows += Row(Id.PC_LINK, "PC Link…", portUse,
+                enabled = !s.busy && ZaurusUsbMode.portFree(s.zaurusUsbCable, s.zaurusUsbDriveAttached), group = 1)
+        }
         rows += Row(Id.SCREENSHOT, "Screenshot", group = 1)
         rows += Row(Id.HIDE_BAR, "Hide bar", group = 2)
-        rows += Row(Id.SAVE_COPY, "Save a copy…", group = 2)
+        rows += Row(Id.SAVE_COPY, "Save a copy…", enabled = !device.zaurus, group = 2)
         rows += Row(Id.LOG, "Emulator log", group = 2)
         rows += Row(Id.RESET, "Reset", group = 3)
         rows += Row(Id.HARD_RESET, "Hard reset…", enabled = device.hardResetWorks, destructive = true, group = 3)

@@ -45,14 +45,26 @@ struct UsbHostBridge::Impl {
             for (unsigned n = 0; n < 64 && self.soc.ethernetIn(frame); ++n) self.rndis.FrameToDevice(frame.data(), frame.size());
             self.netPollAt = (now / netPollNs + 1) * netPollNs;
         }
+        if (self.host->ZaurusNetworkActive() && self.soc.ethernetPoll &&
+            now >= std::max(self.netPollAt, self.host->ZaurusNetworkTxAt())) {
+            self.soc.ethernetPoll(now, nullptr, uint32_t(self.host->GetCounters().enumerations));
+            std::vector<uint8_t> frame;
+            if (self.host->ZaurusNetworkCanSend() && self.soc.ethernetIn && self.soc.ethernetIn(frame))
+                self.host->ZaurusNetworkSend(frame.data(), frame.size());
+            self.netPollAt = (now / netPollNs + 1) * netPollNs;
+        }
         self.host->Tick(now);
+        if (self.soc.ethernetDown && !self.host->ZaurusNetworkActive()) self.soc.ethernetDown();
     }
     static uint64_t Wake(void* context) {
         auto& self = *static_cast<Impl*>(context);
         if (!self.host) return UINT64_MAX;
         if (self.replaced) return 0;
         uint64_t wake = self.host->NextWake();
-        if (self.host->Rndis() && self.rndis.Up() && self.soc.ethernetPoll) wake = std::min(wake, self.netPollAt);
+        if (self.host->Rndis() && self.rndis.Up() && self.soc.ethernetPoll)
+            wake = std::min(wake, self.netPollAt);
+        if (self.host->ZaurusNetworkActive() && self.soc.ethernetPoll)
+            wake = std::min(wake, std::max(self.netPollAt, self.host->ZaurusNetworkTxAt()));
         return self.plugPending ? std::min(wake, self.plugAt) : wake;
     }
     // Reset or load: the host forgets the device at once; the next tick unplugs the cable.
@@ -60,7 +72,9 @@ struct UsbHostBridge::Impl {
     static void Replaced(void* context) {
         auto& self = *static_cast<Impl*>(context);
         self.replaced = true;
+        self.netPollAt = 0;
         if (self.host) self.host->Detach();
+        if (self.soc.ethernetDown) self.soc.ethernetDown();
         self.link.Clear();
     }
     // Any guest write to the UDC.
@@ -79,18 +93,20 @@ UsbHostBridge::UsbHostBridge() : impl(std::make_unique<Impl>()) {}
 UsbHostBridge::~UsbHostBridge() { Stop(); }
 
 bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error) {
-    const bool cable = impl->cableRequest;
+    const bool probe = soc.mode != UsbBusHost::Mode::normal;
+    const bool cable = impl->cableRequest || probe;
     impl->cableRequest = false;
-    if (cable && config.kind != HostSerial::Kind::off && !soc.ethernetOut) {
+    if (cable && !probe && config.kind != HostSerial::Kind::off && !soc.ethernetOut) {
         error = "This device's USB needs a pty, tcp or unix endpoint.";
         return false;
     }
     const bool reuse = !cable && impl->linkKept && impl->link.IsOpen() && config.kind != HostSerial::Kind::off &&
                        HostSerial::Format(impl->link.GetConfig()) == HostSerial::Format(config);
+    const bool replacingProbe = probe && impl->host && (impl->soc.attached() || impl->plugPending);
     impl->StopBridge(reuse);
     impl->linkKept = false;
     if (!soc.port || !soc.port()) {
-        if (config.kind == HostSerial::Kind::off) return true;
+        if (config.kind == HostSerial::Kind::off && !probe) return true;
         error = "This device has no USB port.";
         return false;
     }
@@ -102,7 +118,7 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
         const UsbHostHooks hooks{impl.get(), nullptr, nullptr, Impl::Replaced};
         soc.hooks(&hooks);
     };
-    if (config.kind == HostSerial::Kind::off) {
+    if (config.kind == HostSerial::Kind::off && !probe) {
         off();
         return true;
     }
@@ -117,7 +133,7 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
     }
     impl->soc = soc;
     impl->cableOnly = cable;
-    const bool wasPlugged = soc.attached();
+    const bool wasPlugged = replacingProbe || soc.attached();
     impl->Unplug();
     impl->config = cable ? Config{} : impl->link.GetConfig();
     auto* link = &impl->link;
@@ -126,12 +142,19 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
         UsbBusHost::Link{[link] { return link->SendSpace(); },
                          [link](const uint8_t* data, size_t size) { return link->Send(data, size); },
                          [link](uint8_t* data, size_t size) { return link->Receive(data, size); },
-                         [link] { return link->PendingReceive(); }});
-    // A cable the session left plugged in comes out first, so the TX sees a new plug.
+                         [link] { return link->PendingReceive(); }},
+        soc.mode);
+    // Let the guest see a disconnect before replugging a restored or replaced cable.
     impl->plugPending = true;
     impl->plugAt = soc.time() + (wasPlugged ? replugNs : 0);
     impl->lastPhase = UsbBusHost::Phase::detached;
-    if (soc.ethernetOut) {
+    impl->netPollAt = 0;
+    if (soc.ethernetOut && soc.mode == UsbBusHost::Mode::zaurusNetwork) {
+        auto* self = impl.get();
+        impl->host->zaurusFrameFromDevice = [self](const uint8_t* frame, size_t size) {
+            self->soc.ethernetOut(frame, size, self->lastNow);
+        };
+    } else if (soc.ethernetOut) {
         auto* self = impl.get();
         impl->rndis.frameFromDevice = [self](const uint8_t* frame, size_t size) {
             if (self->soc.ethernetOut) self->soc.ethernetOut(frame, size, self->lastNow);
@@ -143,6 +166,10 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
     soc.port().SetNotify(Impl::Notify, impl.get());
     soc.kick();
     return true;
+}
+
+bool UsbHostBridge::ArmStorageWriteCheck(UsbBusHost::StorageWriteCheck check) {
+    return impl->host && impl->host->ArmStorageWriteCheck(std::move(check));
 }
 
 void UsbHostBridge::Stop() { impl->StopBridge(false); }
@@ -206,9 +233,17 @@ std::string UsbHostBridge::Endpoint() const { return impl->link.Endpoint(); }
 
 std::string UsbHostBridge::Describe() const {
     if (!impl->host) return "off";
-    if (impl->cableOnly)
-        return std::string("on ") + UsbBusHost::PhaseName(impl->host->GetPhase()) +
+    if (impl->cableOnly) {
+        const char* mode = "on ";
+        switch (impl->soc.mode) {
+            case UsbBusHost::Mode::normal: break;
+            case UsbBusHost::Mode::enumerationOnly: mode = "probe "; break;
+            case UsbBusHost::Mode::storageProbe: mode = "storage-probe "; break;
+            case UsbBusHost::Mode::zaurusNetwork: mode = "pc-link "; break;
+        }
+        return std::string(mode) + UsbBusHost::PhaseName(impl->host->GetPhase()) +
                (impl->host->Rndis() ? impl->rndis.Up() ? " rndis up" : " rndis starting" : "");
+    }
     if (impl->config.kind == HostSerial::Kind::syncManager)
         return std::string("sync ") + UsbBusHost::PhaseName(impl->host->GetPhase());
     return std::string(impl->config.kind == HostSerial::Kind::pty ? "pty " : impl->config.kind == HostSerial::Kind::unixSocket ? "unix " : "tcp ") + impl->link.Endpoint() +
