@@ -7,6 +7,7 @@ import com.rm.frond.RunningSheets.CardRow
 import com.rm.frond.RunningSheets.ConnRow
 import com.rm.frond.RunningSheets.DisplayRow
 import com.rm.frond.RunningSheets.Sheet
+import com.rm.frond.RunningSheets.ZaurusUsbMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -124,16 +125,30 @@ class RunningSheetsTest {
         assertTrue(CardRow.FILES in RunningSheets.cardRows(stick, SdCard.State.EJECTED, false, false))
     }
 
-    @Test fun armPalmBoardControlsAreOnlyShownOnSupportedMachines() {
+    @Test fun headphoneAndWriteProtectControlsFollowTheBoard() {
         val armPalms = setOf("palm-tx", "palm-e2", "palm-e2-franken", "palm-zire-72")
         for (device in Device.entries) {
             val supported = device.id in armPalms
-            assertEquals(device.id, supported, AudioRow.HEADPHONES in RunningSheets.audioRows(device))
-            assertEquals(device.id, supported || device.zodiac, device.sdWriteProtection)
+            assertEquals(device.id, supported || device.zaurus, AudioRow.HEADPHONES in RunningSheets.audioRows(device))
+            assertEquals(device.id, supported || device.zodiac || device.zaurus, device.sdWriteProtection)
             if (supported) {
                 val card = RunningSheets.cardRows(device, SdCard.State.EJECTED, false, false)
                 assertTrue(device.id, CardRow.WRITE_PROTECT in card)
             }
+        }
+    }
+
+    @Test fun zaurusHasSeparateCardRowsAndOpensFilesOnlyAfterEjecting() {
+        val zaurus = Device.byId(Device.ZAURUS_ID)!!
+        fun rows(n: Int, state: SdCard.State) = RunningSheets.cardRows(zaurus, state, false, false, n)
+        assertTrue(zaurus.sdSlot)
+        assertFalse(CardRow.IMPORT_CF_IMAGE in rows(0, SdCard.State.NONE))
+        assertTrue(CardRow.IMPORT_CF_IMAGE in rows(1, SdCard.State.NONE))
+        for (n in 0..1) {
+            assertFalse(CardRow.FILES in rows(n, SdCard.State.INSERTED))
+            assertTrue(CardRow.EJECT in rows(n, SdCard.State.INSERTED))
+            assertTrue(CardRow.FILES in rows(n, SdCard.State.EJECTED))
+            assertTrue(CardRow.WRITE_PROTECT in rows(n, SdCard.State.EJECTED))
         }
     }
 
@@ -206,13 +221,24 @@ class RunningSheetsTest {
             assertEquals(device.id, device.hotSyncButton, ConnRow.HOTSYNC in rows)
             assertEquals(device.id, device.zodiac, ConnRow.CRADLE in rows)
             assertEquals(device.id, !device.serialAbsent, ConnRow.SERIAL in rows)
-            assertEquals(device.id, !device.runs68k || device.usb, ConnRow.USB in rows)
+            assertEquals(device.id, !device.zaurus && (!device.runs68k || device.usb), ConnRow.USB in rows)
+            assertEquals(device.id, device.zaurus, ConnRow.ZAURUS_USB in rows)
             assertEquals(device.id, !device.runs68k || device.bluetooth, ConnRow.BLUETOOTH in rows)
             assertEquals(device.id, device.usbPrinter || device.usbWifi, ConnRow.USB_PORT in rows)
             assertEquals(device.id, device.builtInWifi, ConnRow.WIFI_MODULE in rows)
             assertFalse(ConnRow.DEBUGGER in rows)
             assertFalse(ConnRow.USB_RETRY in rows)
         }
+    }
+
+    @Test fun zaurusUsbShowsTheActualCableMode() {
+        assertEquals(ZaurusUsbMode.OFF, ZaurusUsbMode.fromState("off Cable removed"))
+        assertEquals(ZaurusUsbMode.PC_LINK, ZaurusUsbMode.fromState("pc-link running"))
+        assertEquals(ZaurusUsbMode.DRIVE_PROBE, ZaurusUsbMode.fromState("storage-probe detached"))
+        assertEquals(ZaurusUsbMode.ENUMERATION_PROBE, ZaurusUsbMode.fromState("probe running"))
+        assertNull(ZaurusUsbMode.fromState("on running rndis up"))
+        assertEquals(listOf("off", "pc-link", "storage-probe"), ZaurusUsbMode.choices(ZaurusUsbMode.OFF).map { it.first })
+        assertTrue("probe" in ZaurusUsbMode.choices(ZaurusUsbMode.ENUMERATION_PROBE).map { it.first })
     }
 
     @Test fun retryAndDebuggerRowsAppearWhenNeeded() {

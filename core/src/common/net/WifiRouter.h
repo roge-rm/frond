@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace frondSync { class ActiveSyncSession; }
@@ -38,8 +39,11 @@ class WifiRouter {
     // Forwards UDP datagrams sent to 127.0.0.1:hostPort on the host to guest:guestPort (host byte order), from
     // the router's host address. 0 when it's set up, else the errno of the failure (EADDRINUSE: the port is taken).
     int AddUdpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort);
+    int AddTcpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort);
+    int AddUnixTcpForward(const std::string& path, uint32_t guest, uint16_t guestPort);
 
    private:
+    int AddForward(bool udp, uint16_t hostPort, uint32_t guest, uint16_t guestPort);
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

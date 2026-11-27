@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <optional>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -94,6 +95,8 @@ inline bool parseJogLandscape(const std::string& value, JogLandscape& placement)
     return true;
 }
 // Which hideable parts of a strip are shown.
+enum class ZaurusStyle { clamshell, view };
+
 struct DeviceControlView {
     bool keyboard{true};
     bool sideTab{true};
@@ -108,6 +111,7 @@ struct DeviceControlView {
     // The button bar art and its keys are left out (the host hides them while a controller is used).
     // The TG50 keeps its keyboard, so it ignores this.
     bool bare{false};
+    std::optional<ZaurusStyle> zaurus;
 };
 // Where the CLIE jog controls go: hidden, left of the LCD, or left of the keyboard. keyboard is
 // the saved name; on a CLIE without a keyboard it puts them beside the silkscreen and buttons.
@@ -1222,6 +1226,159 @@ inline DanaLayout danaLayout(int viewWidth, int viewHeight, bool keyboard) {
     const int x=(viewWidth-width)/2,y=(viewHeight-lcd-below)/2;
     return {{x,y,width,lcd},{x,y+lcd,keyboard ? width : 0,below}};
 }
+
+// Sharp Zaurus SL-C3000 art. Clamshell: the 640x480 LCD with the bezel's hard icon strip on its
+// right and the keyboard below. View style (screen swivelled and folded over the keyboard): the
+// 480x640 LCD with the icon strip under it and the hinge edge's roller, OK and Cancel on its left.
+// The guest's swivel switch picks the style. The hard icons have no keyboard matrix position.
+enum class ZaurusPart { keyboard, icons, side };
+enum class ZaurusMark { none, enter, backspace, up, down, left, right, ok, cancel, calendar, address, mail, home, menu,
+                        dictionary, jogUp, jogDown, power };
+struct ZaurusKeyArt {
+    const char* name;
+    ZaurusPart part;
+    // In the part's units: the keyboard is 600x340, the icon strip 480x64 as in view style (turned
+    // a quarter anticlockwise beside the clamshell LCD), the side panel 64x704.
+    SDL_Rect bounds;
+    // Printed on the cap: the main legend, and the shifted one at its upper left.
+    const char* legend;
+    const char* upper;
+    // Blue legend printed on the plate above the key.
+    const char* blue;
+    ZaurusMark mark;
+    int row, column;
+};
+struct ZaurusArt {
+    const ZaurusKeyArt* keys;
+    size_t count;
+};
+const ZaurusArt& zaurusArt();
+constexpr int zaurusKeyboardWidth=600, zaurusKeyboardHeight=340;
+constexpr int zaurusIconsLength=480, zaurusIconsDepth=64, zaurusSideWidth=64;
+inline KeyId zaurusArtKey(const ZaurusKeyArt& key) {
+    if (key.mark == ZaurusMark::power) return keyIdPower;
+    return key.row >= 0 ? spitzKey(key.row, key.column) : keyInvalid;
+}
+inline int zaurusKeyIndex(std::string_view name) {
+    const auto& art=zaurusArt();
+    for(size_t i=0;i<art.count;++i) if(name==art.keys[i].name) return int(i);
+    return -1;
+}
+// Held keys by art index, any number at once.
+class ZaurusKeysHeld {
+    std::bitset<128> held;
+  public:
+    bool Set(std::string_view name, bool down) {
+        const int index=zaurusKeyIndex(name);
+        if(index<0) return false;
+        held.set(size_t(index),down);
+        return true;
+    }
+    bool Held(size_t index) const { return index<held.size() && held.test(index); }
+    void Set(size_t index, bool down) { held.set(index, down); }
+    size_t Count() const { return held.count(); }
+    void Clear() { held.reset(); }
+};
+// Window rectangles of the LCD and the parts shown with it, w 0 for a part not shown. The view
+// style's side panel runs the LCD's and the icon strip's height together.
+struct ZaurusLayout {
+    ZaurusStyle style;
+    SDL_Rect screen, icons, keyboard, side;
+};
+// As large as fits the view, centred.
+inline ZaurusLayout zaurusLayout(int viewWidth, int viewHeight, ZaurusStyle style) {
+    const bool clam=style==ZaurusStyle::clamshell;
+    // Total size in LCD pixels.
+    const float lcdW=clam ? 640.f : 480.f,lcdH=clam ? 480.f : 640.f;
+    const float totalW=clam ? lcdW+zaurusIconsDepth : zaurusSideWidth+lcdW;
+    const float totalH=clam ? lcdH+totalW*zaurusKeyboardHeight/zaurusKeyboardWidth : lcdH+zaurusIconsDepth;
+    const float k=std::max(0.f,std::min(viewWidth/totalW,viewHeight/totalH));
+    const int w=int(std::floor(totalW*k)),h=int(std::floor(totalH*k));
+    const int x=(viewWidth-w)/2,y=(viewHeight-h)/2;
+    ZaurusLayout l{style,{},{},{},{}};
+    if(clam) {
+        const int sw=int(std::lround(lcdW*k)),sh=int(std::lround(lcdH*k));
+        l.screen={x,y,sw,sh};
+        l.icons={x+sw,y,w-sw,sh};
+        l.keyboard={x,y+sh,w,h-sh};
+    } else {
+        const int side=int(std::lround(zaurusSideWidth*k)),sh=int(std::lround(lcdH*k));
+        l.side={x,y,side,h};
+        l.screen={x+side,y,w-side,sh};
+        l.icons={x+side,y+sh,w-side,h-sh};
+    }
+    return l;
+}
+inline ZaurusLayout zaurusDeviceLayout(int screenWidth, int screenHeight, ZaurusStyle style, float scale = 1) {
+    const auto rect = [scale](int x, int y, int w, int h) {
+        return SDL_Rect{int(x * scale), int(y * scale), int(w * scale), int(h * scale)};
+    };
+    if (style == ZaurusStyle::clamshell) {
+        const int bodyWidth = screenWidth + zaurusIconsDepth;
+        return {style, rect(0, 0, screenWidth, screenHeight),
+                rect(screenWidth, (screenHeight - zaurusIconsLength) / 2, zaurusIconsDepth, zaurusIconsLength),
+                rect(0, screenHeight, bodyWidth, bodyWidth * zaurusKeyboardHeight / zaurusKeyboardWidth), {}};
+    }
+    return {style, rect(zaurusSideWidth, 0, screenWidth, screenHeight),
+            rect(zaurusSideWidth + (screenWidth - zaurusIconsLength) / 2, screenHeight, zaurusIconsLength, zaurusIconsDepth),
+            {}, rect(0, 0, zaurusSideWidth, screenHeight + zaurusIconsDepth)};
+}
+
+inline SDL_Point deviceControlSize(const DeviceControlProfile& controls, int screenWidth, int screenHeight,
+                                   const DeviceControlView& view) {
+    if (view.zaurus && !view.bare) {
+        const auto layout = zaurusDeviceLayout(screenWidth, screenHeight, *view.zaurus);
+        return *view.zaurus == ZaurusStyle::clamshell
+            ? SDL_Point{layout.keyboard.w, layout.keyboard.y + layout.keyboard.h}
+            : SDL_Point{layout.screen.x + layout.screen.w, layout.side.h};
+    }
+    return {deviceControlsWidth(controls, screenWidth, view),
+            screenHeight + deviceControlsHeight(controls, screenWidth, view)};
+}
+
+// A key's window rectangle in a layout, w 0 when its part isn't shown.
+inline SDL_Rect zaurusKeyRect(const ZaurusLayout& layout, const ZaurusKeyArt& key) {
+    const auto& b=key.bounds;
+    auto scaled=[](const SDL_Rect& dest,float kx,float ky,float x,float y,float w,float h) {
+        const int x0=dest.x+int(std::lround(x*kx)),y0=dest.y+int(std::lround(y*ky));
+        return SDL_Rect{x0,y0,dest.x+int(std::lround((x+w)*kx))-x0,dest.y+int(std::lround((y+h)*ky))-y0};
+    };
+    switch(key.part) {
+        case ZaurusPart::keyboard: {
+            const auto& d=layout.keyboard;
+            if(d.w<=0)return {0,0,0,0};
+            return scaled(d,float(d.w)/zaurusKeyboardWidth,float(d.h)/zaurusKeyboardHeight,b.x,b.y,b.w,b.h);
+        }
+        case ZaurusPart::icons: {
+            const auto& d=layout.icons;
+            if(d.w<=0)return {0,0,0,0};
+            if(layout.style==ZaurusStyle::view)
+                return scaled(d,float(d.w)/zaurusIconsLength,float(d.h)/zaurusIconsDepth,b.x,b.y,b.w,b.h);
+            // Turned a quarter anticlockwise: the strip's left end at the bottom.
+            return scaled(d,float(d.w)/zaurusIconsDepth,float(d.h)/zaurusIconsLength,b.y,
+                          zaurusIconsLength-b.x-b.w,b.h,b.w);
+        }
+        case ZaurusPart::side: {
+            const auto& d=layout.side;
+            if(d.w<=0)return {0,0,0,0};
+            const float k=float(d.w)/zaurusSideWidth;
+            return scaled(d,k,k,b.x,b.y,b.w,b.h);
+        }
+    }
+    return {0,0,0,0};
+}
+// Key under a window point, or -1 in the gaps, on the body and on the LCD.
+inline int zaurusKeyAt(const ZaurusLayout& layout, int x, int y) {
+    const auto& art=zaurusArt();
+    const SDL_Point p{x,y};
+    for(size_t i=0;i<art.count;++i) {
+        const auto r=zaurusKeyRect(layout,art.keys[i]);
+        if(r.w>0 && SDL_PointInRect(&p,&r))return int(i);
+    }
+    return -1;
+}
+// Draws every part the layout shows except the LCD.
+void drawZaurusControls(SDL_Renderer* renderer, const ZaurusLayout& layout, const ZaurusKeysHeld& held);
 
 // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
 // rectangles only place the artwork.

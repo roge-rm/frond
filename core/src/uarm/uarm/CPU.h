@@ -229,6 +229,8 @@ void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
 bool cpuRestoreInstructionFetchState(ArmCpu*, const uint32_t*);
 
 uint32_t cpuCyclesInProgress(const ArmCpu* cpu);
+// Core cycles charged, including the portion of the current batch already executed.
+uint64_t cpuCoreCycles(const ArmCpu* cpu);
 
 // Take one unmasked interrupt at this boundary, without fetching or executing an instruction.
 bool cpuProcessPendingInterrupts(struct ArmCpu* cpu);

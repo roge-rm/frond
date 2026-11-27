@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/zaurus">
+    <file alias="create-zaurus-cf.py">../tools/create-zaurus-cf.py</file>
+  </qresource>
+</RCC>

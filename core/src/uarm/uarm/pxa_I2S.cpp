@@ -351,6 +351,10 @@ bool pxaI2sClocking(const PxaI2s *i2s) {
     pxaI2sGetRate(i2s, numerator, denominator);
     return pxaI2sEnabled(i2s) && numerator && denominator;
 }
+bool pxaI2sReceiveEnabled(const PxaI2s *i2s) {
+    return !(i2s->sacr1 & 0x29) && (i2s->sacr0 & 0x30) != 0x30 && pxaI2sClocking(i2s);
+}
+
 bool pxaI2sClockStateValid(const PxaI2s *i2s) {
     return pxaI2sClocking(i2s) || !i2s->phase;
 }

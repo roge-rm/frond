@@ -129,7 +129,11 @@ static bool pxaTimrPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
                 break;
 
             case 4:
-                timr->OSCR = val;
+                // Writing a new count can land on a match without crossing the intervening counts.
+                if (timr->OSCR != val) {
+                    timr->OSCR = val;
+                    pxaTimrPrvUpdateSingleStep(timr);
+                }
                 break;
 
             case 5:

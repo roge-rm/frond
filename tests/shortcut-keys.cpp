@@ -5,8 +5,8 @@
 
 static int failures = 0;
 
-static void expect(const char* what, SDL_Keycode sym, Uint16 mod, bool keyboard, const char* want) {
-    const auto got = shortcutName(sym, mod, keyboard);
+static void expect(const char* what, SDL_Keycode sym, Uint16 mod, bool keyboard, const char* want, bool zaurus = false) {
+    const auto got = shortcutName(sym, mod, keyboard, zaurus);
     const bool ok = want ? got && *got == want : !got;
     if (!ok) {
         std::printf("FAIL %s: got %s\n", what, got ? got->c_str() : "none");
@@ -32,6 +32,13 @@ int main() {
     expect("keyboard ctrl+1", SDLK_1, KMOD_LCTRL, true, nullptr);
     expect("keyboard f11", SDLK_F11, 0, true, "f11");
     expect("keyboard f12", SDLK_F12, KMOD_LCTRL, true, "f12");
+    expect("zaurus f11", SDLK_F11, 0, false, "f11", true);
+    expect("zaurus f12", SDLK_F12, 0, false, "f12", true);
+    expect("zaurus ctrl+q", SDLK_q, KMOD_RCTRL, false, "ctrl+q", true);
+    expect("zaurus ctrl+shift+q", SDLK_q, KMOD_LCTRL | KMOD_LSHIFT, false, nullptr, true);
+    expect("zaurus ctrl+alt+q", SDLK_q, KMOD_LCTRL | KMOD_LALT, false, nullptr, true);
+    expect("zaurus ctrl+c", SDLK_c, KMOD_LCTRL, false, nullptr, true);
+    expect("zaurus ctrl+s", SDLK_s, KMOD_LCTRL, false, nullptr, true);
     std::printf(failures ? "shortcut-keys: FAIL\n" : "shortcut-keys: ok\n");
     return failures ? 1 : 0;
 }

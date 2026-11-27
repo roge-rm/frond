@@ -21,26 +21,29 @@ struct EjectWatch {
     uint64_t at{0};  // guest time of the eject, ns
 };
 
-inline EjectWatch& ejectWatch() {
-    static EjectWatch watch;
-    return watch;
+inline EjectWatch& ejectWatch(bool compactFlash = false) {
+    static EjectWatch sd, cf;
+    return compactFlash ? cf : sd;
 }
 
-inline void noteEjected(SoC& soc) { ejectWatch() = {true, soc.GetTime()}; }
+inline void noteEjected(SoC& soc, bool compactFlash = false) {
+    ejectWatch(compactFlash) = {true, soc.GetTime()};
+}
 
 inline bool guestAsleep(SoC& soc) { return soc.PowerSleeping(); }
 
 // Runs the guest if an eject is still unseen, at the guest's own clock (100 MHz where it has
 // none), as the removal's handling is CPU bound.
-inline void settleEject(SoC& soc, uint64_t delay = 500000000, uint64_t limit = 5000000000) {
-    auto& watch = ejectWatch();
+inline void settleEject(SoC& soc, bool compactFlash = false) {
+    constexpr uint64_t delay = 500000000, limit = 5000000000;
+    auto& watch = ejectWatch(compactFlash);
     if (!watch.pending) return;
     watch.pending = false;
     const uint64_t cyclesPerSecond = soc.FollowHz() ? soc.FollowHz() : 100000000;
     const uint64_t slice = cyclesPerSecond / 50;  // 20 ms
     const uint64_t start = soc.GetTime();
     uint64_t awake = guestAsleep(soc) ? 0 : std::min(delay, start - watch.at);
-    while ((awake < delay || !soc.SdRemovalHandled().value_or(true)) && soc.GetTime() - watch.at < limit) {
+    while ((awake < delay || (!compactFlash && !soc.SdRemovalHandled().value_or(true))) && soc.GetTime() - watch.at < limit) {
         const uint64_t before = soc.GetTime();
         soc.Run(slice, cyclesPerSecond);
         const uint64_t after = soc.GetTime();

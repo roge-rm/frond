@@ -1,10 +1,10 @@
 # Using Frond
 
-How to run machines in Frond on Linux and Android. The two apps have the same features, so this covers both and says where they differ. The 68k Palms (see the Devices table in the [README](../README.md)) have their own notes under Settings, Buttons and Connections. Install and firmware sizes are in the [README](../README.md). For command line options, console commands and the control socket see [developer-reference.md](developer-reference.md), for tests [testing.md](testing.md) and for speed and audio diagnostics [performance.md](performance.md).
+How to run machines in Frond on Linux and Android. This guide covers both and says where they differ. The 68k Palms (see the Devices table in the [README](../README.md)) have their own notes under Settings, Buttons and Connections. Install and firmware sizes are in the [README](../README.md). For command line options, console commands and the control socket see [developer-reference.md](developer-reference.md), for tests [testing.md](testing.md) and for speed and audio diagnostics [performance.md](performance.md).
 
 ## Firmware and machines
 
-Each Palm you run is a machine on the Devices list (Home on Android). Frond works out the device from the NOR image and never changes your files.
+Each device you run is a machine on the Devices list (Home on Android). For devices with a recognisable NOR image, Frond can pick the model for you. Frond never changes your original firmware.
 
 - **Firmware…** (File menu on Linux, the menu on Android) imports a NOR image and, where the device has one, a NAND image. **Add device** does the same and then starts a new machine. Device can detect the model from the NOR image, or you can choose it. The 68k Palms take one ROM file each (see Firmware in the [README](../README.md)), shown as ROM image, and no NAND. The Zodiac also takes Tapwave's Zodiac 1.1 update, the zip or the PRC in it, as its NOR image. Frond makes the ROM from it and stops if it isn't that update. The HP iPAQ rx1950 takes `CEBL.nbf` from HP's Windows Mobile 5 ROM 1.01.00 ENG as its NOR image and `CEOS.nbf` from the same ROM as its OS image. Another OS `.nbf`, like a custom ROM, works as the OS image too, with a warning that it isn't the tested one; a file that isn't an `.nbf` is refused. A NOR image that belongs to another device than the one chosen is refused. The images are copied into `~/.local/share/frond/firmware/<device>/` on Linux, so you can move the originals.
 - The first start runs the device's own setup. On Palm OS, if taps land in the wrong place, calibrate the screen in Prefs. The rx1950 starts with Windows Mobile's screen alignment, then its setup.
@@ -32,6 +32,43 @@ Which ROM each 68k device and the Zodiac take:
 - Zodiac 1 (32 MiB) and Zodiac 2 (128 MiB) use the same 1.1 ROM. Choose **Tapwave Zodiac 1** when adding that model. Automatic detection picks the Zodiac 2. For either model, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 
 A session has your firmware, installed apps and personal data in it. Keep it to yourself.
+
+### Sharp Zaurus SL-C3000
+
+Choose **Add device → Sharp Zaurus SL-C3000**. Pick an SL-C3000 `SYSTC300.DBK` backup or raw NAND dump with spare bytes, and supply the internal disk. Frond keeps its own copies of these images.
+
+- On desktop, choose **Use an existing CF image** for a raw disk image. To build an image, choose **Create a CF image**, pick the matching Sharp HDD1 archive and set **Capacity** from 4 to 32 GB. The archive needs its embedded factory seed. Creation uses Python 3, e2fsprogs and mtools. The image is sparse and takes more host space as sectors are written.
+- On Android, pick **Existing CF image**. You can use an image made by the desktop builder or `tools/create-zaurus-cf.py`.
+- **CS0 boot PROM** is optional. With an existing CF image, supplying a CS0 dump boots through it. For a new desktop CF image, the builder can use CS0 to fill the stock LC Fonts and the machine boots straight into the kernel. Direct boot needs the LC Fonts on the disk.
+
+Leave **Engine** at **Fast** for normal use. On the first boot, follow Qtopia’s touchscreen, date and owner setup. A fresh start can take several minutes. Sharp 1.01 NAND backups from Conics, TRIsoft and an original SL-C3000 have reached setup. A reconstructed Sharp 1.11 image has reached touchscreen setup in Exact. The TRIsoft English backup can be restored through Qtopia’s **Backup/Restore** from `Backup_Files` at the root of a partitioned FAT16 SD image. An OpenZaurus kernel also needs its matching root filesystem.
+
+#### Controls
+
+Use **Display → Lid** on desktop or **More → Settings → Display** on Android. Open shows the clamshell keyboard. Folded portrait shows the side roller, OK and Cancel. The bezel icons work by touch. **Battery door locked** is under Display on desktop and the Battery tab on Android.
+
+Type with the host keyboard or tap the drawn keys. Alt is Fn, and F1 through F4 are Calendar, Address Book, Mail and Menu. F6 is Home. F10 is Power. In the stand-alone core and on Android with a hardware keyboard, F11 opens or closes the lid and F12 toggles the fold. On desktop, F11 is full screen and F12 is Screenshot.
+
+Under Audio, plug in headphones or the **CE-RH2 remote**. The remote’s buttons appear when it is attached. Enable **Microphone** while running to let guest apps record. Reset and reopening disarm the microphone. **Low-latency audio** uses a shorter playback queue. Early Audio is unavailable on this model.
+
+#### Storage and connections
+
+- The internal CF, external CF and SD/MMC slot are separate. Unmount a removable card in Qtopia before ejecting it from Storage. Change the SD or MMC card type with the slot empty. **Files…** edits FAT12 or FAT16 on an ejected card. You can export other filesystems as raw images.
+- To install an IPK, eject a writable card, queue the file under **Applications** and reinsert the card. Open **Add/Remove Software** in Qtopia to install it.
+- Save and stop before you duplicate or export a machine. A copy includes its private internal CF and removable cards. After an interrupted save, open the original machine and save it again before exporting. **Save a copy…** while running and **Hard reset** are unavailable.
+- In Storage, use the external CF slot for a **Billionton BIL-10BT Ethernet** or **D-Link DCF-660W Wi-Fi** card. Eject it before inserting an external CF disk. Use Qtopia’s Network settings for the corresponding LAN or wireless connection.
+- Under Infrared in **Connections**, choose a connection for beaming or **Mobile phone** for dial-up. On the Zaurus, use Qtopia’s **IrDA – PPP** service to dial.
+- In Storage, **USB flash drive → Insert image…** plugs in a read-only raw USB disk. Eject it to use the Zaurus’s USB device cable. USB keyboards and mice are unavailable.
+- Open **Connections → USB** on desktop or **More → Connections → USB cable** on Android. Choose **Zaurus Drive (probe)** to check media and read the first sector of the volume selected in Qtopia. The probe logs the result in the emulator log. **PC Link cable** (**PC Link (TCP/IP)** on Android) connects the stock USB TCP/IP link for testing. Select **Off** to disconnect before opening the file browser.
+- To copy files through PC Link, set **PC Link → USB (TCP/IP)** in Qtopia. Open **Storage → Internal CF → PC Link…** on Linux or macOS, or **More → PC Link…** on Android. Use the file pickers to copy to or from the Internal Disk. A send refuses an existing filename. Close the browser to disconnect. On Android in Fast, audio pauses until you close it. The Windows file browser and Intellisync data sync are unavailable.
+
+For a command line boot from stock NAND and a raw internal CF image, run the core (`out/frond` from a source build or `/usr/lib/frond/frond-core` in the Debian package).
+
+```sh
+out/frond SYSTC300.DBK --device sharp-zaurus-sl-c3000 --microdrive microdrive.img
+```
+
+Add `--spitz-prom cs0.bin` to boot through a CS0 dump. The core opens the internal image read-only by default. Pass `--microdrive-writable` with a working copy to keep disk writes. Use `--cf` for a raw image in the external CF slot and `--mmc` with `--sd` for a legacy MMC image. See the [developer reference](developer-reference.md#sl-c3000) for USB probes and command line options.
 
 ## Running a machine
 
@@ -615,7 +652,7 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 
 ## Availability and limits
 
-What each device has, beyond the Devices table in the [README](../README.md#devices). The Zodiac and the Danas are under [Device notes](#device-notes).
+What each device has, beyond the Devices table in the [README](../README.md#devices). The Zodiac and the Danas are under [Device notes](#device-notes). See [Sharp Zaurus SL-C3000](#sharp-zaurus-sl-c3000) for the Zaurus.
 
 | | T\|X | E2 | E3 | Zire 72 | TG50 | 68k Palms | rx1950 |
 |---|---|---|---|---|---|---|---|

@@ -29,6 +29,9 @@ The Zodiac's music through a SoundFont uses TinySoundFont, copyright (c)
 2017-2023 Bernhard Schelling, and to MIDI devices RtMidi, copyright (c)
 2003-2023 Gary P. Scavone, both under the MIT licence; their notices are in
 tinysoundfont-LICENSE and rtmidi-LICENSE in this directory.
+The Zaurus keyboard's Japanese legends are drawn from glyphs of Noto Sans CJK
+JP, copyright 2014-2021 Adobe, under the SIL Open Font License 1.1; its notice
+is in noto-sans-cjk-OFL in this directory.
 The Fast engine uses Dynarmic, copyright (c) 2017 merryhime, under the 0BSD
 licence, with bundled fmt, mcl, oaknut, robin-map, zycore and zydis (MIT) and
 xbyak (BSD-3-Clause). Their notices are in dynarmic-LICENSE, fmt-LICENSE,

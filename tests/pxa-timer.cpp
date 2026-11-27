@@ -96,6 +96,15 @@ int main() {
     write(7, 3);
     write(1, 50);
     assert(read(4) == 10 && read(5) == 0 && !lines[0]);
+    // Sharp Linux arms timer zero, then writes OSCR to the first match.
+    timr = pxaTimrInit(nullptr, nullptr);
+    pxaTimrTick(timr, 100);
+    write(0, 0); write(5, 15); write(7, 1);
+    assert(read(5) == 0);
+    write(4, 0);
+    assert(read(5) == 1 && lines[0]);
+    write(5, 1); write(4, 0);
+    assert(read(5) == 0 && !lines[0]);
     // Batched clocks are still visible during a CPU batch, and a new match
     // reschedules from the original timer phase, including already observed ticks.
     timr = pxaTimrInit(nullptr, nullptr);

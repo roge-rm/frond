@@ -21,6 +21,7 @@
 #include "Rotation.h"
 #include "WindowLayout.h"
 #include "WindowId.h"
+#include "ZaurusSwivel.h"
 
 // Input trace (input_trace.h): an input event at one stage.
 inline void traceInputEvent(const char* stage, bool guestThread, const SDL_Event& event) {
@@ -84,6 +85,7 @@ struct RenderDrawState {
     bool lcdEnabled{true};
     DeviceKeyMask buttons{0};
     DeviceStick stick{};
+    std::optional<ZaurusViewState> zaurus;
     bool redraw{false};  // the guest asked for a redraw, e.g. after an expose or a new layout
 };
 
@@ -207,7 +209,7 @@ class RenderLink {
 
     // Guest thread: one draw. frame is the SoC's whole LCD frame or null.
     void Publish(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine, bool lcdEnabled,
-                 DeviceKeyMask buttons, bool redraw, DeviceStick stick = {}) {
+                 DeviceKeyMask buttons, bool redraw, DeviceStick stick = {}, std::optional<ZaurusViewState> zaurus = {}) {
         if (frame) {
             lastDirtyLine = std::min<uint32_t>(lastDirtyLine, height - 1);
             // The back buffer last held the frame from a few draws ago: bring the rows
@@ -241,6 +243,7 @@ class RenderLink {
             pending.lcdEnabled = lcdEnabled;
             pending.buttons = buttons;
             pending.stick = stick;
+            if (zaurus) pending.zaurus = zaurus;
             pending.redraw = pending.redraw || redraw;
             pendingDraw = true;
             woken = true;
@@ -256,6 +259,7 @@ class RenderLink {
         out = pending;
         out.pixels = nullptr;
         pending.redraw = false;
+        pending.zaurus.reset();
         if (pendingFrame) {
             std::swap(front, middle);
             out.pixels = buffers[front].data();

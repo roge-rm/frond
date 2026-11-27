@@ -27,9 +27,15 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     private val stickDevice = device.storageSlot == "memory-stick"
     private val memoryStick get() = stickDevice && slot == 0
     private val m68k = device.runs68k
+    private val compactFlash get() = device.zaurus && slot == 1
     private fun command(operation: String, n: Int = slot): String {
         val op = if (!m68k) operation else when (operation) { "reinsert" -> "insert"; "put-in" -> "attach"; else -> operation }
-        return (if (n != 0) "sd2-" else if (stickDevice) "ms-" else "sd-") + op
+        return when {
+            n == 1 && device.zaurus -> "cf-$op"
+            n != 0 -> "sd2-$op"
+            stickDevice -> "ms-$op"
+            else -> "sd-$op"
+        }
     }
     enum class State { NONE, INSERTED, EJECTED, PALM_WIFI, UNKNOWN }
 
@@ -163,7 +169,41 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     }
     fun protect(on: Boolean) {
         if (!memoryStick && !device.sdWriteProtection) throw Failed("Write protection is not available for this card.")
-        run(command("read-only"), if (on) "on" else "off")
+        run(command(if (compactFlash) "protect" else "read-only"), if (on) "on" else "off")
+    }
+
+    fun insertCompactFlash(uri: Uri) {
+        if (!compactFlash) throw Failed("Choose the CompactFlash slot.")
+        val state = state()
+        if (state != State.NONE && state != State.EJECTED) throw Failed("Eject the CompactFlash card first.")
+        folder.mkdirs()
+        val image = File(folder, "incoming-cf.img")
+        try {
+            if (!copyIn(uri, image, ZaurusImages.MAX_EXTERNAL_CF_BYTES) || image.length() < 512 || image.length() % 512 != 0L)
+                throw Failed("Choose a raw CompactFlash image up to 2 GiB with 512-byte sectors.")
+            run("cf-insert", image.absolutePath)
+        } finally {
+            image.delete()
+        }
+    }
+
+    fun queueZaurusPackage(uri: Uri) {
+        if (!device.zaurus || state() != State.EJECTED || protection(slot, present = true) != false)
+            throw Failed("Eject a writable card first.")
+        val name = displayName(uri) ?: throw Failed("That file has no name.")
+        if (!name.endsWith(".ipk", ignoreCase = true)) throw Failed("Choose an IPK package.")
+        FatImage.checkName(name)
+        folder.mkdirs()
+        val dir = java.nio.file.Files.createTempDirectory(folder.toPath(), "ipk-").toFile()
+        try {
+            val file = File(dir, name)
+            val limit = minOf(ZaurusImages.MAX_EXTERNAL_CF_BYTES, dir.usableSpace - JOURNAL_ROOM)
+            if (limit <= 0 || !copyIn(uri, file, limit)) throw Failed("There isn't room to copy that package.")
+            val medium = if (compactFlash) "cf" else "sd"
+            run("zaurus-install", "$medium ${file.absolutePath}")
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     // Writes the ejected card's image to a picked document. frond-68k writes a card file
@@ -194,14 +234,20 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         val dir = File(path).absoluteFile.parentFile ?: throw Failed("Save the machine before opening its card.")
         // A frond-68k card still linked from where an older Frond kept it opens once it's in Cards.
         if (m68k && Cards.cardFileIn(dir, slot) == null) throw Failed("Close the machine and open it again to move this card into Cards first.")
-        val inserted = state() == State.INSERTED
+        val before = state()
+        if (device.zaurus && before != State.EJECTED) throw Failed("Eject the card in Qtopia and in Frond before opening its files.")
+        val inserted = before == State.INSERTED
         wasInserted = inserted
         try {
             if (inserted) eject()
             val saved = link.request("save", path, timeoutSeconds = 120)
             if (!saved.ok) throw Failed("Couldn't save the machine, so the card wasn't opened. ${saved.message}")
-            val saved2 = Cards.readSlot(dir, slot)
-            if (!saved2.swap && !Cards.writeSlot(dir, saved2.copy(swap = true), slot)) throw Failed("Couldn't open the card.")
+            if (compactFlash) {
+                compactFlashIdentity(inserted).write(dir)
+            } else {
+                val saved2 = Cards.readSlot(dir, slot)
+                if (!saved2.swap && !Cards.writeSlot(dir, saved2.copy(swap = true), slot)) throw Failed("Couldn't open the card.")
+            }
             editing = dir
             editingSlot = slot
             val (id, prot) = takeOut()
@@ -213,7 +259,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             throw e
         }
         try {
-            cardFile = CardFile.open(cardFileIn(dir, slot), !protectedCard)
+            val file = if (compactFlash) File(dir, ZaurusImages.EXTERNAL_CF) else cardFileIn(dir, slot)
+            cardFile = CardFile.open(file, !protectedCard)
             FatImage.over(cardFile!!).use { }
         } catch (e: Exception) {
             // The card goes back in as it was.
@@ -228,14 +275,52 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     // Puts the card file back in the slot, ejected again if it was out when the view opened.
     private fun putBack() {
         val id = identity ?: throw Failed("Couldn't put the card back in.")
+        val holdEjected = device.zaurus && !wasInserted
         try {
-            putIn(id, protectedCard)
+            if (holdEjected) {
+                val mode = if (protectedCard) "protected" else "writable"
+                putInAtStart(slot, "$id $mode ejected")
+            } else putIn(id, protectedCard)
         } catch (e: Failed) {
             throw Failed("Couldn't put the card back in. It's kept in the machine and goes in at the next start. ${e.message}", e.code)
         }
         identity = null
         editing = null
-        if (!wasInserted) try { eject() } catch (_: Exception) { }
+        if (!wasInserted && !holdEjected) try { eject() } catch (_: Exception) { }
+        if (compactFlash) finishCompactFlashSwap()
+    }
+
+    private fun compactFlashIdentity(inserted: Boolean): ZaurusCfSlot {
+        val reply = link.request("cf-identity", timeoutSeconds = 30)
+        return reply.takeIf { it.ok }?.let { ZaurusCfSlot.parse(it.message, inserted) }
+            ?: throw Failed("Couldn't read the removable CF card identity.")
+    }
+
+    // Replay a take-out that was interrupted before the card and session could be saved together.
+    // Slot commands here use n=1 without changing the selected slot of an SD file visit.
+    internal fun restoreCompactFlash(state: State, saved: ZaurusCfSlot): State {
+        val path = session ?: throw Failed("The machine folder is missing.")
+        val dir = File(path).absoluteFile.parentFile ?: throw Failed("The machine folder is missing.")
+        if (state == State.NONE) {
+            if (!CardFile.settle(File(dir, ZaurusImages.EXTERNAL_CF))) throw Failed("Couldn't settle the removable CF card.")
+            putInAtStart(1, saved.argument)
+        } else if (compactFlashIdentity(state == State.INSERTED).identity != saved.identity) {
+            throw Failed("The removable CF card does not match the last file exchange.")
+        }
+        val now = stateOf(1)
+        if (now == State.INSERTED && !saved.inserted) run(command("eject", 1))
+        if (now == State.EJECTED && saved.inserted) run(command("reinsert", 1))
+        finishCompactFlashSwap()
+        return stateOf(1)
+    }
+
+    private fun finishCompactFlashSwap() {
+        val path = session ?: throw Failed("The machine folder is missing.")
+        val dir = File(path).absoluteFile.parentFile ?: throw Failed("The machine folder is missing.")
+        val reply = link.request("save", path, timeoutSeconds = 120)
+        if (!reply.ok) throw Failed("The card is back, but its changes couldn't be saved with the machine. ${reply.message}")
+        val marker = File(dir, ZaurusImages.CF_SLOT)
+        if (!marker.delete() && marker.exists()) throw Failed("Couldn't clear the CF file exchange.")
     }
 
     // A folder's entries, the free space on the card and the card's size.
@@ -493,7 +578,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             if (keep && card.isFile) try { FatImage.recover(card) } catch (_: IOException) { }
             val journal = FatImage.journalOf(card).name
             folder.listFiles().orEmpty().forEach {
-                if (!(keep && (it.name == card.name || it.name == PENDING || it.name == journal))) it.delete()
+                if (keep && (it.name == card.name || it.name == PENDING || it.name == journal)) return@forEach
+                if (it.isDirectory && it.name.startsWith("ipk-")) it.deleteRecursively() else it.delete()
             }
         }
 

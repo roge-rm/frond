@@ -194,6 +194,16 @@ class MachineSettingsTest {
         assertEquals(listOf("Exact", "Fast"), Engine.entries.map { it.label })
     }
 
+    @Test fun newZaurusUsesFastAndRespectsAnExplicitExactSelection() {
+        val device = Device.byId(Device.ZAURUS_ID)!!
+        val defaults = MachineSettings.defaults(device)
+        assertEquals(Engine.FAST, defaults.engine)
+        val args = defaults.arguments(headphonesSupported = true)
+        assertEquals("fast", args[args.indexOf("--engine") + 1])
+        assertEquals(defaults.engine, MachineSettings.from(JSONObject(), defaults).engine)
+        assertEquals(Engine.EXACT, MachineSettings.from(JSONObject().put("engine", "exact"), defaults).engine)
+    }
+
     @Test fun displayArgumentMatchesLaunchArguments() {
         assertEquals("fit=fit smooth=off buttons=on", MachineSettings().displayArgument())
         assertEquals("fit=whole smooth=on buttons=on", MachineSettings(ScreenSize.WHOLE, smoothing = true).displayArgument())

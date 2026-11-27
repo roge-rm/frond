@@ -58,12 +58,39 @@ enum KeyId {
     keyIdPadHome = keyIdPadY + 1,
     keyIdPadMenu = keyIdPadHome + 1,
     keyIdPadHold = keyIdPadMenu + 1,
-    keyIdCount = keyIdPadHold + 1
+    keyIdCount = keyIdKeyboard + 7 * 11
 };
 
 // TG50 keyboard key at drive line 2-7 and column 0-6 of the ROM's keyboard code table; column c
 // reads sense bit (c == 0 ? 1 : c == 1 ? 0 : c). Column 0 holds the modifiers and Tab.
 constexpr KeyId tg50Key(int drive, int column) { return KeyId(keyIdKeyboard + (drive - 2) * 7 + column); }
+
+// Spitz sense and strobe are the row and column in the device's key art.
+constexpr KeyId spitzKey(int sense, int strobe) {
+    constexpr uint16_t switches[] = {0x7ff, 0x7fe, 0xff, 0x2ff, 0x37f, 0x4bf, 0x1ff};
+    if (sense < 0 || sense >= 7 || strobe < 0 || strobe >= 11 ||
+        !(switches[sense] & (1u << strobe)))
+        return keyInvalid;
+    switch (sense * 11 + strobe) {
+        case 0 * 11 + 9: return keyIdJogPress;
+        case 1 * 11 + 9: return keyIdJogDown;
+        case 1 * 11 + 10: return keyIdJogUp;
+        case 3 * 11 + 0: return keyIdHard2;
+        case 4 * 11 + 0: return keyIdHard1;
+        case 5 * 11 + 0: return keyIdHard3;
+        case 5 * 11 + 7: return keyIdUp;
+        case 6 * 11 + 0: return keyIdHome;
+        case 6 * 11 + 3: return keyIdBack;
+        case 6 * 11 + 4: return keyIdSelect;
+        case 6 * 11 + 5: return keyIdHard4;
+        case 6 * 11 + 6: return keyIdLeft;
+        case 6 * 11 + 7: return keyIdDown;
+        case 6 * 11 + 8: return keyIdRight;
+        default: return KeyId(keyIdKeyboard + sense * 11 + strobe);
+    }
+}
+
+constexpr int spitzTabletKeyY = 665;
 
 struct Keypad *keypadInit(struct PxaGpio *gpio, bool matrixHasPullUps);
 bool keypadDefineRow(struct Keypad *kp, unsigned rowIdx, int8_t gpio);
@@ -73,6 +100,7 @@ bool keypadAddMatrixKey(struct Keypad *kp, enum KeyId key, unsigned row, unsigne
 
 void keypadKeyEvt(struct Keypad *kp, enum KeyId key, bool wentDown);
 
+void keypadSetWakeGpio(struct Keypad* kp, int8_t wake, int8_t power);
 void keypadReset(struct Keypad *kp);
 std::function<void()> keypadCaptureInput(struct Keypad *kp);
 

@@ -15,14 +15,25 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `-h`, `--help` | Show the help and exit. |
 | `-v`, `--version` | Print the version and exit. |
 | `-n`, `--nand FILE` | NAND image, for devices that have one. |
-| `--device NAME` | Device for raw firmware: `palm-tx`, `palm-e2`, `palm-zire-72` or `sony-clie-tg50`. The E2 is also found from its NOR header. |
-| `--engine exact\|fast` | CPU engine: `exact` is the interpreter, `fast` is the JIT where it's built in. Default `exact`. `FROND_JIT` overrides it. |
+| `--device NAME` | Device for raw firmware, such as `palm-tx`, `palm-e2`, `palm-zire-72`, `sony-clie-tg50` or `sharp-zaurus-sl-c3000`. The E2 is also found from its NOR header. |
+| `--engine exact\|fast` | CPU engine: `exact` is the interpreter, `fast` is the JIT where it's built in. Default `exact`, or `fast` on the SL-C3000. `FROND_JIT` overrides it. |
 | `--battery SETTING` | Start with `max` (default), `level N` or `host N`, with N from 0 to 100. Quote settings with spaces. Add `charging` or `battery` for the charging state. |
-| `--headphones-in` | Start with headphones plugged in on the T\|X, Tungsten E2/E3 or Zire 72. |
+| `--headphones-in` | Start with headphones plugged in on the T\|X, Tungsten E2/E3, Zire 72 or Zaurus SL-C3000. |
 | `--run-for SECONDS` | Exit after this many wall-clock seconds and print execution diagnostics. Not with `--script` or `--desktop-socket`. |
 | `--framebuffer-output FILE` | Save the unrotated LCD as a PNG at the end of `--run-for`. Needs `--run-for`. |
 | `--input-replay FILE` | Replay timed pen and key events and snapshots, see [Input replay](#input-replay). |
 | `-s`, `--sd FILE` | SD card file. |
+| `--mmc` | Present the SL-C3000's `--sd` image as a legacy MMC at cold boot. |
+| `--microdrive FILE` | The SL-C3000's raw 512-byte-sector internal disk. |
+| `--microdrive-writable` | Keep the SL-C3000's writes to the internal disk. Use a working copy. |
+| `--spitz-prom FILE` | Boot the SL-C3000 through its 8 MiB CS0 dump. With no CS0 image, start the kernel from the NAND backup. |
+| `--cf FILE` | A raw card image for the SL-C3000's external CF slot. |
+| `--cf-protected` | Write-protect the external CF card. |
+| `--zaurus-usb-probe` | Attach a virtual USB host and log enumeration. |
+| `--zaurus-usb-storage-probe` | In stock Zaurus Drive mode, read capacity and the first sector of the selected device. |
+| `--zaurus-usb-storage-write-check LBA OLD NEW` | In stock Zaurus Drive mode on disposable media, compare the selected nonzero sector to OLD, replace it with NEW if it matches and read it back. Both files must contain one 512-byte sector. |
+| `--zaurus-usb-network-probe` | Attach the virtual USB network cable for stock PC Link USB (TCP/IP), without a file listener. |
+| `--zaurus-pc-link-files PORT` | In stock PC Link USB (TCP/IP) mode, forward `127.0.0.1:PORT` to the guest file server's TCP 139 after DHCP. The listener closes with the cable. |
 | `--work-folder DIR` | Run a session from elsewhere, in this empty machine folder. Its card files are copied there. |
 | `--card-swap` | Load a session whose card files the launcher changed while it was off. A slot with another card, the same card changed elsewhere, or none comes up ejected, and the card there now goes in once the Palm has run 500 ms awake (5 s at most), with a `card` event. |
 | `--card-identity HEX` | With `--card-swap`, the identity of the first SD card or Memory Stick put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
@@ -353,6 +364,40 @@ State commands take no argument. Mode commands change the setting and reply with
 | `usb-port` | `off`, `printer` or `wifi` | `usb-port`: the new state. The Dana's one external USB port holds a printer, the Wi-Fi adapter (a Prism 2.5 stick, 045e:006e) or nothing. Choosing what is already there does nothing. `printer attach on` is `usb-port printer`. Other devices answer `unsupported` except for `off` |
 
 The Zire 72 camera starts on the test pattern each run and goes back to it on a save, sleep, reset, a load and leaving the app; its source is never saved. The core crops the centre of each picture to the size the camera asks for and scales it. With `camera-mode frames` the core makes `.camera-frames` in the machine folder (deleted when the core quits) and the frontend writes into it: 64 header bytes, little-endian, then the pixels. The header is `FrondCam`, version 1, capacity (1280 x 960 x 4 bytes), a sequence the writer makes odd before writing and even after, then format (1 RGB24, 2 RGBA, 3 I420, 4 NV21, 5 YUYV), width, height, a clockwise rotation (0, 90, 180, 270) and flags (1 mirror, 2 limited-range YUV). The core reads the newest whole frame each time the camera takes one.
+
+### SL-C3000
+
+The positional firmware argument accepts an SL-C3000 NAND backup with `--device sharp-zaurus-sl-c3000`. For setup and media see [Using Frond](using-frond.md#sharp-zaurus-sl-c3000). These commands use the same replies on desktop and Android.
+
+| Command | Argument | Reply or effect |
+| --- | --- | --- |
+| `zaurus-hardware` | | `hardware` with lid and battery door state, and any active `charging-led` and `disk-led` flags. |
+| `zaurus-lid` | `open`, `closed` or `folded` | Set the lid and return `hardware`. `folded` switches to the side controls. |
+| `zaurus-battery-door` | `locked` or `unlocked` | Set the battery-door switch and return `hardware`. |
+| `headphones-preference` | `in` or `out` | Same as `headphones`, with the attached CE-RH2 kept in place. |
+| `zaurus-remote-state`, `zaurus-remote` | None to read, `in` or `out` to set | `zaurus-remote`: the CE-RH2 jack state. |
+| `zaurus-remote-key` | `volume-down`, `mute`, `previous`, `volume-up`, `next`, `play` or `stop`, followed by `down` or `up` | Press or release a button on the attached CE-RH2. |
+| `zaurus-sd-family` | None to read, `sd` or `mmc` to set | `card-family`. Eject the card before changing the type. |
+| `zaurus-cf-network` | None to read, `ethernet`, `wifi` or `off` to set | `zaurus-cf-network`. The network card needs the external slot free. |
+| `zaurus-install` | `sd` or `cf` followed by an absolute IPK path | Stage to `Documents/Install_Files` on an ejected writable card and save the machine. The guest installs the package after reinsertion. |
+| `cf-state` | | `card`: `none`, `inserted` or `ejected`. |
+| `cf-insert`, `cf-export` | Absolute image path | Import a raw external CF image or export an ejected CF image. |
+| `cf-eject`, `cf-reinsert` | | `ejected` or `inserted`. |
+| `cf-protection`, `cf-protect` | None to read, `on` or `off` to set | `protection`: `read-only` or `writable`. Change protection with the card ejected. |
+| `cf-identity`, `cf-take-out` | | Return the external CF identity and protection. Taking out an ejected card settles the image so the launcher can move it. |
+| `cf-put-in` | `IDENTITY protected\|writable [ejected]` | Load the machine folder's external CF image using its 64-digit identity and protection. The optional `ejected` keeps it out of the slot. |
+| `zaurus-usb-host` | None to read, an absolute raw disk image path to insert, or `off` | Read or change the read-only Mini-A flash drive. The host drive and USB device cable share the connector. |
+| `usb-mode` | `off`, `probe`, `storage-probe` or `pc-link` | `usb`: the new cable state. The probes do not mount the guest volume on the host. The PC Link cable connects USB TCP/IP without starting a file listener. |
+
+The PC Link browser uses a private Unix socket on supported hosts. Set stock PC Link to USB (TCP/IP) in Qtopia. File paths inside the guest are relative to Internal Disk, and a send refuses to replace an existing file.
+
+| Command | Argument | Reply or effect |
+| --- | --- | --- |
+| `zaurus-pc-link-open` | | `opened`: attach the private file link. Eject other USB devices and disconnect other cables first. |
+| `zaurus-pc-link-list` | Guest directory, empty for Internal Disk | `started`: start listing the folder. |
+| `zaurus-pc-link-send`, `zaurus-pc-link-receive` | JSON with `remote` and an absolute `local` path | `started`: queue a transfer. |
+| `zaurus-pc-link-result` | | `busy` while a job runs, `done` when it finishes, or an error. For a list, the result contains a JSON array with each entry's `name` and `directory` flag. |
+| `zaurus-pc-link-close` | | Cancel work and remove the cable. Allows time for the guest to clear a partial upload. |
 
 ### Card commands
 
@@ -1016,6 +1061,8 @@ All in `tools/`. Most take `--help`.
 | `check-usb-printer-capture.py` | Compares a private USB packet trace with one finished raw print job (`doc/usb-printer-runtime.md`). |
 | `generate-device-data.py` | Writes the device profile data for Python and Android. `--check` fails if it's stale. |
 | `zodiac-rom.py` | Makes the Zodiac ROM from Tapwave's Zodiac 1.1 update zip or the PRC inside it, with the same checks as the app's import. |
+| `create-zaurus-cf.py` | Builds a sparse stock SL-C3000 internal CF from a complete `--hdd1 ARCHIVE` and its factory seed. Supply `--size-gb` from 4 to 32 and `--output IMAGE`. Use `--require-fonts` for direct boot and `--font-rom ROM` if the archive needs the LC Fonts from CS0. Requires e2fsprogs and mtools. |
+| `zaurus-glyphs.py` | Generates the Zaurus keyboard's Japanese legend bitmaps from Noto Sans CJK JP for `ZaurusGlyphs.h`. |
 | `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
 | `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/out/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--arm920-icache-index-compatibility` selects a conservative response to the ROM's undocumented CP15 form. Optional `--bootstrap-peripherals`, independent `--gpio-a-input=VALUE`, `--gpio-b-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Optional `--rtc-initial-time=DAY:HH:MM:SS` supplies an opaque retained chip day/time and zero subsecond phase, requiring bootstrap. Optional `--cs4-port0-input=BYTE` enables the private CS4 diagnostic recorder, requiring bootstrap. Optional `--cs5-reset-status-input=BYTE` enables the bounded private W4200 reset echo with an opaque initial byte and immediate bit-3 latch, requiring bootstrap. Reads a private ROM, stops on unsupported CPU or bus behaviour. See Zodiac bring-up and input scenarios. |
@@ -1052,6 +1099,8 @@ All in `tools/`. Most take `--help`.
 
 `make` builds `out/frond` and the desktop app. Test targets build a small program and run it. They need no firmware unless noted.
 
+The embedded desktop SL-C3000 creation check uses X11 and takes private inputs as `FROND_TEST_ZAURUS_NAND`, `FROND_TEST_ZAURUS_HDD1` and `FROND_TEST_ZAURUS_CS0`. It skips when they are missing.
+
 | Target | What it does |
 | --- | --- |
 | `all` | Core and desktop app. |
@@ -1060,6 +1109,10 @@ All in `tools/`. Most take `--help`.
 | `out/frond-68k` | The 68k Palm runner. |
 | `frond-jit` | Copy of `out/frond` for runs that name the JIT. |
 | `desktop` | The Qt app, `out/frond-desktop`. |
+| `test-zaurus-art` | Clamshell and folded layout, key hit areas and art. Optional `ZAURUS_ART_OUT` writes preview PNGs. |
+| `test-zaurus-package` | Stage an IPK on a card and check rollback on interrupted replacement. |
+| `test-zaurus-cf-ethernet`, `test-zaurus-cf-wifi` | Directed Billionton Ethernet and D-Link Wi-Fi CF card checks. |
+| `test-pxa270-ohci` | Directed Zaurus USB host controller and read-only flash drive checks. |
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |
 | `appimage`, `appimage-arm64` | AppImages for x86-64 and arm64, built in Docker on Debian 12. They carry mtools in `usr/lib/frond` for SD file exchange. |
 | `installer-shims` | Build the Windows CE installer helpers with MinGW. |

@@ -14,6 +14,13 @@ struct Pxa270Udc;
 
 struct Pxa270Udc *pxa270UdcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma);
 
+// Select the Port 2 transceiver for a board that routes the UDC there. The board
+// callback reports the cable, device role and clock. Refresh after those change.
+void pxa270UdcUsePort2(Pxa270Udc *udc, bool (*connected)(void *), void *context,
+                      void (*hostModeChanged)(void *) = nullptr);
+bool pxa270UdcPort2HostSelected(const Pxa270Udc *udc);
+void pxa270UdcRefreshPort2(Pxa270Udc *udc);
+
 // Host-side bus events as the UDC sees them on the wire. Call on the emulator thread
 // between guest slices. The caller owns bus timing: an IN may only complete after
 // the packet's bus time has passed since the packet became ready, and transfers run
@@ -24,19 +31,19 @@ struct Pxa270Udc *pxa270UdcInit(struct ArmMem *physMem, struct PxaIc *ic, struct
 bool pxa270UdcHostReset(struct Pxa270Udc *udc);
 // Start of frame: advances UDCFNR and latches IRSOF.
 bool pxa270UdcHostFrame(struct Pxa270Udc *udc);
-// UDCCR.UDE: the guest has the UDC on, so the device pulls D+ up and can be reset.
+// The guest has the UDC on and, for Port 2, its transceiver presents the D+ pull-up.
 bool pxa270UdcHostEnabled(const struct Pxa270Udc *udc);
 // UDE set, and since that enable the guest has written UDCICR with the EP0 and reset
-// (IERS) interrupts on. The model has no D+ pull-up; a host treats this as the device
+// (IERS) interrupts on. For the Palm boards a host treats this as the device
 // being on the bus. The TX ROM sets UDE well before it can answer EP0, and a reset or
 // SETUP before then is lost. UDE=0 leaves UDCICR as it was, so the ICR write has to be
-// a new one. A loaded session with UDE set counts as written.
+// a new one. A loaded session with UDE set counts as written. The Port 2
+// driver can poll for reset and is ready when EP0 interrupts are set.
 bool pxa270UdcHostListening(const struct Pxa270Udc *udc);
 // Called on every guest write to the UDC, register or FIFO, so a sleeping host can
 // look again. nullptr removes it. Not saved.
 void pxa270UdcHostSetNotify(struct Pxa270Udc *udc, void (*notify)(void *), void *context);
-// Counts UDE 0->1 writes. UDE=0 takes the D+ pull-up away, so a change means the device
-// left the bus and came back, even between two host looks at UDE.
+// Counts transitions onto the bus, even between two host checks.
 uint32_t pxa270UdcHostEnableCount(const struct Pxa270Udc *udc);
 // The guest has the SOF interrupt (IRSOF) enabled.
 bool pxa270UdcHostSofWanted(const struct Pxa270Udc *udc);

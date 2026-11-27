@@ -652,6 +652,8 @@ void pxaMmcInsert(struct PxaMmc *mmc, struct VSD *vsd) {
     mmc->vsd = vsd;
 }
 
+void pxaMmcRestoreMemoryCard(PxaMmc* mmc, VSD* vsd) { mmc->vsd = vsd; }
+
 void pxaMmcInsertSdio(PxaMmc *mmc, SdioCard *card) {
     pxaMmcInsert(mmc, nullptr);
     mmc->sdio = card;

@@ -424,6 +424,17 @@ test-dana-keyboard-art: $(if $(filter core,$(DANA_ART_SOURCE)),prepare)
 		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_ART_BUILD)/test-dana-keyboard-art
 	$(DANA_ART_BUILD)/test-dana-keyboard-art
 
+.PHONY: test-zaurus-art
+test: test-zaurus-art
+# ZAURUS_ART_OUT=folder also writes preview PNGs there.
+test-zaurus-art: prepare
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/common \
+		tests/zaurus-art.cpp core/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(OBJ_ROOT)/test-zaurus-art
+	$(OBJ_ROOT)/test-zaurus-art $(ZAURUS_ART_OUT)
+
 .PHONY: test-palm-candidate-art
 test: test-palm-candidate-art
 # Art for Palms not emulated yet. PALM_CANDIDATE_ART_OUT=folder also writes preview PNGs there.
@@ -876,8 +887,8 @@ test-net-wifi-router: prepare $(COMMON_NET_LIB) $(COMMON_LIB)
 	$(OBJ_ROOT)/test-net-wifi-router
 
 .PHONY: test-scheduler
-test-scheduler: prepare
-	$(CXX) -std=c++17 -O2 -Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common tests/scheduler-order.cpp -o $(OBJ_ROOT)/test-scheduler-order
+test-scheduler: prepare $(COMMON_LIB)
+	$(CXX) -std=c++17 -O2 -Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common tests/scheduler-order.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-scheduler-order
 	$(OBJ_ROOT)/test-scheduler-order
 
 .PHONY: test-window-layout
@@ -963,6 +974,30 @@ test-network-reliability: prepare
 		tests/network-dns.cpp core/src/uarm/uarm/HostNetwork.cpp \
 		-Wl,--wrap=getaddrinfo -Wl,--wrap=freeaddrinfo -pthread -o $(OBJ_ROOT)/test-network-dns
 	$(OBJ_ROOT)/test-network-dns
+
+.PHONY: test-zaurus-package
+test-zaurus-package: out/frond
+	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zaurus-package-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zaurus-package.cpp @$(OBJ_ROOT)/zaurus-package-core.rsp $(COMMON_LIB) \
+		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zaurus-package
+	$(OBJ_ROOT)/test-zaurus-package
+
+.PHONY: test-zaurus-cf-ethernet
+test-zaurus-cf-ethernet: out/frond
+	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zaurus-cf-ethernet-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zaurus-cf-ethernet.cpp @$(OBJ_ROOT)/zaurus-cf-ethernet-core.rsp $(COMMON_LIB) \
+		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-zaurus-cf-ethernet
+	$(OBJ_ROOT)/test-zaurus-cf-ethernet
+
+.PHONY: test-zaurus-cf-wifi
+test-zaurus-cf-wifi:
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm -Icore/src/common \
+		tests/zaurus-dcf660w.cpp core/src/uarm/uarm/Dcf660w.cpp core/src/uarm/uarm/wifi_access_point.cpp \
+		-o $(OBJ_ROOT)/test-zaurus-cf-wifi
+	$(OBJ_ROOT)/test-zaurus-cf-wifi
 
 .PHONY: test-pxa-power
 test-pxa-power: out/frond
@@ -1486,6 +1521,16 @@ test-pxa270-udc: $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/pxa270-udc.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-pxa270-udc
 	$(OBJ_ROOT)/test-pxa270-udc
+
+.PHONY: test-pxa270-ohci
+test: test-pxa270-ohci
+test-pxa270-ohci: out/frond
+	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/ohci-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa270-ohci.cpp @$(OBJ_ROOT)/ohci-core.rsp $(COMMON_LIB) \
+		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-pxa270-ohci
+	python3 -c 'import sys; sys.stdout.buffer.write(bytes([1])*512)' > $(OBJ_ROOT)/test-pxa270-ohci.img
+	$(OBJ_ROOT)/test-pxa270-ohci $(OBJ_ROOT)/test-pxa270-ohci.img
 
 .PHONY: test-usb-enumeration
 test-usb-enumeration: $(COMMON_LIB)

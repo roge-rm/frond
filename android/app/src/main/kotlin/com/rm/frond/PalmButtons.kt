@@ -98,7 +98,7 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             PalmButton.CENTRE -> scancodeKey(119) // SDLK_SELECT
             PalmButton.POWER -> SDLK_ESCAPE
             PalmButton.VOICE -> scancodeKey(62) // F5
-            PalmButton.HOME -> device?.homeKey ?: 0
+            PalmButton.HOME -> if (device?.zaurus == true) scancodeKey(63) else device?.homeKey ?: 0
             PalmButton.MENU -> 0
             // Page Up, Page Down, End and Home, which frond-68k turns into the Jog Dial and Back.
             PalmButton.JOG_UP -> scancodeKey(75)

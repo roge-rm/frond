@@ -210,18 +210,16 @@ static void nandPrvStoreFailed(struct NAND *nand) {
 static bool nandPrvBlockErase(struct NAND *nand) {
     uint32_t addr = nandPrvGetPageAddr(nand, 0);
 
-    if (addr & ((1UL << nand->pagesPerBlockLg2) - 1)) return false;
-
     if (addr >= nandPrvPageCount(nand)) return false;
+    addr &= ~((1u << nand->pagesPerBlockLg2) - 1);
     if (!nandPrvEraseBlock(nand, addr)) {
         nandPrvStoreFailed(nand);
         return true;
     }
 
+    const size_t endByte = size_t(addr + (1u << nand->pagesPerBlockLg2)) * nand->bytesPerPage;
     for (size_t storagePage = (addr * nand->bytesPerPage) / 4224;
-         storagePage <=
-         (addr * nand->bytesPerPage + (nand->bytesPerPage << nand->pagesPerBlockLg2)) / 4224;
-         storagePage++) {
+         storagePage <= (endByte - 1) / 4224; storagePage++) {
         nand->dirtyPages[storagePage >> 5] |= (1u << (storagePage & 0x1f));
     }
 
@@ -397,13 +395,13 @@ bool nandWrite(struct NAND *nand, bool cle, bool ale, uint8_t val) {
         switch (nand->state) {
             case K9nandStateProgramAddrRxing:
                 if (nand->addrBytesRxed != nand->byteAddrBytes + nand->pageAddrBytes) return false;
-                nand->state = K9nandStateProgramDataRxing;
                 nand->pageNo = nandPrvGetPageAddr(nand, nand->byteAddrBytes);
 
                 // fprintf(stderr, "writing page %5u (block addr %4u.%2u)\n", nand->pageNo,
                 // nand->pageNo / NAND_PAGES_PER_BLOCK, nand->pageNo % NAND_PAGES_PER_BLOCK);
 
-                if (nand->pageNo >= (nand->blocksPerDevice << nand->pagesPerBlockLg2)) return false;
+                if (nand->pageNo >= nandPrvPageCount(nand)) return false;
+                nand->state = K9nandStateProgramDataRxing;
 
                 memset(nand->pageBuf.buffer, 0xff, nand->bytesPerPage);
                 memoryBufferMarkRangeDirty(&nand->pageBuf, 0, nand->bytesPerPage);
@@ -467,12 +465,11 @@ bool nandRead(struct NAND *nand, bool cle, bool ale, uint8_t *valP) {
                 //	nand->pageNo, nand->pageNo / NAND_PAGES_PER_BLOCK, nand->pageNo %
                 // NAND_PAGES_PER_BLOCK, 'A' + (unsigned)nand->area, nand->addr[0]);
 
-                if (nand->pageNo >= (nand->blocksPerDevice << nand->pagesPerBlockLg2)) {
-                    fprintf(stderr, "page number ouf of bounds\n");
+                if (nand->pageNo >= nandPrvPageCount(nand) ||
+                    !nandPrvReadPage(nand, nand->pageNo, nand->pageBuf.buffer)) {
+                    nand->pageOfst = nand->bytesPerPage + 1;
                     return false;
                 }
-
-                if (!nandPrvReadPage(nand, nand->pageNo, nand->pageBuf.buffer)) return false;
                 memoryBufferMarkRangeDirty(&nand->pageBuf, 0, nand->bytesPerPage);
 
                 switch (nand->area) {
@@ -488,8 +485,12 @@ bool nandRead(struct NAND *nand, bool cle, bool ale, uint8_t *valP) {
                         break;
                 }
                 nand->pageOfst += nandPrvGetByteAddr(nand);
+                if (nand->pageOfst >= nand->bytesPerPage) {
+                    nand->pageOfst = nand->bytesPerPage + 1;
+                    return false;
+                }
             }
-            if (nand->addrBytesRxed != 0xff) return false;
+            if (nand->addrBytesRxed != 0xff || nand->pageOfst > nand->bytesPerPage) return false;
             if (nand->pageOfst == nand->bytesPerPage) {  // read next page
 
                 nand->pageNo++;
@@ -499,8 +500,10 @@ bool nandRead(struct NAND *nand, bool cle, bool ale, uint8_t *valP) {
                 // nand->pageNo / NAND_PAGES_PER_BLOCK, nand->pageNo % NAND_PAGES_PER_BLOCK);
 
                 if (nand->pageNo >= nandPrvPageCount(nand) ||
-                    !nandPrvReadPage(nand, nand->pageNo, nand->pageBuf.buffer))
+                    !nandPrvReadPage(nand, nand->pageNo, nand->pageBuf.buffer)) {
+                    nand->pageOfst = nand->bytesPerPage + 1;
                     return false;
+                }
                 memoryBufferMarkRangeDirty(&nand->pageBuf, 0, nand->bytesPerPage);
             }
             *valP = nand->pageBuf.buffer[nand->pageOfst++];
@@ -726,6 +729,12 @@ struct NAND *nandInit(uint8_t *nandContent, const struct MemoryBuffer *pageBuffe
     nandPrvBusy(nand, 1);  // we start busy for a little bit
 
     return nand;
+}
+
+void nandDestroy(struct NAND *nand) {
+    if (nand->data && nand->releaseData) nand->releaseData(nand->data);
+    free(nand->dirtyPages);
+    delete nand;
 }
 
 void nandResetPageBuffer(struct NAND *nand) {

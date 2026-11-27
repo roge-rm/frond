@@ -39,6 +39,8 @@ class SdlRenderer {
    private:
     void DrawSilkscreen();
     void ClearWindow();
+    SDL_Rect ScreenRect() const;
+    void DrawZaurus(DeviceKeyMask buttons, bool changed);
     void DrawSidebar(const DeviceControlProfile& controls, int screenWidth, int screenHeight, DeviceKeyMask buttons,
                      DeviceStick stick, bool changed);
     // Sets the target the device is drawn on (deviceTexture, or the window) and its scale.

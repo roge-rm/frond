@@ -42,6 +42,8 @@ class AppsPanel : public QWidget {
     void setInstallOnly(bool on, bool windowsMobile = false);
     void loadingInstalledPrograms();
     void showInstalledPrograms(bool ok, const QString& message);
+    // Zaurus: Install queues IPKs onto an ejected card; there is no application list.
+    void setPackageQueue(bool on);
  signals:
     void installRequested();
     void refreshInstalledPrograms();
@@ -53,6 +55,6 @@ class AppsPanel : public QWidget {
  private:
     QListWidget* list;
     QLabel* empty;
-    QPushButton *otherButton{}, *exportAllButton{}, *refreshButton{};
-    bool installOnly{false}, listWindowsMobile{false}, readingWindowsMobile{false};
+    QPushButton *installButton{}, *otherButton{}, *exportAllButton{}, *refreshButton{};
+    bool installOnly{false}, packageQueue{false}, listWindowsMobile{false}, readingWindowsMobile{false};
 };

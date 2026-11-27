@@ -203,4 +203,47 @@ static void exercise(DeviceType5 type) {
     close(listener);
 }
 
-int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeFrankenE2);exercise(deviceTypeZire72);exercise(deviceTypeTG50);}
+static void exerciseZaurusCableModes() {
+    std::vector<uint8_t> prom(8u << 20), nand(528u * 32 * 1024, 0xff);
+    SocPXA soc(deviceTypeSpitz, 64u << 20, prom.data(), prom.size(), nand.data(), nand.size(), -1, 2);
+    const uint32_t branch = 0xeafffffe;
+    std::memcpy(static_cast<uint8_t*>(soc.GetMemoryData().data) + 0x3000, &branch, 4);
+    cpuSetReg(soc.GetCpu(), 15, 0xa0003000);
+    const auto run = [&](unsigned ms) {
+        for (unsigned i = 0; i < ms; ++i) assert(soc.Run(100000, 100000000) >= 100000);
+    };
+
+    UsbHostBridge bridge;
+    std::string error;
+    assert(bridge.StartZaurusNetworkProbe(&soc, error));
+    assert(bridge.Describe().find("pc-link ") == 0);
+    run(10);
+    assert(soc.UsbTestCableAttached());
+
+    assert(bridge.StartZaurusProbe(&soc, true, error));
+    assert(bridge.Describe() == "storage-probe detached");
+    run(490);
+    assert(!soc.UsbTestCableAttached());
+    run(20);
+    assert(soc.UsbTestCableAttached());
+
+    assert(bridge.StartZaurusProbe(&soc, false, error));
+    assert(bridge.Describe() == "probe detached");
+    run(490);
+    assert(!soc.UsbTestCableAttached());
+    run(20);
+    assert(soc.UsbTestCableAttached());
+
+    bridge.Stop();
+    assert(bridge.Describe() == "off" && !soc.UsbTestCableAttached());
+    puts("PASS: Zaurus cable modes report the route and wait 500 ms before a live replug");
+}
+
+int main() {
+    exercise(deviceTypeTX);
+    exercise(deviceTypeE2);
+    exercise(deviceTypeFrankenE2);
+    exercise(deviceTypeZire72);
+    exercise(deviceTypeTG50);
+    exerciseZaurusCableModes();
+}

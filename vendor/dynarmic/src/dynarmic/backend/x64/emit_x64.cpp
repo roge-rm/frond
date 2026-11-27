@@ -5,6 +5,7 @@
 
 #include "dynarmic/backend/x64/emit_x64.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iterator>
 
@@ -365,9 +366,36 @@ void EmitX64::EmitTerminal(IR::Terminal terminal, IR::LocationDescriptor initial
     });
 }
 
+void EmitX64::EnablePatchRetirement() {
+    retired_patch_origins.resize((code.GetTotalCodeSize() + 15) / 16);
+}
+
+void EmitX64::RetirePatchOrigin(BlockDescriptor block) {
+    if (retired_patch_origins.empty() || !block.size) {
+        return;
+    }
+    const size_t offset = static_cast<const u8*>(block.entrypoint) - code.getCode();
+    ASSERT((offset % 16) == 0 && offset + block.size <= code.GetTotalCodeSize());
+    std::fill_n(retired_patch_origins.begin() + offset / 16, (block.size + 15) / 16, u8{1});
+}
+
 void EmitX64::Patch(const IR::LocationDescriptor& target_desc, CodePtr target_code_ptr) {
     const CodePtr save_code_ptr = code.getCurr();
-    const PatchInformation& patch_info = patch_information[target_desc];
+    auto it = patch_information.find(target_desc);
+    if (it == patch_information.end()) {
+        return;
+    }
+    auto& patch_info = it.value();
+    if (!retired_patch_origins.empty()) {
+        const auto retired = [this](CodePtr site) {
+            const size_t offset = static_cast<const u8*>(site) - code.getCode();
+            return retired_patch_origins[offset / 16] != 0;
+        };
+        std::erase_if(patch_info.jg, retired);
+        std::erase_if(patch_info.jz, retired);
+        std::erase_if(patch_info.jmp, retired);
+        std::erase_if(patch_info.mov_rcx, retired);
+    }
 
     for (CodePtr location : patch_info.jg) {
         code.SetCodePtr(location);
@@ -399,6 +427,7 @@ void EmitX64::Unpatch(const IR::LocationDescriptor& target_desc) {
 }
 
 void EmitX64::ClearCache() {
+    std::fill(retired_patch_origins.begin(), retired_patch_origins.end(), u8{0});
     block_descriptors.clear();
     patch_information.clear();
 
@@ -417,6 +446,7 @@ void EmitX64::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescriptor>
             continue;
         }
 
+        RetirePatchOrigin(it->second);
         Unpatch(descriptor);
 
         block_descriptors.erase(it);

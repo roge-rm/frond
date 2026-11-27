@@ -21,6 +21,10 @@
 #define UDCCR_ACTIVE 0x00001fe0ul  // AAISN 7:5, AIN 10:8, ACN 12:11
 #define UDCCR_DRWE 0x00010000ul
 
+constexpr uint32_t UP2OCR_DPPUE = 1u << 4;
+constexpr uint32_t UP2OCR_HXS = 1u << 16;
+constexpr uint32_t UP2OCR_HXOE = 1u << 17;
+
 // UDCCSRA-X (manual 12.6.8). FS, BNE/BNF and SP are derived from the FIFO on read;
 // only DME/FST (R/W) and SST/TRN/PC (W1C) are stored.
 #define CSRX_FS 0x001
@@ -83,6 +87,10 @@ struct Pxa270Udc {
     bool icrSinceEnable;
     void (*notify)(void *);
     void *notifyContext;
+    bool (*port2Connected)(void *);
+    void (*port2HostModeChanged)(void *);
+    void *port2Context;
+    bool port2Enabled;
 
     template <typename T>
     void DoSaveLoad(T &h, uint32_t version) {
@@ -294,6 +302,38 @@ static void pxa270UdcPrvNotify(Pxa270Udc *udc) {
     if (udc->notify) udc->notify(udc->notifyContext);
 }
 
+bool pxa270UdcHostEnabled(const Pxa270Udc *udc) {
+    if (!(udc->udccr & UDCCR_UDE)) return false;
+    constexpr auto port2Mask = UP2OCR_DPPUE | UP2OCR_HXS | UP2OCR_HXOE;
+    return !udc->port2Connected ||
+           ((udc->up2ocr & port2Mask) == (UP2OCR_DPPUE | UP2OCR_HXOE) &&
+            udc->port2Connected(udc->port2Context));
+}
+
+static void pxa270UdcPrvUpdatePort2(Pxa270Udc *udc) {
+    const bool enabled = pxa270UdcHostEnabled(udc);
+    if (enabled && !udc->port2Enabled) ++udc->enableCount;
+    udc->port2Enabled = enabled;
+}
+
+bool pxa270UdcPort2HostSelected(const Pxa270Udc *udc) {
+    constexpr uint32_t host = UP2OCR_HXS | UP2OCR_HXOE;
+    return (udc->up2ocr & host) == host;
+}
+
+void pxa270UdcUsePort2(Pxa270Udc *udc, bool (*connected)(void *), void *context,
+                      void (*hostModeChanged)(void *)) {
+    udc->port2Connected = connected;
+    udc->port2HostModeChanged = hostModeChanged;
+    udc->port2Context = context;
+    udc->port2Enabled = pxa270UdcHostEnabled(udc);
+}
+
+void pxa270UdcRefreshPort2(Pxa270Udc *udc) {
+    pxa270UdcPrvUpdatePort2(udc);
+    pxa270UdcPrvNotify(udc);
+}
+
 static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
                                    void *buf) {
     struct Pxa270Udc *udc = (struct Pxa270Udc *)userData;
@@ -361,7 +401,7 @@ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t siz
                         enabling = false;
                     }
                     if (enabling) {
-                        udc->enableCount++;
+                        if (!udc->port2Connected) ++udc->enableCount;
                         udc->icrSinceEnable = false;
                     }
                     // SMAC switches the endpoint memory to the active configuration: the
@@ -439,10 +479,14 @@ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t siz
                 break;
 
             case 0x20 / 4:  // UP2OCR
-                if (write)
+                if (write) {
+                    const bool wasHost = pxa270UdcPort2HostSelected(udc);
                     udc->up2ocr = val & 0x070307fful;
-                else
+                    if (udc->port2HostModeChanged && wasHost != pxa270UdcPort2HostSelected(udc))
+                        udc->port2HostModeChanged(udc->port2Context);
+                } else {
                     val = udc->up2ocr;
+                }
                 break;
 
             case 0x24 / 4:  // UP3OCR
@@ -459,6 +503,7 @@ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t siz
     if (!write) memcpy(buf, &val, 4);
     else {
         pxa270UdcPrvIrq(udc);
+        if (udc->port2Connected) pxa270UdcPrvUpdatePort2(udc);
         pxa270UdcPrvNotify(udc);
     }
 
@@ -478,7 +523,7 @@ static void pxa270UdcPrvEndControl0(Pxa270Udc *udc) {
 }
 
 bool pxa270UdcHostReset(Pxa270Udc *udc) {
-    if (!(udc->udccr & 1)) return false;
+    if (!pxa270UdcHostEnabled(udc)) return false;
     pxa270UdcPrvFlushTx0(udc);
     pxa270UdcPrvFlushRx0(udc);
     for (auto &e : udc->ep) { e.csr = 0; e.bcr = 0; }
@@ -494,7 +539,7 @@ bool pxa270UdcHostReset(Pxa270Udc *udc) {
 }
 
 bool pxa270UdcHostFrame(Pxa270Udc *udc) {
-    if (!(udc->udccr & 1)) return false;
+    if (!pxa270UdcHostEnabled(udc)) return false;
     udc->udcfnr = (udc->udcfnr + 1) & 0x7ff;
     udc->udcisr[1] |= udc->udcicr[1] & (1u << 30); // IRSOF
     pxa270UdcPrvIrq(udc);
@@ -505,11 +550,9 @@ uint8_t pxa270UdcHostAddress(const Pxa270Udc *udc) { return udc->address; }
 
 bool pxa270UdcHostSofWanted(const Pxa270Udc *udc) { return udc->udcicr[1] & (1u << 30); }
 
-bool pxa270UdcHostEnabled(const Pxa270Udc *udc) { return udc->udccr & UDCCR_UDE; }
-
 bool pxa270UdcHostListening(const Pxa270Udc *udc) {
-    return (udc->udccr & UDCCR_UDE) && udc->icrSinceEnable && (udc->udcicr[0] & 1) &&
-           (udc->udcicr[1] & (1u << 27));
+    return pxa270UdcHostEnabled(udc) && (udc->udcicr[0] & 1) &&
+           (udc->port2Connected || (udc->icrSinceEnable && (udc->udcicr[1] & (1u << 27))));
 }
 
 void pxa270UdcHostSetNotify(Pxa270Udc *udc, void (*notify)(void *), void *context) {
@@ -610,7 +653,7 @@ static bool pxa270UdcPrvHardwareRequest(Pxa270Udc *udc, const uint8_t setup[8]) 
 }
 
 Pxa270UdcHostResult pxa270UdcHostSetup(Pxa270Udc *udc, const uint8_t setup[8]) {
-    if (!(udc->udccr & 1)) return Pxa270UdcHostResult::Disabled;
+    if (!pxa270UdcHostEnabled(udc)) return Pxa270UdcHostResult::Disabled;
     if (udc->ep[0].csr & 8) return Pxa270UdcHostResult::Unsupported; // EP0 OUT DMA
     // SETUP is always accepted. It is an OUT-direction packet, so it drops a ready IN
     // packet without IR0, and it ends a pending STALL and AREN.
@@ -636,7 +679,7 @@ Pxa270UdcHostResult pxa270UdcHostSetup(Pxa270Udc *udc, const uint8_t setup[8]) {
 }
 
 Pxa270UdcHostResult pxa270UdcHostOut(Pxa270Udc *udc, const uint8_t *data, unsigned size) {
-    if (!(udc->udccr & 1)) return Pxa270UdcHostResult::Disabled;
+    if (!pxa270UdcHostEnabled(udc)) return Pxa270UdcHostResult::Disabled;
     if (size > sizeof(udc->rx0) || (size && !data) || (udc->ep[0].csr & 8))
         return Pxa270UdcHostResult::Unsupported;
     if (udc->hw0) {
@@ -661,7 +704,7 @@ Pxa270UdcHostResult pxa270UdcHostOut(Pxa270Udc *udc, const uint8_t *data, unsign
 
 Pxa270UdcHostResult pxa270UdcHostIn(Pxa270Udc *udc, uint8_t data[16], unsigned *size) {
     *size = 0;
-    if (!(udc->udccr & 1)) return Pxa270UdcHostResult::Disabled;
+    if (!pxa270UdcHostEnabled(udc)) return Pxa270UdcHostResult::Disabled;
     auto &csr = udc->ep[0].csr;
     switch (udc->hw0) {
         case HW0_DATA:
@@ -696,7 +739,7 @@ Pxa270UdcHostResult pxa270UdcHostIn(Pxa270Udc *udc, uint8_t data[16], unsigned *
 // Common checks for a bulk/interrupt token. Returns the A-X index in *n on Ack.
 static Pxa270UdcHostResult pxa270UdcPrvEpToken(const Pxa270Udc *udc, uint8_t endpoint, bool in, unsigned *n) {
     *n = 0;
-    if (!(udc->udccr & 1)) return Pxa270UdcHostResult::Disabled;
+    if (!pxa270UdcHostEnabled(udc)) return Pxa270UdcHostResult::Disabled;
     if (!(endpoint & 15) || (endpoint & ~0x8fu)) return Pxa270UdcHostResult::Unsupported;
     *n = pxa270UdcPrvFindEp(udc, endpoint, in);
     if (!*n) return Pxa270UdcHostResult::Timeout;
@@ -768,7 +811,7 @@ Pxa270UdcHostResult pxa270UdcHostEpOut(Pxa270Udc *udc, uint8_t endpoint, const u
 
 Pxa270UdcHostResult pxa270UdcHostPeekIn(const Pxa270Udc *udc, uint8_t endpoint, unsigned *size) {
     *size = 0;
-    if (!(udc->udccr & 1)) return Pxa270UdcHostResult::Disabled;
+    if (!pxa270UdcHostEnabled(udc)) return Pxa270UdcHostResult::Disabled;
     if (!(endpoint & 15)) {
         const auto csr = udc->ep[0].csr;
         switch (udc->hw0) {
@@ -872,6 +915,7 @@ void pxa270UdcLoad(Pxa270Udc *state, SavestateLoader<ChunkType> &loader) {
     // A session saved with the UDC on and its interrupts set up is taken as listening.
     restored.icrSinceEnable = restored.udccr & UDCCR_UDE;
     *state = restored;
+    if (state->port2Connected) state->port2Enabled = pxa270UdcHostEnabled(state);
     pxa270UdcPrvIrq(state);
 }
 

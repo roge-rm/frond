@@ -20,6 +20,8 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QProcess>
+#include <QProgressDialog>
+#include <QStandardPaths>
 #include <QRegularExpression>
 #include <QTimer>
 #include <QSlider>
@@ -45,8 +47,10 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     device->setObjectName("device");
     device->setVisible(false);
     device->addItem(tr("Detect from the NOR image"), QString());
+    // The Zaurus has its own setup, offered only when making a machine.
+    const auto offered = [initialSettings](Device d) { return !frondFirmware::isZaurus(d) || initialSettings; };
     for (auto d : frondFirmware::devices)
-        device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
+        if (offered(d)) device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
     device->setCurrentIndex(std::max(0, device->findData(frondFirmware::deviceId(preselect))));
     auto* deviceButton = new QPushButton(this);
     deviceButton->setObjectName("deviceButton");
@@ -55,7 +59,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     menu->setObjectName("deviceMenu");
     deviceButton->setMenu(menu);
     auto pick = [this](const QString& id) { device->setCurrentIndex(std::max(0, device->findData(id))); };
-    auto fillMenu = [this, menu, pick] {
+    auto fillMenu = [this, menu, pick, offered] {
         menu->clear();
         auto* detect = menu->addAction(tr("Detect from the NOR image"));
         detect->setObjectName("deviceDetect");
@@ -63,7 +67,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         const auto recent = QSettings().value("recentDevices").toStringList();
         QList<QString> shown;
         for (const auto& id : recent)
-            if (frondFirmware::deviceFromId(id) != Device::automatic) shown.append(id);
+            if (const auto d = frondFirmware::deviceFromId(id); d != Device::automatic && offered(d)) shown.append(id);
         if (!shown.isEmpty()) {
             auto* sub = menu->addMenu(tr("Recent"));
             sub->setObjectName("deviceGroupRecent");
@@ -74,7 +78,8 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
             }
         }
         for (auto group : deviceGroups5) {
-            const auto members = frondFirmware::devicesInGroup(group);
+            auto members = frondFirmware::devicesInGroup(group);
+            members.erase(std::remove_if(members.begin(), members.end(), [&](Device d) { return !offered(d); }), members.end());
             if (members.empty()) continue;
             auto* sub = menu->addMenu(QString::fromUtf8(deviceGroupName5(group)));
             sub->setObjectName(QString("deviceGroup%1").arg(int(group)));
@@ -92,7 +97,8 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     connect(device, &QComboBox::currentIndexChanged, this, showChoice);
     showChoice();
     form->addRow(tr("Device"), deviceButton);
-    auto field = [&](const QString& label, const QString& key, QLabel** labelWidget = nullptr) {
+    const auto images = tr("Firmware images (*.bin *.rom *.zip *.prc *.nbf *.DBK *.dbk);;All files (*)");
+    auto field = [&](const QString& label, const QString& key, QLabel** labelWidget, const QString& filter) {
         auto* row = new QHBoxLayout;
         auto* edit = new QLineEdit(this);
         edit->setObjectName(key);
@@ -100,32 +106,58 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         auto* choose = new QPushButton(tr("Choose…"), this);
         choose->setObjectName(key + "Choose");
         row->addWidget(edit, 1); row->addWidget(choose);
-        connect(choose, &QPushButton::clicked, this, [this, edit, label] {
-            const auto file = QFileDialog::getOpenFileName(this, label, edit->text(), tr("Firmware images (*.bin *.rom *.zip *.prc *.nbf);;All files (*)"));
+        auto* text = new QLabel(label, this);
+        connect(choose, &QPushButton::clicked, this, [this, edit, text, filter] {
+            const auto file = QFileDialog::getOpenFileName(this, text->text(), edit->text(), filter);
             if (!file.isEmpty()) edit->setText(file);
         });
-        auto* text = new QLabel(label, this);
         form->addRow(text, row);
         if (labelWidget) *labelWidget = text;
         return edit;
     };
-    nor = field(tr("NOR image"), "nor", &norLabel);
-    nand = field(tr("NAND image (optional for the E2)"), "nand", &nandLabel);
+    nor = field(tr("NOR image"), "nor", &norLabel, images);
+    nand = field(tr("NAND image (optional for the E2)"), "nand", &nandLabel, images);
+    if (initialSettings) {
+        cfMode = new QComboBox(this);
+        cfMode->setObjectName("zaurusCfMode");
+        cfMode->addItem(tr("Use an existing CF image"));
+        cfMode->addItem(tr("Create a CF image"));
+        form->addRow(tr("Internal CF"), cfMode);
+        cfImage = field(tr("CF image"), "zaurusCfImage", &cfImageLabel, tr("CF images (*.img *.raw *.bin);;All files (*)"));
+        cfArchive = field(tr("Sharp HDD1 archive"), "zaurusCfArchive", &cfArchiveLabel,
+                          tr("HDD1 archives (*.tar *.tar.gz *.tgz);;All files (*)"));
+        cfSize = new QSpinBox(this);
+        cfSize->setObjectName("zaurusCfSize");
+        cfSize->setRange(4, 32);
+        cfSize->setSuffix(tr(" GB"));
+        form->addRow(tr("Capacity"), cfSize);
+    }
     anyFirmware = new QCheckBox(tr("Allow other firmware"), this);
     anyFirmware->setObjectName("anyFirmware");
     form->addRow(QString(), anyFirmware);
     // The Zire 72 has no NAND, and a 68k device takes one ROM file.
     auto nandShown = [this] {
         const auto selected = frondFirmware::deviceFromId(device->currentData().toString());
+        const bool zaurus = frondFirmware::isZaurus(selected);
         const bool none = frondFirmware::profile(selected).nandSize == 0;
         nand->setEnabled(!none);
         if (auto* choose = findChild<QPushButton*>("nandChoose")) choose->setEnabled(!none);
-        norLabel->setText(frondFirmware::runs68k(selected) ? tr("ROM image") : tr("NOR image"));
+        const bool create = zaurus && cfMode && cfMode->currentIndex() == 1;
+        norLabel->setText(zaurus ? (create ? tr("CS0 font source (optional)") : tr("CS0 dump (optional)"))
+                                 : frondFirmware::runs68k(selected) ? tr("ROM image") : tr("NOR image"));
         const bool rx1950 = frondFirmware::profile(selected).board == DeviceBoard5::s3c2442Rx1950;
         if (anyFirmware) anyFirmware->setVisible(rx1950);
-        nandLabel->setText(rx1950 ? tr("OS image (CEOS.nbf)") : tr("NAND image (optional for the E2)"));
+        nandLabel->setText(zaurus ? tr("NAND backup (SYSTC300.DBK)") :
+                           rx1950 ? tr("OS image (CEOS.nbf)") : tr("NAND image (optional for the E2)"));
+        if (cfMode) {
+            form->setRowVisible(cfMode, zaurus);
+            form->setRowVisible(cfImageLabel, zaurus && !create);
+            form->setRowVisible(cfArchiveLabel, create);
+            form->setRowVisible(cfSize, create);
+        }
     };
     connect(device, &QComboBox::currentIndexChanged, this, nandShown);
+    if (cfMode) connect(cfMode, &QComboBox::currentIndexChanged, this, nandShown);
     nandShown();
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     auto* import = buttons->addButton(tr("Import"), QDialogButtonBox::AcceptRole);
@@ -141,7 +173,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
             if (const auto warning = frondFirmware::importWarning(stored, nand->text(), anyFirmware->isChecked()); !warning.isEmpty())
                 QMessageBox::warning(this, tr("Frond"), warning);
             accept();
-        } else QMessageBox::critical(this, tr("Frond"), error);
+        } else if (error != frondSessions::cancelledText()) QMessageBox::critical(this, tr("Frond"), error);
     });
     auto* layout = new QVBoxLayout(this);
     layout->addLayout(form);
@@ -205,10 +237,116 @@ QStringList FirmwareDialog::chosenCards() const {
 }
 QString FirmwareDialog::importImages() {
     auto chosen = frondFirmware::deviceFromId(device->currentData().toString());
-    const auto error = frondFirmware::importImages(root, chosen, nor->text(), nand->isEnabled() ? nand->text() : QString(), &chosen,
-                                                  anyFirmware->isVisibleTo(this) && anyFirmware->isChecked());
+    const auto error = frondFirmware::isZaurus(chosen) ? prepareZaurus() :
+        frondFirmware::importImages(root, chosen, nor->text(), nand->isEnabled() ? nand->text() : QString(), &chosen,
+                                    anyFirmware->isVisibleTo(this) && anyFirmware->isChecked());
     if (error.isEmpty()) stored = chosen;
     return error;
+}
+
+QString FirmwareDialog::prepareZaurus() {
+    const auto nandPath = nand->text();
+    const auto promPath = nor->text();
+    const auto& profile = frondFirmware::profile(Device::zaurus);
+    {
+        QFile backup(nandPath);
+        if (!QFileInfo(nandPath).isFile() || !frondSessions::validZaurusNand(backup))
+            return tr("Choose an SL-C3000 SYSTC300.DBK or raw NAND backup with spare bytes.");
+    }
+    if (!promPath.isEmpty()) {
+        QFile prom(promPath);
+        if (!QFileInfo(promPath).isFile() || !prom.open(QIODevice::ReadOnly) || prom.size() != qint64(profile.norSize) ||
+            prom.read(4) == QByteArray(4, char(0xff))) return tr("Choose an 8 MiB SL-C3000 CS0 dump.");
+    }
+
+    const bool create = cfMode->currentIndex() == 1;
+    const auto selected = create ? cfArchive->text() : cfImage->text();
+    QFileInfo input(selected);
+    if (!input.isFile() || !input.isReadable())
+        return create ? tr("Choose a readable Sharp HDD1 archive.") : tr("Choose a readable CF image.");
+    if (!create && (input.size() <= 0 || input.size() % 512 || input.size() > (qint64(512) << 28)))
+        return tr("Choose a raw CF image with 512-byte sectors.");
+    if (!QDir().mkpath(sessions)) return tr("Could not create the session storage directory.");
+    auto stage = std::make_unique<QTemporaryDir>(sessions + "/.dup-zaurus-XXXXXX");
+    if (!stage->isValid()) return tr("Could not create the session storage directory.");
+    QLockFile stageLock(stage->path() + ".lock");
+    stageLock.setStaleLockTime(0);
+    if (!stageLock.tryLock()) return tr("Could not create the session storage directory.");
+
+    const auto cf = stage->filePath(frondSessions::zaurusCf);
+    QProgressDialog progress(create ? tr("Creating the CF image…") : tr("Copying the CF image…"), tr("Cancel"),
+                             0, create ? 0 : 1000, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setAutoReset(false);
+    progress.setAutoClose(false);
+    if (create) {
+        QFile script(":/zaurus/create-zaurus-cf.py");
+        if (!script.open(QIODevice::ReadOnly)) return tr("The Zaurus CF builder is missing.");
+        const auto python = QStandardPaths::findExecutable("python3");
+        if (python.isEmpty()) return tr("Creating a Zaurus CF image requires Python 3, e2fsprogs and mtools.");
+        QStringList arguments{"-I", "-X", "utf8", "-", "--hdd1", input.absoluteFilePath(),
+                              "--size-gb", QString::number(cfSize->value()), "--require-fonts", "--output", cf};
+        if (!promPath.isEmpty()) arguments << "--font-rom" << QFileInfo(promPath).absoluteFilePath();
+
+        QProcess builder;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        const auto bundled = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../lib/frond");
+        if (QFileInfo(bundled + "/mformat").isExecutable())
+            environment.insert("PATH", bundled + QDir::listSeparator() + environment.value("PATH"));
+        builder.setProcessEnvironment(environment);
+        builder.start(python, arguments);
+        if (!builder.waitForStarted()) return tr("Could not start the Zaurus CF builder.");
+        builder.write(script.readAll());
+        builder.closeWriteChannel();
+        progress.show();
+        while (builder.state() != QProcess::NotRunning && !builder.waitForFinished(40)) {
+            QCoreApplication::processEvents();
+            if (!progress.wasCanceled()) continue;
+            builder.kill();
+            builder.waitForFinished();
+            return frondSessions::cancelledText();
+        }
+        QCoreApplication::processEvents();
+        if (progress.wasCanceled()) return frondSessions::cancelledText();
+        if (builder.exitStatus() != QProcess::NormalExit || builder.exitCode() != 0 || !QFileInfo(cf).isFile()) {
+            const auto error = QString::fromUtf8(builder.readAllStandardError()).trimmed();
+            return error.isEmpty() ? tr("Could not create the CF image.") : error;
+        }
+    } else {
+        progress.setValue(0);
+        progress.show();
+        qint64 copied = 0;
+        const bool complete = frondSessions::copyChunked(input.absoluteFilePath(), cf, &copied, input.size(),
+            [&](qint64 done, qint64 total) {
+                progress.setValue(int(done * 1000 / total));
+                QCoreApplication::processEvents();
+                return !progress.wasCanceled();
+            }, true);
+        if (progress.wasCanceled()) return frondSessions::cancelledText();
+        if (!complete || copied != input.size()) return tr("Could not copy the CF image. Check the storage space and close any machine using the image.");
+    }
+    if (!QFile::copy(QFileInfo(nandPath).absoluteFilePath(), stage->filePath(frondSessions::zaurusNand)) ||
+        (!create && !promPath.isEmpty() &&
+         !QFile::copy(QFileInfo(promPath).absoluteFilePath(), stage->filePath(frondSessions::zaurusProm))))
+        return tr("Could not copy the Zaurus firmware.");
+    if (!QFile::setPermissions(cf, QFileDevice::ReadOwner | QFileDevice::WriteOwner))
+        return tr("Could not make the machine's CF image writable.");
+    zaurusStage = std::move(stage);
+    return {};
+}
+
+QString FirmwareDialog::storeZaurus(QString& path) {
+    const auto name = frondSessions::freeName(sessions, frondFirmware::deviceName(stored));
+    const auto prepared = zaurusStage->filePath(name + ".frond");
+    if (const auto error = frondSessions::writePreferences(prepared, machineSettings->values()); !error.isEmpty())
+        return error;
+    QSaveFile marker(frondSessions::markerPath(prepared));
+    const auto id = frondFirmware::deviceId(stored).toUtf8();
+    if (!marker.open(QIODevice::WriteOnly) || marker.write(id) != id.size() || !marker.commit() ||
+        !QDir().rename(zaurusStage->path(), frondSessions::machineDir(sessions, name)))
+        return tr("Could not save the Zaurus machine.");
+    path = frondSessions::filePath(sessions, name);
+    return {};
 }
 
 namespace {
@@ -570,7 +708,10 @@ void fillSpeedBox(QComboBox* box, bool m68k, const QString& name) {
 int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControls jog) {
     const auto& display = frondFirmware::profile(device).frontend;
     int width = display.width + display.sideTabWidth, height = display.height + display.silkscreenHeight + display.stripHeight;
-    if (device == frondFirmware::deviceFromId("sony-clie-tg50")) {
+    if (frondFirmware::isZaurus(device)) {
+        width = 480;
+        height = 640;
+    } else if (device == frondFirmware::deviceFromId("sony-clie-tg50")) {
         // The TG50 sizes the core lays out: the jog tab adds 38 across unless it is hidden or beside the keyboard.
         const bool hidden = jog == frondSessions::JogControls::hidden, beside = keyboard && jog == frondSessions::JogControls::keyboard;
         width = hidden || beside ? 320 : 358;

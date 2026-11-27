@@ -16,7 +16,7 @@ enum class DisplayMode {
     mode_480x320 = 10, mode_480x640 = 11
 };
 
-enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k, vz68k, zodiacNor, rx1950Nand };
+enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k, vz68k, zodiacNor, rx1950Nand, spitzNand };
 enum class DeviceSupport5 { txDesktop, e2Desktop, zire72Desktop, inheritedUnverified, staged, reserved, experimentalDesktop };
 // How a device is told from its firmware: the card header's company and HAL IDs, the NOR size, or a
 // big-endian 68k card header (deviceProfileInspect68kRom5).
@@ -24,7 +24,7 @@ enum class DeviceDetect5 { cardHeader, norSize, none, romHeader68k };
 // Which board model runs it. ez328 and vz328 run in frond-68k, the others in frond. imx1Zodiac is the
 // guarded i.MX1 machine behind SocIMX1, s3c2442Rx1950 the S3C2442 machine behind SocS3C2442.
 enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50, ez328, vz328, imx1Zodiac,
-                          s3c2442Rx1950 };
+                          s3c2442Rx1950, pxa270Spitz };
 // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
 enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50, zodiac, hpIpaq210, hpIpaqRx1950, hpIpaqH4350,
                        m125, iiie, iiixe, v, vx, m100, m105, m500, c500, iiic, m505, m130, m520, t415, iii,
@@ -79,9 +79,9 @@ struct DeviceFrontend5 {
 };
 
 // The picker's groups, in the order it lists them.
-enum class DeviceGroup5 { none, palmOs5, palmClassic, sonyClie, tapwave, hp, alphaSmart, ibm };
+enum class DeviceGroup5 { none, palmOs5, palmClassic, sonyClie, tapwave, hp, alphaSmart, ibm, sharp };
 inline constexpr DeviceGroup5 deviceGroups5[] = {DeviceGroup5::palmOs5, DeviceGroup5::palmClassic, DeviceGroup5::sonyClie,
-    DeviceGroup5::tapwave, DeviceGroup5::hp, DeviceGroup5::alphaSmart, DeviceGroup5::ibm};
+    DeviceGroup5::tapwave, DeviceGroup5::hp, DeviceGroup5::alphaSmart, DeviceGroup5::ibm, DeviceGroup5::sharp};
 inline constexpr const char* deviceGroupName5(DeviceGroup5 group) {
     switch (group) {
         case DeviceGroup5::palmOs5: return "Palm OS 5";
@@ -91,6 +91,7 @@ inline constexpr const char* deviceGroupName5(DeviceGroup5 group) {
         case DeviceGroup5::hp: return "HP";
         case DeviceGroup5::alphaSmart: return "AlphaSmart";
         case DeviceGroup5::ibm: return "IBM";
+        case DeviceGroup5::sharp: return "Sharp";
         case DeviceGroup5::none: break;
     }
     return "";
@@ -402,6 +403,15 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      {true, "", 240, 320, 0, 89, "Calendar|Contacts|Inbox|Wireless",
       "app1|app2|app3|app4|up|down|left|right|centre|power", -1, -1, -1, -1, false, true},
      0, 0, 296352000},
+    {deviceTypeSpitz, "sharp-zaurus-sl-c3000", "Sharp Zaurus SL-C3000", DeviceGroup5::sharp, 200411,
+     DeviceCohort5::spitzNand, DeviceSupport5::staged, DeviceDetect5::none, 0, 0,
+     DeviceBoard5::pxa270Spitz, DeviceArt::none, {false, false, false, false, false, true, false, true, true, false, false, true},
+     8u << 20, 528u * 32 * 1024, 64u << 20, 64u << 20, DisplayMode::mode_480x640, 1u << 11, true,
+     DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
+     {false, "", 480, 640, 0, 0, "Calendar|Address|Mail|Menu",
+      "app1|app2|app3|app4|up|down|left|right|centre|home|back|jog-up|jog-down|jog-press|power",
+      -1, -1, -1, -1, false, true},
+     0, 0, 416000000},
     {deviceTypeInvalid, "hp-ipaq-h4350", "HP iPAQ h4350", DeviceGroup5::none, 0, DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaqH4350, {},
      0, 0, 0, 0, DisplayMode::mode_240x320, 0, false},
@@ -505,10 +515,11 @@ inline bool deviceProfileHasPalmBoardInputs5(int32_t deviceType) {
 }
 
 inline bool deviceProfileSdWriteProtection5(int32_t deviceType) {
-    return deviceTypeIsZodiac5(deviceType) || deviceProfileHasPalmBoardInputs5(deviceType);
+    return deviceTypeIsZodiac5(deviceType) || deviceType == deviceTypeSpitz || deviceProfileHasPalmBoardInputs5(deviceType);
 }
 
 inline bool deviceProfileNetworkHotSync5(const DeviceProfile5& profile) {
+    if (profile.deviceType == deviceTypeSpitz) return false;
     const auto& caps = profile.capabilities;
     return profile.deviceType == deviceTypeTX || caps.modem || caps.irPhone || caps.usbWifi || caps.builtInWifi;
 }
@@ -797,13 +808,15 @@ inline DeviceArt deviceArtFor5(int32_t deviceType) {
 inline bool deviceProfileRunnerEligible5(int32_t deviceType) {
     const auto* profile = deviceProfile5(deviceType);
     return profile && profile->board != DeviceBoard5::none && profile->board != DeviceBoard5::ez328 &&
-           profile->board != DeviceBoard5::vz328 && profile->board != DeviceBoard5::s3c2442Rx1950;
+           profile->board != DeviceBoard5::vz328 && profile->board != DeviceBoard5::s3c2442Rx1950 &&
+           profile->board != DeviceBoard5::pxa270Spitz;
 }
 
 // The OS a device runs, from its board. Palm OS guest services (installing, the application list, hard reset)
 // only exist on Palm OS.
-enum class DeviceOs5 { palmOs, windowsCe };
+enum class DeviceOs5 { palmOs, windowsCe, linuxOs };
 inline DeviceOs5 deviceProfileOs5(const DeviceProfile5& profile) {
+    if (profile.board == DeviceBoard5::pxa270Spitz) return DeviceOs5::linuxOs;
     return profile.board == DeviceBoard5::s3c2442Rx1950 ? DeviceOs5::windowsCe : DeviceOs5::palmOs;
 }
 

@@ -99,6 +99,55 @@ class SessionsLayoutTest {
         assertEquals(File(dir, "session.frond"), sessionFile(dir))
     }
 
+    @Test fun zaurusSaveCopiesItsIdentityAndSparseMicrodrive() {
+        val from = tmp.newFolder("zaurus")
+        File(from, "session.frond").writeText("guest")
+        val drive = File(from, ZaurusImages.CF)
+        java.io.RandomAccessFile(drive, "rw").use {
+            it.setLength(4L shl 20)
+            it.seek((4L shl 20) - 1)
+            it.write(0x34)
+        }
+        assertNotNull(ZaurusImages.portableError(from, saved = true))
+        val identity = "1234567890abcdef".repeat(2)
+        File(from, ZaurusImages.CF_ID).writeText(identity)
+        assertNull(ZaurusImages.portableError(from, saved = true))
+        val commit = "0e".repeat(16)
+        val checkpoint = File(from, ZaurusImages.CF_COMMIT).apply { writeText(commit.uppercase()) }
+        assertNotNull(ZaurusImages.portableError(from, saved = true))
+        checkpoint.writeText(commit)
+        val journal = File(from, "microdrive.journal-$commit").apply { writeText("pending") }
+        assertFalse(packableName(journal.name))
+        assertNotNull(ZaurusImages.portableError(from, saved = true))
+        assertTrue(journal.delete())
+        val copied = File(tmp.root, "zaurus-copy")
+        assertNull(copyMachine(from, copied, 32L shl 20))
+        assertEquals(identity, File(copied, ZaurusImages.CF_ID).readText())
+        assertEquals(commit, File(copied, ZaurusImages.CF_COMMIT).readText())
+        assertArrayEquals(drive.readBytes(), File(copied, ZaurusImages.CF).readBytes())
+
+        val archive = ByteArrayOutputStream()
+        zipPackable(copied, archive)
+        val imported = tmp.newFolder("zaurus-imported")
+        assertTrue(unzipPackable(ByteArrayInputStream(archive.toByteArray()), imported))
+        assertNull(ZaurusImages.portableError(imported, saved = true))
+        assertEquals(commit, File(imported, ZaurusImages.CF_COMMIT).readText())
+        assertArrayEquals(drive.readBytes(), File(imported, ZaurusImages.CF).readBytes())
+    }
+
+    @Test fun zaurusImportRejectsOversizedIdentity() {
+        val archive = ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(archive).use { zip ->
+            zip.putNextEntry(java.util.zip.ZipEntry("session.frond"))
+            zip.write("guest".toByteArray())
+            zip.closeEntry()
+            zip.putNextEntry(java.util.zip.ZipEntry(ZaurusImages.CF_ID))
+            zip.write(ByteArray(33))
+            zip.closeEntry()
+        }
+        assertFalse(unzipPackable(ByteArrayInputStream(archive.toByteArray()), tmp.newFolder("zaurus-invalid")))
+    }
+
     @Test fun sessionPathFollowsTheCore() {
         val id = "0b6c9d7e-1111-2222-3333-444455556666"
         val dir = tmp.newFolder(id)
@@ -191,6 +240,33 @@ class SessionsLayoutTest {
             put64(512) + put32(0) + put64(generation) + put64(64 + 512) + put32(1L shl 20) + ByteArray(16)
         val crc = CRC32().also { it.update(header); it.update(table) }.value
         return header.copyOfRange(0, 24) + put32(crc) + header.copyOfRange(28, 64) + payload + table
+    }
+
+    @Test fun zaurusCfGenerationCanChangeWhileItsSdStaysAttached() {
+        val dir = tmp.newFolder("zaurus-cf")
+        fun card(kind: Long, name: String, generation: Long) =
+            put32(kind) + name.toByteArray(Charsets.US_ASCII).copyOf(32) +
+                put32(1) + put32(0) + ByteArray(32) + put64(512) + put64(512) + put64(generation)
+        val header = put32(0x19800819) + put32(9) + Device.ZAURUS_ID.toByteArray(Charsets.US_ASCII).copyOf(32) +
+            put32(0) + put32(0) + ByteArray(40) + put32(2)
+        val frond = File(dir, "session.frond").also {
+            it.writeBytes(header + card(1, "sd.frondsd", 2) + card(6, ZaurusImages.EXTERNAL_CF, 3))
+        }
+        val sd = File(dir, "sd.frondsd").apply { writeBytes(tinyFrondsdV2(2)) }
+        val cf = File(dir, ZaurusImages.EXTERNAL_CF).apply { writeBytes(tinyFrondsdV2(3)) }
+        assertNull(checkImportedSiblings(dir, frond))
+        cf.writeBytes(tinyFrondsdV2(4))
+        assertNotNull(checkImportedSiblings(dir, frond))
+        val identity = "abcd".repeat(16)
+        assertEquals("$identity protected ejected", ZaurusCfSlot.parse("$identity protected", inserted = false)?.argument)
+        assertEquals("$identity writable", ZaurusCfSlot.parse("$identity writable", inserted = true)?.argument)
+        ZaurusCfSlot(identity, protected = true, inserted = false).write(dir)
+        assertNull(checkImportedSiblings(dir, frond, cfSwap = true))
+        val pending = File(dir, "cf.frondcf.journal-3.full").apply { writeBytes(tinyFrondsdV2(3)) }
+        cf.writeBytes(tinyFrondsdV2(2))
+        assertEquals(pending, sdSettleOf(dir, cf = true).full)
+        sd.writeBytes(tinyFrondsdV2(3))
+        assertNotNull(checkImportedSiblings(dir, frond, cfSwap = true))
     }
 
     // v8 with one Memory Stick descriptor of mb MB.

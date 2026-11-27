@@ -1,5 +1,10 @@
 #include "WifiRouter.h"
 #include <arpa/inet.h>
+#ifndef _WIN32
+#include <sys/un.h>
+#include <unistd.h>
+#endif
+#include <cstring>
 
 #include <algorithm>
 #include <cerrno>
@@ -51,6 +56,7 @@ struct WifiRouter::Impl {
     };
     uint64_t now{};
     Slirp* slirp{};
+    std::string unixListener;
     SlirpCb callbacks{};
     NetSyncForward netSync;
     ActiveSyncForward activeSync;
@@ -107,6 +113,9 @@ struct WifiRouter::Impl {
     }
     ~Impl() {
         if (slirp) slirp_cleanup(slirp);
+#ifndef _WIN32
+        if (!unixListener.empty()) unlink(unixListener.c_str());
+#endif
         for (auto* timer : timers) delete timer;
     }
     static int Add(SlirpPollSocket fd, int events, void* context) {
@@ -157,14 +166,47 @@ void WifiRouter::Poll(uint64_t now) {
     impl->activeSync.Poll();
 }
 int WifiRouter::AddUdpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort) {
+    return AddForward(true, hostPort, guest, guestPort);
+}
+int WifiRouter::AddTcpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort) {
+    return AddForward(false, hostPort, guest, guestPort);
+}
+int WifiRouter::AddForward(bool udp, uint16_t hostPort, uint32_t guest, uint16_t guestPort) {
     if (!Valid()) return EINVAL;
     in_addr host{}, to{};
     host.s_addr = htonl(INADDR_LOOPBACK);
     to.s_addr = htonl(guest);
     // slirp keeps bind's errno when the listen fails.
     errno = 0;
-    if (slirp_add_hostfwd(impl->slirp, 1, host, hostPort, to, guestPort) == 0) return 0;
+    if (slirp_add_hostfwd(impl->slirp, udp, host, hostPort, to, guestPort) == 0) return 0;
     return errno ? errno : EIO;
+}
+int WifiRouter::AddUnixTcpForward(const std::string& path, uint32_t guest, uint16_t guestPort) {
+#ifdef _WIN32
+    (void)path;
+    (void)guest;
+    (void)guestPort;
+    return ENOSYS;
+#else
+    sockaddr_un host{};
+    host.sun_family = AF_UNIX;
+    if (!Valid() || !guestPort || path.empty() || path.size() >= sizeof(host.sun_path)) return EINVAL;
+    if (!impl->unixListener.empty()) return EADDRINUSE;
+    std::memcpy(host.sun_path, path.c_str(), path.size() + 1);
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_addr.s_addr = htonl(guest);
+    to.sin_port = htons(guestPort);
+    // Hold the pathname before binding so a successful listener always has an owner.
+    impl->unixListener = path;
+    errno = 0;
+    if (slirp_add_hostxfwd(impl->slirp, reinterpret_cast<const sockaddr*>(&host), sizeof(host),
+                           reinterpret_cast<const sockaddr*>(&to), sizeof(to), 0) == 0)
+        return 0;
+    const int error = errno ? errno : EIO;
+    impl->unixListener.clear();
+    return error;
+#endif
 }
 bool WifiRouter::Receive(std::vector<uint8_t>& bytes) {
     if (impl->incoming.empty()) return false;

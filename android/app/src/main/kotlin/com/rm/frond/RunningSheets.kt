@@ -54,13 +54,14 @@ object RunningSheets {
         SdCard.State.UNKNOWN -> CardIcon.NONE
     }
 
-    enum class CardRow { SLOT, LINKED, INSERT_LINKED, FILES, EJECT, INSERT, EXPORT_IMAGE, TRY_AGAIN, WRITE_PROTECT, INSERT_PALM_WIFI, EJECT_PALM_WIFI, UNLINK }
+    enum class CardRow { SLOT, LINKED, INSERT_LINKED, FILES, EJECT, INSERT, EXPORT_IMAGE, IMPORT_CF_IMAGE, TRY_AGAIN, WRITE_PROTECT, INSERT_PALM_WIFI, EJECT_PALM_WIFI, UNLINK }
 
     // linked: the empty slot has a linked card; linkedFree: that card can go in now.
     // `n` is the slot: 1 for the second SD slot. `oldPlace`: a frond-68k card not in Cards yet,
     // which doesn't open in Files. `unlinkable`: the slot is linked to a card, in or out.
     fun cardRows(device: Device, state: SdCard.State, linked: Boolean, linkedFree: Boolean, n: Int = 0, oldPlace: Boolean = false, unlinkable: Boolean = false): List<CardRow> {
-        if (!device.cardSupported || !Cards.hasSlot(device, n)) return emptyList()
+        val cf = device.zaurus && n == 1
+        if (!cf && (!device.cardSupported || !Cards.hasSlot(device, n))) return emptyList()
         if (state == SdCard.State.PALM_WIFI) return listOf(CardRow.SLOT, CardRow.EJECT_PALM_WIFI)
         val rows = mutableListOf(CardRow.SLOT)
         if (state == SdCard.State.NONE && linked) {
@@ -77,7 +78,8 @@ object RunningSheets {
             SdCard.State.NONE, SdCard.State.PALM_WIFI -> Unit
             SdCard.State.UNKNOWN -> rows += CardRow.TRY_AGAIN
         }
-        if (oldPlace) rows -= CardRow.FILES
+        if (oldPlace || device.zaurus && state == SdCard.State.INSERTED) rows -= CardRow.FILES
+        if (cf && (state == SdCard.State.NONE || state == SdCard.State.EJECTED)) rows += CardRow.IMPORT_CF_IMAGE
         if (unlinkable && !oldPlace && state != SdCard.State.UNKNOWN) rows += CardRow.UNLINK
         // frond-68k's stick takes its protection from Cards when it goes in.
         if (((device.memoryStick && !device.runs68k && n == 0) || device.sdWriteProtection) &&
@@ -129,7 +131,23 @@ object RunningSheets {
 
     // ---- Connections ----
 
-    enum class ConnRow { BEAM, BLUETOOTH, SERIAL, USB, USB_RETRY, USB_PORT, WIFI_MODULE, DEBUGGER, CRADLE, HOTSYNC }
+    enum class ConnRow { BEAM, BLUETOOTH, SERIAL, USB, ZAURUS_USB, USB_RETRY, USB_PORT, WIFI_MODULE, DEBUGGER, CRADLE, HOTSYNC }
+
+    enum class ZaurusUsbMode(val arg: String, val label: String) {
+        OFF("off", "Off"),
+        PC_LINK("pc-link", "PC Link (TCP/IP)"),
+        DRIVE_PROBE("storage-probe", "Zaurus Drive (probe)"),
+        ENUMERATION_PROBE("probe", "Enumeration probe");
+
+        companion object {
+            fun fromState(state: String): ZaurusUsbMode? = entries.firstOrNull { it.arg == state.substringBefore(' ') }
+
+            fun portFree(cable: ZaurusUsbMode?, driveAttached: Boolean?) = cable == OFF && driveAttached == false
+
+            fun choices(current: ZaurusUsbMode) =
+                entries.filter { it != ENUMERATION_PROBE || it == current }.map { it.arg to it.label }
+        }
+    }
 
     fun connectionRows(
         device: Device, usb: NetRelay.Phase, debuggerShown: Boolean,
@@ -138,7 +156,8 @@ object RunningSheets {
         val rows = mutableListOf(ConnRow.BEAM)
         if (!m68k || device.bluetooth) rows += ConnRow.BLUETOOTH
         if (!device.serialAbsent) rows += ConnRow.SERIAL
-        if (!m68k || device.usb) rows += ConnRow.USB
+        if (device.zaurus) rows += ConnRow.ZAURUS_USB
+        else if (!m68k || device.usb) rows += ConnRow.USB
         if (device.usb && !device.usbNetwork && usb == NetRelay.Phase.DISCONNECTED) rows += ConnRow.USB_RETRY
         if (PrintJob.rowShown(device)) rows += ConnRow.USB_PORT
         if (device.builtInWifi) rows += ConnRow.WIFI_MODULE

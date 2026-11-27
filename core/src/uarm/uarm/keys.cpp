@@ -30,6 +30,7 @@ struct Keypad {
     int8_t kpGpioCol[MAX_KP_COLS];  //<0 for inval
     struct KeyMatrix km[MAX_KP_ROWS][MAX_KP_COLS];
 
+    int8_t wakeGpio, powerGpio;
     bool recalcing, matrixHasPullUps;
 };
 
@@ -62,15 +63,15 @@ static void keypadPrvMatrixRecalc(struct Keypad *kp) {
                 if (haveStrong && !rowState != !colHi)
                     fprintf(stderr, "row %u (%u) being pulled in different directions\n", i,
                             kp->kpGpioRow[i]);
+                rowState = haveStrong ? rowState && colHi : colHi;
                 haveStrong = true;
-
-                rowState = rowState && colHi;
             }
         }
         pxaGpioSetState(kp->gpio, kp->kpGpioRow[i], rowState);
     }
 
     // calc input cols
+    bool matrixActive = false;
     for (j = 0; j < MAX_KP_COLS; j++) {
         bool colState = kp->matrixHasPullUps;
         bool haveStrong = false;
@@ -94,14 +95,17 @@ static void keypadPrvMatrixRecalc(struct Keypad *kp) {
                 if (haveStrong && !rowHi != !colState)
                     fprintf(stderr, "col %u (%u) being pulled in different directions\n", j,
                             kp->kpGpioCol[j]);
+                colState = haveStrong ? colState && rowHi : rowHi;
                 haveStrong = true;
-
-                colState = rowHi && colState;
             }
         }
         pxaGpioSetState(kp->gpio, kp->kpGpioCol[j], colState);
+        matrixActive |= colState != kp->matrixHasPullUps;
     }
 
+    if (kp->wakeGpio >= 0)
+        pxaGpioSetState(kp->gpio, kp->wakeGpio,
+                        matrixActive || pxaGpioInputLevel(kp->gpio, kp->powerGpio));
     kp->recalcing = false;
 }
 
@@ -121,6 +125,7 @@ struct Keypad *keypadInit(struct PxaGpio *gpio, bool matrixHasPullUps) {
 
     kp->gpio = gpio;
     kp->matrixHasPullUps = matrixHasPullUps;
+    kp->wakeGpio = kp->powerGpio = -1;
 
     for (i = 0; i < MAX_KP_ROWS; i++) kp->kpGpioRow[i] = -1;
 
@@ -160,6 +165,12 @@ void keypadKeyEvt(struct Keypad *kp, enum KeyId key, bool wentDown) {
 std::function<void()> keypadCaptureInput(struct Keypad *kp) {
     const Keypad saved = *kp;
     return [kp, saved] { *kp = saved; };
+}
+
+void keypadSetWakeGpio(struct Keypad* kp, int8_t wake, int8_t power) {
+    kp->wakeGpio = wake;
+    kp->powerGpio = power;
+    keypadPrvMatrixRecalc(kp);
 }
 
 void keypadReset(struct Keypad *kp) {

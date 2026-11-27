@@ -7,9 +7,11 @@
 
 #include "CPU.h"
 #include "MMU.h"
+#include "MMU_internal.h"
 #include "arm920_state.h"
 #include "cputil.h"
 #include "icache.h"
+#include "jit_dynarmic.h"
 #include "savestate/savestateAll.h"
 
 #define SAVESTATE_VERSION 1
@@ -253,10 +255,15 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
                         mmuSetS(cp15->mmu, (val & 0x00000100UL) != 0);
                         cp15->control ^= 0x00000100UL;
                     }
-                    mmuControlWrite(cp15->mmu, (val & 0x00000004UL) != 0,
-                                    (tmp & 0x00000001UL) && !(val & 0x00000001UL));
-                    // C (dcOn) moves pages between cached and uncached without a TLB flush.
-                    cpuCostHintClear(cp15->cpu);
+                    const bool cacheOn = (val & 0x00000004UL) != 0;
+                    bool clearCostHints = true;
+#if defined(FROND_DYNARMIC) && (defined(__x86_64__) || defined(_M_X64))
+                    // PXA270 hints survive writes that leave C, M, S and R unchanged.
+                    if (cp15->xscale && cpuJitWmmx(cp15->cpu))
+                        clearCostHints = (tmp & 0x00000301UL) || cacheOn != bool(cp15->mmu->dcOn);
+#endif
+                    mmuControlWrite(cp15->mmu, cacheOn, (tmp & 0x00000001UL) && !(val & 0x00000001UL));
+                    if (clearCostHints) cpuCostHintClear(cp15->cpu);
                     if (tmp & 0x00000001UL) {  // M bit
 
                         cp15->mmuSwitchCy = 2;

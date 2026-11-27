@@ -197,6 +197,7 @@ A32AddressSpace::A32AddressSpace(const A32::UserConfig& conf)
         : AddressSpace(conf.code_cache_size, conf.fastmem_pointer.has_value())
         , conf(conf) {
     EmitPrelude();
+    code_space_remaining.store(GetRemainingSize(), std::memory_order_relaxed);
 }
 
 A32AddressSpace::~A32AddressSpace() {
@@ -270,6 +271,7 @@ void A32AddressSpace::ClearCacheLocked() {
 
 void A32AddressSpace::ClearCacheHeld() {
     ClearCache();
+    code_space_remaining.store(GetRemainingSize(), std::memory_order_release);
     block_ranges.ClearCache();
     fastmem_recompiles.clear();
     if (compile_thread) {
@@ -307,11 +309,17 @@ CodePtr A32AddressSpace::GetOrEmitIfWanted(IR::LocationDescriptor descriptor) {
             return entry;
         }
     }
+    return GetOrEmitInPlace(descriptor);
+}
+
+CodePtr A32AddressSpace::GetOrEmitInPlace(IR::LocationDescriptor descriptor) {
     std::lock_guard lock{code_mutex};
     if (compile_thread && GetRemainingSize() < 1024 * 1024) {
         ClearCacheHeld();
     }
-    return GetOrEmit(descriptor);
+    const CodePtr entry = GetOrEmit(descriptor);
+    code_space_remaining.store(GetRemainingSize(), std::memory_order_release);
+    return entry;
 }
 
 void A32AddressSpace::SetCompileThread(A32::Jit::CompileThread mode) {
@@ -343,7 +351,8 @@ std::function<bool(IR::LocationDescriptor)> A32AddressSpace::CompiledFn() {
 std::function<std::unique_ptr<A32::CodeSnapshot>(IR::LocationDescriptor)> A32AddressSpace::SnapshotFn() {
     return [this](IR::LocationDescriptor location) {
         const A32::LocationDescriptor a32_location{location};
-        return conf.callbacks->SnapshotCodeAhead(a32_location.PC(), a32_location.TFlag(), compile_thread->Overflowed(location));
+        return conf.callbacks->SnapshotCodeAhead(a32_location.PC(), a32_location.TFlag(),
+                                                   compile_thread->Overflowed(location), a32_location.FPSCR().Value());
     };
 }
 
@@ -392,10 +401,8 @@ CodePtr A32AddressSpace::CompileOffThread(IR::LocationDescriptor descriptor) {
             return entry;
         }
     }
-    {
-        // As Emit does in place. The worker only moves the offset on, so a stale read
-        // just clears a little early.
-        std::unique_lock lock{code_mutex};
+    if (code_space_remaining.load(std::memory_order_acquire) < 1024 * 1024) {
+        std::lock_guard lock{code_mutex};
         if (GetRemainingSize() < 1024 * 1024) {
             ClearCacheHeld();
         }
@@ -461,6 +468,7 @@ void A32AddressSpace::CompileJob(CompileThread::Job& job) {
         return;
     }
     job.result.info = EmitUnregistered(std::move(ir_block));
+    code_space_remaining.store(GetRemainingSize(), std::memory_order_release);
     job.first_pc = descriptor.PC();
     job.last_pc = end_location.PC() - 1;
     job.status = CompileThread::Status::Done;
@@ -476,7 +484,13 @@ void A32AddressSpace::InstallCompiled(bool wait) {
     } else if (!lock.try_lock()) {
         return;
     }
-    for (auto& job : compile_thread->TakeDone()) {
+#ifdef __ANDROID__
+    auto& jobs = install_jobs;
+    compile_thread->TakeDone(jobs);
+#else
+    auto jobs = compile_thread->TakeDone();
+#endif
+    for (auto& job : jobs) {
         if (job->status == CompileThread::Status::NoSpace) {
             ClearCacheHeld();
             continue;
@@ -499,6 +513,9 @@ void A32AddressSpace::InstallCompiled(bool wait) {
         }
         InstallJob(*job);
     }
+#ifdef __ANDROID__
+    jobs.clear();
+#endif
 }
 
 void A32AddressSpace::EmitPrelude() {

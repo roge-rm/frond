@@ -266,7 +266,7 @@ endif()
 # The desktop front end (what out/frond runs) with the readline CLI swapped for a
 # stub. Its main() is renamed so android_main.cpp can set up the process first.
 add_library(main SHARED android_main.cpp CliNone.cpp ZodiacMidiJni.cpp ${front_end})
-target_include_directories(main PRIVATE "${UARM}/native")
+target_include_directories(main PRIVATE "${UARM}/native" "${network}/include")
 set_source_files_properties("${UARM}/native/main.cpp" PROPERTIES
     COMPILE_DEFINITIONS "SDL_MAIN_HANDLED;main=frond_core_main")
 target_compile_options(main PRIVATE -O2 -g

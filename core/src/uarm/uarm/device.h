@@ -10,6 +10,7 @@
 #include <cstdio>
 
 #include "BatteryPower.h"
+#include "CardBacking.h"
 #include "SoC.h"
 #include "device_type5.h"
 #include "get_emu_time.h"
@@ -84,6 +85,8 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
                            size_t nandSize, const struct MemoryBuffer *nandPageBuffer);
 void deviceKey(struct Device *dev, uint32_t key, bool down);
 bool devicePanelEnabled(Device*);
+uint8_t deviceSpitzPanelBrightness(const Device*);
+bool deviceSpitzPanelQvga(const Device*);
 bool deviceHoldSwitchOn(Device*);
 void devicePeriodic(struct Device *dev, uint32_t tier);
 void deviceNetworkPeriodic(Device* dev);
@@ -111,6 +114,11 @@ void deviceSetAudioQueue(struct Device *dev, struct AudioQueue *audioQueue);
 
 bool deviceI2sConnected();
 bool deviceTg50IrPowerEnabled(Device *);
+bool deviceSpitzIrPowerEnabled(const Device*);
+inline constexpr unsigned spitzUsbVbus = 35;
+inline constexpr unsigned spitzUsbHostPower = 37;
+inline constexpr unsigned spitzUsbDeviceRole = 41;
+
 void deviceTg50SetUsbCable(Device *, bool connected);
 void deviceTg50SetAccessoryAux(Device *, uint16_t mV);
 void deviceTg50SetConnectorEmpty(Device *);
@@ -118,6 +126,11 @@ void deviceTg50SetConnectorEmpty(Device *);
 // load and reset. False on a board with no battery input modelled yet.
 bool deviceSetBattery(Device *, const BatteryPower &);
 bool deviceBatterySupported(Device *);
+
+struct SpitzPowerState;
+bool deviceSetSpitzPower(Device*, const BatteryPower&, bool locked);
+bool deviceSetSpitzBatteryDoorLocked(Device*, bool locked);
+bool deviceGetSpitzPower(const Device*, SpitzPowerState&);
 void deviceSetCodecHeadphones(Device*, bool in);
 uint16_t deviceTg50AccessoryAuxCode(Device *);
 bool deviceTg50UsbCableAttached(Device *);
@@ -127,6 +140,26 @@ void deviceSetTransportObserver(Device *, void (*)(void *), void *);
 void deviceSetSdCardInserted(struct Device *dev, bool inserted);
 
 enum DeviceType5 deviceGetType(struct Device *dev);
+bool deviceMountMicrodrive(Device* dev, const char* path, bool writable, const char* mediaId);
+bool deviceFlushMicrodrive(const Device* dev);
+bool deviceForEachMicrodriveChange(const Device* dev, const CardBacking::OverlayFn& fn);
+bool deviceWriteMicrodriveBase(Device* dev, uint64_t offset, const void* data, size_t count);
+bool deviceResetMicrodriveOverlay(Device* dev);
+struct SpitzPcmcia;
+SpitzPcmcia* deviceSpitzPcmcia(Device* dev);
+bool deviceInsertCompactFlash(Device* dev, bool writeProtected);
+void deviceEjectCompactFlash(Device* dev);
+bool deviceCompactFlashInserted(const Device* dev);
+void deviceSetCompactFlashWriteProtect(Device* dev, bool locked);
+void deviceSetCompactFlashSwapOnLoad(Device* dev, bool allow);
+bool deviceSpitzSdPowered(const Device* dev);
+void deviceObserveSpitzSdPower(Device* dev, void (*callback)(void*), void* context);
+void deviceSetSpitzLid(Device* dev, bool closed, bool swivelled);
+bool deviceSpitzLidClosed(const Device* dev);
+bool deviceSpitzSwivelled(const Device* dev);
+bool deviceSpitzRemoteInserted(const Device* dev);
+void deviceSetSpitzRemote(Device* dev, bool inserted);
+bool deviceSetSpitzRemoteKey(Device* dev, SpitzRemoteKey key, bool down);
 
 template <typename T>
 void deviceSave(struct Device *dev, T &savestate);

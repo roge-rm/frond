@@ -15,6 +15,7 @@
 #include "LinkCommon.h"
 #include "CardsWindow.h"
 #include "SyncWindow.h"
+#include "ZaurusPcLinkDialog.h"
 #include "RunningRules.h"
 #include "RunningPanels.h"
 #include <QCursor>
@@ -207,6 +208,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     appsPanel = new AppsPanel(root);
     appsLayout->addWidget(appsPanel, 1);
     connect(appsPanel, &AppsPanel::installRequested, this, [this] {
+        if (frondFirmware::isZaurus(currentDevice())) {
+            installFiles(QFileDialog::getOpenFileNames(this, tr("Queue IPK packages"), {}, tr("Qtopia packages (*.ipk)")));
+            return;
+        }
         const auto paths = frondFirmware::installsToCard(currentDevice())
             ? QFileDialog::getOpenFileNames(this, tr("Copy to the SD card"), {}, tr("Windows CE programs (*.cab);;All files (*)"))
             : QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
@@ -284,6 +289,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "gamepad-state" && ok) gamepadReply(message);
         if (command == "activesync-answer" && !ok) log->appendPlainText(command + ": " + message);
         if (command == "cradle-setting") showCradle(ok ? message : QString());
+        if (command == "zaurus-hardware" && ok) showZaurusHardware(message);
+        if (command == "zaurus-remote-state" && zaurusRemoteState.isEmpty()) {
+            zaurusRemoteState = ok ? message : QStringLiteral("unavailable");
+            refresh();
+        }
         if (command == "battery-state" || command == "battery") {
             if (command == "battery" && !ok) { batterySent.clear(); failure(message); return; }
             if (!ok) return;
@@ -301,7 +311,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     mipsTimer->setInterval(1000);
     connect(mipsTimer, &QTimer::timeout, this, [this] { pollMips(); });
     printerTimer = new QTimer(this);
-    connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); pollGamepad(); sendPartnershipAnswer(); });
+    connect(printerTimer, &QTimer::timeout, this, [this] {
+        printerPoll();
+        pollGamepad();
+        sendPartnershipAnswer();
+        if (frondFirmware::isZaurus(runningDevice) && client.available() && !stopping)
+            client.requestBackground(zaurusRemoteState.isEmpty() ? "zaurus-remote-state" : "zaurus-hardware");
+    });
     printerTimer->start(1000);
     auto* danaPending = new QLabel(root);
     danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
@@ -335,6 +351,23 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     cardReadOnly = new QCheckBox(tr("Write protected"), root);
     cardReadOnly->setObjectName("cardReadOnly");
     cardLayout->addWidget(cardReadOnly);
+    zaurusSdFamilyRow = new QWidget(root);
+    auto* sdFamilyLayout = new QHBoxLayout(zaurusSdFamilyRow);
+    sdFamilyLayout->setContentsMargins(0, 0, 0, 0);
+    auto* sdFamilyLabel = new QLabel(tr("Card type"), zaurusSdFamilyRow);
+    zaurusSdFamily = new QComboBox(zaurusSdFamilyRow);
+    zaurusSdFamily->setObjectName("zaurusSdFamily");
+    zaurusSdFamily->addItem(tr("SD"), "sd");
+    zaurusSdFamily->addItem(tr("MMC"), "mmc");
+    zaurusSdFamily->setCurrentIndex(-1);
+    sdFamilyLabel->setBuddy(zaurusSdFamily);
+    sdFamilyLayout->addWidget(sdFamilyLabel);
+    sdFamilyLayout->addWidget(zaurusSdFamily, 1);
+    cardLayout->addWidget(zaurusSdFamilyRow);
+    connect(zaurusSdFamily, qOverload<int>(&QComboBox::activated), this, [this](int index) {
+        if (!send("zaurus-sd-family", zaurusSdFamily->itemData(index).toString()))
+            zaurusSdFamily->setCurrentIndex(zaurusSdFamily->findData(zaurusSdFamilyState));
+    });
     // The second SD slot of a two-slot machine: the same row, under Card 2.
     storage2Heading = new QLabel(tr("Card 2"), root);
     storage2Heading->setObjectName("storage2Heading");
@@ -372,7 +405,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             changeCard(slot.link);
         });
         connect(n ? sd2Eject : sdEject, &QPushButton::clicked, this, [this, n] {
-            if (QMessageBox::question(this, tr("Eject the card?"), tr("Close any files open on the Palm first."),
+            if (QMessageBox::question(this, tr("Eject the card?"), frondFirmware::isZaurus(runningDevice)
+                                          ? tr("Unmount the SD card in the Zaurus before ejecting it here.")
+                                          : tr("Close any files open on the Palm first."),
                                       QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) send(cardCommand("eject", n));
         });
         connect(n ? sd2Reinsert : sdReinsert, &QPushButton::clicked, this, [this, n] { send(cardCommand("reinsert", n)); });
@@ -405,6 +440,77 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (!file.isEmpty()) send(cardCommand("export", 0), file);
     });
 
+    zaurusCfPanel = new QWidget(root);
+    auto* cfLayout = new QVBoxLayout(zaurusCfPanel);
+    cfLayout->setContentsMargins(0, 0, 0, 0);
+    cfLayout->addWidget(new QLabel(tr("External CF"), zaurusCfPanel));
+    zaurusCfState = new QLabel(zaurusCfPanel);
+    zaurusCfState->setObjectName("cfState");
+    cfLayout->addWidget(zaurusCfState);
+    zaurusEthernet = button(tr("Insert Billionton BIL-10BT Ethernet"), "zaurusEthernet", true);
+    zaurusWifi = button(tr("Insert D-Link DCF-660W Wi-Fi"), "zaurusWifi", true);
+    zaurusCfReconnect = button(tr("Reconnect CF network card"), "zaurusCfReconnect", true);
+    zaurusCfNetworkEject = button(tr("Eject network card"), "zaurusCfNetworkEject", true);
+    for (auto* row : {zaurusEthernet, zaurusWifi, zaurusCfReconnect, zaurusCfNetworkEject})
+        cfLayout->addWidget(row);
+    connect(zaurusEthernet, &QPushButton::clicked, this, [this] { send("zaurus-cf-network", "ethernet"); });
+    connect(zaurusWifi, &QPushButton::clicked, this, [this] { send("zaurus-cf-network", "wifi"); });
+    connect(zaurusCfReconnect, &QPushButton::clicked, this, [this] { send("zaurus-cf-network", zaurusCfNetwork); });
+    connect(zaurusCfNetworkEject, &QPushButton::clicked, this, [this] { send("zaurus-cf-network", "off"); });
+    zaurusCfAttach = button(tr("Import image…"), "cfAttach", true);
+    zaurusCfReinsert = button(tr("Insert"), "cfReinsert", true);
+    zaurusCfEject = button(tr("Eject"), "cfEject", true);
+    zaurusCfFiles = button(tr("Files…"), "cfFiles", true);
+    zaurusCfExport = button(tr("Export image…"), "cfExport", true);
+    zaurusCfRetry = button(tr("Try again"), "cfRetry", true);
+    zaurusCfProtect = new QCheckBox(tr("Write protected"), zaurusCfPanel);
+    zaurusCfProtect->setObjectName("cfProtect");
+    for (auto* row : {zaurusCfAttach, zaurusCfReinsert, zaurusCfEject, zaurusCfFiles, zaurusCfExport, zaurusCfRetry})
+        cfLayout->addWidget(row);
+    cfLayout->addWidget(zaurusCfProtect);
+    cardLayout->addWidget(zaurusCfPanel);
+    connect(zaurusCfAttach, &QPushButton::clicked, this, [this] {
+        const auto path = QFileDialog::getOpenFileName(this, tr("Import an external CF image"), {}, tr("Disk images (*.img);;All files (*)"));
+        if (path.isEmpty() || !client.available() || zaurusCfInserted) return;
+        if (zaurusCfPresent && QMessageBox::question(this, tr("Replace the external CF image?"),
+                tr("Export the ejected card first if you want to keep it."),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+        send("cf-insert", path);
+    });
+    connect(zaurusCfReinsert, &QPushButton::clicked, this, [this] { send("cf-reinsert"); });
+    connect(zaurusCfEject, &QPushButton::clicked, this, [this] {
+        if (QMessageBox::question(this, tr("Eject the CF card?"), tr("Unmount the CF card in the Zaurus before ejecting it here."),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) send("cf-eject");
+    });
+    connect(zaurusCfFiles, &QPushButton::clicked, this, [this] { beginExchange(compactFlashSlot); });
+    connect(zaurusCfExport, &QPushButton::clicked, this, [this] {
+        const auto path = outputFile(tr("Export CF image"), tr("Disk images (*.img)"), "CF card.img");
+        if (!path.isEmpty()) send("cf-export", path);
+    });
+    connect(zaurusCfRetry, &QPushButton::clicked, this, [this] {
+        send(zaurusCfNetwork.isEmpty() && zaurusCfKnown ? "zaurus-cf-network" : "cf-state");
+    });
+    connect(zaurusCfProtect, &QCheckBox::clicked, this, [this](bool enabled) { send("cf-protect", enabled ? "on" : "off"); });
+
+    zaurusUsbDrivePanel = new QWidget(root);
+    auto* usbDriveLayout = new QVBoxLayout(zaurusUsbDrivePanel);
+    usbDriveLayout->setContentsMargins(0, 0, 0, 0);
+    usbDriveLayout->addWidget(new QLabel(tr("USB flash drive"), zaurusUsbDrivePanel));
+    zaurusUsbDriveState = new QLabel(zaurusUsbDrivePanel);
+    usbDriveLayout->addWidget(zaurusUsbDriveState);
+    zaurusUsbDriveInsert = button(tr("Insert image…"), "zaurusUsbDriveInsert", true);
+    zaurusUsbDriveEject = button(tr("Eject USB drive"), "zaurusUsbDriveEject", true);
+    zaurusUsbDriveRetry = button(tr("Try again"), "zaurusUsbDriveRetry", true);
+    for (auto* row : {zaurusUsbDriveInsert, zaurusUsbDriveEject, zaurusUsbDriveRetry}) usbDriveLayout->addWidget(row);
+    cardLayout->addWidget(zaurusUsbDrivePanel);
+    connect(zaurusUsbDriveInsert, &QPushButton::clicked, this, [this] {
+        const auto path = QFileDialog::getOpenFileName(this, tr("Insert a USB flash drive image"), {},
+                                                       tr("Disk images (*.img);;All files (*)"));
+        if (!path.isEmpty()) send("zaurus-usb-host", path);
+    });
+    connect(zaurusUsbDriveEject, &QPushButton::clicked, this, [this] { send("zaurus-usb-host", "off"); });
+    connect(zaurusUsbDriveRetry, &QPushButton::clicked, this, [this] { send("zaurus-usb-host"); });
+
     portableExport = button(tr("Export portable folder…"), "portableExport", true);
     cardLayout->addWidget(portableExport);
     connect(portableExport, &QPushButton::clicked, this, [this] {
@@ -422,6 +528,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     cardLayout->addWidget(internalHeading);
     internalButton = button(tr("Files…"), "internalFiles", true);
     cardLayout->addWidget(internalButton);
+    zaurusPcLinkButton = button(tr("PC Link…"), "zaurusPcLink", true);
+    cardLayout->addWidget(zaurusPcLinkButton);
+    zaurusPcLink = new ZaurusPcLinkDialog(client, this);
+    connect(zaurusPcLinkButton, &QPushButton::clicked, zaurusPcLink, &ZaurusPcLinkDialog::browse);
     cardLayout->addStretch();
     connect(internalButton, &QPushButton::clicked, this, &MainWindow::openInternal);
     connect(cardsButton, &QPushButton::clicked, this, [this] { showCards(); });
@@ -467,6 +577,46 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(headphonesToggle, &QCheckBox::clicked, this, [this](bool in) {
         if (!send("headphones", in ? "in" : "out")) refresh();
     });
+    zaurusRemoteToggle = new QCheckBox(tr("CE-RH2 remote in"), root);
+    zaurusRemoteToggle->setObjectName("zaurusRemote");
+    displayGrid->addWidget(zaurusRemoteToggle, 15, 0, 1, 3);
+    connect(zaurusRemoteToggle, &QCheckBox::clicked, this, [this](bool in) {
+        if (!send("zaurus-remote", in ? "in" : "out")) refresh();
+    });
+    zaurusRemoteKeys = new QWidget(root);
+    auto* remoteLayout = new QGridLayout(zaurusRemoteKeys);
+    remoteLayout->setContentsMargins(0, 0, 0, 0);
+    displayGrid->addWidget(zaurusRemoteKeys, 16, 0, 1, 3);
+    const QPair<QString, QString> remoteKeys[] = {
+        {"play", tr("Play / pause")}, {"stop", tr("Stop")},
+        {"previous", tr("Previous")}, {"next", tr("Next")},
+        {"volume-down", tr("Volume down")}, {"volume-up", tr("Volume up")},
+        {"mute", tr("Mute")},
+    };
+    zaurusRemoteRelease = new QTimer(this);
+    zaurusRemoteRelease->setSingleShot(true);
+    connect(zaurusRemoteRelease, &QTimer::timeout, this, [this] {
+        if (client.running() && !send("zaurus-remote-key", zaurusRemoteKey + " up")) {
+            zaurusRemoteRelease->start(100);
+            return;
+        }
+        zaurusRemoteKey.clear();
+        refresh();
+    });
+    int remoteIndex = 0;
+    for (const auto& item : remoteKeys) {
+        auto* control = new QPushButton(item.second, zaurusRemoteKeys);
+        remoteLayout->addWidget(control, remoteIndex / 2, remoteIndex % 2);
+        ++remoteIndex;
+        connect(control, &QPushButton::clicked, this, [this, key = item.first] {
+            if (!zaurusRemoteKey.isEmpty()) return;
+            zaurusRemoteKey = key;
+            if (!send("zaurus-remote-key", zaurusRemoteKey + " down")) {
+                zaurusRemoteKey.clear();
+                refresh();
+            }
+        });
+    }
     microphoneToggle = new QCheckBox(tr("On"), root);
     microphoneToggle->setObjectName("microphone");
     microphoneLabel = label(tr("Microphone"), 2, displayGrid); displayGrid->addWidget(microphoneToggle, 2, 1, 1, 2);
@@ -529,6 +679,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usb->setObjectName("usbMode");
     usb->addItem(tr("Off"), "off");
     usb->addItem(tr("On"), "on");
+    usb->addItem(tr("Zaurus Drive (probe)"), "storage-probe");
+    usb->addItem(tr("PC Link cable"), "pc-link");
+    usb->addItem(tr("Enumeration probe"), "probe");
     usb->addItem(tr("Terminal (PTY)"), "pty");
     usb->addItem(tr("Wait for a peer"), "tcp");
     usb->addItem(tr("Sync Manager"), "sync");
@@ -545,7 +698,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     grid->addWidget(usbState, 7, 1, 1, 2);
     auto usbChanged = [this] {
         if (client.running()) {
-            if (client.available()) send("usb-mode", usbArgument());
+            if (client.available() && usbArgument() != "probe") send("usb-mode", usbArgument());
             return;
         }
         refresh();
@@ -706,6 +859,25 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     hotSyncButton = button(tr("HotSync"), "hotsync");
     displayLayout->addWidget(rotate, 0, Qt::AlignLeft);
+    zaurusLidLabel = new QLabel(tr("Lid"), root);
+    zaurusLid = new QComboBox(root);
+    zaurusLid->setObjectName("zaurusLid");
+    zaurusLid->addItem(tr("Open"), "open");
+    zaurusLid->addItem(tr("Closed"), "closed");
+    zaurusLid->addItem(tr("Folded portrait"), "folded");
+    zaurusLid->setCurrentIndex(-1);
+    zaurusLidLabel->setBuddy(zaurusLid);
+    displayLayout->addWidget(zaurusLidLabel);
+    displayLayout->addWidget(zaurusLid);
+    zaurusBatteryDoor = new QCheckBox(tr("Battery door locked"), root);
+    zaurusBatteryDoor->setObjectName("zaurusBatteryDoor");
+    displayLayout->addWidget(zaurusBatteryDoor);
+    connect(zaurusLid, qOverload<int>(&QComboBox::activated), this, [this](int i) {
+        send("zaurus-lid", zaurusLid->itemData(i).toString());
+    });
+    connect(zaurusBatteryDoor, &QCheckBox::clicked, this, [this](bool locked) {
+        send("zaurus-battery-door", locked ? "locked" : "unlocked");
+    });
     displayLayout->addStretch();
     connectionsLayout->addWidget(hotSyncButton, 0, Qt::AlignLeft);
     auto* pair = new QPushButton(tr("Pair with another Frond…"), root);
@@ -887,6 +1059,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
     });
     connect(&client, &DesktopClient::error, this, [this](const QString& message) {
+        zaurusPcLink->machineStopped();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         // The end of the emulator log, since the log button goes away when the core stops.
         auto lines = log->toPlainText().split('\n');
@@ -898,6 +1071,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         failure(refused.isEmpty() ? message : refused, details);
     });
     connect(&client, &DesktopClient::stalled, this, [this] {
+        if (zaurusPcLink->isVisible()) zaurusPcLink->reject();
         forceButton->show(); runningBar->setForceStop(true); notify(tr("The emulator is not responding. Waiting for it to finish…"), 0);
     });
     connect(&client, &DesktopClient::started, this, [this] {
@@ -910,6 +1084,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         else send("device-state");
     });
     connect(&client, &DesktopClient::finished, this, [this] {
+        zaurusPcLink->machineStopped();
+        zaurusRemoteRelease->stop();
+        zaurusRemoteKey.clear();
         syncMachineId.clear(); syncMachineError.clear(); syncRunning = false; voiceWanted = voiceSent = false;
         askPartnership(false);
         if (exchangeDialog) exchangeDialog->reject();
@@ -926,6 +1103,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false;
+        zaurusCfKnown = zaurusCfPresent = zaurusCfInserted = zaurusCfProtectKnown = false;
+        zaurusInstallSlot.clear();
+        zaurusSdFamilyState.clear();
+        zaurusCfNetwork.clear();
+        zaurusCfNetworkStatus.clear();
+        zaurusUsbDriveKnown = zaurusUsbDriveAttached = zaurusUsbDriveStartup = false;
+        zaurusSdFamily->setCurrentIndex(-1);
         card2Present = card2Inserted = sd2Known = secondStartPending = firstStartPending = false; cardSlot = 0; startCards.clear(); runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
         frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear();
@@ -995,6 +1179,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 exchangeStage == ExchangeStage::None && cardMove.stage == CardMove::None)
                 save();
         });
+        if (command.startsWith("zaurus-pc-link-")) {
+            zaurusPcLink->reply(command, ok, code, message);
+            forceButton->hide();
+            runningBar->setForceStop(false);
+            return;
+        }
+        if (stopping) zaurusPcLink->pump();
         if (command == "dana-view" || command == "dana-view-state") {
             forceButton->hide(); refresh();
             if (stopping && exchangeStage == ExchangeStage::None) save();
@@ -1036,6 +1227,51 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             showCradle(ok ? message : QString());
             if (stopping) save();
             else if (startup) afterCradle();
+            return;
+        }
+        if (command == "zaurus-sd-family") {
+            const bool initial = zaurusSdFamilyState.isEmpty();
+            if (ok && zaurusSdFamily->findData(message) >= 0) zaurusSdFamilyState = message;
+            else if (!initial && !stopping) failure(message);
+            zaurusSdFamily->setCurrentIndex(zaurusSdFamily->findData(zaurusSdFamilyState));
+            refresh();
+            if (initial && !stopping) {
+                zaurusUsbDriveStartup = send("zaurus-usb-host");
+                if (!zaurusUsbDriveStartup) send("network-state");
+            }
+            return;
+        }
+        if (command == "zaurus-cf-network") {
+            const bool initial = zaurusCfNetwork.isEmpty();
+            if (ok) {
+                zaurusCfNetwork = message.section(' ', 0, 0);
+                zaurusCfNetworkStatus = message.section(' ', 1, 1);
+            } else if (!stopping) failure(message);
+            refresh();
+            if (!stopping) {
+                if (initial && !zaurusCfKnown) send("cf-state");
+                else if (!zaurusUsbDriveKnown) send("zaurus-usb-host");
+            }
+            return;
+        }
+        if (command == "zaurus-usb-host") {
+            if (ok) {
+                zaurusUsbDriveKnown = message == "off" || message.startsWith("drive ");
+                zaurusUsbDriveAttached = message.startsWith("drive ");
+            } else if (!stopping && !zaurusUsbDriveStartup) failure(message);
+            refresh();
+            if (zaurusUsbDriveStartup) {
+                zaurusUsbDriveStartup = false;
+                if (!stopping) send("network-state");
+            }
+            return;
+        }
+        if (command == "zaurus-remote-key" && !zaurusRemoteKey.isEmpty())
+            zaurusRemoteRelease->start(ok ? 400 : 0);
+        if (command == "zaurus-lid" || command == "zaurus-battery-door") {
+            if (ok) showZaurusHardware(message);
+            else failure(message);
+            if (stopping) save();
             return;
         }
         if (command == "db-list") { databasesReply(ok, code, message); return; }
@@ -1131,6 +1367,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 return;
             }
         }
+        if (command == "zaurus-install" && installTotal > 0) {
+            if (ok && QFileInfo::exists(sessionPath)) {
+                settings.setValue("lastSession", sessionPath);
+                QFile::remove(frondSessions::markerPath(sessionPath));
+                QFile::remove(frondSessions::workPath(sessionPath));
+            }
+            if (installResult(ok, code, message)) return;
+            if (ok && !stopping) notify(tr("Packages queued. Insert the card and open Add/Remove Software on the Zaurus."));
+            else if (code == "cancelled" && !stopping) notify(tr("Cancelled."));
+            return;
+        }
         if (command == "install") appsStale = true;
         if (internalJob.active && !stopping && (command == "install" || command == "export-db" || command == "delete-db")) {
             internalReply(ok, message);
@@ -1160,6 +1407,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
             if (command == "sd-state" || command == "ms-state") sdKnown = false;
             if (command == "sd2-state") sd2Known = false;
+            if (command == "cf-state") zaurusCfKnown = false;
+            if (command == "cf-protect" || command == "cf-protection") zaurusCfProtectKnown = false;
+            if (command.startsWith("cf-")) refresh();
             // A card that didn't go in at start stays in the folder for the next start.
             if (firstStartPending && (command == cardCommand("state", 0) || command == cardCommand("put-in", 0))) {
                 firstStartPending = false;
@@ -1200,7 +1450,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             // A failed switch leaves the core off (serial, infrared) or as it was (Bluetooth); the
             // picker and the hub's attach follow it.
             if (command == "serial-mode") { showSerial("off " + message); attachSerial(); }
-            if (command == "usb-mode") showUsb("off " + message);
+            if (command == "usb-mode") {
+                if (frondFirmware::isZaurus(runningDevice) && !stopping) send("usb-state");
+                else showUsb("off " + message);
+            }
             if (command == "irda-mode") {
                 if (runningPreferences.infrared == "printer") { printerClearHeld(irPrint); irPrint.status = {}; }
                 showIrda("off error: " + message); attachInfrared();
@@ -1263,6 +1516,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (!stopping && frondFirmware::isZodiac(runningDevice) &&
             (command == "cradle" || command == "reset" || command == "hard-reset") && send("cradle-setting")) return;
+        if (!stopping && frondFirmware::isZaurus(runningDevice) &&
+            (command == "reset" || command == "hard-reset")) {
+            zaurusUsbDriveKnown = false;
+            send("zaurus-cf-network");
+        }
         // frond-68k's state replies go on with the card's key and flags: the first word says it.
         const auto word = message.section(' ', 0, 0);
         if (command == "sd-state" || command == "ms-state") {
@@ -1285,7 +1543,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         else if (command == "sd-eject" || command == "ms-eject") cardInserted = false;
         else if (command == "sd-take-out" || command == "ms-take-out") cardPresent = cardInserted = false;
-        else if (command == "sd-put-in" || command == "ms-put-in") cardPresent = cardInserted = true;
+        else if (command == "sd-put-in" || command == "ms-put-in") {
+            cardPresent = true;
+            cardInserted = code != "ejected";
+        }
         if ((command.startsWith("sd-") || command.startsWith("ms-")) &&
             command != "sd-state" && command != "ms-state") sdKnown = true;
         if (command == "sd2-state") {
@@ -1309,8 +1570,38 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             protection2Known = message == "read-only" || message == "writable";
             card2ReadOnly->setChecked(message == "read-only");
         }
+        if (command == "cf-state") {
+            zaurusCfKnown = word == "none" || word == "inserted" || word == "ejected";
+            zaurusCfPresent = zaurusCfKnown && word != "none";
+            zaurusCfInserted = word == "inserted";
+        } else if (command == "cf-insert" || command == "cf-reinsert" || command == "cf-put-in") {
+            zaurusCfKnown = zaurusCfPresent = true;
+            zaurusCfInserted = code != "ejected" && word != "ejected";
+        } else if (command == "cf-eject") {
+            zaurusCfInserted = false;
+        } else if (command == "cf-take-out") {
+            zaurusCfPresent = zaurusCfInserted = false;
+        }
+        if (command == "cf-protection" || command == "cf-protect") {
+            zaurusCfProtectKnown = message == "read-only" || message == "writable";
+            zaurusCfProtect->setChecked(message == "read-only");
+        }
         if (cardMove.stage != CardMove::None && continueCardMove(command, message)) return;
         if (exchangeStage != ExchangeStage::None) { exchangeResult(true, message); return; }
+        if (command.startsWith("cf-")) refresh();
+        if (command == "cf-state" && !stopping && zaurusCfNetwork == "off") {
+            const auto dir = runningMachineDir();
+            const auto slot = frondSessions::zaurusCfSwapOf(dir);
+            if (slot && zaurusCfPresent && !zaurusCfInserted && slot->inserted && send("cf-reinsert")) return;
+            if (slot && !zaurusCfPresent && QFileInfo::exists(dir + '/' + frondSessions::zaurusExternalCf) &&
+                send("cf-put-in", putInArgument(compactFlashSlot, QString::fromLatin1(slot->identity),
+                                               slot->writeProtected, slot->inserted))) return;
+        }
+        if (!stopping && zaurusCfPresent && (command == "cf-state" || command == "cf-insert" || command == "cf-put-in" || command == "cf-eject" ||
+                                                     command == "cf-reinsert") &&
+            send("cf-protection")) return;
+        if (!stopping && zaurusSdFamilyState.isEmpty() &&
+            (command == "cf-state" || command == "cf-protection") && send("zaurus-sd-family")) return;
         if (command == "network-state" || command == "network-mode") {
             const auto index = network->findData(message);
             if (index >= 0) network->setCurrentIndex(index);
@@ -1332,9 +1623,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             keyboardDriverCheck = false;
         }
         if (command == "gamepad") gamepadReply(message);
-        if (command == "headphones") {
-            runningPreferences.headphonesIn = message == "in";
+        if (command == "headphones" || command == "zaurus-remote") {
+            if (command == "zaurus-remote") zaurusRemoteState = message;
+            else if (zaurusRemoteState == "in") zaurusRemoteState = "out";
+            runningPreferences.headphonesIn = command == "headphones" && message == "in";
             if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
+            refresh();
         }
         if (command == "display" && contrastPending) {
             contrastPending = false;
@@ -1344,7 +1638,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (command == "serial-mode") { runningPreferences.serial = serialChoice(); savePeripherals(); attachSerial(); }
         if (command == "serial-state" || command == "serial-mode") showSerial(message);
-        if (command == "usb-mode") { runningPreferences.usb = usbArgument(); savePeripherals(); }
+        if (command == "usb-mode" && !frondFirmware::isZaurus(runningDevice)) {
+            runningPreferences.usb = usbArgument();
+            savePeripherals();
+        }
         if (command == "usb-state" || command == "usb-mode") showUsb(message);
         if (command == "irda-mode") {
             if (runningPreferences.infrared == "printer" && irdaChoice() != "printer") { printerClearHeld(irPrint); irPrint.status = {}; }
@@ -1370,7 +1667,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "network-state" && !stopping && !frondFirmware::isDana(runningDevice)) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping &&
-            frondFirmware::capabilities(runningDevice).usb && usbArgument() != "off") { send("usb-state"); return; }
+            (frondFirmware::isZaurus(runningDevice) ||
+             (frondFirmware::capabilities(runningDevice).usb && usbArgument() != "off"))) { send("usb-state"); return; }
         const bool m68k = frondFirmware::runs68k(runningDevice);
         // frond-68k: slot 1's card goes in by path now when the core left it out at start.
         bool firstDone = false;
@@ -1424,6 +1722,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             }
         }
         if ((command == "sd-state" || command == "ms-state" || protectedStart || firstDone) && !stopping) {
+            if (frondFirmware::isZaurus(runningDevice) && !zaurusCfKnown &&
+                send(zaurusCfNetwork.isEmpty() ? "zaurus-cf-network" : "cf-state")) return;
             send(command == "ms-state" && cardPresent && !m68k ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
@@ -1457,7 +1757,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "save") {
             if (savedWorkingCopy) {
                 // While Files has the card out, the slot keeps swap until it's back in.
-                if (exchangeStage == ExchangeStage::None) frondCards::clearSwap(frondSessions::machineDirOf(sessionPath));
+                if (exchangeStage == ExchangeStage::None) {
+                    const auto dir = frondSessions::machineDirOf(sessionPath);
+                    frondCards::clearSwap(dir);
+                    if (zaurusCfPresent) QFile::remove(dir + '/' + frondSessions::zaurusExternalCfSlot);
+                }
                 if (stopping) finalSaved = true;
                 settings.setValue("lastSession", sessionPath); settings.sync();
                 QFile::remove(frondSessions::markerPath(sessionPath));
@@ -1586,19 +1890,29 @@ void MainWindow::refresh() {
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
     note(network, supportsNetwork, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
-    note(usb, caps.usb, frondFirmware::usbNetwork(currentDevice()) ? QString() : usbTip); note(usbPort, caps.usb, {});
+    const bool zaurus = frondFirmware::isZaurus(currentDevice());
+    note(usb, caps.usb || zaurus, frondFirmware::usbNetwork(currentDevice()) ? QString() : usbTip); note(usbPort, caps.usb, {});
     note(irda, caps.infrared, infraredKeyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* w : runningButtons) w->setEnabled(enabled);
+    saveCopyButton->setEnabled(enabled && !frondFirmware::isZaurus(currentDevice()));
     microphoneToggle->setEnabled(enabled && caps.microphone);
     microphoneToggle->setChecked(running && microphoneArmed);
     cameraBox->setEnabled(enabled && frondFirmware::profile(currentDevice()).frontend.camera);
     soundToggle->setEnabled(enabled && caps.sound);
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
-    const bool headphonesSupported = deviceProfileHasPalmBoardInputs5(int(currentDevice()));
+    const bool headphonesSupported = zaurus || deviceProfileHasPalmBoardInputs5(int(currentDevice()));
+    const bool remoteAttached = zaurus && zaurusRemoteState == "in";
+    const bool remoteKnown = zaurusRemoteState == "in" || zaurusRemoteState == "out";
+    const bool jackReady = enabled && zaurusRemoteKey.isEmpty();
     headphonesToggle->setVisible(headphonesSupported);
-    headphonesToggle->setEnabled(enabled && headphonesSupported);
-    headphonesToggle->setChecked(running && runningPreferences.headphonesIn);
+    headphonesToggle->setEnabled(jackReady && headphonesSupported);
+    headphonesToggle->setChecked(running && runningPreferences.headphonesIn && !remoteAttached);
+    zaurusRemoteToggle->setVisible(zaurus);
+    zaurusRemoteToggle->setEnabled(jackReady && remoteKnown);
+    zaurusRemoteToggle->setChecked(remoteAttached);
+    zaurusRemoteKeys->setVisible(remoteAttached);
+    zaurusRemoteKeys->setEnabled(jackReady);
     showBattery();
     note(soundToggle, caps.sound, {});
     // A 68k device's missing hardware isn't shown at all; on the others it's greyed.
@@ -1649,6 +1963,9 @@ void MainWindow::refresh() {
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
     hotSyncButton->setEnabled(enabled && !(cradleSetting == "detached"));
     shown(!m68k, {rotateButton});
+    shown(frondFirmware::isZaurus(currentDevice()), {zaurusLidLabel, zaurusLid, zaurusBatteryDoor});
+    zaurusLid->setEnabled(enabled && zaurusLid->currentIndex() >= 0);
+    zaurusBatteryDoor->setEnabled(enabled && zaurusLid->currentIndex() >= 0);
     contrast->setEnabled(enabled);
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
     holdLabel->setVisible(frontend.holdPresent);
@@ -1681,15 +1998,22 @@ void MainWindow::refresh() {
     // Windows CE's USB is a network link (RNDIS): on or off, no endpoint.
     const bool usbNetwork = frondFirmware::usbNetwork(currentDevice());
     // Rows the device doesn't take are hidden in the list and disabled, so the wheel and arrow keys skip them too.
-    offerMode(usb, "on", usbNetwork);
+    offerMode(usb, "on", usbNetwork && !zaurus);
     offerMode(usb, "pty", !usbNetwork);
     offerMode(usb, "tcp", !usbNetwork);
     offerMode(usb, "sync", hotSyncAvailable);
-    if (((usb->currentData() == "on") != usbNetwork || (usb->currentData() == "sync" && !hotSyncAvailable)) &&
-         usb->currentData() != "off") usb->setCurrentIndex(usb->findData("off"));
+    offerMode(usb, "storage-probe", zaurus);
+    offerMode(usb, "pc-link", zaurus);
+    const auto usbMode = usb->currentData().toString();
+    offerMode(usb, "probe", zaurus && usbMode == "probe");
+    if (usbMode != "off") {
+        const bool available = zaurus ? usbMode == "storage-probe" || usbMode == "pc-link" || usbMode == "probe"
+            : usbNetwork ? usbMode == "on" : usbMode == "pty" || usbMode == "tcp" || (usbMode == "sync" && hotSyncAvailable);
+        if (!available) usb->setCurrentIndex(usb->findData("off"));
+    }
     usbLabel->setText(usbNetwork ? tr("USB") : tr("USB HotSync"));
     if (usbNetwork) usbPort->setVisible(false);
-    usb->setEnabled(editable && caps.usb);
+    usb->setEnabled(editable && (zaurus ? running && zaurusUsbDriveKnown && !zaurusUsbDriveAttached : caps.usb));
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
     // IR HotSync: the HotSync app's IR to a PC/Handheld, on a HotSync device with infrared.
     const bool irSyncAvailable = syncAvailable && protocol == frondDesktopSync::Protocol::hotSync && caps.infrared && irSyncWorks;
@@ -1712,9 +2036,50 @@ void MainWindow::refresh() {
     auto traits = runningRules::traitsFor(currentDevice());
     traits.syncManager = protocol != frondDesktopSync::Protocol::none;
     const bool guest = traits.guestServices;
-    appsPanel->setEnabled(enabled && (guest || traits.cardInstall));
+    appsPanel->setEnabled(enabled && (guest || traits.cardInstall || zaurus));
     appsPanel->setInstallOnly(!guest, !guest && traits.cardInstall);
-    appsPanel->setToolTip(guest || traits.cardInstall ? QString() : reason);
+    appsPanel->setPackageQueue(zaurus);
+    appsPanel->setToolTip(guest || traits.cardInstall || zaurus ? QString() : reason);
+    zaurusSdFamilyRow->setVisible(zaurus && supported);
+    zaurusSdFamily->setEnabled(enabled && !cardInserted && !zaurusSdFamilyState.isEmpty());
+    internalHeading->setText(zaurus ? tr("Internal CF") : tr("Internal"));
+    internalButton->setVisible(!zaurus);
+#ifdef Q_OS_WIN
+    zaurusPcLinkButton->setVisible(false);
+#else
+    zaurusPcLinkButton->setVisible(zaurus);
+#endif
+    zaurusPcLinkButton->setEnabled(enabled && !zaurusUsbCableAttached && !zaurusUsbDriveAttached);
+    zaurusUsbDrivePanel->setVisible(zaurus);
+    zaurusUsbDrivePanel->setEnabled(enabled);
+    zaurusUsbDriveState->setText(!zaurusUsbDriveKnown ? tr("Not known") :
+                                 zaurusUsbDriveAttached ? tr("Read-only") : tr("No drive"));
+    zaurusUsbDriveRetry->setVisible(!zaurusUsbDriveKnown);
+    zaurusUsbDriveInsert->setVisible(zaurusUsbDriveKnown && !zaurusUsbDriveAttached);
+    zaurusUsbDriveInsert->setEnabled(!zaurusUsbCableAttached);
+    zaurusUsbDriveEject->setVisible(zaurusUsbDriveKnown && zaurusUsbDriveAttached);
+    zaurusCfPanel->setVisible(zaurus);
+    zaurusCfPanel->setEnabled(enabled);
+    const bool cfNetworkAttached = zaurusCfNetwork == "ethernet" || zaurusCfNetwork == "wifi";
+    const bool cfSlotFree = zaurusCfKnown && !zaurusCfInserted && zaurusCfNetwork == "off";
+    zaurusEthernet->setVisible(cfSlotFree);
+    zaurusWifi->setVisible(cfSlotFree);
+    zaurusCfNetworkEject->setVisible(cfNetworkAttached);
+    zaurusCfReconnect->setVisible(cfNetworkAttached && zaurusCfNetworkStatus == "offline");
+    zaurusCfState->setText(zaurusCfNetwork == "ethernet" ? tr("Billionton BIL-10BT Ethernet") :
+                           zaurusCfNetwork == "wifi" ? tr("D-Link DCF-660W Wi-Fi") :
+                           !zaurusCfKnown ? tr("Not known") : !zaurusCfPresent ? tr("No card")
+                           : zaurusCfInserted ? tr("Inserted") : tr("Ejected"));
+    zaurusCfRetry->setVisible(!zaurusCfKnown || zaurusCfNetwork.isEmpty() ||
+                             (zaurusCfPresent && !zaurusCfProtectKnown));
+    zaurusCfAttach->setText(zaurusCfPresent ? tr("Replace image…") : tr("Import image…"));
+    zaurusCfAttach->setVisible(cfSlotFree);
+    zaurusCfReinsert->setVisible(zaurusCfPresent && cfSlotFree);
+    zaurusCfEject->setVisible(zaurusCfInserted);
+    zaurusCfFiles->setVisible(zaurusCfPresent && cfSlotFree);
+    zaurusCfExport->setVisible(zaurusCfPresent && cfSlotFree);
+    zaurusCfProtect->setVisible(zaurusCfPresent && cfSlotFree);
+    zaurusCfProtect->setEnabled(zaurusCfProtectKnown);
     installBenchAction->setEnabled(enabled && guest);
     hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, traits));
     hardResetButton->setToolTip(traits.hardReset ? QString() : reason);
@@ -1729,7 +2094,7 @@ void MainWindow::refresh() {
     // The picker button already says "No card" or the card's name, and Eject shows it's in.
     sdStatus->setVisible((!m68k || linkedCards) && (!known || (cardPresent && !cardInserted)));
     sdReinsert->setVisible(known && cardPresent && !cardInserted);
-    sdExchange->setVisible(known && cardPresent);
+    sdExchange->setVisible(known && cardPresent && (!zaurus || !cardInserted));
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
     const bool zodiac = frondFirmware::isZodiac(runningDevice);
@@ -1761,6 +2126,7 @@ void MainWindow::refresh() {
         if (!supported) b->setVisible(false);
         b->setEnabled(enabled && supported);
     }
+    if (zaurus && cardInserted) cardPick->setEnabled(false);
     if (palmWifiInserted) {
         sdStatus->hide();
         linkedState->hide();
@@ -2312,7 +2678,7 @@ void MainWindow::barPressed(RunningBar::Button button) {
         case RunningBar::Button::Card: togglePanel(1); break;
         case RunningBar::Button::Sync: startSync(); break;
         case RunningBar::Button::Sound: soundToggle->click(); break;
-        case RunningBar::Button::Power: replay(runningRules::powerReplay(), "power"); break;
+        case RunningBar::Button::Power: replay(runningRules::powerReplay(runningDevice), "power"); break;
         case RunningBar::Button::ForceStop: forceButton->click(); break;
     }
 }
@@ -2446,9 +2812,11 @@ QMenu* MainWindow::rowMenu(const QString& path, QWidget* parent) {
     rename->setObjectName("renameSession"); rename->setEnabled(!info.old);
     auto* duplicate = menu->addAction(tr("Duplicate"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { duplicateSession(path); }); });
     duplicate->setObjectName("duplicateSession");
+    const bool zaurus = frondFirmware::isZaurus(frondFirmware::deviceFromId(info.device));
     duplicate->setEnabled(!info.old && !client.running() && !busy && !frondSessions::inUse(path));
     auto* exportAction = menu->addAction(tr("Export…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { exportSession(path); }); });
-    exportAction->setObjectName("exportSession"); exportAction->setEnabled(info.saved && !info.old);
+    exportAction->setObjectName("exportSession");
+    exportAction->setEnabled(info.saved && !info.old && (!zaurus || (!client.running() && !busy && !frondSessions::inUse(path))));
     auto* remove = menu->addAction(tr("Delete"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { deleteSession(path); }); });
     remove->setObjectName("deleteSession");
     return menu;
@@ -2461,6 +2829,7 @@ frondSessions::Preferences MainWindow::defaultPreferences(frondFirmware::Device 
             settings.value("fastAudio", false).toBool()};
     // A new machine starts with its peripherals off.
     prefs.peripheralsSet = true;
+    prefs.fastEngine = frondFirmware::isZaurus(device);
     return prefs;
 }
 void MainWindow::migratePeripherals(frondSessions::Preferences* prefs) {
@@ -2588,7 +2957,8 @@ void MainWindow::duplicateSession(const QString& path) {
             auto update = [&] {
                 clause->setText(link->isChecked() ? tr("The copy shares %1 with %2.").arg(cardName, info.name)
                                 : copy->isChecked() ? (names.size() > 1 ? tr("The copy gets its own cards, %1.") : tr("The copy gets its own card, %1.")).arg(copyName)
-                                                    : tr("The copy has no card."));
+                                                    : frondFirmware::isZaurus(frondFirmware::deviceFromId(info.device))
+                                                        ? tr("The copy has no SD card.") : tr("The copy has no card."));
             };
             for (auto* r : {link, copy, none}) connect(r, &QRadioButton::toggled, &dialog, update);
             update();
@@ -2622,6 +2992,8 @@ void MainWindow::duplicateSession(const QString& path) {
 void MainWindow::exportSession(const QString& path) {
     const auto info = infoFor(path);
     if (!info.saved) return;
+    const bool zaurus = frondFirmware::isZaurus(frondFirmware::deviceFromId(info.device));
+    if (zaurus && (client.running() || busy)) return;
     const auto target = outputFile(tr("Export"), tr("Frond sessions (*.frond)"), info.name + ".frond");
     if (target.isEmpty()) return;
     if (!confirmReplace(frondSessions::exportDestDir(target))) return;
@@ -2630,7 +3002,7 @@ void MainWindow::exportSession(const QString& path) {
     // one locked already is running, and Cards greys it anyway.
     QLockFile hold(info.path + ".lock");
     hold.setStaleLockTime(0);
-    const bool held = frondSessions::tryLockSession(hold, info.path);
+    const bool held = !zaurus && frondSessions::tryLockSession(hold, info.path);
     if (held && cardsWindow) cardsWindow->refresh();
     const auto error = runCardJob(this, tr("Exporting %1…").arg(info.name), [&](const frondSessions::CopyProgress& progress) {
         if (exportHook) exportHook();
@@ -2646,6 +3018,10 @@ void MainWindow::deleteSession(const QString& path) {
     const auto info = infoFor(path);
     // A card in the machine goes back to Cards; the dialog says so.
     QString question = tr("Delete %1?").arg(info.name);
+    if (frondFirmware::isZaurus(frondFirmware::deviceFromId(info.device)) &&
+        QFileInfo::exists(frondSessions::machineDirOf(path) + '/' + frondSessions::zaurusExternalCf)) {
+        question += ' ' + tr("Its external CF image will also be deleted.");
+    }
     if (info.saved && !info.old) {
         const auto dir = frondSessions::machineDirOf(info.path);
         frondCards::reconcile(sessionFolder());
@@ -2720,6 +3096,13 @@ void MainWindow::addDevice() {
     dialog.offerCards(sessionFolder());
     if (dialog.exec() != QDialog::Accepted) return;
     const auto device = dialog.imported();
+    if (frondFirmware::isZaurus(device)) {
+        QString path;
+        if (const auto error = dialog.storeZaurus(path); !error.isEmpty()) return failure(error);
+        refreshSessions(path);
+        startSession(infoFor(path));
+        return;
+    }
     const auto chosenCards = dialog.chosenCards();
     settings.setValue("recentDevices", frondFirmware::pushRecentDevice(
         settings.value("recentDevices").toStringList(), frondFirmware::deviceId(device)));
@@ -2758,6 +3141,24 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
     const auto load = QFileInfo(source).isDir() ? frondSessions::sessionFrondIn(source) : source;
     const auto header = frondSessions::readHeader(load);
     auto device = frondFirmware::deviceFromId(header.device);
+    if (frondFirmware::isZaurus(device)) {
+        if (!source.startsWith(managedRoot + '/')) {
+            QString name;
+            const auto error = runCardJob(this, tr("Importing the session…"), [&](const frondSessions::CopyProgress& progress) {
+                return frondSessions::importFile(managedRoot, source, &name, progress);
+            });
+            if (!error.isEmpty()) {
+                if (error != frondSessions::cancelledText()) failure(error);
+                return;
+            }
+            const auto imported = frondSessions::filePath(managedRoot, name);
+            refreshSessions(imported);
+            startSession(infoFor(imported));
+        } else {
+            startSession(infoFor(load));
+        }
+        return;
+    }
     if (device == frondFirmware::Device::automatic) device = frondFirmware::Device::tx;
     if (!QFileInfo(coreFor(device)).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
     QString target = load;
@@ -2807,7 +3208,7 @@ void MainWindow::startSession(const frondSessions::Info& info) {
         const auto source = QFileInfo(info.path).canonicalFilePath();
         if (source.isEmpty()) return failure(tr("Choose an existing session file."));
         arguments << source;
-    } else {
+    } else if (!frondFirmware::isZaurus(device)) {
         if (!ensureFirmware(device)) return;
         arguments << "--device" << frondFirmware::deviceId(device) << frondFirmware::storedNor(firmwareRoot(), device);
         if (!frondFirmware::storedNand(firmwareRoot(), device).isEmpty())
@@ -2815,9 +3216,21 @@ void MainWindow::startSession(const frondSessions::Info& info) {
         if (frondFirmware::storedAnyFirmware(firmwareRoot(), device)) arguments << "--any-firmware";
     }
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
+    const auto folder = frondSessions::machineDirOf(canonicalSession(info.path));
+    if (frondFirmware::isZaurus(device)) {
+        const QFileInfo cf(folder + '/' + frondSessions::zaurusCf);
+        if (!cf.isFile() || cf.isSymLink()) return failure(tr("The machine's internal CF image is missing."));
+        if (!info.saved) {
+            const auto backup = folder + '/' + frondSessions::zaurusNand;
+            if (!QFileInfo(backup).isFile()) return failure(tr("The machine's Zaurus NAND backup is missing."));
+            arguments << "--device" << frondFirmware::deviceId(device) << backup;
+            const auto prom = folder + '/' + frondSessions::zaurusProm;
+            if (QFileInfo(prom).isFile()) arguments << "--spitz-prom" << prom;
+        }
+        arguments << "--microdrive" << cf.absoluteFilePath() << "--microdrive-writable";
+    }
     // A new machine runs in its own folder, where cards above 128 MB live until the first save.
     if (!info.saved) {
-        const auto folder = frondSessions::machineDirOf(canonicalSession(info.path));
         if (!QDir().mkpath(folder)) return failure(tr("Could not create the session storage directory."));
         if (QFileInfo(folder).canonicalFilePath() != QFileInfo(sessionFolder()).canonicalFilePath())
             arguments << "--work-folder" << folder;
@@ -2831,6 +3244,10 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     gamepadState.clear();
     cradleSetting.clear();
     cradleStartupPending = false;
+    zaurusLid->setCurrentIndex(-1);
+    zaurusRemoteRelease->stop();
+    zaurusRemoteState.clear();
+    zaurusRemoteKey.clear();
     const auto caps = frondFirmware::capabilities(startDevice);
     const bool m68k = frondFirmware::runs68k(startDevice);
     if (m68k) {
@@ -2907,7 +3324,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (runningPreferences.batteryMode == "host") hostBattery = frondBattery::readHost();
     batterySent = batterySpec();
     arguments << "--battery" << batterySent;
-    if (runningPreferences.headphonesIn && deviceProfileHasPalmBoardInputs5(int(runningDevice)))
+    if (runningPreferences.headphonesIn && (frondFirmware::isZaurus(runningDevice) ||
+                                            deviceProfileHasPalmBoardInputs5(int(runningDevice))))
         arguments << "--headphones-in";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
     if (!m68k && runningPreferences.fastAudio) {
@@ -2930,6 +3348,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         if (runningPreferences.contrastSet && frondFirmware::lcdContrast(startDevice))
             arguments << "--contrast" << QString::number(runningPreferences.contrast);
     } else if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+    else if (frondFirmware::isZaurus(startDevice)) arguments << "--engine" << "exact";
     if (const auto speed = frondSessions::speedForCore(runningPreferences, m68k); speed != "original") arguments << "--speed" << speed;
     {
         const QSignalBlocker blocked(contrast);
@@ -2975,6 +3394,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         arguments << frondCards::outsideArguments(arguments.value(0), sessionFolder(),
                                                  QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/dana-cards"));
     }
+    if (frondFirmware::isZaurus(startDevice) && frondSessions::zaurusCfSwapOf(machine) && !arguments.contains("--card-swap"))
+        arguments << "--card-swap";
     // If Frond goes without stopping the Palm, the core saves the working session itself.
     arguments << "--save-on-disconnect" << QFileInfo(target).absoluteFilePath();
     stopping = closeAfterStop = allowClose = false;
@@ -3416,17 +3837,19 @@ QString MainWindow::usbArgument() const {
 // or, for a network link, "on <bus phase>[ rndis up| rndis starting]".
 void MainWindow::showUsb(const QString& state) {
     const auto parts = state.split(' ');
+    zaurusUsbCableAttached = !state.isEmpty() && frondFirmware::isZaurus(runningDevice) && parts[0] != "off";
     if (!state.isEmpty()) {
         usb->setCurrentIndex(std::max(0, usb->findData(parts[0])));
         if (parts[0] == "tcp" && parts.size() > 1) {
             const auto port = parts[1].section(':', -1).toInt();
             if (port > 0) usbPort->setValue(port);
         }
-        refresh();
     }
     if (state.isEmpty()) usbState->clear();
     else if (parts[0] == "off") usbState->setText(parts.size() > 1 ? tr("USB: off, %1").arg(state.mid(4)) : QString());
     else if (parts[0] == "sync") usbState->setText(tr("USB: Sync Manager"));
+    else if (zaurusUsbCableAttached)
+        usbState->setText(parts.value(1) == "running" ? tr("USB: %1 enumerated").arg(deviceLabel()) : tr("USB: cable in"));
     else if (parts[0] == "on")
         usbState->setText(state.endsWith(" rndis up") ? tr("USB: network up") : parts.size() > 1 && parts[1] == "running"
                           ? tr("USB: %1 enumerated").arg(deviceLabel()) : tr("USB: cable in"));
@@ -3434,9 +3857,10 @@ void MainWindow::showUsb(const QString& state) {
         usbState->setText(tr("USB: %1, %2, %3").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection"),
                                                     parts[3] == "running" ? tr("%1 enumerated").arg(deviceLabel()) : tr("%1 %2").arg(deviceLabel(), parts[3])));
     else usbState->setText(tr("USB: %1").arg(state));
+    if (!state.isEmpty()) refresh();
 }
 void MainWindow::loadUsbSettings() {
-    const auto& value = runningPreferences.usb;
+    const auto value = frondFirmware::isZaurus(runningDevice) ? QStringLiteral("off") : runningPreferences.usb;
     usb->setCurrentIndex(std::max(0, usb->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     usbPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5024);
     for (auto* source : {&usbPrint, &irPrint}) { source->held.clear(); source->status = {}; source->stage = PrinterStage::None; source->dir.reset(); }
@@ -3600,18 +4024,19 @@ QString MainWindow::outputFile(const QString& title, const QString& filter, cons
     return QFileInfo(dialog.selectedFiles().first()).absoluteFilePath();
 }
 void MainWindow::save(bool saveAs) {
-    if (!client.available()) return;
+    if (!client.available() || (stopping && !zaurusRemoteKey.isEmpty())) return;
     if (stopping && danaView.finishChanges()) return;
     if (!saveAs) {
         savingPath = sessionPath; send("save", sessionPath);
         return;
     }
+    if (frondFirmware::isZaurus(runningDevice)) return;
     const auto path = outputFile(tr("Save a Copy"), tr("Frond sessions (*.frond)"), deviceLabel() + ".frond");
     if (path.isEmpty()) return;
     saveCopyTo(path);
 }
 void MainWindow::saveCopyTo(const QString& path) {
-    if (!client.available()) return;
+    if (!client.available() || frondFirmware::isZaurus(runningDevice)) return;
     if (frondFirmware::linkedCards(runningDevice)) {
         const bool two = deviceProfileCardSlotCount5(frondFirmware::profile(runningDevice)) > 1;
         const bool stick = deviceProfileLinkedStick5(frondFirmware::profile(runningDevice));
@@ -3886,17 +4311,19 @@ void MainWindow::dropEvent(QDropEvent* event) {
 bool MainWindow::installDropAllowed() const {
     const auto device = currentDevice();
     return client.running() && ((frondFirmware::palmOs(device) && frondFirmware::guestServices(device)) ||
-                                frondFirmware::installsToCard(device));
+                                frondFirmware::installsToCard(device) || frondFirmware::isZaurus(device));
 }
 // Palm databases, or any file for a device that installs onto its SD card.
 QStringList MainWindow::installPaths(const QMimeData* data) const {
-    const bool anyFile = frondFirmware::installsToCard(currentDevice());
+    const auto device = currentDevice();
+    const bool anyFile = frondFirmware::installsToCard(device);
+    const bool zaurus = frondFirmware::isZaurus(device);
     QStringList out;
     for (const auto& url : data->urls()) {
         const auto path = url.toLocalFile();
         const auto suffix = QFileInfo(path).suffix().toLower();
         if (path.isEmpty() || !QFileInfo(path).isFile()) continue;
-        if (anyFile || suffix == "prc" || suffix == "pdb" || suffix == "pqa") out << path;
+        if (anyFile || (zaurus ? suffix == "ipk" : suffix == "prc" || suffix == "pdb" || suffix == "pqa")) out << path;
     }
     return out;
 }
@@ -3914,9 +4341,37 @@ bool MainWindow::saveFrondBench(const QString& path) {
     out.write(in.readAll());
     return out.commit();
 }
+bool MainWindow::canQueueZaurus(int slot) const {
+    if (slot == compactFlashSlot) return zaurusCfKnown && zaurusCfPresent && !zaurusCfInserted &&
+        zaurusCfProtectKnown && !zaurusCfProtect->isChecked();
+    return sdKnown && cardPresent && !cardInserted && protectionKnown && !cardReadOnly->isChecked();
+}
+
+bool MainWindow::sendInstall(const QString& path) {
+    if (!zaurusInstallSlot.isEmpty()) return send("zaurus-install", zaurusInstallSlot + ' ' + path);
+    return send(frondFirmware::installsToCard(runningDevice) ? "install-copy" : "install", path);
+}
+
 void MainWindow::installFiles(const QStringList& paths) {
     if (paths.isEmpty() || busy || installTotal > 0) return;
-    if (paths.size() == 1) { send("install", QFileInfo(paths.first()).absoluteFilePath()); return; }
+    zaurusInstallSlot.clear();
+    if (frondFirmware::isZaurus(runningDevice)) {
+        const bool sd = canQueueZaurus(0), cf = canQueueZaurus(compactFlashSlot);
+        if (!sd && !cf)
+            return failure(tr("Unmount and eject a writable SD or external CF card before queuing packages."));
+        if (sd && cf) {
+            const QStringList names{tr("SD card"), tr("External CF")};
+            bool chosen = false;
+            const auto card = QInputDialog::getItem(this, tr("Queue IPK packages"), tr("Card"), names, 0, false, &chosen);
+            if (!chosen) return;
+            zaurusInstallSlot = card == names.first() ? "sd" : "cf";
+        } else {
+            zaurusInstallSlot = sd ? "sd" : "cf";
+        }
+    } else if (paths.size() == 1) {
+        send("install", QFileInfo(paths.first()).absoluteFilePath());
+        return;
+    }
     installQueue.clear(); installFailed.clear(); installHint = 0;
     for (const auto& path : paths) installQueue << QFileInfo(path).absoluteFilePath();
     installTotal = installQueue.size();
@@ -3928,8 +4383,9 @@ bool MainWindow::installNext() {
     if (installQueue.isEmpty()) return true;
     installCurrent = installQueue.takeFirst();
     const int number = installTotal - installQueue.size();
-    if (send(frondFirmware::installsToCard(runningDevice) ? "install-copy" : "install", installCurrent)) {
-        notify(tr("Installing %1 of %2…").arg(number).arg(installTotal));
+    if (sendInstall(installCurrent)) {
+        notify((zaurusInstallSlot.isEmpty() ? tr("Installing %1 of %2…") : tr("Queuing %1 of %2…"))
+                   .arg(number).arg(installTotal));
         return true;
     }
     installFailed << QFileInfo(installCurrent).fileName() + ": " + tr("Couldn't send it to the emulator.");
@@ -3955,6 +4411,12 @@ bool MainWindow::installResult(bool ok, const QString& code, const QString& mess
     const int hint = installHint, total = installTotal;
     installTotal = 0; installFailed.clear(); installHint = 0;
     if (failed.isEmpty()) return false;
+    if (!zaurusInstallSlot.isEmpty()) {
+        notify(tr("Queued %1 of %2.").arg(total - failed.size()).arg(total));
+        failure(failed.join('\n') + (total > failed.size()
+            ? tr("\n\nInsert the card and open Add/Remove Software on the Zaurus.") : QString()));
+        return true;
+    }
     notify(tr("Installed %1 of %2.").arg(total - failed.size()).arg(total));
     failure(failed.join('\n') + (hint ? tr("\n\nWait for Palm OS to finish its current activity, then try again.") : QString()));
     return true;
@@ -3968,14 +4430,15 @@ bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;
     busy = true; refresh(); notify(tr("Working…"));
     const bool msCard = command == "ms-create" || command == "ms-insert" || command == "ms-export";
-    if (command == "sd-create" || command == "sd-insert" || command == "sd-export" || msCard) {
+    const bool cfCard = command == "cf-insert" || command == "cf-export";
+    if (command == "sd-create" || command == "sd-insert" || command == "sd-export" || msCard || cfCard) {
         // Large cards take a while; the core reports each percent and stops on cancel.
         delete cardProgress;
         cardProgress = new QProgressDialog(command.endsWith("-create") ? tr("Making the card…") :
                                            command.endsWith("-insert") ? tr("Inserting the image…") : tr("Exporting the image…"),
                                            tr("Cancel"), 0, 1000, this);
         cardProgress->setObjectName("cardProgress");
-        cardProgress->setWindowTitle(msCard ? tr("Memory Stick") : tr("SD card"));
+        cardProgress->setWindowTitle(msCard ? tr("Memory Stick") : cfCard ? tr("External CF") : tr("SD card"));
         cardProgress->setWindowModality(Qt::WindowModal);
         cardProgress->setAutoClose(false); cardProgress->setAutoReset(false);
         cardProgress->setMinimumDuration(500);
@@ -3989,8 +4452,9 @@ void MainWindow::stop(bool closeApp) {
     if (!client.running()) { if (closeApp) { allowClose = true; close(); } return; }
     if (stopping) return;
     stopping = true; client.cancelFiles(); refresh();
+    if (zaurusPcLink->isVisible()) zaurusPcLink->reject();
     if (exchangeDialog) exchangeDialog->reject();
-    else if (client.available() && exchangeStage == ExchangeStage::None) save();
+    else if (client.available() && exchangeStage == ExchangeStage::None && zaurusRemoteKey.isEmpty()) save();
     else notify(tr("Waiting to save the session…"));
 }
 void MainWindow::askStop(const QString& message) {
@@ -4016,6 +4480,16 @@ bool MainWindow::event(QEvent* event) {
     if (event->type() == QEvent::ScreenChangeInternal) danaView.setDensity(devicePixelRatioF());
     return QMainWindow::event(event);
 }
+void MainWindow::showZaurusHardware(const QString& state) {
+    if (!frondFirmware::isZaurus(runningDevice)) return;
+    const auto lid = zaurusLid->findData(state.section(' ', 0, 0));
+    const bool locked = state.section(' ', 1, 1) == "locked";
+    if (lid == zaurusLid->currentIndex() && locked == zaurusBatteryDoor->isChecked()) return;
+    zaurusLid->setCurrentIndex(lid);
+    zaurusBatteryDoor->setChecked(locked);
+    refresh();
+}
+
 void MainWindow::showDevice(const QString& id) {
     runningDevice = frondFirmware::deviceFromId(id);
     if (runningDevice == frondFirmware::Device::automatic) runningDevice = frondFirmware::Device::tx;
@@ -4055,6 +4529,7 @@ bool MainWindow::storageSupported() const {
 }
 QString MainWindow::cardCommand(const char* operation, int n) const {
     QString op = QLatin1String(operation);
+    if (n == compactFlashSlot) return QStringLiteral("cf-") + op;
     // frond-68k inserts an ejected card with insert and takes a card file in with attach.
     if (frondFirmware::runs68k(currentDevice())) {
         if (op == "reinsert") op = QStringLiteral("insert");
@@ -4062,9 +4537,11 @@ QString MainWindow::cardCommand(const char* operation, int n) const {
     }
     return (n ? QStringLiteral("sd2-") : memoryStick() ? QStringLiteral("ms-") : QStringLiteral("sd-")) + op;
 }
-QString MainWindow::putInArgument(int n, const QString& identity, bool protect) const {
+QString MainWindow::putInArgument(int n, const QString& identity, bool protect, bool inserted) const {
     if (frondFirmware::runs68k(currentDevice())) return frondCards::attachArgument(sessionFolder(), runningMachineDir(), n);
-    return identity + (protect ? QStringLiteral(" protected") : QStringLiteral(" writable"));
+    auto argument = identity + (protect ? QStringLiteral(" protected") : QStringLiteral(" writable"));
+    if (!inserted && (n == compactFlashSlot || frondFirmware::isZaurus(runningDevice))) argument += QStringLiteral(" ejected");
+    return argument;
 }
 bool MainWindow::secondSlot() const { return frondCards::secondSlot(currentDevice()); }
 bool MainWindow::putInStartCard() {
@@ -4081,6 +4558,7 @@ bool MainWindow::putInStartCard() {
 }
 void MainWindow::beginExchange(int n) {
     if (!client.available() || stopping || !present(n) || exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None) return;
+    if (frondFirmware::isZaurus(runningDevice) && inserted(n)) return;
     if (inserted(n) && QMessageBox::question(this, tr("Open the card's files?"),
             tr("Close any files open on the Palm first. The card is ejected while Files is open and goes back in when you close it."),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
@@ -4101,7 +4579,9 @@ void MainWindow::endExchange() {
         dialog->disconnect(this);
         dialog->close();
     }
-    exchangeStage = ExchangeStage::None; exchangeIdentity.clear(); busy = false; refresh();
+    exchangeStage = ExchangeStage::None; exchangeIdentity.clear();
+    if (cardSlot == compactFlashSlot) cardSlot = 0;
+    busy = false; refresh();
     if (cardsWindow) cardsWindow->refresh();
 }
 void MainWindow::exchangeResult(bool ok, const QString& message) {
@@ -4121,16 +4601,17 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
     // Stopping with the card out: it goes back in before the final save.
     if (ok && stopping && stage == ExchangeStage::TakeOut) {
         exchangeStage = ExchangeStage::PutIn;
-        if (!send(cardCommand("put-in", cardSlot), putInArgument(cardSlot, exchangeIdentity, exchangeProtected))) { endExchange(); save(); }
+        if (!send(cardCommand("put-in", cardSlot), putInArgument(cardSlot, exchangeIdentity, exchangeProtected, exchangeWasInserted))) { endExchange(); save(); }
         return;
     }
     if (!ok || stopping) {
         const bool reinsert = !ok && !stopping && exchangeWasInserted && (stage == ExchangeStage::Save || stage == ExchangeStage::TakeOut);
+        const int n = cardSlot;
         endExchange();
         if (!ok && stage == ExchangeStage::PutIn)
             failure(tr("Couldn't put the card back in. It's kept in the machine and goes in at the next start. %1").arg(message));
         else if (!ok) failure(message);
-        if (reinsert && client.available()) send(cardCommand("reinsert"));
+        if (reinsert && client.available()) send(cardCommand("reinsert", n));
         if (stopping) save();
         return;
     }
@@ -4144,20 +4625,35 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         QFile::remove(frondSessions::markerPath(sessionPath));
         QFile::remove(frondSessions::workPath(sessionPath));
         const auto dir = runningMachineDir();
-        auto slot = frondCards::readSlot(dir, cardSlot);
-        if (!slot.swap) {
-            slot.present = true;
-            slot.swap = true;
-            if (!frondCards::writeSlot(dir, slot, cardSlot)) { exchangeResult(false, tr("Couldn't open the card.")); return; }
+        if (cardSlot == compactFlashSlot) {
+            const auto cards = frondCards::descriptorsOf(sessionPath);
+            const auto cf = std::find_if(cards.cbegin(), cards.cend(), [](const auto& d) { return d.kind == 6; });
+            if (cf == cards.cend() || !frondSessions::writeZaurusCfSwap(dir,
+                    {cf->identity.toHex(), cf->writeProtected, exchangeWasInserted})) {
+                exchangeResult(false, tr("Couldn't open the card."));
+                return;
+            }
+        } else {
+            auto slot = frondCards::readSlot(dir, cardSlot);
+            if (!slot.swap) {
+                slot.present = true;
+                slot.swap = true;
+                if (!frondCards::writeSlot(dir, slot, cardSlot)) { exchangeResult(false, tr("Couldn't open the card.")); return; }
+            }
         }
-        exchangeStage = ExchangeStage::TakeOut; send(cardCommand("take-out"));
+        exchangeStage = ExchangeStage::TakeOut;
+        if (!send(cardCommand("take-out"))) exchangeResult(false, tr("Couldn't reach the emulator."));
     } else if (stage == ExchangeStage::TakeOut) {
         exchangeStage = ExchangeStage::Open;
         openExchangeCard();
     } else if (stage == ExchangeStage::PutIn) {
-        if (!exchangeWasInserted) { exchangeStage = ExchangeStage::EjectAgain; send(cardCommand("eject")); return; }
+        if (!exchangeWasInserted && !frondFirmware::isZaurus(runningDevice)) {
+            exchangeStage = ExchangeStage::EjectAgain;
+            if (!send(cardCommand("eject"))) exchangeResult(false, tr("Couldn't reach the emulator."));
+            return;
+        }
         endExchange();
-        notify(tr("Card put back in."));
+        notify(exchangeWasInserted ? tr("Card put back in.") : tr("Card put back in, ejected."));
     } else if (stage == ExchangeStage::EjectAgain) {
         endExchange();
         notify(tr("Card put back in, ejected."));
@@ -4167,7 +4663,8 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
 // ms.frondmsp): opens it in Files.
 void MainWindow::openExchangeCard() {
     const auto dir = runningMachineDir();
-    const auto path = cardSlot ? dir + "/sd2.frondsd" : !memoryStick() ? dir + "/sd.frondsd"
+    const auto path = cardSlot == compactFlashSlot ? dir + '/' + frondSessions::zaurusExternalCf
+                      : cardSlot ? dir + "/sd2.frondsd" : !memoryStick() ? dir + "/sd.frondsd"
                       : QFileInfo::exists(dir + "/ms.frondms") ? dir + "/ms.frondms" : dir + "/ms.frondmsp";
     std::unique_ptr<frondCardFile::CardFile> card;
     QString error;
@@ -4203,7 +4700,8 @@ void MainWindow::exchangeClosed() {
         return;
     }
     exchangeStage = ExchangeStage::PutIn;
-    if (!send(cardCommand("put-in", cardSlot), putInArgument(cardSlot, exchangeIdentity, exchangeProtected))) exchangeResult(false, tr("Couldn't reach the Palm."));
+    if (!send(cardCommand("put-in", cardSlot), putInArgument(cardSlot, exchangeIdentity, exchangeProtected, exchangeWasInserted)))
+        exchangeResult(false, tr("Couldn't reach the emulator."));
 }
 
 // ---- Cards on the running machine ----
@@ -4215,6 +4713,7 @@ QString MainWindow::runningMachineDir() const {
 QString MainWindow::runningCardName(int n) const {
     // Files names the card while it's taken out for the exchange.
     if (!present(n) && (exchangeStage == ExchangeStage::None || cardSlot != n)) return tr("No card");
+    if (n == compactFlashSlot) return tr("External CF");
     const auto dir = runningMachineDir();
     const auto slot = frondCards::readSlot(dir, n);
     frondCards::Card card;
@@ -4265,6 +4764,8 @@ void MainWindow::pickCard(int n) {
 // Each step goes through the core so the card's writes reach its file before it moves: eject (with
 // the usual confirmation), take out, then put the new card in.
 void MainWindow::changeCard(const QString& in) {
+    if (frondFirmware::isZaurus(runningDevice) && inserted(cardSlot))
+        return failure(tr("Unmount the SD card in the Zaurus and eject it before changing cards."));
     cardMove = {CardMove::None, in};
     if (present(cardSlot) && inserted(cardSlot)) {
         if (QMessageBox::question(this, tr("Eject the card?"), tr("Close any files open on the Palm first."),

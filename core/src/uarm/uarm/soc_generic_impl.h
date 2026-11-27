@@ -71,7 +71,7 @@ bool SocGeneric<T>::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond
 template <class T>
 void SocGeneric<T>::Reset() {
     this->BeforeStateReplacement();
-    this->StateReplaced();
+    this->StateReplaced(SoC::StateReplacement::reset);
     paceBreakSyscall = 0;
     SoC::Reset();
 
@@ -156,7 +156,7 @@ bool SocGeneric<T>::Load(size_t savestateSize, void* savestateData) {
         return false;
     }
 
-    this->StateReplaced();
+    this->StateReplaced(SoC::StateReplacement::load);
     return true;
 }
 

@@ -29,6 +29,7 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
     private val nextId = AtomicInteger(1)
     private val bluetoothReading = AtomicBoolean(false)
     private val fileJobs = ConcurrentHashMap.newKeySet<String>()
+    internal val audioJackLock = Any()
     private val panelState = Object()
     private var panelDesired = false
     private var panelPending = false

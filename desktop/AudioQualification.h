@@ -99,7 +99,8 @@ inline bool lowLatencyAvailable(frondFirmware::Device device) {
     const auto board = frondFirmware::profile(device).board;
     if (board == DeviceBoard5::imx1Zodiac) return false;
     const auto caps = frondFirmware::capabilities(device);
-    return caps.sound && (deviceProfileRunnerEligible5(int(device)) || board == DeviceBoard5::s3c2442Rx1950);
+    return caps.sound && (deviceProfileRunnerEligible5(int(device)) || board == DeviceBoard5::s3c2442Rx1950 ||
+                          board == DeviceBoard5::pxa270Spitz);
 }
 inline QString lowLatencyOption(frondFirmware::Device device, const QString& session, const QString& nor) {
     if (!lowLatencyAvailable(device)) return {};

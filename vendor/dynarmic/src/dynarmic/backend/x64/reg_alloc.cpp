@@ -111,7 +111,7 @@ void HostLocInfo::AddArgReference() {
     ASSERT(accumulated_uses + current_references <= total_uses);
 }
 
-void HostLocInfo::ReleaseOne() {
+void HostLocInfo::ReleaseOne(std::span<HostLoc> value_locations) {
     is_being_used_count--;
     is_scratch = false;
 
@@ -122,17 +122,17 @@ void HostLocInfo::ReleaseOne() {
     current_references--;
 
     if (current_references == 0)
-        ReleaseAll();
+        ReleaseAll(value_locations);
 }
 
-void HostLocInfo::ReleaseAll() {
+void HostLocInfo::ReleaseAll(std::span<HostLoc> value_locations) {
     accumulated_uses += current_references;
     current_references = 0;
 
     is_set_last_use = false;
 
     if (total_uses == accumulated_uses) {
-        values.clear();
+        ClearValues(value_locations);
         accumulated_uses = 0;
         total_uses = 0;
         max_bit_width = 0;
@@ -142,18 +142,25 @@ void HostLocInfo::ReleaseAll() {
     is_scratch = false;
 }
 
-bool HostLocInfo::ContainsValue(const IR::Inst* inst) const {
-    return std::find(values.begin(), values.end(), inst) != values.end();
+void HostLocInfo::RelocateValues(std::span<HostLoc> value_locations, HostLoc loc) const {
+    for (const IR::Inst* inst : values) {
+        value_locations[inst->GetName()] = loc;
+    }
+}
+
+void HostLocInfo::ClearValues(std::span<HostLoc> value_locations) {
+    RelocateValues(value_locations, HostLoc::RSP);
+    values.clear();
 }
 
 size_t HostLocInfo::GetMaxBitWidth() const {
     return max_bit_width;
 }
 
-void HostLocInfo::AddValue(IR::Inst* inst) {
+void HostLocInfo::AddValue(IR::Inst* inst, std::span<HostLoc> value_locations) {
     if (is_set_last_use) {
         is_set_last_use = false;
-        values.clear();
+        ClearValues(value_locations);
     }
     values.push_back(inst);
     total_uses += inst->UseCount();
@@ -256,10 +263,11 @@ bool Argument::IsInMemory() const {
     return HostLocIsSpill(*reg_alloc.ValueLocation(value.GetInst()));
 }
 
-RegAlloc::RegAlloc(BlockOfCode& code, std::vector<HostLoc> gpr_order, std::vector<HostLoc> xmm_order)
+RegAlloc::RegAlloc(BlockOfCode& code, std::vector<HostLoc> gpr_order, std::vector<HostLoc> xmm_order, unsigned last_name)
         : gpr_order(gpr_order)
         , xmm_order(xmm_order)
         , hostloc_info(NonSpillHostLocCount + SpillCount)
+        , value_locations(size_t{last_name} + 1, HostLoc::RSP)
         , code(code) {}
 
 RegAlloc::ArgumentInfo RegAlloc::GetArgumentInfo(IR::Inst* inst) {
@@ -312,7 +320,7 @@ OpArg RegAlloc::UseOpArg(Argument& arg) {
 void RegAlloc::Use(Argument& arg, HostLoc host_loc) {
     ASSERT(!arg.allocated);
     arg.allocated = true;
-    UseImpl(arg.value, {host_loc});
+    UseImpl(arg.value, std::span{&host_loc, 1});
 }
 
 Xbyak::Reg64 RegAlloc::UseScratchGpr(Argument& arg) {
@@ -330,7 +338,7 @@ Xbyak::Xmm RegAlloc::UseScratchXmm(Argument& arg) {
 void RegAlloc::UseScratch(Argument& arg, HostLoc host_loc) {
     ASSERT(!arg.allocated);
     arg.allocated = true;
-    UseScratchImpl(arg.value, {host_loc});
+    UseScratchImpl(arg.value, std::span{&host_loc, 1});
 }
 
 void RegAlloc::DefineValue(IR::Inst* inst, const Xbyak::Reg& reg) {
@@ -348,7 +356,7 @@ void RegAlloc::DefineValue(IR::Inst* inst, Argument& arg) {
 void RegAlloc::Release(const Xbyak::Reg& reg) {
     ASSERT(reg.getKind() == Xbyak::Operand::XMM || reg.getKind() == Xbyak::Operand::REG);
     const auto hostloc = static_cast<HostLoc>(reg.getIdx() + static_cast<size_t>(reg.getKind() == Xbyak::Operand::XMM ? HostLoc::XMM0 : HostLoc::RAX));
-    LocInfo(hostloc).ReleaseOne();
+    LocInfo(hostloc).ReleaseOne(ValueLocations());
 }
 
 Xbyak::Reg64 RegAlloc::ScratchGpr() {
@@ -356,7 +364,7 @@ Xbyak::Reg64 RegAlloc::ScratchGpr() {
 }
 
 Xbyak::Reg64 RegAlloc::ScratchGpr(HostLoc desired_location) {
-    return HostLocToReg64(ScratchImpl({desired_location}));
+    return HostLocToReg64(ScratchImpl(std::span{&desired_location, 1}));
 }
 
 Xbyak::Xmm RegAlloc::ScratchXmm() {
@@ -364,10 +372,10 @@ Xbyak::Xmm RegAlloc::ScratchXmm() {
 }
 
 Xbyak::Xmm RegAlloc::ScratchXmm(HostLoc desired_location) {
-    return HostLocToXmm(ScratchImpl({desired_location}));
+    return HostLocToXmm(ScratchImpl(std::span{&desired_location, 1}));
 }
 
-HostLoc RegAlloc::UseImpl(IR::Value use_value, const std::vector<HostLoc>& desired_locations) {
+HostLoc RegAlloc::UseImpl(IR::Value use_value, std::span<const HostLoc> desired_locations) {
     if (use_value.IsImmediate()) {
         return LoadImmediate(use_value, ScratchImpl(desired_locations));
     }
@@ -399,7 +407,7 @@ HostLoc RegAlloc::UseImpl(IR::Value use_value, const std::vector<HostLoc>& desir
     return destination_location;
 }
 
-HostLoc RegAlloc::UseScratchImpl(IR::Value use_value, const std::vector<HostLoc>& desired_locations) {
+HostLoc RegAlloc::UseScratchImpl(IR::Value use_value, std::span<const HostLoc> desired_locations) {
     if (use_value.IsImmediate()) {
         return LoadImmediate(use_value, ScratchImpl(desired_locations));
     }
@@ -426,7 +434,7 @@ HostLoc RegAlloc::UseScratchImpl(IR::Value use_value, const std::vector<HostLoc>
     return destination_location;
 }
 
-HostLoc RegAlloc::ScratchImpl(const std::vector<HostLoc>& desired_locations) {
+HostLoc RegAlloc::ScratchImpl(std::span<const HostLoc> desired_locations) {
     const HostLoc location = SelectARegister(desired_locations);
     MoveOutOfTheWay(location);
     LocInfo(location).WriteLock();
@@ -488,7 +496,7 @@ void RegAlloc::HostCall(IR::Inst* result_def,
     }
 
     for (HostLoc caller_saved : other_caller_save) {
-        ScratchImpl({caller_saved});
+        ScratchImpl(std::span{&caller_saved, 1});
     }
 }
 
@@ -509,7 +517,7 @@ void RegAlloc::ReleaseStackSpace(size_t stack_space) {
 void RegAlloc::EndOfAllocScope() {
     for (size_t w = 0; w < touched_locs.size(); w++) {
         for (u64 bits = touched_locs[w]; bits; bits &= bits - 1) {
-            hostloc_info[w * 64 + std::countr_zero(bits)].ReleaseAll();
+            hostloc_info[w * 64 + std::countr_zero(bits)].ReleaseAll(ValueLocations());
         }
         touched_locs[w] = 0;
     }
@@ -525,7 +533,13 @@ void RegAlloc::EmitVerboseDebuggingOutput() {
     }
 }
 
-HostLoc RegAlloc::SelectARegister(const std::vector<HostLoc>& desired_locations) const {
+HostLoc RegAlloc::SelectARegister(std::span<const HostLoc> desired_locations) const {
+    if (desired_locations.size() == 1) {
+        const HostLoc loc = desired_locations.front();
+        ASSERT(!LocInfo(loc).IsLocked());
+        return loc;
+    }
+
     // Frond: the same partitions on a copy in a fixed buffer instead of a new vector.
     std::array<HostLoc, 64> buffer;
     ASSERT(desired_locations.size() <= buffer.size());
@@ -549,18 +563,19 @@ HostLoc RegAlloc::SelectARegister(const std::vector<HostLoc>& desired_locations)
 }
 
 std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const {
-    for (size_t i = 0; i < used_locs; i++) {
-        if (hostloc_info[i].ContainsValue(value)) {
-            return static_cast<HostLoc>(i);
-        }
+    const unsigned name = value->GetName();
+    ASSERT(name && name < value_locations.size());
+    const HostLoc loc = value_locations[name];
+    if (loc == HostLoc::RSP) {
+        return std::nullopt;
     }
-
-    return std::nullopt;
+    return loc;
 }
 
 void RegAlloc::DefineValueImpl(IR::Inst* def_inst, HostLoc host_loc) {
     ASSERT_MSG(!ValueLocation(def_inst), "def_inst has already been defined");
-    LocInfo(host_loc).AddValue(def_inst);
+    LocInfo(host_loc).AddValue(def_inst, ValueLocations());
+    value_locations[def_inst->GetName()] = host_loc;
 }
 
 void RegAlloc::DefineValueImpl(IR::Inst* def_inst, const IR::Value& use_inst) {
@@ -618,7 +633,9 @@ void RegAlloc::Move(HostLoc to, HostLoc from) {
 
     EmitMove(bit_width, to, from);
 
-    LocInfo(to) = std::exchange(LocInfo(from), {});
+    auto& destination = LocInfo(to);
+    destination = std::exchange(LocInfo(from), {});
+    destination.RelocateValues(ValueLocations(), to);
 }
 
 void RegAlloc::CopyToScratch(size_t bit_width, HostLoc to, HostLoc from) {
@@ -644,7 +661,11 @@ void RegAlloc::Exchange(HostLoc a, HostLoc b) {
 
     EmitExchange(a, b);
 
-    std::swap(LocInfo(a), LocInfo(b));
+    auto& first = LocInfo(a);
+    auto& second = LocInfo(b);
+    std::swap(first, second);
+    first.RelocateValues(ValueLocations(), a);
+    second.RelocateValues(ValueLocations(), b);
 }
 
 void RegAlloc::MoveOutOfTheWay(HostLoc reg) {
@@ -679,7 +700,6 @@ HostLocInfo& RegAlloc::LocInfo(HostLoc loc) {
     const size_t i = static_cast<size_t>(loc);
     static_assert(NonSpillHostLocCount + SpillCount <= 128);
     touched_locs[i / 64] |= u64(1) << (i % 64);
-    used_locs = std::max(used_locs, i + 1);
     return hostloc_info[i];
 }
 

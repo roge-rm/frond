@@ -12,6 +12,7 @@
 #include "mmiodev_MemoryStickController.h"
 #include "sdcard.h"
 #include "soc_PXA.h"
+#include "ZaurusMicrodriveJournal.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -33,7 +34,7 @@ namespace frondNative {
 // (a v1 file's change counter) it was opened at. `takenOut` are card
 // files a take-out left in the folder for the frontend to move; a save doesn't remove them.
 struct SlotCards {
-    bool sdProtected{}, sd2Protected{};
+    bool sdProtected{}, sd2Protected{}, cfProtected{};
     std::array<uint8_t, frondMachine::identityBytes> msIdentity{};
     uint64_t msChanges{};
     std::vector<std::string> takenOut;
@@ -108,20 +109,23 @@ inline std::filesystem::path machineFolderForSave(const std::filesystem::path& p
     return folder;
 }
 
-// The session metadata, one record a line: "any-firmware" for an rx1950 made with --any-firmware, and
-// "saved-at N", the host's time at the save in Unix seconds. Older sessions hold "any-firmware" alone or nothing.
+// The session metadata, one record a line: "any-firmware" for an rx1950 made with --any-firmware,
+// "saved-at N", the host's time at the save in Unix seconds, and "zaurus-microdrive-v1 TOKEN", the Zaurus
+// Microdrive generation a save published. Older sessions hold "any-firmware" alone or nothing.
 inline constexpr char anyFirmwareRecord[] = "any-firmware";
 inline constexpr char savedAtRecord[] = "saved-at ";
 
 struct SessionRecords {
     bool anyFirmware = false;
     std::optional<int64_t> savedAt;
+    std::string microdrive;  // the Microdrive generation token, empty for none; checked by the reader
 };
 
 inline std::vector<uint8_t> sessionMetadata(const SessionRecords& records) {
     std::string text;
     if (records.anyFirmware) text += std::string(anyFirmwareRecord) + "\n";
     if (records.savedAt) text += savedAtRecord + std::to_string(*records.savedAt) + "\n";
+    if (!records.microdrive.empty()) text += microdriveRecord + records.microdrive + "\n";
     return {text.begin(), text.end()};
 }
 
@@ -143,6 +147,8 @@ inline SessionRecords parseSessionMetadata(const std::vector<uint8_t>& metadata)
             errno = 0;
             const long long value = std::strtoll(number.c_str(), &stop, 10);
             if (!number.empty() && stop && !*stop && errno == 0) records.savedAt = int64_t(value);
+        } else if (line.rfind(microdriveRecord, 0) == 0) {
+            records.microdrive = line.substr(sizeof(microdriveRecord) - 1);
         }
     }
     return records;
@@ -159,7 +165,7 @@ inline void fillState(SoC& soc, frondSession::Contents& contents) {
     };
     contents.nor = copy(soc.GetRomData());
     // A session made with --any-firmware reopens without it; the save's time moves the clock on at a reopen.
-    contents.metadata = sessionMetadata({soc.AnyFirmware(), int64_t(std::time(nullptr))});
+    contents.metadata = sessionMetadata({soc.AnyFirmware(), int64_t(std::time(nullptr)), {}});
     // Internal NAND saves to nand.frondnand (frondNand), never into the .frond.
     contents.memory = copy(soc.GetMemoryData());
     contents.savestate = copy(soc.GetSavestate());
@@ -225,7 +231,8 @@ struct MachineSave {
     std::vector<std::string> keep;
     // sd2: the second SD slot's card, in sdCardStore(1); `second` when this save has one.
     SdSave sd, nand, sd2;
-    bool saved{}, published{}, second{};
+    bool saved{}, published{}, second{}, publishMicrodrive{};
+    std::string microdriveRedo;
     // With no card journal or copy, finishSdSave is only folder work and runs on the worker.
     bool sdFinished{}, sdFinishOk{}, sd2Finished{}, sd2FinishOk{};
 };
@@ -233,7 +240,8 @@ struct MachineSave {
 // `background`: writeMachineSave runs on a worker while the guest goes on.
 inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, MachineSave& out,
                              const std::filesystem::path& loadedFrom = {},
-                             const std::filesystem::path& loadedFolder = {}, bool background = true) {
+                             const std::filesystem::path& loadedFolder = {}, bool background = true,
+                             int rollbackCardSlot = -1) {
     out = {};
     out.sd2.kind = frondMachine::kindSd2;
     const auto started = std::chrono::steady_clock::now();
@@ -249,6 +257,21 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
                   << std::endl;
         return false;
     }
+    if (soc.GetDeviceType() == deviceTypeSpitz) {
+        const auto& managed = managedMicrodriveFolder();
+        if (!managed.empty() && !std::filesystem::equivalent(folder, managed, ec)) {
+            std::cerr << "save: close the Zaurus machine before making a copy" << std::endl;
+            return false;
+        }
+        auto& spitz = static_cast<SocPXA&>(soc);
+        out.publishMicrodrive = !managed.empty();
+        if (out.publishMicrodrive ? (background || !settleMicrodrive(folder, spitz, microdriveGeneration(), false) ||
+                                     !prepareMicrodriveJournal(folder, spitz, out.microdriveRedo))
+                                  : !spitz.FlushMicrodrive()) {
+            std::cerr << "save: the Microdrive journal could not be prepared" << std::endl;
+            return false;
+        }
+    }
     out.folder = folder;
     auto& contents = out.contents;
     auto& temps = out.temps;
@@ -256,6 +279,14 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
     auto& nand = out.nand;
     auto& sd2 = out.sd2;
     fillState(soc, contents);
+    if (out.publishMicrodrive) {
+        const auto& token = out.microdriveRedo.empty() ? microdriveGeneration() : out.microdriveRedo;
+        if (!token.empty()) {
+            auto records = parseSessionMetadata(contents.metadata);
+            records.microdrive = token;
+            contents.metadata = sessionMetadata(records);
+        }
+    }
     const double stateMs = saveTimingMs(started);
     auto fail = [&](const char* why) {
         std::cerr << "save: " << why << " in " << folder << std::endl;
@@ -263,6 +294,8 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
         abandonSdSave(sd);
         abandonSdSave(nand);
         abandonSdSave(sd2);
+        if (!out.microdriveRedo.empty())
+            frondSession::removePath(microdriveJournal::path(folder, out.microdriveRedo));
         return false;
     };
     // Journals and full copies are taken here and written by writeMachineSave.
@@ -291,7 +324,7 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
         frondMachine::Media media;
         const bool ok = pro ? beginSdSave(folder, media, msCtrlrInserted(ms), sd, frondMachine::kindMsPro, msCtrlrReadOnly(ms))
                             : beginSdSave(folder, media, soc.SdInserted(), sd, frondMachine::kindSd,
-                                          slotCards().sdProtected);
+                                          slotCards().sdProtected, nullptr, rollbackCardSlot == 0);
         if (!ok) return fail("the card save could not start");
         temps.emplace_back();  // published by completeSdSave, not renamed with the .frond
         contents.media.push_back(std::move(media));
@@ -303,9 +336,13 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
         contents.media.push_back(std::move(media));
     }
     // The second SD slot's card, from its own store, the same three steps.
-    if (sdCardStore(1).initialized() && soc.HasSecondSdSlot()) {
+    const bool spitz = pxa && soc.GetDeviceType() == deviceTypeSpitz;
+    if (sdCardStore(1).initialized() && (soc.HasSecondSdSlot() || spitz)) {
         frondMachine::Media media;
-        if (!beginSdSave(folder, media, soc.Sd2Inserted(), sd2, frondMachine::kindSd2, slotCards().sd2Protected))
+        const auto kind = spitz ? frondMachine::kindCf : frondMachine::kindSd2;
+        const bool inserted = spitz ? pxa->CompactFlashInserted() : soc.Sd2Inserted();
+        const bool protect = spitz ? slotCards().cfProtected : slotCards().sd2Protected;
+        if (!beginSdSave(folder, media, inserted, sd2, kind, protect, nullptr, rollbackCardSlot == 1))
             return fail("the second card save could not start");
         temps.emplace_back();  // published by completeSdSave
         contents.media.push_back(std::move(media));
@@ -369,6 +406,8 @@ inline bool finishMachineSave(MachineSave& save, SoC& soc) {
         abandonSdSave(save.sd);
         abandonSdSave(save.nand);
         abandonSdSave(save.sd2);
+        if (!save.microdriveRedo.empty())
+            frondSession::removePath(microdriveJournal::path(folder, save.microdriveRedo));
         std::cerr << "save: the session file could not be written in " << folder << std::endl;
         return false;
     }
@@ -376,8 +415,15 @@ inline bool finishMachineSave(MachineSave& save, SoC& soc) {
     if (soc.GetNand() && nandRawBytes(soc.GetNand()))
         frondNand::completeSave(folder, soc.GetNand(), save.nand);
     bool finished = true;
+    if (save.publishMicrodrive) {
+        if (!save.microdriveRedo.empty()) microdriveGeneration() = save.microdriveRedo;
+        auto& spitz = static_cast<SocPXA&>(soc);
+        finished = frondSession::syncDir(folder) && settleMicrodrive(folder, spitz, microdriveGeneration(), true) &&
+                   publishMicrodriveId(folder);
+        if (!finished) std::cerr << "save: the Microdrive journal still needs recovery" << std::endl;
+    }
     if (!save.sdFinished)
-        finished = completeSdSave(folder, save.sd);
+        finished = completeSdSave(folder, save.sd) && finished;
     else if (save.sdFinishOk)
         afterSdPublish(folder, save.sd.kind);
     else

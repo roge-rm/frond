@@ -32,6 +32,7 @@ import com.rm.frond.SyncProtocol
 import com.rm.frond.LinkStore
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
+import com.rm.frond.RunningSheets.ZaurusUsbMode
 import com.rm.frond.UsbLink
 
 internal fun relayText(s: NetRelay.Status): String = when (s.phase) {
@@ -194,7 +195,11 @@ fun CardEjectDialog(model: RunningModel, files: Boolean, n: Int = 0, onDismiss: 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Eject the card?") },
-        text = { Text(if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
+        text = { Text(when {
+            model.device.zaurus -> "Unmount the card in Qtopia first."
+            files -> "Close any files open on the Palm first. Frond saves a recovery session before the exchange."
+            else -> "Close any files open on the Palm first."
+        }) },
         confirmButton = {
             TextButton(onClick = {
                 onDismiss()
@@ -228,7 +233,7 @@ fun CardPickerDialogs(model: RunningModel) {
         AlertDialog(
             onDismissRequest = { model.confirmChange(false) },
             title = { Text("Eject the card?") },
-            text = { Text("Close any files open on the Palm first.") },
+            text = { Text(if (model.device.zaurus) "Unmount the card in Qtopia first." else "Close any files open on the Palm first.") },
             confirmButton = { TextButton(onClick = { model.confirmChange(true) }) { Text("Eject") } },
             dismissButton = { TextButton(onClick = { model.confirmChange(false) }) { Text("Cancel") } },
         )
@@ -281,7 +286,13 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             }
             ConnectionChoiceDialog("Serial port", current, onDismiss, choices) { onDismiss(); model.changeSerial(it) }
         }
-        LinkKind.USB -> if (model.device.usbNetwork)
+        LinkKind.USB -> if (model.device.zaurus) {
+            val current = model.zaurusUsbCable ?: return
+            ConnectionChoiceDialog("USB cable", current.arg, onDismiss, ZaurusUsbMode.choices(current)) {
+                onDismiss()
+                ZaurusUsbMode.fromState(it)?.let(model::changeZaurusUsbCable)
+            }
+        } else if (model.device.usbNetwork)
             ConnectionChoiceDialog("USB", if (model.usbCable) "on" else "off", onDismiss, listOf("off" to "Off", "on" to "On")) {
                 onDismiss(); model.changeUsbCable(it == "on")
             }

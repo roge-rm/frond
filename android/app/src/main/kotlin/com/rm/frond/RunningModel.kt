@@ -6,6 +6,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
+import com.rm.frond.RunningSheets.ZaurusUsbMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -45,12 +46,12 @@ class RunningModel(
         private set
     private var secondWriteProtected by mutableStateOf<Boolean?>(null)
     fun protectionOf(n: Int) = if (n == 0) writeProtected else secondWriteProtected
-    override val title get() = device.cardLabel
+    override val title get() = if (device.zaurus && cardSlot == 1) "CompactFlash" else device.cardLabel
     override val canWrite get() = (!device.memoryStick && !device.sdWriteProtection) || protectionOf(cardSlot) == false
-    override val leaveLabel get() = "Insert"
+    override val leaveLabel get() = if (device.zaurus) "Done" else "Insert"
     override val prompt = ClashPrompt()
-    // The second SD slot: the Zodiac's and the Dana's.
-    val twoSlots = Cards.hasSlot(device, 1)
+    // The second slot takes SD on the Zodiac and Dana, and CompactFlash on the Zaurus.
+    val twoSlots = Cards.hasSlot(device, 1) || device.zaurus
     var secondState by mutableStateOf(SdCard.State.UNKNOWN)
         private set
     var secondShown by mutableStateOf(SlotShown("No card"))
@@ -93,6 +94,19 @@ class RunningModel(
         var s = c.stateOf(n)
         // Only the first read the core answers counts.
         if (s == SdCard.State.UNKNOWN || startPutIns[n] || SdCard.editing != null) return s
+        if (device.zaurus && n == 1) {
+            val saved = machineDir?.let { ZaurusCfSlot.read(it) }
+            if (saved != null) {
+                try {
+                    s = c.restoreCompactFlash(s, saved)
+                } catch (e: Exception) {
+                    startPutInError = "Couldn't restore the removable CF card" to SdCard.message(e)
+                    return SdCard.State.UNKNOWN
+                }
+            }
+            startPutIns[n] = true
+            return s
+        }
         startPutIns[n] = true
         if (s != SdCard.State.NONE || (n == 0 && !device.runs68k)) return s
         val dir = machineDir ?: return s
@@ -158,6 +172,12 @@ class RunningModel(
                 if (!waitingForGdb) return@runOnUiThread
                 waitingForGdb = false
                 readCard()
+                readZaurusSdFamily()
+                readZaurusCfNetwork()
+                readZaurusUsbDrive()
+                loadUsbCable()
+                readZaurusHardware()
+                readZaurusRemote()
                 readKeyboard()
                 readHold()
                 readGamepad()
@@ -253,6 +273,9 @@ class RunningModel(
         cardCancel?.let {
             it.set(true)
             cancellingFiles = true
+            usbCopyInput?.let { input ->
+                activity.lifecycleScope.launch(Dispatchers.IO) { runCatching { input.close() } }
+            }
             return
         }
         val cancellation = card?.cancelJob()
@@ -282,6 +305,7 @@ class RunningModel(
         private set
 
     private fun slotInfo(s: SdCard.State, n: Int = 0): SlotShown {
+        if (device.zaurus && n == 1) return SlotShown(if (s == SdCard.State.NONE) "No card" else "CompactFlash card")
         val dir = machineDir
         val pending = n == 0 && SdCard.pendingFor(activity.applicationContext, FrondActivity.running?.session) != null
         if (s == SdCard.State.PALM_WIFI) return SlotShown("Palm Wi-Fi Card")
@@ -315,6 +339,7 @@ class RunningModel(
     @Volatile private var cardCancel: java.util.concurrent.atomic.AtomicBoolean? = null
 
     fun openPicker(select: String? = null, n: Int = cardSlot) {
+        if (device.zaurus && n == 1) return
         val dir = machineDir ?: return
         if (busy != null || waiting() || stateOf(n) == SdCard.State.PALM_WIFI ||
             shownOf(n).pending || shownOf(n).oldPlace || !selectSlot(n)) return
@@ -350,17 +375,21 @@ class RunningModel(
         val p = picker ?: return
         if (!yes) return
         picker = null
-        changeCard(p.selected)
+        changeCard(p.selected, ejectConfirmed = true)
     }
 
     // Eject (confirmed), take the old card out to the drawer, then put the new one in. The old
     // card is never lost: a failed put-in sends the new one back to the drawer.
-    fun changeCard(to: String?) {
+    fun changeCard(to: String?, ejectConfirmed: Boolean = false) {
         val dir = machineDir ?: return
         job("Changing the card", "Couldn't change the card") { c ->
             val state = c.state()
             if (state == SdCard.State.PALM_WIFI) throw SdCard.Failed("Eject the Palm Wi-Fi Card first.")
-            if (state == SdCard.State.INSERTED) c.eject()
+            if (state == SdCard.State.INSERTED) {
+                if (device.zaurus && !ejectConfirmed)
+                    throw SdCard.Failed("Unmount the card in Qtopia, then eject it in Frond.")
+                c.eject()
+            }
             val n = c.slot
             if (c.state() != SdCard.State.NONE) {
                 val (identity, protected) = c.takeOut()
@@ -375,6 +404,36 @@ class RunningModel(
                 Cards.putInFailed(sessions, dir, to, n)
                 throw e
             }
+        }
+    }
+
+    fun insertCompactFlash(uri: Uri) {
+        if (!device.zaurus || !selectSlot(1)) return
+        job("Copying", "Couldn't insert the CompactFlash card", cancellable = true) { it.insertCompactFlash(uri) }
+    }
+
+    fun queueZaurusPackages(uris: List<Uri>, n: Int) {
+        if (!device.zaurus || uris.isEmpty() || !selectSlot(n)) return
+        job("Queuing packages", "Couldn't queue all packages", cancellable = true) { c ->
+            val failures = mutableListOf<String>()
+            var queued = 0
+            for ((index, uri) in uris.withIndex()) {
+                if (c.cancelled) throw SdCard.Failed("File transfer cancelled.", "cancelled")
+                try {
+                    c.queueZaurusPackage(uri)
+                    queued++
+                } catch (e: Exception) {
+                    if (c.cancelled) throw SdCard.Failed("File transfer cancelled.", "cancelled")
+                    failures += "${displayName(uri) ?: "IPK package"}: ${SdCard.message(e)}"
+                }
+                progressed((index + 1f) / uris.size)
+            }
+            val next = "Reinsert the card and open Add/Remove Software on the Zaurus."
+            if (failures.isNotEmpty()) {
+                val summary = if (queued == 0) "" else "$queued queued. $next\n\n"
+                throw SdCard.Failed(summary + failures.joinToString("\n"))
+            }
+            activity.runOnUiThread { note = "$queued queued. $next" }
         }
     }
 
@@ -1034,14 +1093,29 @@ class RunningModel(
     var usbCable by mutableStateOf(false)
         private set
 
-    // Reads the cable back from the core's usb-state ("on ..." or "off ..."), so the row matches a session that
-    // was saved or started with it in.
+    var zaurusUsbCable by mutableStateOf<ZaurusUsbMode?>(null)
+        private set
+
+    fun acceptUsbCable(state: String) {
+        if (device.zaurus) zaurusUsbCable = ZaurusUsbMode.fromState(state)
+        else if (device.usbNetwork) usbCable = state.startsWith("on")
+    }
+
     fun loadUsbCable() {
         val l = link ?: return
-        if (!device.usbNetwork) return
+        if ((!device.usbNetwork && !device.zaurus) || waitingForGdb) return
         activity.lifecycleScope.launch {
             val reply = withContext(Dispatchers.IO) { runCatching { l.request("usb-state", timeoutSeconds = 5) }.getOrNull() }
-            if (reply != null && reply.ok) usbCable = reply.message.startsWith("on")
+            if (reply != null && reply.ok) acceptUsbCable(reply.message)
+        }
+    }
+
+    fun changeZaurusUsbCable(mode: ZaurusUsbMode) {
+        if (!device.zaurus || mode == zaurusUsbCable || mode == ZaurusUsbMode.ENUMERATION_PROBE) return
+        device("Changing USB cable", "Couldn't change the USB cable", false) { l ->
+            val reply = l.request("usb-mode", mode.arg, timeoutSeconds = 30)
+            if (reply.ok) activity.runOnUiThread { acceptUsbCable(reply.message) }
+            if (reply.ok) null else reply.message
         }
     }
 
@@ -1136,6 +1210,245 @@ class RunningModel(
     fun reset() = device("Resetting", "Couldn't reset", true) { send(it, "reset") }
 
     fun rotate() = device("Rotating", "Couldn't rotate", true) { send(it, "rotate") }
+
+    var zaurusMmc by mutableStateOf<Boolean?>(null)
+        private set
+
+    private fun showZaurusSdFamily(reply: ControlLink.Reply) {
+        if (!reply.ok) return
+        zaurusMmc = when (reply.message) {
+            "mmc" -> true
+            "sd" -> false
+            else -> null
+        }
+    }
+
+    fun readZaurusSdFamily() {
+        val l = link ?: return
+        if (!device.zaurus || waitingForGdb) return
+        activity.lifecycleScope.launch {
+            showZaurusSdFamily(withContext(Dispatchers.IO) { l.request("zaurus-sd-family", timeoutSeconds = 5) })
+        }
+    }
+
+    fun changeZaurusSdFamily(mmc: Boolean) = device("Changing card type", "Couldn't change the card type", false) { l ->
+        val reply = l.request("zaurus-sd-family", if (mmc) "mmc" else "sd", timeoutSeconds = 5)
+        activity.runOnUiThread { showZaurusSdFamily(reply) }
+        if (reply.ok) null else reply.message
+    }
+
+    var zaurusCfNetwork by mutableStateOf<String?>(null)
+        private set
+
+    fun readZaurusCfNetwork() {
+        val l = link ?: return
+        if (!device.zaurus || waitingForGdb) return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("zaurus-cf-network", timeoutSeconds = 5) }
+            if (reply.ok) zaurusCfNetwork = reply.message
+        }
+    }
+
+    fun changeZaurusCfNetwork(mode: String) =
+        device("Changing CF card", "Couldn't change the CF card", false) { l ->
+            val reply = l.request("zaurus-cf-network", mode, timeoutSeconds = 5)
+            if (reply.ok) activity.runOnUiThread { zaurusCfNetwork = reply.message }
+            if (reply.ok) null else reply.message
+        }
+
+    internal var pcLink by mutableStateOf<ZaurusPcLink?>(null)
+        private set
+
+    fun openPcLink(pauseAudio: Boolean, soundEnabled: () -> Boolean, onVisibilityChanged: () -> Unit) {
+        val l = link ?: return
+        if (!device.zaurus || pcLink != null || busy != null || waiting() ||
+            !ZaurusUsbMode.portFree(zaurusUsbCable, zaurusUsbDriveAttached)) return
+        val browser = ZaurusPcLink(activity, l, pauseAudio, soundEnabled, onClose = {
+            pcLink = null
+            onVisibilityChanged()
+        }, notify = { note = it })
+        pcLink = browser
+        onVisibilityChanged()
+        browser.refresh()
+    }
+
+    var zaurusUsbDriveAttached by mutableStateOf<Boolean?>(null)
+        private set
+
+    @Volatile private var usbCopyInput: java.io.InputStream? = null
+
+    private fun showZaurusUsbDrive(reply: ControlLink.Reply) {
+        if (reply.code == "timeout" || reply.code == "closed") zaurusUsbDriveAttached = null
+        else if (reply.ok) zaurusUsbDriveAttached = when {
+            reply.message == "off" -> false
+            reply.message.startsWith("drive ") -> true
+            else -> null
+        }
+    }
+
+    fun readZaurusUsbDrive() {
+        val l = link ?: return
+        if (!device.zaurus || waitingForGdb) return
+        activity.lifecycleScope.launch {
+            showZaurusUsbDrive(withContext(Dispatchers.IO) { l.request("zaurus-usb-host", timeoutSeconds = 5) })
+        }
+    }
+
+    fun insertZaurusUsbDrive(uri: Uri) {
+        val l = link ?: return
+        if (busy != null || waiting()) return
+        val cancel = java.util.concurrent.atomic.AtomicBoolean(false)
+        cardCancel = cancel
+        canCancelFiles = true
+        cancellingFiles = false
+        busy = "Opening USB flash drive"
+        activity.lifecycleScope.launch {
+            try {
+                val reply = copyAndAttachUsbDrive(l, uri, cancel)
+                if (reply == null) note = "Cancelled"
+                else {
+                    showZaurusUsbDrive(reply)
+                    if (!reply.ok) alert = "Couldn't insert the USB flash drive" to reply.message
+                }
+            } finally {
+                cardCancel = null
+                canCancelFiles = false
+                cancellingFiles = false
+                busy = null
+            }
+        }
+    }
+
+    private suspend fun copyAndAttachUsbDrive(l: ControlLink, uri: Uri, cancel: java.util.concurrent.atomic.AtomicBoolean) =
+        withContext(Dispatchers.IO) {
+            val cancelled = { cancel.get() || !isActive }
+            val fail = { message: String -> ControlLink.Reply(false, "image", message) }
+            val limit = minOf(activity.cacheDir.usableSpace, 0xffffffffL * 512)
+            val image = try {
+                File.createTempFile("zaurus-usb-", ".img", activity.cacheDir)
+            } catch (_: java.io.IOException) {
+                return@withContext fail("Couldn't create a local copy of the image.")
+            }
+            try {
+                val input = activity.contentResolver.openInputStream(uri)
+                    ?: return@withContext fail("Couldn't open that disk image.")
+                usbCopyInput = input
+                val copied = input.use { BoundedCardImage.copy(it, image, limit, cancelled) }
+                usbCopyInput = null
+                if (!copied) return@withContext fail("Couldn't copy the image into the available space.")
+                withContext(Dispatchers.Main.immediate) { canCancelFiles = false }
+                if (cancelled()) null else l.request("zaurus-usb-host", image.absolutePath, timeoutSeconds = 15)
+            } catch (_: java.io.IOException) {
+                if (cancelled()) null else fail("Couldn't read that disk image.")
+            } catch (_: SecurityException) {
+                fail("Couldn't open that disk image.")
+            } finally {
+                usbCopyInput = null
+                // The emulator holds the live read-only file descriptor after a successful insert.
+                image.delete()
+            }
+        }
+
+    fun ejectZaurusUsbDrive() = device("Ejecting USB flash drive", "Couldn't eject the USB flash drive", false) { l ->
+        val reply = l.request("zaurus-usb-host", "off", timeoutSeconds = 5)
+        activity.runOnUiThread { showZaurusUsbDrive(reply) }
+        if (reply.ok) null else reply.message
+    }
+
+    var zaurusRemoteAttached by mutableStateOf<Boolean?>(null)
+        private set
+
+    fun readZaurusRemote() {
+        val l = link ?: return
+        if (!device.zaurus || waitingForGdb || busy != null) return
+        zaurusRemoteAttached = null
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("zaurus-remote-state", timeoutSeconds = 5) }
+            zaurusRemoteAttached = if (reply.ok) when (reply.message) {
+                "in" -> true
+                "out" -> false
+                else -> null
+            } else null
+        }
+    }
+
+    fun changeZaurusRemote(inserted: Boolean) = changeZaurusJack("zaurus-remote", inserted)
+
+    fun changeZaurusHeadphones(inserted: Boolean) = changeZaurusJack("headphones", inserted)
+
+    private fun changeZaurusJack(command: String, inserted: Boolean) =
+        device("Changing audio jack", "Couldn't change the audio jack", false) { l ->
+            synchronized(l.audioJackLock) {
+                val reply = l.request(command, if (inserted) "in" else "out", timeoutSeconds = 5)
+                if (!reply.ok) return@device reply.message
+                val remote = command == "zaurus-remote" && reply.message == "in"
+                val headphones = command == "headphones" && reply.message == "in"
+                activity.runOnUiThread {
+                    zaurusRemoteAttached = remote
+                    settings = settings.copy(headphonesIn = headphones)
+                }
+                try {
+                    sessionId?.let { id ->
+                        Sessions.updateSettings(activity.applicationContext, id) { it.copy(headphonesIn = headphones) }
+                    }
+                    null
+                } catch (e: Exception) {
+                    "Couldn't write the machine settings."
+                }
+            }
+        }
+
+    fun tapZaurusRemote(key: String) =
+        device("Pressing remote button", "Couldn't use the remote", false) { l ->
+            val pressed = l.request("zaurus-remote-key", "$key down", timeoutSeconds = 5)
+            val released: ControlLink.Reply
+            try {
+                if (pressed.ok) Thread.sleep(400)
+            } finally {
+                released = l.request("zaurus-remote-key", "$key up", timeoutSeconds = 5)
+            }
+            when {
+                !pressed.ok -> pressed.message
+                !released.ok -> released.message
+                else -> null
+            }
+        }
+
+    var zaurusLid by mutableStateOf<String?>(null)
+        private set
+    var zaurusDoorLocked by mutableStateOf<Boolean?>(null)
+        private set
+
+    private fun showZaurusHardware(reply: ControlLink.Reply) {
+        if (!reply.ok) return
+        val fields = reply.message.split(' ')
+        zaurusLid = fields.firstOrNull()
+        zaurusDoorLocked = when (fields.getOrNull(1)) {
+            "locked" -> true
+            "unlocked" -> false
+            else -> null
+        }
+    }
+
+    fun readZaurusHardware() {
+        val l = link ?: return
+        if (!device.zaurus || waitingForGdb) return
+        activity.lifecycleScope.launch {
+            showZaurusHardware(withContext(Dispatchers.IO) { l.request("zaurus-hardware", timeoutSeconds = 5) })
+        }
+    }
+
+    fun changeZaurusLid(mode: String) = device("Moving lid", "Couldn't move the lid", false) { l ->
+        val reply = l.request("zaurus-lid", mode, timeoutSeconds = 5)
+        activity.runOnUiThread { showZaurusHardware(reply) }
+        if (reply.ok) null else reply.message
+    }
+
+    fun changeZaurusDoor(locked: Boolean) = device("Moving battery switch", "Couldn't move the battery switch", false) { l ->
+        val reply = l.request("zaurus-battery-door", if (locked) "locked" else "unlocked", timeoutSeconds = 5)
+        activity.runOnUiThread { showZaurusHardware(reply) }
+        if (reply.ok) null else reply.message
+    }
 
     var cradleAttached by mutableStateOf<Boolean?>(null)
         private set

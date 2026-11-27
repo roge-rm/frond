@@ -66,6 +66,7 @@ class FirmwareInputTest : public QObject {
         QCOMPARE(ids(DeviceGroup5::hp), QStringList({"hp-ipaq-rx1950"}));
         QCOMPARE(ids(DeviceGroup5::alphaSmart), QStringList({"alphasmart-dana", "alphasmart-dana-wireless"}));
         QCOMPARE(ids(DeviceGroup5::ibm), QStringList({"ibm-workpad-c500"}));
+        QCOMPARE(ids(DeviceGroup5::sharp), QStringList({"sharp-zaurus-sl-c3000"}));
         size_t total = 0;
         for (auto group : deviceGroups5) total += frondFirmware::devicesInGroup(group).size();
         QCOMPARE(total, frondFirmware::devices.size());

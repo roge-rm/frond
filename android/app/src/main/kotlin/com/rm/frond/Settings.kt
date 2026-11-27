@@ -13,8 +13,7 @@ enum class ScreenSize(val label: String, val arg: String) {
     FILL("Fill", "fill"),
 }
 
-// PROGRAM turns the app the way the running program holds the device, on a device whose OS turns its
-// screen (the Zodiac); elsewhere it follows the phone.
+// PROGRAM follows the Zodiac's display orientation or the Zaurus's swivel switch. On other devices it follows the phone.
 enum class Orientation(val label: String, val request: Int) {
     PROGRAM("Follow the program", ActivityInfo.SCREEN_ORIENTATION_FULL_USER),
     PHONE("Follow the phone", ActivityInfo.SCREEN_ORIENTATION_FULL_USER),

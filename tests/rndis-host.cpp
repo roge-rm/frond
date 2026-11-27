@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -358,9 +359,9 @@ static void dhcpTests() {
     assert(quiet.Receive(f) && get32(&f[14 + 20 + 8 + 4]) != 0);
 }
 
-// A free UDP port on 127.0.0.1 (bound and let go).
-static uint16_t freeUdpPort() {
-    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+// A free port on 127.0.0.1 (bound and let go).
+static uint16_t freeLoopbackPort(int type) {
+    const int fd = socket(AF_INET, type, 0);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -382,7 +383,7 @@ static void connectRequestTests() {
     uint16_t port = 0;
     Bytes f, request;
     for (int attempt = 0; attempt < 5 && !bound; ++attempt) {
-        port = freeUdpPort();
+        port = freeLoopbackPort(SOCK_DGRAM);
         auto link = std::make_unique<frondNet::DesktopLink>(mac, port);
         link->Poll(0);
         assert(link->Receive(f));
@@ -445,6 +446,39 @@ static void connectRequestTests() {
     assert(got);
 }
 
+static void tcpForwardTests() {
+    auto link = std::make_unique<frondNet::DesktopLink>(mac, 0);
+    assert(link->AddTcpForward(0, 139) == EINVAL);
+    assert(link->AddTcpForward(21139, 139) == ENOTCONN);
+    Bytes frame, request;
+    link->Poll(0);
+    assert(link->Receive(frame));
+    link->Input(dhcpAnswer(frame, 2).data(), 342, ms);
+    assert(link->Receive(request));
+    link->Input(dhcpAnswer(request, 5).data(), 342, 2 * ms);
+    assert(link->Address() == 0xa9fe0202 && link->Server() == 0xa9fe0201);
+
+    uint16_t port = 0;
+    for (int i = 0; i < 5; ++i) {
+        const auto candidate = freeLoopbackPort(SOCK_STREAM);
+        const int error = link->AddTcpForward(candidate, 139);
+        if (!error) { port = candidate; break; }
+        assert(error == EADDRINUSE);
+    }
+    assert(port);
+    assert(link->AddTcpForward(port, 139) == EADDRINUSE);
+
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(fd >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    link.reset();
+    assert(bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    close(fd);
+}
+
 int main() {
     messageTests();
     bringUpTests();
@@ -452,6 +486,7 @@ int main() {
     bulkTests();
     dhcpTests();
     connectRequestTests();
+    tcpForwardTests();
     std::puts("rndis-host: ok");
     return 0;
 }

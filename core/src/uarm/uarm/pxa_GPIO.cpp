@@ -39,6 +39,9 @@ struct PxaGpio {
 
     GpioChangedNotifF inputObserver;
     void* inputObserverContext;
+    bool (*polledInputRead)(void*);
+    void* polledInputContext;
+    unsigned polledInputPin;
     bool holdOutputs;
     uint32_t heldDirs[4], heldLatches[4];
 
@@ -57,6 +60,15 @@ struct PxaGpio {
     }
 };
 
+static uint32_t pxaGpioPrvReadLevels(const PxaGpio* gpio, unsigned bank) {
+    const uint32_t levels = gpio->levels[bank];
+    if (!gpio->polledInputRead || gpio->polledInputPin / 32 != bank) return levels;
+    const uint32_t bit = 1u << (gpio->polledInputPin % 32);
+    const auto* dirs = gpio->holdOutputs ? gpio->heldDirs : gpio->dirs;
+    if (dirs[bank] & bit) return levels;
+    return gpio->polledInputRead(gpio->polledInputContext) ? levels | bit : levels & ~bit;
+}
+
 static void pxaGpioPrvRecalcValues(struct PxaGpio *gpio, uint_fast8_t which) {
     uint32_t val, newVal, oldVal = gpio->levels[which], t;
 
@@ -68,18 +80,6 @@ static void pxaGpioPrvRecalcValues(struct PxaGpio *gpio, uint_fast8_t which) {
     val = gpio->holdOutputs ? gpio->heldDirs[which] : gpio->dirs[which];
     const uint32_t latch = gpio->holdOutputs ? gpio->heldLatches[which] : gpio->latches[which];
     newVal = (latch & val) | (gpio->inputs[which] & (~val));
-
-    // process change notifs
-    t = newVal ^ oldVal;
-    while (t) {
-        uint32_t bit = 31 - __builtin_clz(t), num = 32 * which + bit;
-
-        t &= ~(1 << bit);
-
-        if (gpio->notifF[num])
-            gpio->notifF[num](gpio->notifD[num], num, !!(oldVal & (1 << bit)),
-                              !!(newVal & (1 << bit)));
-    }
 
     // -- even AFRs read input value
     /*
@@ -115,6 +115,18 @@ static void pxaGpioPrvRecalcValues(struct PxaGpio *gpio, uint_fast8_t which) {
         uint32_t wentLo = oldVal & ~newVal;
 
         gpio->detStatus[which] |= (wentHi & gpio->riseDet[which]) | (wentLo & gpio->fallDet[which]);
+    }
+
+    // A callback can change an input on this bank. Commit the strobe and its edges first.
+    t = newVal ^ oldVal;
+    while (t) {
+        uint32_t bit = 31 - __builtin_clz(t), num = 32 * which + bit;
+
+        t &= ~(1 << bit);
+
+        if (gpio->notifF[num])
+            gpio->notifF[num](gpio->notifD[num], num, !!(oldVal & (1 << bit)),
+                              !!(newVal & (1 << bit)));
     }
 }
 
@@ -244,7 +256,7 @@ static bool pxaGpioPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
             case 0:
             case 1:
             case 2:
-                val = gpio->levels[pa - 0];
+                val = pxaGpioPrvReadLevels(gpio, pa);
                 break;
 
             case 67:
@@ -436,12 +448,20 @@ bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin) {
     return pin < gpio->nGpios && (gpio->inputs[pin / 32] & (1u << (pin % 32)));
 }
 
+void pxaGpioSetPolledInput(PxaGpio* gpio, unsigned pin, bool (*read)(void*), void* context) {
+    if (pin >= gpio->nGpios) return;
+    gpio->polledInputRead = read;
+    gpio->polledInputContext = context;
+    gpio->polledInputPin = pin;
+}
+
 bool pxaGpioPeekLevel(const PxaGpio* gpio, uint32_t pa, uint32_t* value) {
-    // GPLR0-2 at +0, +4 and +8, and GPLR3 at +0x100, as a read of them gives.
+    // GPLR0-2 at +0, +4 and +8, and GPLR3 at +0x100.
     const uint32_t at = pa - PXA_GPIO_BASE;
-    if (at == 0x100) *value = gpio->levels[3];
-    else if (at <= 8 && !(at & 3)) *value = gpio->levels[at >> 2];
-    else return false;
+    if (at != 0x100 && (at > 8 || (at & 3))) return false;
+    const unsigned bank = at == 0x100 ? 3 : at >> 2;
+    if (gpio->polledInputRead && gpio->polledInputPin / 32 == bank) return false;
+    *value = gpio->levels[bank];
     return true;
 }
 

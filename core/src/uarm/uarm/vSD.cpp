@@ -12,7 +12,8 @@
 #include "sd_log_limit.h"
 #include "savestate/savestateAll.h"
 
-#define SAVESTATE_VERSION 2
+constexpr uint32_t sdStateVersion = 2;
+constexpr uint32_t mmcStateVersion = 3;
 
 // this is not and will never be a full SD card emulator, deal with it!
 
@@ -44,6 +45,8 @@ struct VSD {
     uint16_t rca;
 
     bool hcCard;
+    bool supportsLegacyMmc;
+    bool legacyMmc;
     bool writeProtected;  // The host card descriptor owns this switch.
     bool acmdShift;
     bool reportAcmdNext;
@@ -92,6 +95,9 @@ struct VSD {
             eraseStart = eraseEnd = 0;
         }
 
+        if (version >= mmcStateVersion) chunkHelper.DoBool(legacyMmc);
+        else legacyMmc = false;
+
         state = static_cast<State>(state8);
     }
 };
@@ -112,6 +118,10 @@ static void vsdCardReset(struct VSD *vsd) {
     vsd->state = StateIdle;
     vsd->prevAcmd41Param = 0;
     vsd->initWaitLeft = 20;
+    if (vsd->legacyMmc) {
+        vsd->haveExpectedNumBlocks = false;
+        vsd->numBlocksExpected = 0;
+    }
 }
 
 static uint32_t vsdCalcR1resp(struct VSD *vsd, uint32_t r1bicBits, uint32_t r1orrBits) {
@@ -264,6 +274,12 @@ static void vsdGetCsd(struct VSD *vsd, uint8_t *reply) {
         vsdGetCsdV2(vsd, reply);
     else
         vsdGetCsdV1(vsd, reply);
+    if (vsd->legacyMmc) {
+        reply[0] = 0x4c;  // MMC CSD structure 1, system specification 3.x
+        reply[3] = 0x2a;  // 20 MHz
+        reply[10] &= 0x80;  // Single-block erase groups
+        reply[11] = 0;
+    }
     if (vsd->writeProtected) reply[14] |= 0x10;  // TMP_WRITE_PROTECT
 }
 
@@ -285,6 +301,25 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             vsdCardReset(vsd);
             replTyp = SdReplyNone;
             break;
+
+        case 1:  // MMC SEND_OP_COND
+            if (!vsd->legacyMmc) {
+                replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnknownCommand, wasAcmd);
+                break;
+            }
+            if (vsd->state != StateIdle && vsd->state != StateReady) return SdReplyNone;
+            reply[0] = 0x3f;
+            reply[1] = 0;
+            reply[2] = 0xff;
+            reply[3] = 0x80;
+            reply[4] = 0;
+            reply[5] = 0xff;
+            if (param & 0x00ff8000) {
+                if (vsd->initWaitLeft) --vsd->initWaitLeft;
+                else vsd->state = StateReady;
+            }
+            if (vsd->state == StateReady) reply[1] |= 0x80;
+            return SdReply48bits;
 
         case 2:
             if (vsd->state != StateReady) {
@@ -319,6 +354,11 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             reply[13] = 0xEC;
             reply[14] = 3;   // MDT.month = march
             reply[15] = 20;  // MDT.year = 2020
+            if (vsd->legacyMmc) {
+                reply[0] = 0x3f;
+                reply[14] = 0;     // MMC PSN is a full 32 bits
+                reply[15] = 0x38;  // March 2005, years since 1997
+            }
             replTyp = SdReply136bits;
             break;
 
@@ -328,9 +368,17 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
                                        false /* there is no ACMD3 */);
                 break;
             }
-            vsd->state = StateStby;
-            vsd->rca = 3;
-            replTyp = vsdPrepareR6resp(vsd, cmd, reply);
+            if (vsd->legacyMmc) {
+                const uint16_t address = param >> 16;
+                if (!address) return SdReplyNone;
+                vsd->rca = address;
+                vsd->state = StateStby;
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+            } else {
+                vsd->state = StateStby;
+                vsd->rca = 3;
+                replTyp = vsdPrepareR6resp(vsd, cmd, reply);
+            }
             break;
 
         case 6:
@@ -370,6 +418,7 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             break;
 
         case 8:
+            if (vsd->legacyMmc) return SdReplyNone;  // No EXT_CSD before MMC v4
             if (vsd->state != StateIdle) {
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState,
                                        false /* there is no ACMD8 */);
@@ -520,15 +569,21 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
                 replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
             break;
 
-        case 32:  // erase start and end
+        case 32:  // SD erase start and end
         case 33:
+        case 35:  // MMC erase group start and end
+        case 36:
+            if ((cmd >= 35) != vsd->legacyMmc) {
+                replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnknownCommand, wasAcmd);
+                break;
+            }
             if (wasAcmd || vsd->state != StateTran)
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
             else if (!vsd->hcCard && (param % 512))
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam, wasAcmd);
             else {
                 uint32_t sec = vsd->hcCard ? param : param / 512;
-                if (cmd == 32) {
+                if (cmd == 32 || cmd == 35) {
                     vsd->eraseStart = sec;
                     vsd->eraseHaveStart = true;
                 } else {
@@ -656,6 +711,7 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             break;
 
         case 55:
+            if (vsd->legacyMmc) return SdReplyNone;
             if (vsd->state == StateReady || vsd->state == StateIdent) {
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState,
                                        false /* there is no ACMD55 */);
@@ -767,7 +823,7 @@ enum SdDataReplyType vsdDataXferBlockFromCard(struct VSD *vsd, void *data, uint3
     return SdDataOk;
 }
 
-struct VSD *vsdInit(SdSectorR sR, SdSectorW sW, uint32_t nSec) {
+struct VSD *vsdInit(SdSectorR sR, SdSectorW sW, uint32_t nSec, bool supportsLegacyMmc) {
     struct VSD *vsd = (struct VSD *)malloc(sizeof(struct VSD));
 
     if (vsd) {
@@ -775,6 +831,7 @@ struct VSD *vsdInit(SdSectorR sR, SdSectorW sW, uint32_t nSec) {
 
         vsd->secR = sR;
         vsd->secW = sW;
+        vsd->supportsLegacyMmc = supportsLegacyMmc;
 
         vsdReset(vsd, nSec);
     }
@@ -784,13 +841,21 @@ struct VSD *vsdInit(SdSectorR sR, SdSectorW sW, uint32_t nSec) {
 
 void vsdReset(struct VSD *vsd, uint32_t nSec) {
     vsd->nSec = nSec;
-    vsd->hcCard = nSec > 4194304;
+    vsd->hcCard = !vsd->legacyMmc && nSec > 4194304;
     sdLogReset(&vsd->rejectLog);
 
     vsdCardReset(vsd);
 }
 
 void vsdSetWriteProtect(struct VSD *vsd, bool on) { vsd->writeProtected = on; }
+
+void vsdSetLegacyMmc(VSD* vsd, bool enabled) {
+    if (!vsd->supportsLegacyMmc || vsd->legacyMmc == enabled) return;
+    vsd->legacyMmc = enabled;
+    vsdReset(vsd, vsd->nSec);
+}
+
+bool vsdLegacyMmc(const VSD* vsd) { return vsd->legacyMmc; }
 
 void vsdPowerOff(struct VSD *vsd) { vsdCardReset(vsd); }
 
@@ -857,7 +922,7 @@ uint8_t vsdCRC7(uint8_t *data, uint32_t sz) {
 template <typename T>
 void vsdSave(struct VSD *vsd, T &savestate) {
     // Savestate layouts are cached: use one fixed layout before and after card insertion.
-    const uint32_t version = SAVESTATE_VERSION;
+    const uint32_t version = vsd->supportsLegacyMmc ? mmcStateVersion : sdStateVersion;
     auto chunk = savestate.GetChunk(ChunkType::vsd, version);
     if (!chunk) abort();
 
@@ -868,14 +933,16 @@ void vsdSave(struct VSD *vsd, T &savestate) {
 template <typename T>
 void vsdLoad(struct VSD *vsd, T &loader) {
     uint32_t version;
-    auto chunk = loader.GetChunkOrFail(ChunkType::vsd, SAVESTATE_VERSION, "vsd", version);
+    const uint32_t maxVersion = vsd->supportsLegacyMmc ? mmcStateVersion : sdStateVersion;
+    auto chunk = loader.GetChunkOrFail(ChunkType::vsd, maxVersion, "vsd", version);
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
     vsd->DoSaveLoad(helper, version);
     // Restored lengths feed backing callbacks or a copy from the fixed status
     // buffer. Reject corrupt state before it can be used by the controller.
-    if (vsd->state > StateDis ||
+    if (chunk->HasError() || vsd->state > StateDis ||
+        (vsd->legacyMmc && (vsd->hcCard || vsd->nSec > 4194304)) ||
         (vsd->bufIsData ? vsd->curBufLen != 512 : vsd->curBufLen > sizeof(vsd->curBuf)) ||
         ((vsd->state == StateData || vsd->state == StateRcv) && !vsd->curBufLen) ||
         (vsd->state == StateRcv && !vsd->bufIsData)) loader.NotifyError();

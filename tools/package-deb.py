@@ -108,6 +108,7 @@ Maintainer: Frond contributors <frond@users.noreply.github.com>
 Section: otherosfs
 Priority: optional
 Depends: {deps}
+Suggests: python3, e2fsprogs
 Installed-Size: {installed}
 Homepage: https://github.com/roge-rm/frond
 Description: Native Palm OS emulator

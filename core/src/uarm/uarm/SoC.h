@@ -38,6 +38,8 @@ struct PatchDispatch;
 struct AudioQueue;
 struct PatchContext;
 
+enum class SpitzRemoteKey : uint8_t { none, volumeDown, mute, previous, volumeUp, next, play, stop };
+
 class SoC {
    public:
     NetworkSimulation networkSimulation;
@@ -66,6 +68,10 @@ class SoC {
     virtual bool HoldSwitchSupported() const { return false; }
     virtual bool HoldSwitchOn() const { return false; }
     virtual bool SetHoldSwitch(bool) { return false; }
+    // Zaurus hinge switches. The closed position covers the LCD, view style keeps it exposed.
+    virtual bool SetSpitzLid(bool, bool) { return false; }
+    virtual bool SpitzLidClosed() const { return false; }
+    virtual bool SpitzSwivelled() const { return false; }
     // Headphones in the jack: a host setting like the battery, put back on the board after every load and
     // reset, never saved. Runs on the SoC's thread.
     virtual bool HeadphonesSupported() const { return false; }
@@ -178,6 +184,7 @@ class SoC {
     // A power press from the host the guest may not have had yet: held, queued or jammed.
     bool PowerKeyPending();
     void PenDown(int x, int y);
+    bool SpitzTabletKeyDown(unsigned index);
     void PenUp();
     // The clock key and pen events are stamped with, in milliseconds; null is the host's steady clock.
     // A headless replay passes guest time so the holds the Zodiac times from it repeat.
@@ -286,7 +293,8 @@ class SoC {
     virtual void BeforeStateReplacement() {}
     virtual void DiscardMemoryStickSaveImage() {}
     // After a reset, or a load that succeeded.
-    virtual void StateReplaced() {}
+    enum class StateReplacement { reset, load };
+    virtual void StateReplaced(StateReplacement) {}
     // A load was refused; restore loads the previous state back.
     virtual void StateReplacementRefused(const std::function<void()>& restore) { restore(); }
     virtual void BeginSerialCheckpoint() {}

@@ -25,7 +25,7 @@ public:
 
     HaltReason Step(A32AddressSpace& process, A32JitState& thread_ctx, volatile u32* halt_reason) {
         const auto location_descriptor = A32::LocationDescriptor{thread_ctx.GetLocationDescriptor()}.SetSingleStepping(true);
-        const auto entry_point = process.GetOrEmit(location_descriptor);
+        const auto entry_point = process.GetOrEmitInPlace(location_descriptor);
 #ifdef __ANDROID__
         ExceptionHandler::ScopedExecution signal_scope{process.exception_handler, process.conf.fastmem_pointer.has_value() && thread_ctx.frond_fastmem_enabled};
 #endif

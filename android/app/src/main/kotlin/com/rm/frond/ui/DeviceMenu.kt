@@ -18,11 +18,18 @@ import com.rm.frond.DevicePicker
 
 // The device menu: Detect (when given), Recent, then the groups. A group shows its devices under a back row.
 @Composable
-fun DeviceMenu(expanded: Boolean, onDismiss: () -> Unit, detect: String? = null, onDetect: () -> Unit = {}, onPick: (Device) -> Unit) {
+fun DeviceMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    detect: String? = null,
+    onDetect: () -> Unit = {},
+    devices: List<Device> = Device.shown,
+    onPick: (Device) -> Unit,
+) {
     val context = LocalContext.current
     var group by remember { mutableStateOf<String?>(null) }
-    val groups = remember { DevicePicker.groups() }
-    val recent = remember(expanded) { DevicePicker.recent(context) }
+    val groups = remember(devices) { DevicePicker.groups(devices) }
+    val recent = remember(expanded, devices) { DevicePicker.recent(context, devices) }
     DropdownMenu(expanded = expanded, onDismissRequest = { group = null; onDismiss() }) {
         val open = groups.firstOrNull { it.first == group }
         if (open == null) {

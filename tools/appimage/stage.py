@@ -69,9 +69,9 @@ def stage(arch, binaries, appdir, strip):
                 copy(binaries / 'frond-68k', 'usr/lib/frond/frond-68k-core', 0o755),
                 copy(binaries / 'btvirt', 'usr/lib/frond/btvirt', 0o755),
                 copy(binaries / 'bluetooth-phone', 'usr/lib/frond/bluetooth-phone', 0o755)]
-    # mtools dispatches on argv[0], so mdir and mcopy are links to it.
+    # mtools dispatches on argv[0], so each command is a link to it.
     programs.append(copy(Path('/usr/bin/mtools'), 'usr/lib/frond/mtools', 0o755))
-    for tool in ('mdir', 'mcopy'):
+    for tool in ('mdir', 'mcopy', 'mformat'):
         os.symlink('mtools', appdir / 'usr/lib/frond' / tool)
     for program in programs:
         subprocess.run([strip, '--strip-unneeded', str(program)], check=True)

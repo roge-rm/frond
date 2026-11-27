@@ -19,6 +19,10 @@ SOURCE_C = 								\
 
 SOURCE_CXX =		 					\
 	uarm/SoC.cpp 						\
+	uarm/spitz_nand.cpp \
+	uarm/spitz_pcmcia.cpp \
+	uarm/spitz_cf_ethernet.cpp \
+	uarm/Dcf660w.cpp \
 	uarm/soc_PXA.cpp					\
 	uarm/soc_pv.cpp						\
 	uarm/soc_IMX1.cpp					\
@@ -92,6 +96,7 @@ SOURCE_CXX =		 					\
 	uarm/pxa270_WMMX.cpp				\
 	uarm/pxa270_KPC.cpp					\
 	uarm/pxa270_IMC.cpp					\
+	uarm/pxa270_OHCI.cpp					\
 	uarm/pxa270_UDC.cpp					\
 	uarm/pxa_TIMR.cpp 					\
 	uarm/pxa_IC.cpp						\
@@ -162,6 +167,8 @@ SOURCE_CXX_NATIVE =						\
 	native/Commands.cpp					\
 	native/InputReplay.cpp				\
 	native/WindowId.cpp				\
+	native/ZaurusPcLink.cpp			\
+	native/ZaurusPcLinkFiles.cpp		\
 	native/main.cpp
 
 # The infrared phone's and Wi-Fi's slirp side (common/net), ahead of libcommon.a.
@@ -194,7 +201,7 @@ zodiac-developer: $(BINARY_ZODIAC_DEVELOPER)
 
 # The Zodiac's MIDI out (native/ZodiacRtMidi.cpp, RtMidi): ALSA on Linux, CoreMIDI on macOS, WinMM on Windows.
 ifeq ($(HOST_OS),macos)
-LDFLAGS_NATIVE_EXTRA += -framework CoreMIDI -framework CoreAudio -framework CoreFoundation
+LDFLAGS_NATIVE_EXTRA += -framework CoreMIDI -framework CoreAudio -framework CoreFoundation -liconv
 else ifeq ($(HOST_OS),windows)
 LDFLAGS_NATIVE_EXTRA += -lwinmm
 else

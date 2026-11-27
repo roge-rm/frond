@@ -27,7 +27,7 @@
 #define UNMASKABLE_INTS 0x7C8E
 
 #define PALETTE_SIZE 512
-#define SAVESTATE_VERSION 2
+#define SAVESTATE_VERSION 3
 
 struct PxaLcd {
     struct PxaIc *ic;
@@ -41,6 +41,9 @@ struct PxaLcd {
     // PXA27x overlays 1 and 2, and LCSR1 with their per-channel SOF, EOF and branch bits.
     uint32_t ovl1c1, ovl1c2, ovl2c1, ovl2c2, ccr, lcsr1;
     bool pxa270;  // overlays, channels 2-6 and LCSR1 exist only on the PXA27x
+    bool spitz, qvga;
+    uint8_t brightness;
+    uint64_t scanStart;
 
     // for our use
     uint16_t intMask;
@@ -91,6 +94,7 @@ struct PxaLcd {
             chunkHelper.Do32(fbr[i]).Do32(fdadr[i]).Do32(fsadr[i]).Do32(fidr[i]).Do32(ldcmd[i]);
         if (version >= 2)
             chunkHelper.Do32(ovl1c1).Do32(ovl1c2).Do32(ovl2c1).Do32(ovl2c2).Do32(ccr).Do32(lcsr1);
+        if (version >= 3) chunkHelper.Do64(scanStart).DoBool(qvga);
     }
 };
 
@@ -118,6 +122,19 @@ static void pxaLcdPrvUpdateInts(struct PxaLcd *lcd) {
 
 static void pxaLcdPrvFrameSizeChanged(struct PxaLcd *lcd, uint32_t oldLccr1, uint32_t oldLccr2);
 
+static uint16_t pxaLcdSpitzInterruptMask(uint32_t lccr0) {
+    // LCCR0 masks are active high. LCSR0 still records masked events.
+    constexpr struct { uint32_t mask; uint16_t status; } bits[] = {
+        {1u << 3, 1u << 0}, {1u << 4, 1u << 1}, {1u << 5, 3u << 4},
+        {1u << 6, 1u << 8}, {1u << 11, 1u << 7}, {1u << 20, 1u << 9},
+        {1u << 21, 1u << 6},
+    };
+    uint16_t mask = 0x7c0c;
+    for (const auto& bit : bits)
+        if (!(lccr0 & bit.mask)) mask |= bit.status;
+    return mask;
+}
+
 static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
                                 void *buf) {
     struct PxaLcd *lcd = (struct PxaLcd *)userData;
@@ -141,6 +158,11 @@ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
                     lcd->enbChanged = 1;
 
                 lcd->lccr0 = val;
+                if (lcd->spitz) {
+                    lcd->intMask = pxaLcdSpitzInterruptMask(val);
+                    pxaLcdPrvUpdateInts(lcd);
+                    break;
+                }
                 // recalc intMask
                 v16 = UNMASKABLE_INTS;
                 if (val & 0x00200000UL)  // output fifo underrun
@@ -631,17 +653,25 @@ static bool pxaLcdPrvLargerFrame(const struct PxaLcd *lcd, uint32_t lccr1, uint3
 }
 
 // Draws the panel's part of a larger frame (see above) and finishes it.
-static void pxaLcdPrvScreenDataLarger(struct PxaLcd *lcd, uint32_t addr, uint32_t len, uint8_t bpp,
-                                      uint32_t ppl, uint32_t lpp) {
+static bool pxaLcdPrvDoubleFrame(const PxaLcd* lcd, uint8_t bpp, uint32_t len, uint32_t ppl,
+                                  uint32_t lpp) {
+    return lcd->qvga && bpp == 4 && ppl * 2 == lcd->width && lpp * 2 == lcd->height &&
+           len == ppl * lpp * 2;
+}
+
+static void pxaLcdPrvScreenDataShaped(struct PxaLcd *lcd, uint32_t addr, uint32_t len, uint8_t bpp,
+                                      uint32_t ppl, uint32_t lpp, bool doubled) {
     std::vector<uint8_t> frame(len);
     pxaLcdPrvDma(lcd, frame.data(), addr, len);
 
-    const uint32_t x0 = (ppl - lcd->width) / 2, y0 = (lpp - lcd->height) / 2;
+    const uint32_t factor = doubled ? 2 : 1;
+    const uint32_t x0 = (ppl - lcd->width / factor) / 2;
+    const uint32_t y0 = (lpp - lcd->height / factor) / 2;
     const uint32_t bits = 1u << bpp;
     for (uint32_t y = 0; y < lcd->height; y++) {
         uint32_t *dst = lcd->back_buffer + y * lcd->width;
         for (uint32_t x = 0; x < lcd->width; x++) {
-            const uint32_t bit = ((y0 + y) * ppl + x0 + x) * bits;
+            const uint32_t bit = ((y0 + (doubled ? y / 2 : y)) * ppl + x0 + (doubled ? x / 2 : x)) * bits;
             const uint8_t *src = &frame[bit >> 3];
             if (bpp == 4)
                 dst[x] = unpack_rgb16(src[0] | (src[1] << 8));
@@ -656,9 +686,9 @@ static void pxaLcdPrvScreenDataLarger(struct PxaLcd *lcd, uint32_t addr, uint32_
 }
 
 // Decides whether the DMA'd framebuffer is tracked by the SoC, and marks it dirty.
-static void pxaLcdPrvTrackFramebuffer(struct PxaLcd *lcd, bool larger) {
+static void pxaLcdPrvTrackFramebuffer(struct PxaLcd *lcd, bool shaped) {
     const uint32_t panelBytes = ((uint32_t)(lcd->width * lcd->height) << lcd->framebufferBpp) >> 3;
-    if (larger || lcd->framebufferSize == panelBytes) {
+    if (shaped || lcd->framebufferSize == panelBytes) {
         lcd->framebufferDirty = true;
         lcd->framebufferTrackingActive =
             lcd->soc->SetFramebuffer(lcd->framebufferBase, lcd->framebufferSize);
@@ -676,9 +706,11 @@ static void pxaLcdPrvFrameSizeChanged(struct PxaLcd *lcd, uint32_t oldLccr1, uin
     uint32_t ppl, lpp;
     if (!lcd->framebufferSize) return;
     const bool was = pxaLcdPrvLargerFrame(lcd, oldLccr1, oldLccr2, lcd->framebufferBpp,
-                                          lcd->framebufferSize, ppl, lpp);
+                                          lcd->framebufferSize, ppl, lpp) ||
+                     pxaLcdPrvDoubleFrame(lcd, lcd->framebufferBpp, lcd->framebufferSize, ppl, lpp);
     const bool is = pxaLcdPrvLargerFrame(lcd, lcd->lccr1, lcd->lccr2, lcd->framebufferBpp,
-                                         lcd->framebufferSize, ppl, lpp);
+                                         lcd->framebufferSize, ppl, lpp) ||
+                    pxaLcdPrvDoubleFrame(lcd, lcd->framebufferBpp, lcd->framebufferSize, ppl, lpp);
     if (was != is) pxaLcdPrvTrackFramebuffer(lcd, is);
 }
 
@@ -689,21 +721,22 @@ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uin
     const uint32_t *const frameBefore = lcd->front_buffer;
     uint32_t ppl, lpp;
     const bool larger = pxaLcdPrvLargerFrame(lcd, lcd->lccr1, lcd->lccr2, bpp, len, ppl, lpp);
+    const bool doubled = pxaLcdPrvDoubleFrame(lcd, bpp, len, ppl, lpp);
 
     if (addr != lcd->framebufferBase || len != lcd->framebufferSize || bpp != lcd->framebufferBpp) {
         lcd->framebufferBase = addr;
         lcd->framebufferSize = len;
         lcd->framebufferBpp = bpp;
 
-        pxaLcdPrvTrackFramebuffer(lcd, larger);
+        pxaLcdPrvTrackFramebuffer(lcd, larger || doubled);
     }
 
     // An overlay's planes aren't tracked, so a frame with one is always drawn.
     const bool overlays = pxaLcdPrvOverlaysOn(lcd);
     if (lcd->framebufferTrackingActive && !lcd->framebufferDirty && !overlays) return;
 
-    if (larger) {
-        pxaLcdPrvScreenDataLarger(lcd, addr, len, bpp, ppl, lpp);
+    if (larger || doubled) {
+        pxaLcdPrvScreenDataShaped(lcd, addr, len, bpp, ppl, lpp, doubled);
         len = 0;
     } else if (bpp == 4 && pxaLcdPrvScreenData16FromRam(lcd, addr, len)) {
         len = 0;
@@ -760,11 +793,22 @@ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uin
     // The base plane finished a frame: the overlays go on top of it.
     if (overlays && lcd->front_buffer != frameBefore) pxaLcdPrvDrawOverlays(lcd, lcd->front_buffer);
 
+    if (lcd->spitz && lcd->brightness != 255 && lcd->front_buffer != frameBefore) {
+        const unsigned brightness = lcd->brightness;
+        for (uint32_t i = 0; i < uint32_t(lcd->width) * lcd->height; ++i) {
+            const uint32_t colour = lcd->front_buffer[i];
+            const unsigned r = (colour & 255) * brightness / 255;
+            const unsigned g = ((colour >> 8) & 255) * brightness / 255;
+            const unsigned b = ((colour >> 16) & 255) * brightness / 255;
+            lcd->front_buffer[i] = (colour & 0xff000000) | (b << 16) | (g << 8) | r;
+        }
+    }
+
     lcd->framebufferDirty = false;
     lcd->soc->ClearFramebufferDirty();
 }
 
-void pxaLcdTick(struct PxaLcd *lcd) {
+static void pxaLcdPrvTick(struct PxaLcd *lcd) {
     // every other call starts a frame, the others end one [this generates spacing between
     // interrupts so as to not confuse guest OS]
 
@@ -776,6 +820,7 @@ void pxaLcdTick(struct PxaLcd *lcd) {
 
             lcd->lcsr |= 0x0080;  // quick disable happened
             lcd->state = LCD_STATE_IDLE;
+            lcd->scanStart = 0;
         }
         lcd->enbChanged = false;
     }
@@ -789,6 +834,7 @@ void pxaLcdTick(struct PxaLcd *lcd) {
             lcd->lcsr |= 0x0001;  // disable happened
             lcd->state = LCD_STATE_IDLE;
             lcd->lccr0 &= ~1;
+            lcd->scanStart = 0;
         } else
             switch (lcd->state) {
                 case LCD_STATE_IDLE:
@@ -826,7 +872,8 @@ void pxaLcdTick(struct PxaLcd *lcd) {
                         lcd->frameNum++;
                         pxaLcdPrvOverlayFrame(lcd);
 
-                        if (!(lcd->frameNum & 63)) pxaLcdPrvScreenDataDma(lcd, lcd->fsadr[0], len);
+                        if (lcd->spitz || !(lcd->frameNum & 63))
+                            pxaLcdPrvScreenDataDma(lcd, lcd->fsadr[0], len);
                     }
 
                     lcd->state = LCD_STATE_DMA_0_END;
@@ -843,6 +890,84 @@ void pxaLcdTick(struct PxaLcd *lcd) {
     pxaLcdPrvUpdateInts(lcd);
 }
 
+void pxaLcdTick(PxaLcd* lcd) { pxaLcdPrvTick(lcd); }
+
+struct PxaLcdLineTiming {
+    uint32_t width, sync, total;
+};
+
+static PxaLcdLineTiming pxaLcdLineTiming(const PxaLcd* lcd) {
+    const uint32_t width = (lcd->lccr1 & 0x3ff) + 1;
+    const uint32_t sync = ((lcd->lccr1 >> 10) & 63) + 1;
+    const uint32_t frontPorch = ((lcd->lccr1 >> 16) & 255) + 1;
+    const uint32_t backPorch = (lcd->lccr1 >> 24) + 1;
+    return {width, sync, width + sync + frontPorch + backPorch};
+}
+
+static uint64_t pxaLcdPixelPeriod(const PxaLcd* lcd, uint32_t clockHz) {
+    const uint32_t divider = ((lcd->lccr3 & 255) + 1) * (lcd->lccr3 & (1u << 27) ? 1 : 2);
+    return 1000000000000ull * divider / clockHz;  // ps
+}
+
+bool pxaLcdSpitzHsync(const PxaLcd* lcd, uint64_t now, uint32_t clockHz) {
+    if (!clockHz || !(lcd->lccr0 & 1)) return false;
+    const auto line = pxaLcdLineTiming(lcd);
+    const uint64_t pixel = pxaLcdPixelPeriod(lcd, clockHz);
+    const uint64_t phase = (now >= lcd->scanStart ? now - lcd->scanStart : 0) %
+                           (line.total * pixel / 1000);
+    const bool pulse = phase < line.sync * pixel / 1000;
+    return pulse != ((lcd->lccr3 & (1u << 21)) != 0);
+}
+
+void pxaLcdTickSpitz(PxaLcd* lcd, uint64_t now, uint32_t clockHz, uint8_t brightness, bool qvga) {
+    const bool disable = lcd->lccr0 & 0x400;
+    if (!clockHz) {
+        // The clock gate stops scanout. Complete any disable waiting for that scan to end.
+        if (disable && (lcd->lccr0 & 1)) pxaLcdPrvTick(lcd);
+        return;
+    }
+    if (lcd->brightness != brightness || lcd->qvga != qvga) {
+        lcd->brightness = brightness;
+        lcd->framebufferDirty = true;
+        if (lcd->qvga != qvga) {
+            lcd->qvga = qvga;
+            // Find the framebuffer again if the timing generator changed its scaling.
+            lcd->framebufferSize = 0;
+        }
+    }
+
+    // The active scan and blanking interval determine the EOF and next frame.
+    if (lcd->scanStart > now) lcd->scanStart = 0;
+    if (!lcd->enbChanged && (lcd->lccr0 & 1)) {
+        const uint64_t linePeriod = pxaLcdLineTiming(lcd).total * pxaLcdPixelPeriod(lcd, clockHz);
+        const uint32_t height = (lcd->lccr2 & 0x3ff) + 1;
+        const uint32_t vsync = ((lcd->lccr2 >> 10) & 63) + 1;
+        const uint32_t porches = (lcd->lccr2 >> 16 & 255) + (lcd->lccr2 >> 24);
+        const uint64_t active = linePeriod * height / 1000;
+        const uint64_t frame = linePeriod * (height + vsync + porches) / 1000;
+
+        if (lcd->state == LCD_STATE_DMA_0_END && !(lcd->ldcmd[0] & 0x04000000)) {
+            if (lcd->scanStart && now - lcd->scanStart < active) return;
+            if (disable && (lcd->ldcmd[0] & 0x00200000)) lcd->lcsr |= 0x0100;
+        }
+        if (lcd->state == LCD_STATE_IDLE && !disable) {
+            if (lcd->scanStart && now - lcd->scanStart < frame) return;
+            // Keep the programmed rate when the scheduler wakes between two scan boundaries.
+            lcd->scanStart = lcd->scanStart && now - lcd->scanStart < 2 * frame
+                            ? lcd->scanStart + frame : now;
+        }
+    } else if (lcd->enbChanged && (lcd->lccr0 & 1)) {
+        lcd->scanStart = now;
+    }
+
+    pxaLcdPrvTick(lcd);
+    if (lcd->state == LCD_STATE_DMA_0_START) pxaLcdPrvTick(lcd);
+    if (lcd->state == LCD_STATE_DMA_0_END && (lcd->ldcmd[0] & 0x04000000)) {
+        pxaLcdPrvTick(lcd);
+        lcd->scanStart = 0;
+    }
+}
+
 uint32_t *pxaLcdGetPendingFrame(struct PxaLcd *lcd) {
     return lcd->frame_pending ? lcd->front_buffer : NULL;
 }
@@ -854,7 +979,7 @@ void pxaLcdSetFramebufferDirty(struct PxaLcd *lcd) { lcd->framebufferDirty = tru
 bool pxaLcdIsEnabled(struct PxaLcd *lcd) { return lcd->lccr0 & 0x0001; }
 
 struct PxaLcd *pxaLcdInit(struct ArmMem *physMem, class SoC *soc, struct PxaIc *ic,
-                          struct MemoryBuffer *buffer, uint16_t width, uint16_t height, bool pxa270) {
+                          struct MemoryBuffer *buffer, uint16_t width, uint16_t height, bool pxa270, bool spitz) {
     struct PxaLcd *lcd = (struct PxaLcd *)malloc(sizeof(*lcd));
 
     if (!lcd) ERR("cannot alloc LCD");
@@ -867,6 +992,9 @@ struct PxaLcd *pxaLcdInit(struct ArmMem *physMem, class SoC *soc, struct PxaIc *
     lcd->height = height;
     lcd->soc = soc;
     lcd->pxa270 = pxa270;
+    lcd->spitz = spitz;
+    lcd->brightness = 255;
+    if (spitz) lcd->intMask = pxaLcdSpitzInterruptMask(0);
 
     lcd->front_buffer = (uint32_t *)malloc(width * height * 4);
     lcd->back_buffer = (uint32_t *)malloc(width * height * 4);
@@ -886,7 +1014,7 @@ void pxaLcdResetPaletteBuffer(struct PxaLcd *lcd) {
 
 template <typename T>
 void pxaLcdSave(struct PxaLcd *lcd, T &savestate, bool pxa270) {
-    const uint32_t version = pxa270 ? SAVESTATE_VERSION : 0;
+    const uint32_t version = lcd->spitz ? SAVESTATE_VERSION : pxa270 ? 2 : 0;
     auto chunk = savestate.GetChunk(ChunkType::pxaLcd, version);
     if (!chunk) ERR("unable to allocate chunk");
 
@@ -902,7 +1030,14 @@ void pxaLcdLoad(struct PxaLcd *lcd, T &loader) {
 
     LoadChunkHelper helper(*chunk);
     lcd->ovl1c1 = lcd->ovl1c2 = lcd->ovl2c1 = lcd->ovl2c2 = lcd->ccr = lcd->lcsr1 = 0;
+    lcd->scanStart = 0;
+    lcd->qvga = false;
+    lcd->brightness = 255;
     lcd->DoSaveLoad(helper, version);
+    if (lcd->spitz) {
+        lcd->intMask = pxaLcdSpitzInterruptMask(lcd->lccr0);
+        pxaLcdPrvUpdateInts(lcd);
+    }
 
     // Host frame buffers are rebuilt from guest RAM after loading.
     lcd->framebufferDirty = true;

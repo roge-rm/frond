@@ -6,6 +6,8 @@
 #include "dynarmic/backend/x64/a32_emit_x64.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <utility>
 
@@ -28,6 +30,7 @@
 #include "dynarmic/frontend/A32/a32_location_descriptor.h"
 #include "dynarmic/frontend/A32/a32_types.h"
 #include "dynarmic/interface/A32/coprocessor.h"
+#include "dynarmic/ir/opt/passes.h"
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/microinstruction.h"
 #include "dynarmic/ir/opcodes.h"
@@ -81,6 +84,10 @@ FP::FPCR A32EmitContext::FPCR(bool fpcr_controlled) const {
 
 A32EmitX64::A32EmitX64(BlockOfCode& code, A32::UserConfig conf, A32::Jit* jit_interface)
         : EmitX64(code), conf(std::move(conf)), jit_interface(jit_interface) {
+    const char* purge = std::getenv("FROND_PURGE_PATCHES");
+    if (purge && std::strcmp(purge, "1") == 0) {
+        EnablePatchRetirement();
+    }
     GenFastmemFallbacks();
     GenTerminalHandlers();
     code.PreludeComplete();
@@ -110,6 +117,7 @@ A32EmitX64::BlockDescriptor A32EmitX64::Install(const EmittedBlock& emitted) {
 }
 
 A32EmitX64::EmittedBlock A32EmitX64::EmitUnregistered(IR::Block& block) {
+    Optimization::NamingPass(block);
     if (conf.very_verbose_debugging_output) {
         std::puts(IR::DumpBlock(block).c_str());
     }
@@ -130,7 +138,7 @@ A32EmitX64::EmittedBlock A32EmitX64::EmitUnregistered(IR::Block& block) {
         return gprs;
     }();
 
-    RegAlloc reg_alloc{code, gpr_order, any_xmm};
+    RegAlloc reg_alloc{code, gpr_order, any_xmm, block.empty() ? 0u : block.back().GetName()};
     A32EmitContext ctx{conf, reg_alloc, block};
 
     // Start emitting.

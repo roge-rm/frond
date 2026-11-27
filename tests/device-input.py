@@ -119,7 +119,7 @@ class DeviceInputTest(unittest.TestCase):
                           'palm-m100', 'palm-m105', 'palm-m125', 'palm-m500', 'ibm-workpad-c500',
                           'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520',
                           'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'tapwave-zodiac-1', 'sony-clie-t415',
-                          'hp-ipaq-210', 'hp-ipaq-rx1950', 'hp-ipaq-h4350'])
+                          'hp-ipaq-210', 'hp-ipaq-rx1950', 'sharp-zaurus-sl-c3000', 'hp-ipaq-h4350'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
                          ('zire72-nor', 'zire72-desktop', ZIRE_SIZE, 0))
@@ -127,7 +127,7 @@ class DeviceInputTest(unittest.TestCase):
                           zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
                          {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved',
-                          'ez68k-rom', 'vz68k-rom', 'zodiac-nor', 'rx1950-nand'})
+                          'ez68k-rom', 'vz68k-rom', 'zodiac-nor', 'rx1950-nand', 'spitz-nand'})
         self.assertEqual(data['profiles'][2]['status'], 'experimental-desktop')
         self.assertEqual(data['profiles'][3]['status'], 'inherited-unverified')
         iiix = {p['name']: p for p in data['profiles']}['palm-iiix']
@@ -138,6 +138,10 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual(by_name['hp-ipaq-210']['status'], 'reserved')
         self.assertEqual(by_name['hp-ipaq-rx1950']['status'], 'experimental-desktop')
         self.assertEqual(by_name['hp-ipaq-h4350']['status'], 'reserved')
+        self.assertEqual(by_name['sharp-zaurus-sl-c3000']['status'], 'staged')
+        zaurus = by_name['sharp-zaurus-sl-c3000']
+        self.assertTrue(zaurus['sd_slot'])
+        self.assertEqual((zaurus['sd_min_bytes'], zaurus['sd_max_bytes']), (32 << 20, 2048 << 20))
         colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}
         self.assertEqual(colour, {'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520'})
 

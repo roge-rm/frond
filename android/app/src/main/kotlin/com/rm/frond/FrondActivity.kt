@@ -274,7 +274,10 @@ open class FrondActivity : SDLActivity() {
             if (name == "winmo-apps" || name == "winmo-apps-error") runOnUiThread {
                 menuModel?.acceptInstalledPrograms(name == "winmo-apps", state)
             }
-            if (name == "serial" || name == "usb") runOnUiThread { menuModel?.acceptSyncRoute(name, state) }
+            if (name == "serial" || name == "usb") runOnUiThread {
+                menuModel?.acceptSyncRoute(name, state)
+                if (name == "usb") menuModel?.acceptUsbCable(state)
+            }
             if (name == "serial") SerialLink.acceptNativeState(state)
             if (name == "infrared") IrLink.acceptNativeState(state)
             if (name == "microphone") {
@@ -389,6 +392,8 @@ open class FrondActivity : SDLActivity() {
         val extras = intent?.extras
         val arguments = mutableListOf<String>()
         val session = sessionPath
+        val device = launchDevice()
+        val machineFolder = session?.let { File(it).parentFile }
         // Any session file in the machine's folder loads, so a fresh start can't save over it.
         val saved = session?.let { path ->
             File(path).takeIf { it.isFile || it.isDirectory } ?: Sessions.forPath(this, path)?.file?.takeIf { it.isFile }
@@ -396,8 +401,13 @@ open class FrondActivity : SDLActivity() {
         if (saved != null) {
             arguments += saved.path
             arguments += launchCards
+        } else if (device.zaurus && machineFolder != null) {
+            arguments += device.coreFlags
+            arguments += File(machineFolder, ZaurusImages.NAND).path
+            arguments += listOf("--work-folder", machineFolder.path)
+            val prom = File(machineFolder, ZaurusImages.PROM)
+            if (prom.isFile) arguments += listOf("--spitz-prom", prom.path)
         } else {
-            val device = Device.byId(extras?.getString(EXTRA_DEVICE)) ?: Device.TX
             val nor = extras?.getString(EXTRA_NOR) ?: Firmware.nor(this, device).path
             val nand = extras?.getString(EXTRA_NAND) ?: Firmware.nand(this, device).path
             arguments += device.coreFlags
@@ -410,6 +420,10 @@ open class FrondActivity : SDLActivity() {
             }
             // frond-68k links its cards by path from the machine's folder, which Add device's cards go into.
             if (device.linkedCards) session?.let { File(it).parentFile }?.takeIf { it.canonicalFile != Sessions.folder(this).canonicalFile }?.mkdirs()
+        }
+        if (device.zaurus && machineFolder != null) {
+            arguments += listOf("--microdrive", File(machineFolder, ZaurusImages.CF).path, "--microdrive-writable")
+            if (machineSettings.engine == Engine.EXACT) arguments += listOf("--engine", "exact")
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd,
@@ -487,7 +501,9 @@ open class FrondActivity : SDLActivity() {
             startRefused = start.error
             start.heldBy?.let { Log.i(TAG, "linked card is in $it") }
             start.heldBy2?.let { Log.i(TAG, "linked card 2 is in $it") }
-            start.arguments
+            if (device.zaurus && ZaurusCfSlot.read(folder) != null && "--card-swap" !in start.arguments)
+                start.arguments + "--card-swap"
+            else start.arguments
         } catch (e: Exception) {
             Log.e(TAG, "card start: ${e.message}")
             startRefused = "Couldn't prepare this session's cards."
@@ -578,7 +594,7 @@ open class FrondActivity : SDLActivity() {
         if (hidden == touchHidden) return
         if (barPeek) peekBar(false)
         touchHidden = hidden
-        if (!leaving) barView?.visibility = if (hidden) View.GONE else View.VISIBLE
+        if (!leaving) barView?.visibility = if (hidden && menuModel?.pcLink == null) View.GONE else View.VISIBLE
         syncCorner()
         updateSurfaceMargin()
         applyDisplay()
@@ -629,18 +645,18 @@ open class FrondActivity : SDLActivity() {
     // up, target SDK 36+), so that shape never comes and the core never starts. The core takes any shape.
     override fun getRequestedOrientation(): Int = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
 
-    // Every device follows the setting; the core shows the Zodiac's panel upright in portrait. With
-    // Follow the program the Zodiac turns with its OS, landscape until the core has said.
+    // Follow the program uses the orientation shown by the Zodiac or Zaurus.
     private fun orientationRequest() =
         if (followsProgram()) Orientation.programRequest(guestOrientation) ?: ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         else settings.orientation.request
 
-    private fun followsProgram() = settings.orientation == Orientation.PROGRAM && launchDevice().zodiac
+    private fun followsProgram() = settings.orientation == Orientation.PROGRAM &&
+        launchDevice().let { it.zodiac || it.zaurus }
 
     // The guest OS's orientation, as SysGetOrientation numbers it; 0 until the core says. UI thread.
     private var guestOrientation = 0
 
-    // From the core's guest thread (android_main.cpp, by name) when the guest OS turns its screen.
+    // From the core (android_main.cpp, by name) when the guest screen turns.
     fun onGuestOrientation(orientation: Int) = runOnUiThread {
         Log.i(TAG, "guest orientation $orientation")
         guestOrientation = orientation
@@ -917,6 +933,7 @@ open class FrondActivity : SDLActivity() {
     // returns. Also runs when SDL asks the core to close (the core sends a "close" event).
     // Back closes the bar's menu first, then leaves the machine.
     private fun back() {
+        menuModel?.pcLink?.let { it.back(); return }
         bar.controls?.let { if (it.capturing != null) { it.capturing = null; return } }
         when (RunningBar.backAction(touchHidden, barPeek, bar.sheet != null, bar.menuOpen)) {
             RunningBar.BackAction.CLOSE_SHEET -> openSheet(null)
@@ -1112,11 +1129,13 @@ open class FrondActivity : SDLActivity() {
         link.whenConnected {
             if (!link.connectedOnce) return@whenConnected
             soundSender.execute {
-                if (leaving || destroyed) return@execute
-                // Read the latest saved setting in case several changes were waiting for the link.
-                val saved = Sessions.forPath(this, sessionPath)?.settings ?: return@execute
-                val reply = link.request("headphones", if (saved.headphonesIn) "in" else "out", timeoutSeconds = 10)
-                if (!reply.ok) Log.w(TAG, "headphones: ${reply.code} ${reply.message}")
+                synchronized(link.audioJackLock) {
+                    if (leaving || destroyed) return@execute
+                    val saved = Sessions.forPath(this, sessionPath)?.settings ?: return@execute
+                    val command = if (launchDevice().zaurus) "headphones-preference" else "headphones"
+                    val reply = link.request(command, if (saved.headphonesIn) "in" else "out", timeoutSeconds = 10)
+                    if (!reply.ok) Log.w(TAG, "$command: ${reply.code} ${reply.message}")
+                }
             }
         }
     }
@@ -1351,6 +1370,10 @@ open class FrondActivity : SDLActivity() {
         model.readNetwork()
         model.readMicrophone()
         model.readCard()
+        if (model.device.zaurus) {
+            model.loadUsbCable()
+            model.readZaurusUsbDrive()
+        }
     }
 
     private fun openMenu() {
@@ -1370,6 +1393,11 @@ open class FrondActivity : SDLActivity() {
             RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
             RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openSheet(RunningSheets.menuSheet(id))
             RunningMenu.Id.SYNC_MANAGER -> bar.syncManager = true
+            RunningMenu.Id.PC_LINK -> model.openPcLink(machineSettings.engine == Engine.FAST, { sound }) {
+                if (!leaving) barView?.visibility =
+                    if (model.pcLink != null || !touchHidden || barPeek) View.VISIBLE else View.GONE
+                layoutBar()
+            }
             RunningMenu.Id.SCREENSHOT -> takeScreenshot()
             RunningMenu.Id.HIDE_BAR -> setBarShown(false)
             RunningMenu.Id.SAVE_COPY -> saveCopy(model)
@@ -1546,9 +1574,10 @@ open class FrondActivity : SDLActivity() {
     private fun layoutBar() {
         val view = barView ?: return
         val params = view.layoutParams as RelativeLayout.LayoutParams
-        val full = bar.shown || bar.sheet != null
+        val overlay = bar.sheet != null || menuModel?.pcLink != null
+        val full = bar.shown || overlay
         val width = if (full) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
-        val height = if (bar.sheet != null) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
+        val height = if (overlay) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
         val portrait = resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE
         val centre = if (!full && RunningBar.handleCentred(portrait)) RelativeLayout.TRUE else 0
         val start = if (!full && !RunningBar.handleCentred(portrait)) RelativeLayout.TRUE else 0
@@ -1658,7 +1687,8 @@ open class FrondActivity : SDLActivity() {
             // A file of its own per press, so two quick presses never share one.
             val file = File.createTempFile("power", ".replay", cacheDir)
             try {
-                file.writeText("0 key-down power\n80 key-up power\n")
+                val holdMs = if (launchDevice().zaurus) 2750 else 80
+                file.writeText("0 key-down power\n$holdMs key-up power\n")
                 // The core drops the microphone for input-replay; arm it again if it was on.
                 val wasOn = link.request("microphone-state", timeoutSeconds = 10).message == "on"
                 val reply = link.request("input-replay", file.path, timeoutSeconds = 30)
@@ -1945,6 +1975,7 @@ open class FrondActivity : SDLActivity() {
         menuModel?.printer?.close()
         menuModel?.irPrinter?.close()
         stopCameraFeed()
+        menuModel?.pcLink?.dispose()
         barOwner?.destroy()
         inputListener?.let { inputDevices?.unregisterInputDeviceListener(it) }
         inputListener = null

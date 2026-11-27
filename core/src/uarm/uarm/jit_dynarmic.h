@@ -23,6 +23,7 @@ enum FrondJitStop {
     FROND_JIT_ABORT,      // regs[15] is a load or store whose access failed after it ran in
                           // the JIT up to there; the CPU takes the data abort jitLastAbort
                           // gives without running it again
+    FROND_JIT_QUEUED,     // PXA270 async compilation pending, with a longer branch retry budget
 };
 
 // The failed access behind FROND_JIT_ABORT: its address, fault status, size in bytes and
@@ -46,6 +47,8 @@ const FrondJitAbort &jitLastAbort(const FrondJit *jit);
 // off, 1 when its condition fails). Returns the clocks run, at most
 // cycles - 1 + jitMaxUnchecked(jit) x the largest instruction cost for cycles >= 1.
 uint32_t jitRun(FrondJit *jit, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop);
+// Taken branches before a FROND_JIT_QUEUED retry.
+unsigned jitQueuedBranches(const FrondJit *jit);
 // The instructions the last jitRun ran, a Thumb pair counted 2 (ARM920T); its clocks elsewhere.
 uint32_t jitLastInstructions(const FrondJit *jit);
 // ARM920T: FCSE PID tags handed out since the last restart, and the restarts (every tag taken, code dropped).
@@ -86,9 +89,8 @@ void jitInvalidate(FrondJit *jit, uint32_t va, uint32_t size);
 void jitGuestInvalidateAll(FrondJit *jit, uint32_t pc);
 // Host side changes (reset, session load, PACE and peephole patching): drops everything.
 void jitClear(FrondJit *jit);
-// A CPAR write; changed: bit 0 or 1 changed on a CPU with iWMMXt, which drops all translated
-// code, since whether the JIT runs iWMMXt instructions depends on those bits.
-void jitCparWritten(FrondJit *jit, bool changed);
+// Count CPAR writes and changes to iWMMXt permissions.
+void jitCparWritten(bool changed);
 // For tests: whether the iWMMXt slot gives a callback for the ARM word (CDP, MCR, MRC, MCRR,
 // MRRC, LDC or STC on coprocessor 0 or 1), as it would when dynarmic compiles it.
 bool jitWmmxCompiles(FrondJit *jit, uint32_t word);

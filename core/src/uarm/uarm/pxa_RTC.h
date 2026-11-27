@@ -12,13 +12,14 @@ struct PxaRtc;
 void pxaRtcSetWakeCallback(PxaRtc* rtc, void (*callback)(void*), void* context);
 void pxaRtcRefreshInterrupts(PxaRtc* rtc);
 
-struct PxaRtc* pxaRtcInit(struct ArmMem* physMem, struct PxaIc* ic);
+struct PxaRtc* pxaRtcInit(struct ArmMem* physMem, struct PxaIc* ic, bool unixEpoch = false);
 
 void pxaRtcTick(struct PxaRtc* rtc);
 
 // Registers a GPIO reset leaves alone (PXA27x 3.4.3).
 struct PxaRtcRetained {
     uint64_t lastAlarmCheck;
+    uint32_t counterOffset;
     uint32_t RTAR, RTTR;
     uint8_t RTSR;
 };

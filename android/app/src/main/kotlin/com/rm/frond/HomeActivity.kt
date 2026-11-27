@@ -1,6 +1,7 @@
 package com.rm.frond
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -35,7 +36,7 @@ import java.io.File
 
 // `cards`: Add device's card per slot of a two-slot machine, a drawer card's id or "" for none.
 data class MachineDraft(val device: Device, val settings: MachineSettings = MachineSettings(), val sessionId: String? = null,
-                        val cards: List<String> = listOf("", ""))
+                        val cards: List<String> = listOf("", ""), val zaurus: ZaurusImages.Picks = ZaurusImages.Picks())
 
 // Import, export and duplicate run here, so a recreated activity doesn't cancel them or leave the
 // Copying dialog up. The state is shared with whichever HomeModel is current.
@@ -121,6 +122,7 @@ class HomeModel(private val activity: HomeActivity) {
 
     // As runCopy, with `label` in the dialog and a progress bar fed by `work`'s progress (bytes).
     fun runJob(label: String, errorTitle: String, success: String?, cancellable: Boolean = false, reload: Boolean = true,
+               onSuccess: ((HomeModel) -> Unit)? = null,
                work: (cancelled: () -> Boolean, progress: (Long, Long) -> Unit) -> String?) {
         if (HomeWork.copying) return
         HomeWork.copying = true
@@ -153,7 +155,10 @@ class HomeModel(private val activity: HomeActivity) {
                 if (reload) current?.reload()
                 if (finished && error == COPY_CANCELLED) Unit
                 else if (finished && error != null) current?.alert = errorTitle to error
-                else if (finished) current?.notice = success
+                else if (finished && current != null) {
+                    current.notice = success
+                    onSuccess?.invoke(current)
+                }
             }
         }
     }
@@ -269,7 +274,13 @@ class HomeModel(private val activity: HomeActivity) {
             alert = "Saved by an older Frond" to "This session was saved by an older Frond and can't be loaded."
             return
         }
-        if (!session.saved && firmwareReady[device] != true) {
+        if (device.zaurus) {
+            if (!File(session.folder, ZaurusImages.CF).isFile ||
+                !session.saved && !File(session.folder, ZaurusImages.NAND).isFile) {
+                alert = "Missing Zaurus image" to "The machine's NAND backup or CF image is missing."
+                return
+            }
+        } else if (!session.saved && firmwareReady[device] != true) {
             alert = "No firmware" to "Import the ${device.label} firmware first."
             return
         }
@@ -278,9 +289,13 @@ class HomeModel(private val activity: HomeActivity) {
             session.settings.applyTo(settings).putInto(Intent(activity, Emulators.activity(device)))
                 .putExtra(FrondActivity.EXTRA_SESSION, session.file.path)
                 .putExtra(FrondActivity.EXTRA_DEVICE, device.id)
-                .putExtra(FrondActivity.EXTRA_NOR, Firmware.nor(activity, device).path)
-                .putExtra(FrondActivity.EXTRA_NAND, Firmware.nand(activity, device).path)
-                .apply { HomeWork.startCards.remove(session.id)?.let { putExtra(FrondActivity.EXTRA_START_CARDS, it.toTypedArray()) } },
+                .apply {
+                    if (!device.zaurus) {
+                        putExtra(FrondActivity.EXTRA_NOR, Firmware.nor(activity, device).path)
+                        putExtra(FrondActivity.EXTRA_NAND, Firmware.nand(activity, device).path)
+                    }
+                    HomeWork.startCards.remove(session.id)?.let { putExtra(FrondActivity.EXTRA_START_CARDS, it.toTypedArray()) }
+                },
         )
     }
 
@@ -299,6 +314,7 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun cancelMachine() {
+        if (copying && machineDraft?.device?.zaurus == true) return
         val picked = machineDraft?.settings?.soundFont
         machineDraft = null
         if (!picked.isNullOrEmpty()) pruneSoundFonts()
@@ -307,6 +323,25 @@ class HomeModel(private val activity: HomeActivity) {
     fun chooseMachine(device: Device) {
         machineDraft?.takeIf { it.sessionId == null }?.let {
             machineDraft = it.copy(device = device, settings = it.settings.forDevice(it.device, device))
+        }
+    }
+
+    fun chooseZaurusImages(change: (ZaurusImages.Picks) -> ZaurusImages.Picks) {
+        val draft = machineDraft ?: return
+        if (draft.device.zaurus && draft.sessionId == null)
+            machineDraft = draft.copy(zaurus = change(draft.zaurus))
+    }
+
+    private fun addZaurus(draft: MachineDraft) {
+        if (!draft.zaurus.ready) return
+        val app = activity.applicationContext
+        lateinit var session: Session
+        runJob("Copying Zaurus images", "Couldn't add the Zaurus", null, cancellable = true, onSuccess = { current ->
+            current.machineDraft = null
+            current.start(session)
+        }) { cancelled, progress ->
+            session = Sessions.createZaurus(app, draft.device, draft.settings, draft.zaurus, cancelled, progress)
+            null
         }
     }
 
@@ -370,6 +405,8 @@ class HomeModel(private val activity: HomeActivity) {
                 machineDraft = null
                 reload()
                 pruneSoundFonts()
+            } else if (draft.device.zaurus) {
+                addZaurus(draft)
             } else if (firmwareReady[draft.device] != true) {
                 openFirmware(draft.device)
             } else {
@@ -402,8 +439,10 @@ class HomeModel(private val activity: HomeActivity) {
         state.getString("machineDraft")?.let {
             val json = org.json.JSONObject(it)
             val device = Device.byId(json.optString("device")) ?: return@let
+            fun image(name: String) = json.optString(name).takeIf(String::isNotEmpty)?.let(Uri::parse)
             machineDraft = MachineDraft(device, MachineSettings.from(json.optJSONObject("settings")),
-                json.optString("sessionId").takeIf(String::isNotEmpty))
+                json.optString("sessionId").takeIf(String::isNotEmpty),
+                zaurus = ZaurusImages.Picks(image("zaurusNand"), image("zaurusCf"), image("zaurusProm")))
         }
         firmwareOpen = state.getBoolean("firmwareOpen")
         startAfterImport = Device.byId(state.getString("startAfterImport"))
@@ -413,7 +452,9 @@ class HomeModel(private val activity: HomeActivity) {
     fun saveState(state: Bundle) {
         machineDraft?.let {
             state.putString("machineDraft", org.json.JSONObject().put("device", it.device.id)
-                .put("settings", it.settings.json()).put("sessionId", it.sessionId).toString())
+                .put("settings", it.settings.json()).put("sessionId", it.sessionId)
+                .put("zaurusNand", it.zaurus.nand?.toString()).put("zaurusCf", it.zaurus.cf?.toString())
+                .put("zaurusProm", it.zaurus.prom?.toString()).toString())
         }
         state.putBoolean("firmwareOpen", firmwareOpen)
         state.putString("startAfterImport", startAfterImport?.id)

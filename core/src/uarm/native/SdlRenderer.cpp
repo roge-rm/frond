@@ -60,11 +60,10 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
     if (fit != WindowFit::none) {
         const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
         const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
-        const int deviceWidth = deviceControlsWidth(deviceControls(deviceType,controlView),
-            landscape ? screenHeight : displayConfiguration.width, controlView);
-        const int deviceHeight = (landscape ? displayConfiguration.width : screenHeight) +
-                                 deviceControlsHeight(deviceControls(deviceType,controlView),landscape ? screenHeight : displayConfiguration.width,controlView);
-        layout = fitWindowLayout(fit, deviceWidth, deviceHeight, windowWidth, windowHeight);
+        const auto size = deviceControlSize(deviceControls(deviceType, controlView),
+            landscape ? screenHeight : displayConfiguration.width,
+            landscape ? displayConfiguration.width : screenHeight, controlView);
+        layout = fitWindowLayout(fit, size.x, size.y, windowWidth, windowHeight);
 
         // The device's place in output pixels. It is drawn on a texture of that size, the scale mapping
         // device pixels into it, and copied there on each present.
@@ -182,7 +181,8 @@ void SdlRenderer::Draw(bool forceRedraw, DeviceKeyMask buttons, DeviceStick stic
 void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine,
                          bool lcdEnabled, DeviceKeyMask buttons, DeviceStick stick) {
     if (!renderer) return;
-    const bool controlsChanged = pressedButtons != buttons || shownStick != stick;
+    const bool buttonsChanged = pressedButtons != buttons;
+    const bool controlsChanged = buttonsChanged || shownStick != stick;
     pressedButtons = buttons;
     shownStick = stick;
     this->lcdEnabled = lcdEnabled;
@@ -238,54 +238,83 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
 
     if (frameTextureValid && lcdEnabled) {
         // The jog tab turned over the screen moves it down; that only comes with the upright frame.
-        const int top = int(scale * deviceScreenTop(deviceControls(deviceType,controlView),controlView));
-        SDL_Rect dest = {.x = int(scale * deviceScreenLeft(deviceControls(deviceType,controlView),controlView)),
-                         .y = top,
+        const auto screen = ScreenRect();
+        SDL_Rect dest = {.x = screen.x,
+                         .y = screen.y,
                          .w = int(scale * displayConfiguration.width),
                          .h = int(scale * displayConfiguration.height)};
 
-        SDL_Point origin;
+        if (controlView.zaurus && rotation != Rotation::portrait_0) {
+            // The SDL software renderer scales the viewport offset again on a rotated copy.
+            // Use output pixels and turn the panel around the centre of the LCD opening.
+            float sx, sy;
+            SDL_RenderGetScale(renderer, &sx, &sy);
+            const float w = screen.w * sx, h = screen.h * sy;
+            const bool quarter = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
+            const float rawWidth = quarter ? h : w, rawHeight = quarter ? w : h;
+            const SDL_FRect panel{screen.x * sx + (w - rawWidth) * 0.5f,
+                                  screen.y * sy + (h - rawHeight) * 0.5f, rawWidth, rawHeight};
+            SDL_RenderSetScale(renderer, 1, 1);
+            SDL_RenderCopyExF(renderer, frameTexture, nullptr, &panel, -90 * int(rotation), nullptr, SDL_FLIP_NONE);
+            SDL_RenderSetScale(renderer, sx, sy);
+        } else {
+            SDL_Point origin;
 
-        switch (rotation) {
-            case Rotation::landscape_90:
-                dest.y = int(scale * displayConfiguration.width);
-                origin = {0, 0};
-                SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 270, &origin,
-                                 SDL_FLIP_NONE);
+            switch (rotation) {
+                case Rotation::landscape_90:
+                    dest.y = int(scale * displayConfiguration.width);
+                    origin = {0, 0};
+                    SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 270, &origin,
+                                     SDL_FLIP_NONE);
 
-                break;
+                    break;
 
-            case Rotation::portrait_180:
-                dest.y = int(scale * displayConfiguration.graffitiHeight);
+                case Rotation::portrait_180:
+                    dest.y = int(scale * displayConfiguration.graffitiHeight);
 
-                SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 180, nullptr,
-                                 SDL_FLIP_NONE);
+                    SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 180, nullptr,
+                                     SDL_FLIP_NONE);
 
-                break;
+                    break;
 
-            case Rotation::landscape_270:
-                dest.x += int(scale * (displayConfiguration.height +
-                                  displayConfiguration.graffitiHeight - displayConfiguration.width));
-                dest.y = int(scale * displayConfiguration.width);
+                case Rotation::landscape_270:
+                    dest.x += int(scale * (displayConfiguration.height +
+                                      displayConfiguration.graffitiHeight - displayConfiguration.width));
+                    dest.y = int(scale * displayConfiguration.width);
 
-                origin = {int(scale * displayConfiguration.width), 0};
+                    origin = {int(scale * displayConfiguration.width), 0};
 
-                SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 90, &origin,
-                                 SDL_FLIP_NONE);
+                    SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 90, &origin,
+                                     SDL_FLIP_NONE);
 
-                break;
+                    break;
 
-            default:
+                default:
 
-                SDL_RenderCopy(renderer, frameTexture, nullptr, &dest);
+                    SDL_RenderCopy(renderer, frameTexture, nullptr, &dest);
 
-                break;
+                    break;
+            }
         }
     }
 
     const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
     const int screenWidth=landscape ? displayConfiguration.height+displayConfiguration.graffitiHeight : displayConfiguration.width;
     const int screenHeight=landscape ? displayConfiguration.width : displayConfiguration.height+displayConfiguration.graffitiHeight;
+    if (controlView.zaurus && !controlView.bare) {
+        DrawZaurus(buttons, buttonsChanged);
+        const auto layout = zaurusDeviceLayout(screenWidth, screenHeight, *controlView.zaurus, scale);
+        const auto& body = *controlView.zaurus == ZaurusStyle::view ? layout.side : layout.keyboard;
+        const int radius = std::max(1, int(3 * scale));
+        for (int i = 0; i < 2; ++i) {
+            const SDL_Rect light{body.x + int((24 + i * 12) * scale), body.y + body.h - int(12 * scale),
+                                 2 * radius, radius};
+            if (stick.lamp & (1 << i))
+                SDL_SetRenderDrawColor(renderer, i == 0 ? 255 : 133, i == 0 ? 158 : 235, 62, 255);
+            else SDL_SetRenderDrawColor(renderer, 75, 78, 82, 255);
+            SDL_RenderFillRect(renderer, &light);
+        }
+    }
     const auto& controls=deviceControls(deviceType,controlView);
     if(controls.count) {
         // Controls all beside the screen leave nothing to draw under it.
@@ -320,6 +349,58 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
         if(controls.sideTabWidth>0) DrawSidebar(controls,screenWidth,screenHeight,buttons,stick,controlsChanged);
     }
     Present();
+}
+
+SDL_Rect SdlRenderer::ScreenRect() const {
+    const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
+    const int height = displayConfiguration.height + displayConfiguration.graffitiHeight;
+    const int width = displayConfiguration.width;
+    const auto& controls = deviceControls(deviceType, controlView);
+    if (controlView.zaurus && !controlView.bare)
+        return zaurusDeviceLayout(landscape ? height : width, landscape ? width : height, *controlView.zaurus, scale).screen;
+    return {int(scale * deviceScreenLeft(controls, controlView)), int(scale * deviceScreenTop(controls, controlView)),
+            int(scale * (landscape ? height : width)), int(scale * (landscape ? width : height))};
+}
+
+void SdlRenderer::DrawZaurus(DeviceKeyMask buttons, bool changed) {
+    const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
+    const int width = landscape ? displayConfiguration.height : displayConfiguration.width;
+    const int height = landscape ? displayConfiguration.width : displayConfiguration.height;
+    const auto size = deviceControlSize(deviceControls(deviceType, controlView), width, height, controlView);
+    if (!controlsTexture) {
+        controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET, size.x, size.y);
+        if (controlsTexture) {
+            SDL_SetTextureBlendMode(controlsTexture, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
+        }
+    }
+    if (!controlsPainted || changed) {
+        ZaurusKeysHeld held;
+        const auto& art = zaurusArt();
+        for (size_t i = 0; i < art.count; ++i) {
+            const KeyId key = zaurusArtKey(art.keys[i]);
+            held.Set(i, key && (buttons & deviceKeyBit(key)));
+        }
+        if (!controlsTexture) {
+            drawZaurusControls(renderer, zaurusDeviceLayout(width, height, *controlView.zaurus, scale), held);
+            return;
+        }
+        float sx, sy;
+        SDL_RenderGetScale(renderer, &sx, &sy);
+        if (SDL_SetRenderTarget(renderer, controlsTexture) == 0) {
+            SDL_RenderSetScale(renderer, 1, 1);
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+            SDL_RenderClear(renderer);
+            drawZaurusControls(renderer, zaurusDeviceLayout(width, height, *controlView.zaurus), held);
+            DrawOnDevice();
+            SDL_RenderSetScale(renderer, sx, sy);
+            controlsPainted = true;
+        }
+    }
+    if (controlsPainted) {
+        const SDL_Rect dest{0, 0, int(scale * size.x), int(scale * size.y)};
+        SDL_RenderCopy(renderer, controlsTexture, nullptr, &dest);
+    }
 }
 
 // The panels beside the screen, painted into a viewport-sized texture only when a key, the stick or the LED
@@ -379,7 +460,7 @@ void SdlRenderer::DrawSidebar(const DeviceControlProfile& controls, int screenWi
 
 // Clear the visible panel on every draw, including power transitions.
 void SdlRenderer::ClearWindow() {
-    if (fit == WindowFit::none) {
+    if (fit == WindowFit::none && !controlView.zaurus) {
         const uint8_t panel = lcdEnabled ? 0xff : 0;
         SDL_SetRenderDrawColor(renderer, panel, panel, panel, 0xff);
         SDL_RenderClear(renderer);
@@ -387,11 +468,7 @@ void SdlRenderer::ClearWindow() {
     }
     SDL_SetRenderDrawColor(renderer, background >> 16, (background >> 8) & 0xff, background & 0xff, 0xff);
     SDL_RenderClear(renderer);
-    const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
-    const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
-    const SDL_Rect screen{deviceScreenLeft(deviceControls(deviceType,controlView),controlView),
-                          deviceScreenTop(deviceControls(deviceType,controlView),controlView), landscape ? screenHeight : displayConfiguration.width,
-                          landscape ? displayConfiguration.width : screenHeight};
+    const auto screen = ScreenRect();
     const uint8_t panel = lcdEnabled ? 0xff : 0;
     SDL_SetRenderDrawColor(renderer, panel, panel, panel, 0xff);
     SDL_RenderFillRect(renderer, &screen);

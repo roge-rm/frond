@@ -132,7 +132,7 @@ fun FirmwareScreen(model: HomeModel) {
                 trailingContent = {
                     Box {
                         TextButton(onClick = { choosing = true }, enabled = !busy) { Text("Change") }
-                        DeviceMenu(choosing, { choosing = false }, "Detect from the firmware", { changeDevice(null) }) { changeDevice(it) }
+                        DeviceMenu(choosing, { choosing = false }, "Detect from the firmware", { changeDevice(null) }, Device.shown.filterNot { it.zaurus }) { changeDevice(it) }
                     }
                 },
             )

@@ -229,6 +229,31 @@ object Sessions {
         return Session(id, name, device, now, 0L, machine(context, id), settings = settings).also { write(context, it) }
     }
 
+    internal fun createZaurus(context: Context, device: Device, settings: MachineSettings, picks: ZaurusImages.Picks,
+                              cancelled: () -> Boolean, progress: (Long, Long) -> Unit): Session {
+        val id = UUID.randomUUID().toString()
+        val dest = machine(context, id)
+        val staged = File(dest, ".import.part")
+        activeImports.add(id)
+        try {
+            if (!staged.mkdirs()) throw IOException("Couldn't create the machine folder.")
+            ZaurusImages.stage(context.contentResolver, picks, staged, cancelled, progress)
+            if (cancelled()) throw kotlinx.coroutines.CancellationException()
+            for (name in listOf(ZaurusImages.NAND, ZaurusImages.CF, ZaurusImages.PROM)) {
+                val file = File(staged, name)
+                if (file.isFile && !file.renameTo(File(dest, name))) throw IOException("Couldn't move $name into the machine folder.")
+            }
+            val session = Session(id, freeName(context, device.label), device, System.currentTimeMillis(), 0L, dest, settings = settings)
+            if (cancelled()) throw kotlinx.coroutines.CancellationException()
+            write(context, session)
+            return session
+        } finally {
+            if (!meta(context, id).isFile) dest.deleteRecursively()
+            else staged.deleteRecursively()
+            activeImports.remove(id)
+        }
+    }
+
     // Copies the machine under a new id and the next free numbered name, with its card as `choice`
     // says. Blocks; run it off the main thread. Returns an error message or null (COPY_CANCELLED when
     // cancelled). The copy is deleted if it fails.
@@ -242,6 +267,7 @@ object Sessions {
         try {
             val lock = Cards.tryRunLock(s.folder) ?: return "Stop ${s.name} first."
             lock.use {
+                if (device.zaurus) prepareZaurusCopy(s)?.let { return it }
                 val error = duplicateMachine(folder(context), s.folder, dest, cancelled, choice)
                 if (error != null) return error
                 return try {
@@ -305,6 +331,14 @@ object Sessions {
         val open = { context.contentResolver.openOutputStream(to, "wt") }
         val delete = { refuseOutput(context, to, "Couldn't export the session."); Unit }
         val lock = Cards.tryRunLock(s.folder)
+        if (s.device?.zaurus == true) {
+            if (lock == null) return refuseOutput(context, to, "Stop ${s.name} first.")
+            lock.use {
+                prepareZaurusCopy(s)?.let { return refuseOutput(context, to, it) }
+                Cards.reconcile(sessions, s.folder)?.let { return refuseOutput(context, to, it) }
+                return exportPackable(s.folder, open, delete)
+            }
+        }
         if (!DanaSession.wrapped(s.file)) {
             lock.use { Cards.reconcile(sessions, if (lock != null) s.folder else null) }
             return exportPackable(s.folder, open, delete)
@@ -325,12 +359,25 @@ object Sessions {
         }
     }
 
+    private fun prepareZaurusCopy(s: Session): String? {
+        ZaurusImages.portableError(s.folder, s.saved)?.let { return it }
+        if (ZaurusCfSlot.read(s.folder) != null) {
+            val settle = sdSettleOf(s.folder, cf = true)
+            val cf = File(s.folder, settle.sibling)
+            if (settle.full == null && settle.journal == null && (!cf.isFile || !CardFile.settle(cf)))
+                return "Couldn't settle the removable CF card."
+        }
+        return null
+    }
+
     // Saves the running Palm to a picked document, like the desktop's Save a Copy. The core saves to
     // a private folder first and keeps running from and saving to its own session. Blocks; run it off
     // the main thread. Returns an error message or null. The copy is a zip of packable files; SAF
     // cannot promise atomic replacement of an existing document.
     fun saveCopy(context: Context, link: ControlLink, to: Uri, session: String? = null): String? {
-        forPath(context, session)?.device?.takeIf { it.linkedCards }?.let { device ->
+        val machine = forPath(context, session)
+        if (machine?.device?.zaurus == true) return refuseOutput(context, to, "Close the Zaurus and export it from the Machines list.")
+        machine?.device?.takeIf { it.linkedCards }?.let { device ->
             val cards = device.storageSlots.map { link.request(it.commandPrefix + "state") }
             LinkedCards.sessionCopyError(cards.map { if (it.ok) it.message else null }, device.storageSlots.size)
                 ?.let { return refuseOutput(context, to, it) }
@@ -479,20 +526,28 @@ object Sessions {
                 frond = File(converted, "session.frond")
                 converted
             } else staged
+            device ?: return "That session is for a device Frond can't run here yet."
+            if (device.zaurus) {
+                ZaurusImages.portableError(files, saved = true)?.let { return it }
+            } else if (ZaurusImages.companions.any { File(files, it).exists() }) {
+                return "That session contains Zaurus images for another device."
+            }
             if (!linked && header.version >= 7L) {
-                checkImportedSiblings(staged, frond, Cards.readSlot(staged).swap || Cards.readSlot(staged, 1).swap)?.let { return it }
+                checkImportedSiblings(staged, frond, Cards.readSlot(staged).swap || Cards.readSlot(staged, 1).swap,
+                    cfSwap = device.zaurus && ZaurusCfSlot.read(staged) != null)?.let { return it }
             }
             if (frond != File(dest, "session.frond") && !frond.renameTo(File(dest, "session.frond")))
                 return "Couldn't save the session."
-            for (sibling in listOf("sd.frondsd", "sd2.frondsd", "ms.frondms", "ms.frondmsp", NAND_FILE, "slot.json", "slot2.json")) {
+            for (sibling in listOf("sd.frondsd", "sd2.frondsd", "ms.frondms", "ms.frondmsp", NAND_FILE, "slot.json", "slot2.json") +
+                    ZaurusImages.companions) {
                 val source = File(files, sibling)
                 if (source.isFile && !source.renameTo(File(dest, sibling))) return "Couldn't save the session."
             }
             File(dest, "session.frond.settings.json").takeIf { it.isFile }?.delete()
-            val name = freeName(context, displayName(context, from)?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: device!!.label)
+            val name = freeName(context, displayName(context, from)?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: device.label)
             // The packed card becomes a new card in Cards.
             Cards.adoptImportedCard(folder(context), dest, "$name card", preserveLinkedKey = linked)?.let { return it }
-            write(context, Session(id, name, device!!, System.currentTimeMillis(), 0L, dest))
+            write(context, Session(id, name, device, System.currentTimeMillis(), 0L, dest))
             return null
         } catch (e: Exception) {
             return "Couldn't save the session."
@@ -547,7 +602,7 @@ internal fun classicV2Physical(payload: Long, side: Long): Long {
 // bytes and end with the card's generation, which a v2 card file must match. With `swap`
 // (slot.json says the slot changed since the save) the card files are whatever is there, checked
 // against their own headers. Only a v1 classic stick, which isn't a container, is read here.
-internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false): String? {
+internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false, cfSwap: Boolean = false): String? {
     val mismatch = "That session's card files don't match."
     val bytes = try { frond.readBytes() } catch (e: IOException) { return "Couldn't read that file." }
     if (bytes.size < 8) return "Couldn't read that file."
@@ -557,6 +612,7 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
     data class Card(val kind: Long, val physical: Long, val generation: Long)
     val cards = mutableListOf<Card>()
     var nand: Card? = null
+    var cf: Card? = null
     if (bytes.size >= 40 + 52) {
         val mediaCount = le32(bytes, 88)
         val descBytes = mediaCount * descSize
@@ -588,6 +644,13 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
                         physical > (256L shl 20) || logical != physical / 33 * 32)
                         return mismatch
                     nand = Card(kind, physical, generation)
+                    continue
+                }
+                6L -> {
+                    if (version != 9L || cf != null || name != ZaurusImages.EXTERNAL_CF || logical != physical ||
+                        physical !in 512..ZaurusImages.MAX_EXTERNAL_CF_BYTES || physical % 512 != 0L)
+                        return mismatch
+                    cf = Card(kind, physical, generation)
                     continue
                 }
                 else -> return mismatch
@@ -660,6 +723,13 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
     if (!expectMs && File(dir, "ms.frondms").isFile) return mismatch
     if (!expectPro && File(dir, "ms.frondmsp").isFile) return mismatch
     if (expectMs && expectPro) return mismatch
+    val cfFile = File(dir, ZaurusImages.EXTERNAL_CF)
+    if (cf != null || cfSwap) {
+        val info = CardFile.info(cfFile, checked = true) ?: return mismatch
+        if (info.kind != 0 || info.side != 0L || info.payload !in 512..ZaurusImages.MAX_EXTERNAL_CF_BYTES ||
+            info.payload % 512 != 0L || (!cfSwap && (cf == null || info.payload != cf.physical || info.generation != cf.generation)))
+            return mismatch
+    } else if (cfFile.isFile) return mismatch
     val nandFile = File(dir, NAND_FILE)
     val want = nand
     if (want == null) return if (nandFile.isFile) mismatch else null
@@ -679,7 +749,8 @@ internal const val NAND_FILE = "nand.frondnand"
 // file, so only old ones go.
 internal fun saveTempName(name: String) =
     !liveCardName(name) && (name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") || name.contains(".frondms.tmp-") ||
-        name.contains(".frondnand.tmp-") || (name.startsWith(".gen-") && name.contains("-tmp-")))
+        name.contains(".frondnand.tmp-") || name.contains(".frondcf.tmp-") ||
+        (name.startsWith(".gen-") && name.contains("-tmp-")))
 
 // A running machine's candidate card and its generation files. The core flocks the candidate and
 // removes abandoned ones itself when that machine starts again.
@@ -716,7 +787,8 @@ internal fun ignoredName(name: String) =
     name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
         name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") || name.contains(".frondmsp.journal-") ||
         name.contains(".frondms.journal-") || name.contains(".frondnand.tmp-") || name.contains(".frondnand.journal-") ||
-        name.contains(".gen-")
+        name.contains(".frondcf.tmp-") || name.contains(".frondcf.journal-") || name.contains(".gen-") ||
+        ZaurusImages.ignoresJournal(name)
 
 // Where the core writes a Save a copy: the ARM core takes the folder, the 68k core writes one
 // session file and needs its path.
@@ -725,7 +797,7 @@ internal fun copySavePath(copy: File, runs68k: Boolean): String =
 
 internal fun packableName(name: String): Boolean {
     if (ignoredName(name) || '/' in name || '\\' in name) return false
-    return name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == NAND_FILE || name == "slot.json" || name == "slot2.json" ||
+    return name in ZaurusImages.companions || name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == NAND_FILE || name == "slot.json" || name == "slot2.json" ||
         name.endsWith(".frond.settings.json") ||
         (name.endsWith(".frond") && !name.endsWith(".frond.new"))
 }
@@ -751,11 +823,11 @@ internal fun sessionPathIn(dir: File): File = sessionFile(dir) ?: File(dir, "${d
 
 // The content generation of the file-backed card (kind 1 SD, 2 classic stick or 3 Pro) a v8 or
 // v9 .frond describes, with its kind, or 0 for none. With `nand` it's the v9 internal NAND's (kind 4).
-internal fun sdCardOf(frond: File?, nand: Boolean = false, second: Boolean = false): Pair<Long, Long> = try {
+internal fun sdCardOf(frond: File?, nand: Boolean = false, second: Boolean = false, cf: Boolean = false): Pair<Long, Long> = try {
     val head = frond?.inputStream()?.use { it.readExact(92 + 400) } ?: ByteArray(0)
     if (head.size < 92 || (le32(head, 4) != 8L && le32(head, 4) != 9L)) 0L to 1L
     else (0 until minOf(le32(head, 88), 4L).toInt()).map { 92 + it * 100 }
-        .firstOrNull { it + 100 <= head.size && le32(head, it).let { kind -> if (second) kind == 5L else if (nand) kind == 4L else kind in 1L..3L } }
+        .firstOrNull { it + 100 <= head.size && le32(head, it).let { kind -> when { cf -> kind == 6L; second -> kind == 5L; nand -> kind == 4L; else -> kind in 1L..3L } } }
         ?.let { le64(head, it + 92) to le32(head, it) } ?: (0L to 1L)
 } catch (e: IOException) {
     0L to 1L
@@ -771,9 +843,10 @@ internal fun sdGenerationOf(frond: File?): Long = sdCardOf(frond).first
 // it's the same for a v9 nand.frondnand.
 internal class SdSettle(val full: File?, val journal: File?, val sibling: String = "sd.frondsd")
 
-internal fun sdSettleOf(dir: File, frond: File? = sessionFile(dir), nand: Boolean = false, second: Boolean = false): SdSettle {
-    val (want, kind) = sdCardOf(frond, nand, second)
-    val sibling = if (nand) NAND_FILE else if (second) "sd2.frondsd" else when (kind) { 3L -> "ms.frondmsp"; 2L -> "ms.frondms"; else -> "sd.frondsd" }
+internal fun sdSettleOf(dir: File, frond: File? = sessionFile(dir), nand: Boolean = false,
+                        second: Boolean = false, cf: Boolean = false): SdSettle {
+    val (want, kind) = sdCardOf(frond, nand, second, cf)
+    val sibling = if (cf) ZaurusImages.EXTERNAL_CF else if (nand) NAND_FILE else if (second) "sd2.frondsd" else when (kind) { 3L -> "ms.frondmsp"; 2L -> "ms.frondms"; else -> "sd.frondsd" }
     val none = SdSettle(null, null, sibling)
     if (want == 0L) return none
     val sd = File(dir, sibling)
@@ -826,7 +899,7 @@ internal fun exportPackable(dir: File?, open: () -> java.io.OutputStream?, delet
 internal fun zipPackable(dir: File, output: java.io.OutputStream, linked: Boolean = false) {
     if (!linked && sessionFile(dir)?.let { DanaSession.wrapped(it) } == true)
         throw IOException("Independent-card sessions require a native portable folder export.")
-    val settles = listOf(sdSettleOf(dir), sdSettleOf(dir, nand = true), sdSettleOf(dir, second = true))
+    val settles = listOf(sdSettleOf(dir), sdSettleOf(dir, nand = true), sdSettleOf(dir, second = true), sdSettleOf(dir, cf = true))
     ZipOutputStream(output).use { zip ->
         val files = dir.listFiles()?.filter { it.isFile && packableName(it.name) }.orEmpty()
             .filterNot { f -> settles.any { it.full != null && f.name == it.sibling } }
@@ -878,7 +951,11 @@ internal fun unzipPackable(input: java.io.InputStream, dest: File, nandMax: Long
                 continue
             }
             if (entry.isDirectory || !(packableName(name) || name == "sd0.frondsd")) continue
-            File(dest, name).outputStream().use { zip.copyTo(it, 1 shl 20) }
+            val target = File(dest, name)
+            if (name in ZaurusImages.companions) {
+                if (target.exists()) throw IOException("Duplicate Zaurus image.")
+                ZaurusImages.copyImage(zip, target, ZaurusImages.limit(name), sparse = name == ZaurusImages.CF)
+            } else target.outputStream().use { zip.copyTo(it, 1 shl 20) }
         }
     }
     sessionFile(dest) != null
@@ -915,7 +992,7 @@ internal const val COPY_PART = ".copy.part"
 internal fun copyMachine(from: File, dest: File, free: Long, copyCard: Boolean = true, cancelled: () -> Boolean = { false }): String? {
     if (dest.exists()) return "Couldn't duplicate the session."
     val settles = listOfNotNull(if (copyCard) sdSettleOf(from) else null, sdSettleOf(from, nand = true),
-        if (copyCard) sdSettleOf(from, second = true) else null)
+        if (copyCard) sdSettleOf(from, second = true) else null, sdSettleOf(from, cf = true))
     // slot.json and slot2.json are written by the duplicate; card files only when the card is copied.
     val files = from.listFiles()?.filter { it.isFile && packableName(it.name) && it.name != "slot.json" && it.name != "slot2.json" &&
         (copyCard || (it.name !in Cards.cardFiles && it.name != "sd2.frondsd")) }.orEmpty()
@@ -929,14 +1006,24 @@ internal fun copyMachine(from: File, dest: File, free: Long, copyCard: Boolean =
         }
         name to source
     } + settles.mapNotNull { s -> s.full?.takeIf { files.none { f -> f.name == s.sibling } }?.let { s.sibling to it } })
-    val needed = entries.sumOf { it.second.length() }
+    val needed = entries.filter { it.first != ZaurusImages.CF }.sumOf { it.second.length() }
     if (free < needed + (16L shl 20)) return "Not enough free space to duplicate this machine. It needs ${needed / 1_000_000 + 1} MB."
     return try {
         if (!dest.mkdirs() || !File(dest, COPY_PART).createNewFile()) throw IOException("no folder")
         val buffer = ByteArray(1 shl 20)
         for ((name, source) in entries) {
             if (cancelled()) throw CancellationException()
-            File(dest, name).outputStream().use { out ->
+            val target = File(dest, name)
+            if (name == ZaurusImages.CF) {
+                source.inputStream().use {
+                    ZaurusImages.copyImage(it, target, ZaurusImages.limit(name), length = source.length(), cancelled = {
+                        if (cancelled()) throw CancellationException()
+                        false
+                    })
+                }
+                continue
+            }
+            target.outputStream().use { out ->
                 val journal = settles.firstOrNull { it.sibling == name }?.journal
                 if (journal != null) writeSettledSd(source, journal, out)
                 else source.inputStream().use { input ->

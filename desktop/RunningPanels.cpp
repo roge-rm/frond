@@ -82,7 +82,8 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
         buttons->addWidget(b);
         return b;
     };
-    connect(add(tr("Install…"), "installApp"), &QPushButton::clicked, this, &AppsPanel::installRequested);
+    installButton = add(tr("Install…"), "installApp");
+    connect(installButton, &QPushButton::clicked, this, &AppsPanel::installRequested);
     otherButton = add(tr("Other…"), "otherApp");
     connect(otherButton, &QPushButton::clicked, this, &AppsPanel::otherRequested);
     exportAllButton = add(tr("Export all…"), "exportRam");
@@ -116,6 +117,13 @@ void AppsPanel::setInstallOnly(bool on, bool windowsMobile) {
     list->setEnabled(!on || windowsMobile);
     list->setVisible(!on || windowsMobile);
     setDatabases({});
+}
+
+void AppsPanel::setPackageQueue(bool on) {
+    if (on == packageQueue) return;
+    packageQueue = on;
+    installButton->setText(on ? tr("Queue IPK…") : tr("Install…"));
+    empty->setVisible(!on);
 }
 
 void AppsPanel::loadingInstalledPrograms() {
@@ -209,5 +217,5 @@ void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, con
     refreshButton->setEnabled(true);
     empty->setText(listWindowsMobile ? tr("Installed programs haven’t been read") :
                    installOnly ? tr("Not available yet") : note.isEmpty() ? tr("No applications") : note);
-    empty->setVisible(apps.empty());
+    empty->setVisible(apps.empty() && !packageQueue);
 }

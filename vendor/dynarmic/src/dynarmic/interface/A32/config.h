@@ -64,6 +64,7 @@ enum class Exception {
 struct CodeSnapshot : public TranslateCallbacks {
     virtual ~CodeSnapshot() = default;
 
+
     void PreCodeTranslationHook(bool /*is_thumb*/, VAddr /*pc*/, A32::IREmitter& /*ir*/) override {}
     std::uint64_t GetTicksForCode(bool /*is_thumb*/, VAddr /*vaddr*/, std::uint32_t /*instruction*/) override { return 1; }
 
@@ -142,8 +143,11 @@ struct UserCallbacks : public TranslateCallbacks {
     // Null compiles the block in place as before.
     virtual std::unique_ptr<CodeSnapshot> SnapshotCode(VAddr /*pc*/, bool /*thumb*/, bool /*whole*/) { return nullptr; }
     // The same for a block compiled ahead (Jit::SetCompileAhead), which the guest may never
-    // run, so the callback should read no memory with side effects. Null skips the block.
-    virtual std::unique_ptr<CodeSnapshot> SnapshotCodeAhead(VAddr pc, bool thumb, bool whole) { return SnapshotCode(pc, thumb, whole); }
+    // run, so the callback should read no memory with side effects. The FPSCR comes from
+    // the block's location descriptor. Null skips the block.
+    virtual std::unique_ptr<CodeSnapshot> SnapshotCodeAhead(VAddr pc, bool thumb, bool whole, std::uint32_t /*fpscr*/) {
+        return SnapshotCode(pc, thumb, whole);
+    }
     // Before a block compiled off-thread is installed, on the guest thread: false drops it
     // (the code it was translated from has changed since the snapshot).
     virtual bool CodeUnchanged(CodeSnapshot& /*snapshot*/) { return true; }
