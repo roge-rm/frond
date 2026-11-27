@@ -2845,6 +2845,8 @@ bool jitCodeWritten(FrondJit *j, uint8_t *hostPage, uint32_t offset, uint32_t si
     return known;
 }
 
+uint64_t jitKeepStoreDrops() { return stats.keepStoreDrops; }
+
 void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size, const void *data) {
     bool dropped = false;
     jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWrittenPa(pa >> 12, pa & 0xfffu, size, data); });

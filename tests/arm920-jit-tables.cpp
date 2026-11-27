@@ -370,6 +370,8 @@ void testKeptEdit() {
         machine->word(0x281010, 0x33333333);
         machine->word(0x404, str(0, 13));
         machine->word(0x40c, dtlbInvalidate);
+        machine->word(0x410, 0xe10d3090);  // SWP r3, r0, [r13]
+        machine->word(0x414, 0xe8cd0001);  // STMIA r13, {r0}^
         machine->word(0x420, str(0, 13));
         machine->word(0x424, movPc(8));
         machine->word(0x440, loop);
@@ -396,26 +398,33 @@ void testKeptEdit() {
         }
         same(exact, fast, loads, 20, 0);
     };
-    // Warm the loads, the park loop and the translated edit (storing the word it holds).
+    // Warm the loads, the park loop and the translated edit (storing the word it holds), with invalidations so the
+    // table pages are marked (the first mark flushes the host TLB, which drops every entry).
     for (unsigned i = 0; i < 3; ++i) {
+        step(kernel + 12);
         run();
         same(exact, fast, park, 20, 0);
         same(exact, fast, edit, 20, 0x102ff2);
     }
     assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x33333333);
-    // Invalidate, run elsewhere (the JIT keeps the slot page), then move the slot entry to B with no invalidation.
-    step(kernel + 12);
-    same(exact, fast, park, 20, 0);
-    step(kernel + 4, 0x202ff2);
-    same(exact, fast, park, 20, 0);
-    run();
-    assert(exact.reg(1) == 0x22222222 && fast.reg(1) == 0x22222222);
-    // The same with translated code moving it back to A.
-    step(kernel + 12);
-    same(exact, fast, park, 20, 0);
-    same(exact, fast, edit, 20, 0x102ff2);
-    run();
-    assert(exact.reg(1) == 0x11111111 && fast.reg(1) == 0x11111111);
+    // Each round: invalidate, run elsewhere (the JIT keeps the slot page), then move the slot entry with no
+    // invalidation: by STR, SWP and STM with the user bank through the step, then by translated code. The store
+    // has to find the kept entry's word, and the next load walks the new entry.
+    const uint32_t edits[] = {kernel + 4, kernel + 0x10, kernel + 0x14, edit};
+    for (unsigned round = 0; round < 4; ++round) {
+        const uint32_t pte = round & 1 ? 0x102ff2 : 0x202ff2, value = round & 1 ? 0x11111111 : 0x22222222;
+        step(kernel + 12);
+        same(exact, fast, park, 20, 0);
+        const uint64_t drops = cpuJitKeepStoreDrops();
+        if (edits[round] == edit)
+            same(exact, fast, edit, 20, pte);
+        else
+            step(edits[round], pte);
+        assert(cpuJitKeepStoreDrops() > drops);
+        same(exact, fast, park, 20, 0);
+        run();
+        assert(exact.reg(1) == value && fast.reg(1) == value);
+    }
 }
 
 // A page whose section entry moves to another domain with no TLB invalidation, filled again while the stale TLB entry

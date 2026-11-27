@@ -100,6 +100,8 @@ bool jitCodeWritten(FrondJit *jit, uint8_t *hostPage, uint32_t offset, uint32_t 
 // from. The same, by physical page. data: the bytes being stored while the page still holds the old ones,
 // or null.
 void jitCodeWrittenPa(FrondJit *jit, uint32_t pa, uint32_t size, const void *data = nullptr);
+// Stores that changed a table word a kept page entry's walk read, over every JIT so far.
+uint64_t jitKeepStoreDrops();
 // Sends stores to the RAM pages in [host, host + size) back through the callbacks.
 void jitWriteProtect(FrondJit *jit, const uint8_t *host, uint32_t size);
 // The same for the one RAM page at hostPage, after a line of it was flagged.

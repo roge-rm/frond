@@ -398,6 +398,9 @@ struct ArmCpu {
     // and the run's budget, which such a store can shrink.
     Arm920LeanWrite leanWrite;
     uint32_t leanInstr, leanBudget;
+    // Fast: RAM repeated through [mirrorBase, mirrorEnd) every mirrorSize bytes (a power of two, 0 for none). The code
+    // maps and the JIT key RAM by the first copy's address (cpuPrvArm920FoldPa). Not saved.
+    uint32_t mirrorBase, mirrorEnd, mirrorSize;
     // Fast blocks: virtual pages whose stores went to leanWrite (not plain, not cacheable or bufferable), keyed as
     // the host TLB is (cpuJitLeanDeviceWrite). pa is the page's physical address with bit 0 set when in use.
     // Fast blocks: the pc of the last access-pc instruction generated code ran (cpuArm920SetJitAccessPcs), taken by
@@ -1363,12 +1366,20 @@ static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
     return (i & 0x0c100000) == 0x04100000 || ((i & 0x0e100090) == 0x00100090 && (i & 0x60));
 }
 
+// The address the code maps and the JIT use for RAM at pa: its first copy where the RAM repeats.
+static inline uint32_t cpuPrvArm920FoldPa(const ArmCpu *cpu, uint32_t pa) {
+    if (cpu->mirrorSize && pa >= cpu->mirrorBase && pa < cpu->mirrorEnd)
+        return cpu->mirrorBase + ((pa - cpu->mirrorBase) & (cpu->mirrorSize - 1));
+    return pa;
+}
+
 // A store to [pa, pa + size), inside one page. Translated code is dropped by block: those whose code the
 // store overlaps, in the virtual pages translated from pa. Decoded code isn't tied to the physical pages
 // it came from, so a store to any of its lines drops it all. A store to other lines of those pages drops
 // nothing.
 // data: the bytes being stored, before the page holds them (null if it already does or they aren't known).
 static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size, const void *data = nullptr) {
+    pa = cpuPrvArm920FoldPa(cpu, pa);
 #ifdef FROND_DYNARMIC
     // The word marks stay until jitRun works them out again from the blocks left.
     if (cpu->jitCode && unlikely(cpu->jitCode->page(pa)) && cpu->jitCode->hitWords(pa, size))
@@ -1382,6 +1393,7 @@ static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size, const vo
 
 // Whether a store to the page at pa has to come through cpuPrvArm920Stored (it holds code).
 static bool cpuPrvArm920CodePage(const ArmCpu *cpu, uint32_t pa) {
+    pa = cpuPrvArm920FoldPa(cpu, pa);
 #ifdef FROND_DYNARMIC
     if (cpu->jitCode && cpu->jitCode->page(pa)) return true;
 #endif
@@ -1604,6 +1616,10 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
             }
         }
         if constexpr (arm920) {
+            // Fast: the guarded step's stores drop translated and decoded code and the JIT's table watches, as the
+            // lean path's do. Only while Fast is on (leanPage), so Exact never gets here.
+            if constexpr (write && size <= 4)
+                if (unlikely(cpu->leanPage != nullptr)) cpuPrvArm920Stored(cpu, pa, size, buf);
             auto* dc = cpu->arm920DataCache;
             dc->mem = cpu->mem;
             const auto ctl = *cpu->cp15ControlWord;
@@ -5666,6 +5682,7 @@ static FORCE_INLINE void cpuPrvLeanDecodeSlot(struct icache *ic, struct icacheli
 // write entries, so every later store to it takes the slow path, which drops the decoded code when the
 // store lands on a noted line.
 static void cpuPrvLeanNoteCode(struct ArmCpu *cpu, uint32_t pa) {
+    pa = cpuPrvArm920FoldPa(cpu, pa);
     if (cpu->leanCode->note(pa)) hostTlbFlush(&cpu->mem->hostTlb);
 }
 
@@ -5900,6 +5917,12 @@ void cpuArm920SetLeanRead(ArmCpu *cpu, Arm920LeanRead read) { cpu->leanRead = re
 
 void cpuArm920SetLeanWrite(ArmCpu *cpu, Arm920LeanWrite write) { cpu->leanWrite = write; }
 
+void cpuArm920SetRamMirror(ArmCpu *cpu, uint32_t base, uint32_t size, uint32_t end) {
+    cpu->mirrorBase = base;
+    cpu->mirrorSize = size && !(size & (size - 1)) ? size : 0;
+    cpu->mirrorEnd = end;
+}
+
 bool cpuArm920LeanInJit(const ArmCpu *cpu) { return cpu->leanJit; }
 
 // A DMA or other write over the whole page at pa.
@@ -6079,7 +6102,7 @@ bool cpuJitCodePageWrite(ArmCpu *cpu, uint32_t va, unsigned size, uint32_t value
     auto &e = cpu->jitCodeWrite[(va >> 12) & 15];
     const struct HostTlb &t = cpu->mem->hostTlb;
     if (e.key != hostTlbKey(t.gen, va, cpu->privileged) || e.epoch != t.epoch || !e.host) return false;
-    const uint32_t pa = e.pa | (va & 0xfffu);
+    const uint32_t pa = cpuPrvArm920FoldPa(cpu, e.pa | (va & 0xfffu));
     const bool jitPage = cpu->jitCode && cpu->jitCode->page(pa), leanPage = cpu->leanCode && cpu->leanCode->page(pa);
     if (!jitPage && !leanPage) {
         // No code left: the slow path fills a host TLB write entry instead.
@@ -6211,7 +6234,7 @@ bool cpuJitRefused(const ArmCpu *cpu) { return cpu->jitRefused; }
 bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access) {
     const MMUTranslateResult r = mmuTranslateCodeAccess(cpu->memorySystem.mmu, va, access);
     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
-    *pa = MMU_TRANSLATE_RESULT_PA(r);
+    *pa = cpuPrvArm920FoldPa(cpu, MMU_TRANSLATE_RESULT_PA(r));
     return true;
 }
 
@@ -6237,8 +6260,11 @@ bool cpuJitCodePaMemo(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access, 
     if (cpu->model != ArmCpuModel::arm920t || !cpu->jitBlocks || !cpu->leanPage) return cpuJitCodePa(cpu, va, pa, access);
     const MMUTranslateResult r =
         mmuTranslateCodeAccessMemo(cpu->memorySystem.mmu, va, access, memo, cpuPrvTableWord, cpu);
+    // The table words by their first copy too, as stores report them (cpuPrvArm920Stored).
+    if (memo->n != 0xff)
+        for (uint8_t i = 0; i < memo->n; i++) memo->pa[i] = cpuPrvArm920FoldPa(cpu, memo->pa[i]);
     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
-    *pa = MMU_TRANSLATE_RESULT_PA(r);
+    *pa = cpuPrvArm920FoldPa(cpu, MMU_TRANSLATE_RESULT_PA(r));
     return true;
 }
 
@@ -6267,7 +6293,7 @@ int cpuJitPageWords(ArmCpu *cpu, uint32_t va, const uint8_t *hostPage, bool writ
         for (int k = 0; k < n; k++) seen |= words[k] == memo.word[i];
         if (seen) continue;
         if (n == kJitPageWords) return -1;
-        pas[n] = memo.pa[i];
+        pas[n] = cpuPrvArm920FoldPa(cpu, memo.pa[i]);
         words[n++] = memo.word[i];
     }
     return n;
@@ -6304,6 +6330,7 @@ void cpuJitSetCodeLines(ArmCpu *cpu, uint8_t *hostPage, uint8_t *flags, uint64_t
 }
 
 void cpuJitSetArm920CodeWords(ArmCpu *cpu, uint32_t pa, const uint64_t *words) {
+    pa = cpuPrvArm920FoldPa(cpu, pa);
     if (!cpu->jitCode || !cpu->jitCode->page(pa)) return;
     uint64_t any = 0;
     for (unsigned i = 0; i < 16; i++) any |= words[i];
@@ -6340,7 +6367,7 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
         if (!cpu->leanPage) return nullptr;
         bool ram = false;
         uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &ram);
-        if (page && ram && cpu->jitCode->note(pa, false)) hostTlbFlush(&cpu->mem->hostTlb);
+        if (page && ram && cpu->jitCode->note(cpuPrvArm920FoldPa(cpu, pa), false)) hostTlbFlush(&cpu->mem->hostTlb);
         return page;
     }
     if (uint8_t *page = memWatchRamCode(cpu->mem, pa, cpuPrvJitCodeWritten, cpu, lines)) return page;
@@ -6354,6 +6381,7 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
 
 bool cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa) {
     if (!cpu->jitCode) return false;
+    pa = cpuPrvArm920FoldPa(cpu, pa);
     // A newly marked page loses its host TLB entries, so its stores come through cpuPrvArm920Stored.
     if (cpu->jitCode->note(pa, false)) hostTlbFlush(&cpu->mem->hostTlb);
     cpu->jitCode->noteWord(pa);
@@ -6361,6 +6389,7 @@ bool cpuJitWatchTableWord(ArmCpu *cpu, uint32_t pa) {
 }
 
 void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa) {
+    pa = cpuPrvArm920FoldPa(cpu, pa);
     if (cpu->jitCode && cpu->jitCode->page(pa)) cpu->jitCode->noteWord(pa);
 }
 
@@ -6468,6 +6497,7 @@ uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask
 
 static uint64_t jitExceptionReturns;
 uint64_t cpuJitExceptionReturns() { return jitExceptionReturns; }
+uint64_t cpuJitKeepStoreDrops() { return jitKeepStoreDrops(); }
 
 uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target) {
     ++jitExceptionReturns;
@@ -7399,6 +7429,7 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span,
 }
 #else
 uint64_t cpuJitExceptionReturns() { return 0; }
+uint64_t cpuJitKeepStoreDrops() { return 0; }
 uint64_t cpuJitDomainCalls() { return 0; }
 uint64_t cpuJitCpsrWrites() { return 0; }
 uint64_t cpuJitCpsrInterprets() { return 0; }
