@@ -28,6 +28,7 @@ object ZaurusImages {
     private const val NAND_ERROR = "Choose an SL-C3000 SYSTC300.DBK or a raw NAND image with spare bytes."
     private const val PROM_ERROR = "Choose an 8 MiB SL-C3000 CS0 boot PROM."
     private const val CF_ERROR = "Choose a raw CF image with 512-byte sectors."
+    private const val FONT_ERROR = "Choose an 8 MiB SL-C3000 CS0 dump."
 
     fun limit(name: String): Long = when (name) {
         NAND -> DBK_BYTES
@@ -69,22 +70,55 @@ object ZaurusImages {
         file.isFile && file.length() == PROM_BYTES &&
             java.io.DataInputStream(file.inputStream()).use { it.readInt() != -1 }
 
-    data class Picks(val nand: Uri? = null, val cf: Uri? = null, val prom: Uri? = null) {
-        val ready get() = nand != null && cf != null
+    // Add device's Zaurus picks as document URIs. With `create` the CF is built from the `hdd1` archive at
+    // `sizeGb`, and `prom` is only its LC Font source, as on the desktop; otherwise `cf` is imported.
+    data class Picks(val nand: String? = null, val cf: String? = null, val prom: String? = null,
+                     val create: Boolean = false, val hdd1: String? = null, val sizeGb: Int = ZaurusCf.DEFAULT_GB) {
+        val ready get() = nand != null && (if (create) hdd1 != null else cf != null)
+
+        fun putInto(json: org.json.JSONObject): org.json.JSONObject = json.put("zaurusNand", nand).put("zaurusCf", cf)
+            .put("zaurusProm", prom).put("zaurusCreate", create).put("zaurusHdd1", hdd1).put("zaurusSizeGb", sizeGb)
+
+        companion object {
+            fun from(json: org.json.JSONObject): Picks {
+                fun uri(name: String) = json.optString(name).takeIf(String::isNotEmpty)
+                val size = json.optInt("zaurusSizeGb", ZaurusCf.DEFAULT_GB).takeIf { it in ZaurusCf.sizes } ?: ZaurusCf.DEFAULT_GB
+                return Picks(uri("zaurusNand"), uri("zaurusCf"), uri("zaurusProm"), json.optBoolean("zaurusCreate"),
+                    uri("zaurusHdd1"), size)
+            }
+        }
     }
 
     fun stage(resolver: ContentResolver, picks: Picks, dir: File, cancelled: () -> Boolean,
               progress: (Long, Long) -> Unit) {
         val nand = File(dir, NAND)
-        copy(resolver, requireNotNull(picks.nand), nand, DBK_BYTES, NAND_ERROR, cancelled)
+        copy(resolver, Uri.parse(requireNotNull(picks.nand)), nand, DBK_BYTES, NAND_ERROR, cancelled)
         if (!validNand(nand)) throw IOException(NAND_ERROR)
+        val cf = File(dir, CF)
+        if (picks.create) {
+            // The CS0 dump only fills the LC Fonts here; the machine keeps no boot PROM.
+            val font = picks.prom?.let { uri ->
+                File(dir, ".font-rom").also { file ->
+                    copy(resolver, Uri.parse(uri), file, PROM_BYTES, FONT_ERROR, cancelled)
+                    if (!validProm(file)) throw IOException(FONT_ERROR)
+                }
+            }
+            try {
+                ZaurusCf.create(resolver, Uri.parse(requireNotNull(picks.hdd1)), font, picks.sizeGb, cf, cancelled, progress)
+            } catch (e: Throwable) {
+                cf.delete()
+                throw e
+            } finally {
+                font?.delete()
+            }
+            return
+        }
         picks.prom?.let { uri ->
             val prom = File(dir, PROM)
-            copy(resolver, uri, prom, PROM_BYTES, PROM_ERROR, cancelled)
+            copy(resolver, Uri.parse(uri), prom, PROM_BYTES, PROM_ERROR, cancelled)
             if (!validProm(prom)) throw IOException(PROM_ERROR)
         }
-        val cf = File(dir, CF)
-        copy(resolver, requireNotNull(picks.cf), cf, MAX_CF_BYTES, CF_ERROR, cancelled, sparse = true, progress = progress)
+        copy(resolver, Uri.parse(requireNotNull(picks.cf)), cf, MAX_CF_BYTES, CF_ERROR, cancelled, sparse = true, progress = progress)
         if (cf.length() == 0L || cf.length() % 512 != 0L) throw IOException(CF_ERROR)
     }
 

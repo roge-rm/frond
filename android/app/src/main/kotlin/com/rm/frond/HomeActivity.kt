@@ -1,7 +1,6 @@
 package com.rm.frond
 
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -336,7 +335,8 @@ class HomeModel(private val activity: HomeActivity) {
         if (!draft.zaurus.ready) return
         val app = activity.applicationContext
         lateinit var session: Session
-        runJob("Copying Zaurus images", "Couldn't add the Zaurus", null, cancellable = true, onSuccess = { current ->
+        val label = if (draft.zaurus.create) "Creating the CF image" else "Copying Zaurus images"
+        runJob(label, "Couldn't add the Zaurus", null, cancellable = true, onSuccess = { current ->
             current.machineDraft = null
             current.start(session)
         }) { cancelled, progress ->
@@ -439,10 +439,8 @@ class HomeModel(private val activity: HomeActivity) {
         state.getString("machineDraft")?.let {
             val json = org.json.JSONObject(it)
             val device = Device.byId(json.optString("device")) ?: return@let
-            fun image(name: String) = json.optString(name).takeIf(String::isNotEmpty)?.let(Uri::parse)
             machineDraft = MachineDraft(device, MachineSettings.from(json.optJSONObject("settings")),
-                json.optString("sessionId").takeIf(String::isNotEmpty),
-                zaurus = ZaurusImages.Picks(image("zaurusNand"), image("zaurusCf"), image("zaurusProm")))
+                json.optString("sessionId").takeIf(String::isNotEmpty), zaurus = ZaurusImages.Picks.from(json))
         }
         firmwareOpen = state.getBoolean("firmwareOpen")
         startAfterImport = Device.byId(state.getString("startAfterImport"))
@@ -451,10 +449,8 @@ class HomeModel(private val activity: HomeActivity) {
 
     fun saveState(state: Bundle) {
         machineDraft?.let {
-            state.putString("machineDraft", org.json.JSONObject().put("device", it.device.id)
-                .put("settings", it.settings.json()).put("sessionId", it.sessionId)
-                .put("zaurusNand", it.zaurus.nand?.toString()).put("zaurusCf", it.zaurus.cf?.toString())
-                .put("zaurusProm", it.zaurus.prom?.toString()).toString())
+            state.putString("machineDraft", it.zaurus.putInto(org.json.JSONObject().put("device", it.device.id)
+                .put("settings", it.settings.json()).put("sessionId", it.sessionId)).toString())
         }
         state.putBoolean("firmwareOpen", firmwareOpen)
         state.putString("startAfterImport", startAfterImport?.id)

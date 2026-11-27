@@ -293,18 +293,22 @@ dependencies {
 
 tasks.named("preBuild") { dependsOn(prepareCore, fetchSdl, fetchSdlImage) }
 
-// Unit tests load a host build of the storage library's JNI (CardStorageJni.cpp with miniz) as
-// libfrondcard.so, so the CardFile and FatImage tests run the same C++ as the app. Needs the host's
-// cc and c++, and the JDK's jni.h.
+// Unit tests load a host build of the storage library's JNI (CardStorageJni.cpp and ZaurusCfJni.cpp
+// with miniz) as libfrondcard.so, so the CardFile, FatImage and ZaurusCf tests run the same C++ as the
+// app. Needs the host's cc and c++, and the JDK's jni.h.
 val hostStorage: File = layout.buildDirectory.dir("host-storage").get().asFile
 val buildHostStorage = tasks.register<Exec>("buildHostStorage") {
     group = "build"
     description = "Builds the storage library's JNI for the host, for unit tests"
     dependsOn(prepareCore)
     val jni = File(projectDir, "src/main/cpp/CardStorageJni.cpp")
+    val zaurusJni = File(projectDir, "src/main/cpp/ZaurusCfJni.cpp")
     val common = File(coreSource, "src/common")
+    val zaurusSources = listOf("TarStream", "Ext3Writer", "Fat32Writer", "ZaurusCf")
+        .joinToString(" ") { "\"$common/storage/$it.cpp\"" }
     val jdk = File(System.getProperty("java.home"))
     inputs.file(jni)
+    inputs.file(zaurusJni)
     inputs.dir(File(common, "storage"))
     inputs.file(File(common, "zip/miniz.c"))
     outputs.file(File(hostStorage, "libfrondcard.so"))
@@ -312,7 +316,8 @@ val buildHostStorage = tasks.register<Exec>("buildHostStorage") {
     commandLine("sh", "-c",
         "cc -std=gnu99 -O1 -fPIC -I\"$common\" -c \"$common/zip/miniz.c\" -o \"$hostStorage/miniz.o\" && " +
         "c++ -std=c++17 -O1 -g -fPIC -shared -Wall -Wextra -Wno-unused-parameter " +
-        "-I\"$jdk/include\" -I\"$jdk/include/linux\" -I\"$common\" \"$jni\" \"$hostStorage/miniz.o\" " +
+        "-I\"$jdk/include\" -I\"$jdk/include/linux\" -I\"$common\" \"$jni\" \"$zaurusJni\" $zaurusSources " +
+        "\"$hostStorage/miniz.o\" " +
         "-o \"$hostStorage/libfrondcard.so\"")
 }
 // -Pfrond.fuzz=CLASS fuzzes that @FuzzTest class for frond.fuzzTime (default 5m) instead of only
@@ -324,8 +329,8 @@ tasks.withType<Test>().configureEach {
     dependsOn(buildHostStorage, copyLicences)
     systemProperty("java.library.path", hostStorage.absolutePath)
     useJUnitPlatform()
-    // Jazzer attaches its agent at run time.
-    jvmArgs("-XX:+EnableDynamicAgentLoading")
+    // Jazzer attaches its agent at run time. ZaurusCfTest hands the JNI raw file descriptors.
+    jvmArgs("-XX:+EnableDynamicAgentLoading", "--add-opens=java.base/java.io=ALL-UNNAMED")
     if (fuzzTarget != null) {
         environment("JAZZER_FUZZ", "1")
         systemProperty("jazzer.max_duration", fuzzTime)

@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,6 +33,7 @@ import com.rm.frond.SyncProtocol
 import com.rm.frond.supportsNetworkHotSync
 import com.rm.frond.LinkStore
 import com.rm.frond.MachineRows
+import com.rm.frond.ZaurusCf
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,13 +48,16 @@ fun MachineSettingsScreen(model: HomeModel) {
     val zSetup = !editing && draft.device.zaurus
     val ready = if (zSetup) draft.zaurus.ready else model.firmwareReady[draft.device] == true
     val pickNand = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.chooseZaurusImages { it.copy(nand = uri) }
+        if (uri != null) model.chooseZaurusImages { it.copy(nand = uri.toString()) }
     }
     val pickCf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.chooseZaurusImages { it.copy(cf = uri) }
+        if (uri != null) model.chooseZaurusImages { it.copy(cf = uri.toString()) }
     }
     val pickProm = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.chooseZaurusImages { it.copy(prom = uri) }
+        if (uri != null) model.chooseZaurusImages { it.copy(prom = uri.toString()) }
+    }
+    val pickHdd1 = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.chooseZaurusImages { it.copy(hdd1 = uri.toString()) }
     }
     if (zSetup) CopyingDialog(model)
     model.alert?.let { (title, text) ->
@@ -78,12 +83,32 @@ fun MachineSettingsScreen(model: HomeModel) {
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
             if (!editing) DeviceChoice("Device", draft.device) { model.chooseMachine(it) }
             if (zSetup) {
+                val picks = draft.zaurus
                 Header("Zaurus images")
-                ZaurusImagePicker("NAND backup", draft.zaurus.nand) { pickNand.launch(arrayOf("*/*")) }
-                ZaurusImagePicker("Existing CF image", draft.zaurus.cf) { pickCf.launch(arrayOf("*/*")) }
-                ZaurusImagePicker("CS0 boot PROM (optional)", draft.zaurus.prom) { pickProm.launch(arrayOf("*/*")) }
-                if (draft.zaurus.prom != null)
-                    TextButton(onClick = { model.chooseZaurusImages { it.copy(prom = null) } }) { Text("Remove boot PROM") }
+                ZaurusImagePicker("NAND backup", picks.nand) { pickNand.launch(arrayOf("*/*")) }
+                Choice("Internal CF", picks.create, listOf(false, true),
+                    { if (it) "Create from HDD1 archive" else "Import a CF image" }) { create ->
+                    model.chooseZaurusImages { it.copy(create = create) }
+                }
+                if (picks.create) {
+                    ZaurusImagePicker("HDD1 archive", picks.hdd1) { pickHdd1.launch(arrayOf("*/*")) }
+                    Choice("Size", picks.sizeGb, ZaurusCf.sizes, ZaurusCf::sizeName) { size ->
+                        model.chooseZaurusImages { it.copy(sizeGb = size) }
+                    }
+                    val free = remember(picks.sizeGb) { com.rm.frond.Sessions.folder(context).usableSpace }
+                    ZaurusCf.fillWarning(free, picks.sizeGb)?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 16.dp))
+                    }
+                    ZaurusImagePicker("CS0 font source (optional)", picks.prom) { pickProm.launch(arrayOf("*/*")) }
+                    if (picks.prom != null)
+                        TextButton(onClick = { model.chooseZaurusImages { it.copy(prom = null) } }) { Text("Remove font source") }
+                } else {
+                    ZaurusImagePicker("Existing CF image", picks.cf) { pickCf.launch(arrayOf("*/*")) }
+                    ZaurusImagePicker("CS0 boot PROM (optional)", picks.prom) { pickProm.launch(arrayOf("*/*")) }
+                    if (picks.prom != null)
+                        TextButton(onClick = { model.chooseZaurusImages { it.copy(prom = null) } }) { Text("Remove boot PROM") }
+                }
             }
             // A card for each slot of a two-slot machine.
             if (!editing && com.rm.frond.Cards.hasSlot(draft.device, 1)) {
@@ -152,9 +177,9 @@ fun MachineSettingsScreen(model: HomeModel) {
 }
 
 @Composable
-private fun ZaurusImagePicker(label: String, uri: android.net.Uri?, pick: () -> Unit) {
+private fun ZaurusImagePicker(label: String, uri: String?, pick: () -> Unit) {
     val resolver = LocalContext.current.contentResolver
-    val name = remember(resolver, uri) { uri?.let { HostFiles.displayName(resolver, it) } }
+    val name = remember(resolver, uri) { uri?.let { HostFiles.displayName(resolver, android.net.Uri.parse(it)) } }
     TextButton(onClick = pick) {
         Text(if (name == null) label else "$label ($name)", maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
