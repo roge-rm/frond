@@ -88,6 +88,8 @@ std::unique_ptr<S3c2442Machine> S3c2442Machine::create(const S3c2442Options& opt
         return nullptr;
     }
     patchDispatchSetCpu(patches, m->cpuCore);
+    // Fast keys code and table watches by the first copy of the SDRAM (leanPage folds the copies onto one buffer).
+    cpuArm920SetRamMirror(m->cpuCore, sdramBase, options.ramBytes, sdramBase + bank6Size);
     cpuArm920EnableWait(m->cpuCore);
     cpuArm920SetMemoryCheck(m->cpuCore, cacheCheck, m.get());
     cpuSetUndefinedHook(m->cpuCore, undefinedTaken, m.get());

@@ -69,6 +69,10 @@ struct Stats {
     // and suspended pages whose blocks at their MVA a later flush dropped.
     uint64_t suspends = 0, resumes = 0, otherPidInstalls = 0, suspendedMvaDrops = 0;
     uint64_t guardExits = 0, guardAbsent = 0;
+    // ARM920T Fast blocks: page table clears for PID changes and guest TLB invalidations alone (keepClears), the
+    // entries they kept and dropped, the table line checks they made and the lines found changed.
+    uint64_t keepClears = 0, keptPages = 0, keepDrops = 0, keepLineChecks = 0, keepLinesChanged = 0;
+    uint64_t keepStoreDrops = 0;  // stores that changed a noted table word (KeepWordsWritten)
     // ARM920T Fast blocks: mapping checks that went through every code page (the rest took only the pages
     // of table lines that changed), the pages all checks walked, the changed lines and the most lines kept.
     uint64_t fullMapChecks = 0, mapPagesChecked = 0, tableLinesChanged = 0, tableLines = 0;
@@ -171,6 +175,12 @@ struct Stats {
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
                 (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
+        fprintf(stderr,
+                "jit: keepClears %llu keptPages %llu keepDrops %llu keepLineChecks %llu keepLinesChanged %llu "
+                "keepStoreDrops %llu\n",
+                (unsigned long long)keepClears, (unsigned long long)keptPages, (unsigned long long)keepDrops,
+                (unsigned long long)keepLineChecks, (unsigned long long)keepLinesChanged,
+                (unsigned long long)keepStoreDrops);
         fprintf(stderr, "jit: guardExits %llu guardAbsent %llu\n",
                 (unsigned long long)guardExits, (unsigned long long)guardAbsent);
         fprintf(stderr, "jit: suspends %llu resumes %llu otherPidInstalls %llu suspendedMvaDrops %llu\n",
@@ -492,11 +502,48 @@ struct Env final : public A32::UserCallbacks {
     // Filled page table entries by their page's domain (MMU_DOMAIN_NONE with the MMU off,
     // MMU_DOMAIN_UNKNOWN when the TLB didn't hold the page), each with what its TLB entry
     // allows while the domain is a client (cpuJitPageClientAccess).
+    // ARM920T Fast blocks: an entry also holds the page table words its walk read (Filled::words, kWordsNone when
+    // it can't be kept, 0 with the MMU off), each as a 64-byte table line (keepLines) and an offset in it, with the
+    // word's value then. A PID change drops only entries below 32 MB, and a guest TLB invalidation only those whose
+    // words changed (KeepPages), as a walk after it would give the rest again. The noted words are marked in the
+    // CPU's code map (cpuJitWatchTableWord), so a store that changes one drops the entries whose walks read it right
+    // away (KeepWordsWritten): after an invalidation the guest may change a mapping with no other one before using it.
+    static constexpr uint8_t kWordsNone = 0xff;
     struct Filled {
         uint32_t page;
         uint8_t client;
+        uint8_t words = kWordsNone;
+        uint8_t offset[kJitPageWords] = {};
+        uint16_t line[kJitPageWords] = {};
+        uint32_t value[kJitPageWords] = {};
     };
-    std::array<std::vector<Filled>, MMU_DOMAIN_UNKNOWN + 1> filled;
+    // Two lists per domain (and one pair for an unknown domain): entries at 32 MB and up (even), below (odd).
+    std::array<std::vector<Filled>, 2 * (MMU_DOMAIN_UNKNOWN + 1)> filled;
+    // Set when an entry was noted with no words; cleared by an invalidation that found none left.
+    bool anyUnkept = false;
+    // A watched table line: its host address (null when free) and physical address (pa >> 6, 64-byte aligned), a
+    // copy as of the last check, how many entries' words are in it, the words marked (a bit each), the pages of the
+    // entries noted with words in it (some may have left or been noted again since), and changed when the next check
+    // has to look at its entries' words.
+    struct KeepLine {
+        const uint8_t *host = nullptr;
+        uint32_t pa = 0;
+        uint32_t uses = 0;
+        uint16_t words = 0;
+        bool changed = false;
+        alignas(16) uint8_t copy[64];
+        std::vector<uint32_t> pages;
+        size_t compactAt = 32;
+    };
+    std::vector<KeepLine> keepLines;
+    std::unordered_map<uint32_t, uint16_t> keepLineAt;  // by pa >> 6
+    std::vector<uint16_t> keepFree;
+    // With keepOn, where each page's entry is in filled: its list << 24 | its index, kNoRecord for none.
+    static constexpr uint32_t kNoRecord = ~0u;
+    std::vector<uint32_t> recordAt;
+    std::vector<uint32_t> scratchKeepPages;
+    bool keepOn = false;  // ARM920T Fast blocks without the memory cost model (its hint is cleared with the table)
+    uint32_t softEpoch = 0, softPid = 0, softTlb = 0;  // cpuJitSoftFlushes at the last GenChanged
     // The privilege level this JIT runs at, and the other level's Env (null until that one
     // first runs). Everything here is only used while the CPU is at this level, apart from
     // what both get: invalidations, clears, write protection and code writes.
@@ -875,6 +922,7 @@ struct Env final : public A32::UserCallbacks {
     // known: this level holds code from the page. True if the store dropped any.
     bool CodeWrittenPa(uint32_t pa, uint32_t offset, uint32_t size, const void *data) {
         if (watchTables) TableWordsWritten(pa, offset, size, data);
+        if (!keepLineAt.empty()) KeepWordsWritten(pa, offset, size, data);
         const auto it = byPa.find(pa);
         return it != byPa.end() && RangeWritten(it->second, offset, size, true, pa, nullptr);
     }
@@ -900,6 +948,7 @@ struct Env final : public A32::UserCallbacks {
         // The table words walks read stay watched too.
         for (const auto &l : tableLines)
             if (l->pa >> 6 == pa) words[(l->pa & 63) >> 2] |= uint64_t(l->words) << ((l->pa & 3) * 16);
+        KeepWordsPa(pa, words);
     }
 
     // A store to [offset, offset + size) of physical page pa hit a word marked in the CPU's code map: the table
@@ -1214,6 +1263,8 @@ struct Env final : public A32::UserCallbacks {
         recheck.clear();
         checkedTtb = ~0u;
         cpuJitForgetCode(cpu);
+        // The other level's kept entries lose their table word marks with the code map.
+        if (other) other->ClearPages();
         gen = ~0ull;
         mapGen = cpuJitMapGen(cpu);
     }
@@ -1237,18 +1288,282 @@ struct Env final : public A32::UserCallbacks {
         }
 #endif
         for (auto &list : filled) {
-            for (const Filled &f : list) SetPage(f.page, nullptr);
+            for (const Filled &f : list) {
+                SetPage(f.page, nullptr);
+                if (keepOn) recordAt[f.page] = kNoRecord;
+            }
             list.clear();
         }
         writable.clear();
+        keepLines.clear();
+        keepLineAt.clear();
+        keepFree.clear();
     }
 
-    void NoteFilled(uint32_t page) {
+    // Drops a filled entry's page table entry and its writable listing and table lines.
+    void DropFilled(const Filled &f) {
+        uint8_t *const entry = (*pages)[f.page];
+        if (entry && !(uintptr_t(entry) & 1)) {
+            const auto it = writable.find(entry);
+            if (it != writable.end()) {
+                std::erase(it->second, f.page);
+                if (it->second.empty()) writable.erase(it);
+            }
+        }
+        SetPage(f.page, nullptr);
+        if (keepOn) recordAt[f.page] = kNoRecord;
+        ReleaseWords(f);
+    }
+
+    // Takes the entry at index pos of filled[d] out of its list and drops it.
+    void RemoveFilled(uint32_t d, uint32_t pos) {
+        auto &list = filled[d];
+        const Filled f = list[pos];
+        if (pos + 1 != list.size()) {
+            list[pos] = list.back();
+            recordAt[list[pos].page] = d << 24 | pos;
+        }
+        list.pop_back();
+        DropFilled(f);
+    }
+
+    void ReleaseWords(const Filled &f) {
+        if (f.words == kWordsNone) return;
+        for (uint8_t i = 0; i < f.words; i++) {
+            KeepLine &l = keepLines[f.line[i]];
+            if (--l.uses) continue;
+            keepLineAt.erase(l.pa);
+            l.host = nullptr;
+            l.words = 0;
+            l.pages.clear();
+            l.compactAt = 32;
+            keepFree.push_back(f.line[i]);
+        }
+    }
+
+    // Whether entry f's walk read a word in keep line index li.
+    static bool UsesLine(const Filled &f, uint16_t li) {
+        if (f.words == kWordsNone) return false;
+        for (uint8_t i = 0; i < f.words; i++)
+            if (f.line[i] == li) return true;
+        return false;
+    }
+
+    // A store to [offset, offset + size) of physical page pa that hit a marked word (CodeWrittenPa). data is what an
+    // aligned word store puts there, with the old word still in place (null if not known). Entries whose walks read a
+    // word the store changes, or may change, go now, so none outlives the mapping the guest makes there.
+    void KeepWordsWritten(uint32_t pa, uint32_t offset, uint32_t size, const void *data) {
+        for (uint32_t line = offset >> 6; line <= (offset + size - 1) >> 6; line++) {
+            const auto it = keepLineAt.find((pa << 6) | line);
+            if (it == keepLineAt.end()) continue;
+            const uint16_t li = it->second;
+            KeepLine &l = keepLines[li];
+            const uint32_t from = std::max(offset, line << 6) & 63;
+            const uint32_t to = std::min(offset + size, (line + 1) << 6) - (line << 6);
+            uint16_t mask = 0;
+            for (uint32_t w = from >> 2; w <= (to - 1) >> 2; w++) mask |= uint16_t(1u << w);
+            if (!(mask & l.words)) continue;
+            if (data && size == 4 && !(offset & 3)) {
+                uint32_t old, now;
+                std::memcpy(&old, l.host + (offset & 63), 4);
+                std::memcpy(&now, data, 4);
+                if (old == now) continue;
+            }
+            stats.keepStoreDrops++;
+            l.changed = true;
+            std::vector<uint32_t> &list = scratchKeepPages;
+            list.clear();
+            list.swap(l.pages);
+            l.compactAt = 32;
+            for (uint32_t page : list) {
+                const uint32_t at = recordAt[page];
+                if (at == kNoRecord) continue;
+                const uint32_t d = at >> 24, pos = at & 0xffffff;
+                if (!UsesLine(filled[d][pos], li)) continue;
+                stats.keepDrops++;
+                RemoveFilled(d, pos);
+            }
+        }
+    }
+
+    // The words of the keep lines in physical page pa, into words (16) as CodeWordsPa gives them.
+    void KeepWordsPa(uint32_t pa, uint64_t *words) const {
+        if (keepLineAt.empty()) return;
+        for (uint32_t line = 0; line < 64; line++) {
+            const auto it = keepLineAt.find((pa << 6) | line);
+            if (it != keepLineAt.end()) words[line >> 2] |= uint64_t(keepLines[it->second].words) << ((line & 3) * 16);
+        }
+    }
+
+    // Keeps a line's page list to the entries with words in it, each once.
+    void CompactKeepPages(KeepLine &l, uint16_t li) {
+        std::sort(l.pages.begin(), l.pages.end());
+        l.pages.erase(std::unique(l.pages.begin(), l.pages.end()), l.pages.end());
+        std::erase_if(l.pages, [&](uint32_t page) {
+            const uint32_t at = recordAt[page];
+            return at == kNoRecord || !UsesLine(filled[at >> 24][at & 0xffffff], li);
+        });
+        l.compactAt = std::max<size_t>(32, 2 * l.pages.size());
+    }
+
+    // Notes the table words of a filled entry for host (writable when write) at page, so it can be kept (Filled).
+    void NoteWords(Filled &f, const uint8_t *host, bool write) {
+        ReleaseWords(f);
+        f.words = kWordsNone;
+        if (!keepOn || memoryCost) return;
+        const uint8_t *words[kJitPageWords];
+        uint32_t pas[kJitPageWords];
+        const int n = cpuJitPageWords(cpu, f.page << 12, host, write, words, pas);
+        if (n < 0) {
+            anyUnkept = true;
+            return;
+        }
+        bool watched = true;  // each word is marked, so a store to it comes to KeepWordsWritten
+        for (int i = 0; i < n; i++) {
+            // Lines by physical address: the host copy of RAM needn't be 64-byte aligned.
+            const uint8_t *const at = words[i] - (pas[i] & 63);
+            auto [it, added] = keepLineAt.try_emplace(pas[i] >> 6, 0);
+            if (added) {
+                if (keepFree.empty()) {
+                    if (keepLines.size() > 0xfffe) {  // no line index left: this entry isn't kept
+                        keepLineAt.erase(it);
+                        f.words = uint8_t(i);
+                        ReleaseWords(f);
+                        f.words = kWordsNone;
+                        anyUnkept = true;
+                        return;
+                    }
+                    it->second = uint16_t(keepLines.size());
+                    keepLines.emplace_back();
+                } else {
+                    it->second = keepFree.back();
+                    keepFree.pop_back();
+                }
+                KeepLine &l = keepLines[it->second];
+                l.host = at;
+                l.pa = pas[i] >> 6;
+                l.changed = false;
+                std::memcpy(l.copy, at, 64);
+            }
+            KeepLine &l = keepLines[it->second];
+            l.uses++;
+            f.line[i] = it->second;
+            f.offset[i] = uint8_t(words[i] - at);
+            std::memcpy(&f.value[i], words[i], 4);
+            // Marking a page new to the code map flushes the host TLB, and the next GenChanged drops every entry
+            // (this one too) with no store to it missed after.
+            const uint16_t bit = uint16_t(1u << (f.offset[i] >> 2));
+            if (!(l.words & bit)) {
+                if (cpuJitWatchTableWord(cpu, pas[i] & ~3u))
+                    l.words |= bit;
+                else
+                    watched = false;
+            }
+            // A word that moved on since the copy: the next check looks at this line's entries whatever it holds then.
+            if (std::memcmp(l.copy + f.offset[i], words[i], 4)) l.changed = true;
+        }
+        f.words = uint8_t(n);
+        if (!watched) {
+            ReleaseWords(f);
+            f.words = kWordsNone;
+            anyUnkept = true;
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            KeepLine &l = keepLines[f.line[i]];
+            if (!l.pages.empty() && l.pages.back() == f.page) continue;
+            l.pages.push_back(f.page);
+            if (l.pages.size() > l.compactAt) CompactKeepPages(l, f.line[i]);
+        }
+    }
+
+    // After PID changes (pid) and guest TLB invalidations (tlb) alone: entries below 32 MB go with a PID change,
+    // and with an invalidation each entry whose walk read a table word that now differs, or that has none noted.
+    // A changed line's copy is brought up to date once its entries are checked.
+    void KeepPages(bool pid, bool tlb) {
+        stats.keepClears++;
+        bool changed = false;
+        if (tlb) {
+            for (KeepLine &l : keepLines) {
+                if (!l.host) continue;
+                stats.keepLineChecks++;
+                l.changed = l.changed || std::memcmp(l.copy, l.host, 64) != 0;
+                changed |= l.changed;
+            }
+        }
+        // With no changed line and every entry noted, an invalidation leaves the entries at 32 MB and up as they are.
+        const bool all = tlb && (changed || anyUnkept);
+        if (all) anyUnkept = false;
+        for (size_t d = 0; d < filled.size(); d++) {
+            const bool low = d & 1;
+            if (!all && !(pid && low)) continue;
+            auto &list = filled[d];
+            if (pid && low) {
+                stats.keepDrops += list.size();
+                for (Filled &f : list) DropFilled(f);
+                list.clear();
+                continue;
+            }
+            size_t kept = 0;
+            for (Filled &f : list) {
+                bool drop = f.words == kWordsNone;
+                for (uint8_t i = 0; i < f.words && !drop; i++) {
+                    const KeepLine &l = keepLines[f.line[i]];
+                    uint32_t now;
+                    std::memcpy(&now, l.host + f.offset[i], 4);
+                    drop = l.changed && now != f.value[i];
+                }
+                if (drop) {
+                    stats.keepDrops++;
+                    DropFilled(f);
+                } else {
+                    stats.keptPages++;
+                    recordAt[f.page] = uint32_t(d) << 24 | uint32_t(kept);
+                    list[kept++] = f;
+                }
+            }
+            list.resize(kept);
+        }
+        if (changed) {
+            for (KeepLine &l : keepLines) {
+                if (!l.host || !l.changed) continue;
+                stats.keepLinesChanged++;
+                std::memcpy(l.copy, l.host, 64);
+                l.changed = false;
+            }
+        }
+    }
+
+    static uint32_t FilledList(int access, uint32_t page) {
+        return 2 * (access < 0 ? MMU_DOMAIN_UNKNOWN : access >> 2) + (page < 0x2000);
+    }
+
+    void NoteFilled(uint32_t page, const uint8_t *host, bool write) {
         const int access = cpuJitPageClientAccess(cpu, page << 12, privileged);
-        if (access < 0)
-            filled[MMU_DOMAIN_UNKNOWN].push_back({page, 0});
-        else
-            filled[access >> 2].push_back({page, uint8_t(access & 3)});
+        const uint32_t d = FilledList(access, page);
+        auto &list = filled[d];
+        list.push_back({page, uint8_t(access < 0 ? 0 : access & 3)});
+        if (keepOn) {
+            if (recordAt.empty()) recordAt.assign(size_t(1) << 20, kNoRecord);
+            recordAt[page] = d << 24 | uint32_t(list.size() - 1);
+        }
+        NoteWords(list.back(), host, write);
+    }
+
+    // A read-only entry made writable: its words are noted again for the store, or it goes at the next invalidation.
+    // It stays listed by the domain and AP it was filled with, so if the TLB now holds others it isn't kept.
+    void NoteWritable(uint32_t page, const uint8_t *host) {
+        if (!keepOn || memoryCost || recordAt.empty() || recordAt[page] == kNoRecord) return;
+        const uint32_t at = recordAt[page];
+        Filled &f = filled[at >> 24][at & 0xffffff];
+        const int access = cpuJitPageClientAccess(cpu, page << 12, privileged);
+        if (FilledList(access, page) != at >> 24 || (access >= 0 && f.client != (access & 3))) {
+            ReleaseWords(f);
+            f.words = kWordsNone;
+            anyUnkept = true;
+            return;
+        }
+        NoteWords(f, host, true);
     }
 
     // Only the DACR changed since the pages were filled, so each page has the mapping and
@@ -1260,15 +1575,17 @@ struct Env final : public A32::UserCallbacks {
         stats.domainChecks++;
         for (unsigned d = 0; d < 16; d++) {
             const uint32_t before = (from >> (2 * d)) & 3, now = (to >> (2 * d)) & 3;
-            if (mmuDomainRank(now) < mmuDomainRank(before)) CheckDomain(filled[d], now);
+            if (mmuDomainRank(now) < mmuDomainRank(before))
+                for (unsigned low = 0; low < 2; low++) CheckDomain(2 * d + low, now);
         }
-        CheckDomain(filled[MMU_DOMAIN_UNKNOWN], 0);
+        for (unsigned low = 0; low < 2; low++) CheckDomain(2 * MMU_DOMAIN_UNKNOWN + low, 0);
     }
 
-    // The pages of one domain whose two DACR bits are now bits.
-    void CheckDomain(std::vector<Filled> &list, uint32_t bits) {
+    // The pages of one domain (filled[d]) whose two DACR bits are now bits.
+    void CheckDomain(uint32_t d, uint32_t bits) {
+        auto &list = filled[d];
         size_t kept = 0;
-        for (const Filled f : list) {
+        for (const Filled &f : list) {
             const unsigned access = bits == 3 ? 3 : bits == 1 ? f.client : 0;
             uint8_t *const entry = (*pages)[f.page];
             const bool writableEntry = entry && !(uintptr_t(entry) & 1);
@@ -1285,10 +1602,13 @@ struct Env final : public A32::UserCallbacks {
                     stats.pageReadOnly++;
                 } else {
                     SetPage(f.page, nullptr);
+                    if (keepOn) recordAt[f.page] = kNoRecord;
+                    ReleaseWords(f);
                     stats.pageDrops++;
                     continue;
                 }
             }
+            if (keepOn) recordAt[f.page] = d << 24 | uint32_t(kept);
             list[kept++] = f;
         }
         list.resize(kept);
@@ -1306,7 +1626,17 @@ struct Env final : public A32::UserCallbacks {
 
     [[gnu::noinline]] void GenChanged(uint64_t g) {
         const uint32_t d = cpuJitGetDomain(cpu);
-        if (gen == ~0ull || (g >> 32) != (gen >> 32))
+        uint32_t epoch, pid, tlb;
+        cpuJitSoftFlushes(cpu, &epoch, &pid, &tlb);
+        // Every epoch step since the last look was a PID change or a guest TLB invalidation.
+        const bool soft =
+            keepOn && !memoryCost && gen != ~0ull && epoch - softEpoch == (pid - softPid) + (tlb - softTlb);
+        const bool keepPid = pid != softPid, keepTlb = tlb != softTlb;
+        softEpoch = epoch, softPid = pid, softTlb = tlb;
+        if (soft && (g >> 32) != (gen >> 32)) {
+            KeepPages(keepPid, keepTlb);
+            if (d != domains) CheckDomains(domains, d);
+        } else if (gen == ~0ull || (g >> 32) != (gen >> 32))
             ClearPages();
         else if (d != domains)
             CheckDomains(domains, d);
@@ -1423,7 +1753,7 @@ struct Env final : public A32::UserCallbacks {
             if (host && !(uintptr_t(host) & 1)) {
                 stats.pageFills++;
                 SetPage(page, ReadOnly(host));
-                NoteFilled(page);
+                NoteFilled(page, host, false);
             } else if (!memoryCost) {
                 AfterIo();
             }
@@ -1491,7 +1821,8 @@ struct Env final : public A32::UserCallbacks {
             uint8_t *host = cpuJitWritePage(cpu, va);
             if (host && !(uintptr_t(host) & 1)) {
                 stats.writeMaps++;
-                if (!entry) NoteFilled(page);
+                if (!entry) NoteFilled(page, host, true);
+                else NoteWritable(page, host);
                 SetPage(page, host);
                 writable[host].push_back(page);
             }
@@ -2280,6 +2611,7 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     conf.callbacks = &e;
     e.arm920 = cpuGetModel(j->cpu) == ArmCpuModel::arm920t;
     e.lineBound = e.arm920 && j->singleStep;
+    e.keepOn = e.arm920 && !e.lineBound && !getenv("FROND_JIT_NO_KEEP");
     conf.arch_version = e.arm920 ? A32::ArchVersion::v4T : A32::ArchVersion::v5TE;
     if (e.lineBound)
         conf.optimizations &= ~(OptimizationFlag::BlockLinking | OptimizationFlag::ReturnStackBuffer |
@@ -2512,6 +2844,8 @@ bool jitCodeWritten(FrondJit *j, uint8_t *hostPage, uint32_t offset, uint32_t si
         j->remaskHost.push_back(hostPage);
     return known;
 }
+
+uint64_t jitKeepStoreDrops() { return stats.keepStoreDrops; }
 
 void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size, const void *data) {
     bool dropped = false;

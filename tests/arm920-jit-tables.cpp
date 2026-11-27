@@ -3,6 +3,9 @@
 // walks the new entry. Then a data load fills the TLB from the old entry and the table is changed back with
 // no flush, so the stale TLB entry keeps the old page. Last the entry is made a fault one and flushed, then
 // set to a third page with no flush (as WinCE maps a slot back). Fast runs the same code as Exact each time.
+// Data pages are kept across PID changes and TLB invalidations too: loads at 32 MB and up and below it go on
+// with the mapping each change leaves, a table edit after an invalidation is seen by the next load, and a page filled
+// through a stale TLB entry's domain isn't kept.
 
 #include <cassert>
 #include <cstdint>
@@ -248,6 +251,261 @@ void testSuspendedSlot() {
     assert(fast.reg(2) == 0x10506);
 }
 
+void testKeptData() {
+    constexpr uint32_t slot = 0x04000000, slotTable = l2 + 0x800, slotPte = slotTable + 8;
+    constexpr uint32_t kernel = 0xc0000400, park = 0xc0000440, loads = 0xc0000500;
+    constexpr uint32_t dtlbInvalidate = 0xee080f16;  // MCR p15, 0, r0, c8, c6, 0
+    Machine exact;
+    Machine fast;
+    for (auto* machine : {&exact, &fast}) {
+        machine->setup();
+        machine->word(ttb + (slot >> 20) * 4, slotTable | 0x11);
+        machine->word(slotPte, 0x102ff2);
+        machine->word(l2 + 8, 0x281ff2);
+        machine->word(0x102010, 0x11111111);
+        machine->word(0x202010, 0x22222222);
+        machine->word(0x281010, 0x33333333);
+        machine->word(0x400, mcr(13, 0));
+        machine->word(0x404, str(0, 13));
+        machine->word(0x408, tlbFlush);
+        machine->word(0x40c, dtlbInvalidate);
+        machine->word(0x440, loop);
+        machine->word(0x500, ldr(1, 10));
+        machine->word(0x504, ldr(2, 11));
+        machine->word(0x508, movPc(8));
+        cpuSetReg(machine->cpu, 8, park);
+        cpuSetReg(machine->cpu, 10, slot + 0x2010);
+        cpuSetReg(machine->cpu, 11, 0x2010);
+        cpuSetReg(machine->cpu, 13, 0xd0300000 + slotPte - ttb);
+    }
+    enableJit(fast);
+    auto step = [&](uint32_t pc, uint32_t value = 0) {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 0, value);
+            cpuSetReg(machine->cpu, 15, pc);
+            machine->step();
+        }
+    };
+    auto run = [&] {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 1, 0);
+            cpuSetReg(machine->cpu, 2, 0);
+            cpuSetReg(machine->cpu, 15, loads);
+        }
+        uint32_t ran = 0;
+        int stop = arm920JitExit;
+        cpuArm920RunJit(fast.cpu, 16, &stop, 16, &ran);
+        assert(stop == arm920JitBudget && ran);
+        for (uint32_t i = 0; i < ran; ++i) exact.step();
+        for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
+    };
+
+    step(kernel, 0);
+    run();
+    run();
+    assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x33333333);
+    // PID 2: VA 0x2010 is MVA 0x04002010, the page the slot load reads.
+    step(kernel, slot);
+    run();
+    assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x11111111);
+    // The slot entry moves to B and the D TLB is invalidated: both loads read B.
+    step(kernel + 4, 0x202ff2);
+    step(kernel + 12);
+    run();
+    assert(fast.reg(1) == 0x22222222 && fast.reg(2) == 0x22222222);
+    // PID 0 again: the low load goes back to its own page, the slot load stays on B.
+    step(kernel, 0);
+    run();
+    assert(fast.reg(1) == 0x22222222 && fast.reg(2) == 0x33333333);
+    // An invalidation with no table change keeps both, then a flush after moving the slot entry back to A.
+    step(kernel + 12);
+    run();
+    assert(fast.reg(1) == 0x22222222 && fast.reg(2) == 0x33333333);
+    step(kernel + 4, 0x102ff2);
+    step(kernel + 8);
+    run();
+    assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x33333333);
+}
+
+
+// Fast in step with Exact over the next count instructions from pc, with r0 set to value: blocks with a budget they
+// can't pass, then the interpreter for what they leave.
+void same(Machine& exact, Machine& fast, uint32_t pc, uint64_t count, uint32_t value) {
+    for (auto* machine : {&exact, &fast}) {
+        cpuSetReg(machine->cpu, 0, value);
+        cpuSetReg(machine->cpu, 15, pc);
+    }
+    for (uint64_t i = 0; i < count; ++i) exact.step();
+    const uint32_t slack = cpuArm920JitMaxUnchecked(fast.cpu);
+    while (count) {
+        if (count > slack && cpuArm920JitCanRun(fast.cpu)) {
+            int stop = arm920JitExit;
+            uint32_t ran = 0;
+            const uint32_t budget = uint32_t(count - slack);
+            cpuArm920RunJit(fast.cpu, budget, &stop, budget, &ran);
+            count -= ran;
+            if (ran) continue;
+        }
+        fast.step();
+        --count;
+    }
+    for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
+}
+
+// A data page kept over a TLB invalidation whose table entry the guest then changes with no invalidation after: the
+// next load walks the new entry. The edit is made once by an interpreted store and once by translated code.
+void testKeptEdit() {
+    constexpr uint32_t slot = 0x04000000, slotTable = l2 + 0x800, slotPte = slotTable + 8;
+    constexpr uint32_t kernel = 0xc0000400, park = 0xc0000440, loads = 0xc0000500, edit = 0xc0000420;
+    constexpr uint32_t dtlbInvalidate = 0xee080f16;
+    Machine exact;
+    Machine fast;
+    for (auto* machine : {&exact, &fast}) {
+        machine->setup();
+        machine->word(ttb + (slot >> 20) * 4, slotTable | 0x11);
+        machine->word(slotPte, 0x102ff2);
+        machine->word(l2 + 8, 0x281ff2);
+        machine->word(0x102010, 0x11111111);
+        machine->word(0x202010, 0x22222222);
+        machine->word(0x281010, 0x33333333);
+        machine->word(0x404, str(0, 13));
+        machine->word(0x40c, dtlbInvalidate);
+        machine->word(0x410, 0xe10d3090);  // SWP r3, r0, [r13]
+        machine->word(0x414, 0xe8cd0001);  // STMIA r13, {r0}^
+        machine->word(0x420, str(0, 13));
+        machine->word(0x424, movPc(8));
+        machine->word(0x440, loop);
+        machine->word(0x500, ldr(1, 10));
+        machine->word(0x504, ldr(2, 11));
+        machine->word(0x508, movPc(8));
+        cpuSetReg(machine->cpu, 8, park);
+        cpuSetReg(machine->cpu, 10, slot + 0x2010);
+        cpuSetReg(machine->cpu, 11, 0x2010);
+        cpuSetReg(machine->cpu, 13, 0xd0300000 + slotPte - ttb);
+    }
+    enableJit(fast);
+    auto step = [&](uint32_t pc, uint32_t value = 0) {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 0, value);
+            cpuSetReg(machine->cpu, 15, pc);
+            machine->step();
+        }
+    };
+    auto run = [&] {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 1, 0);
+            cpuSetReg(machine->cpu, 2, 0);
+        }
+        same(exact, fast, loads, 20, 0);
+    };
+    // Warm the loads, the park loop and the translated edit (storing the word it holds), with invalidations so the
+    // table pages are marked (the first mark flushes the host TLB, which drops every entry).
+    for (unsigned i = 0; i < 3; ++i) {
+        step(kernel + 12);
+        run();
+        same(exact, fast, park, 20, 0);
+        same(exact, fast, edit, 20, 0x102ff2);
+    }
+    assert(fast.reg(1) == 0x11111111 && fast.reg(2) == 0x33333333);
+    // Each round: invalidate, run elsewhere (the JIT keeps the slot page), then move the slot entry with no
+    // invalidation: by STR, SWP and STM with the user bank through the step, then by translated code. The store
+    // has to find the kept entry's word, and the next load walks the new entry.
+    const uint32_t edits[] = {kernel + 4, kernel + 0x10, kernel + 0x14, edit};
+    for (unsigned round = 0; round < 4; ++round) {
+        const uint32_t pte = round & 1 ? 0x102ff2 : 0x202ff2, value = round & 1 ? 0x11111111 : 0x22222222;
+        step(kernel + 12);
+        same(exact, fast, park, 20, 0);
+        const uint64_t drops = cpuJitKeepStoreDrops();
+        if (edits[round] == edit)
+            same(exact, fast, edit, 20, pte);
+        else
+            step(edits[round], pte);
+        assert(cpuJitKeepStoreDrops() > drops);
+        same(exact, fast, park, 20, 0);
+        run();
+        assert(exact.reg(1) == value && fast.reg(1) == value);
+    }
+}
+
+// A page whose section entry moves to another domain with no TLB invalidation, filled again while the stale TLB entry
+// still holds the old domain, then kept over an invalidation: a DACR change that takes the new domain away faults the
+// next load in Exact, and so it does in Fast.
+void testKeptDomain() {
+    constexpr uint32_t slot = 0x04000000, slotTable = l2 + 0x800, slotPte = slotTable + 8;
+    constexpr uint32_t slotL1 = ttb + (slot >> 20) * 4;
+    constexpr uint32_t kernel = 0xc0000400, park = 0xc0000440, loads = 0xc0000500, dacr = 0xc0000430;
+    constexpr uint32_t dtlbInvalidate = 0xee080f16;
+    Machine exact;
+    Machine fast;
+    for (auto* machine : {&exact, &fast}) {
+        machine->setup();
+        machine->word(slotL1, slotTable | 0x11);
+        machine->word(slotPte, 0x102ff2);
+        machine->word(0x102010, 0x11111111);
+        machine->word(0x400, mcr(13, 0));
+        machine->word(0x40c, dtlbInvalidate);
+        machine->word(0x410, mcr(3, 0));
+        machine->word(0x418, str(0, 12));
+        machine->word(0x430, mcr(3, 0));
+        machine->word(0x434, movPc(8));
+        machine->word(0x440, loop);
+        machine->word(0x500, ldr(1, 10));
+        machine->word(0x504, ldr(2, 11));
+        machine->word(0x508, movPc(8));
+        machine->word(0xf0010, loop);  // data abort, high vectors
+        cpuSetReg(machine->cpu, 8, park);
+        cpuSetReg(machine->cpu, 10, 0x2010);
+        cpuSetReg(machine->cpu, 11, 0x2010);
+        cpuSetReg(machine->cpu, 12, 0xd0300000 + slotL1 - ttb);
+    }
+    enableJit(fast);
+    auto step = [&](uint32_t pc, uint32_t value = 0) {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 0, value);
+            cpuSetReg(machine->cpu, 15, pc);
+            machine->step();
+        }
+    };
+    auto run = [&] {
+        for (auto* machine : {&exact, &fast}) {
+            cpuSetReg(machine->cpu, 1, 0);
+            cpuSetReg(machine->cpu, 2, 0);
+        }
+        same(exact, fast, loads, 20, 0);
+    };
+    // PID 2 (VA 0x2010 is in the slot), domains 0 and 1 managers. Translated code writes the DACR without a host
+    // TLB flush (the JIT's p15 slot), so the JIT checks its pages by domain then.
+    step(kernel, slot);
+    step(kernel + 0x10, 0xf);
+    // Mapping checks after invalidations mark the code pages' table words, which flushes the host TLB the first time.
+    for (unsigned i = 0; i < 3; ++i) {
+        step(kernel + 12);
+        run();
+        same(exact, fast, park, 20, 0);
+        same(exact, fast, dacr, 20, 0xf);
+    }
+    assert(fast.reg(1) == 0x11111111);
+    // After an invalidation and a PID change and back both TLBs hold VA 0x2010's page from a walk (domain 0).
+    step(kernel + 12);
+    step(kernel, 0);
+    step(kernel, slot);
+    run();
+    // The slot's section entry goes to domain 1 with no invalidation, and a PID change and back drops the JIT's
+    // entry for VA 0x2010 while the TLB entry (domain 0) stays.
+    step(kernel + 0x18, slotTable | 0x11 | 1u << 5);
+    step(kernel, 0);
+    step(kernel, slot);
+    run();
+    run();
+    assert(exact.reg(1) == 0x11111111 && fast.reg(1) == 0x11111111);
+    // Invalidate, run elsewhere, then domain 1 no access: Exact walks the new entry and takes a domain fault.
+    step(kernel + 12);
+    same(exact, fast, park, 20, 0);
+    same(exact, fast, dacr, 20, 3);
+    run();
+    assert(exact.reg(15) == 0xffff0010 && fast.reg(15) == 0xffff0010);
+}
+
 }
 
 int main() {
@@ -297,6 +555,9 @@ int main() {
     assert(exact.reg(2) == 40 + 0x10000 + 1 + 0x100);
     assert(translated > 0);
     testSuspendedSlot();
+    testKeptData();
+    testKeptEdit();
+    testKeptDomain();
     std::printf("Fast: %llu of the instructions in translated blocks\n", (unsigned long long)translated);
     std::printf("PASS: ARM920T table edits and suspended FCSE code\n");
 }
