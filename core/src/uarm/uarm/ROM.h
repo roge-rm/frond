@@ -10,6 +10,8 @@
 struct ArmRom;
 
 struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, uint32_t size, bool sharedCopy = false);
+// Complete flash bus writes without changing the read-only image.
+void romSetProtectedFlash(ArmRom* rom);
 // The bus and its ROM callbacks must already be quiesced.
 void romRelease(struct ArmRom *rom);
 

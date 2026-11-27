@@ -625,7 +625,7 @@ open class FrondActivity : SDLActivity() {
     // up, target SDK 36+), so that shape never comes and the core never starts. The core takes any shape.
     override fun getRequestedOrientation(): Int = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
 
-    // Follow the program uses the Zodiac's display orientation or the Zaurus's swivel switch.
+    // Follow the program uses the orientation shown by the Zodiac or Zaurus.
     private fun orientationRequest() =
         if (followsProgram()) Orientation.programRequest(guestOrientation) ?: ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         else settings.orientation.request
@@ -636,7 +636,7 @@ open class FrondActivity : SDLActivity() {
     // The guest OS's orientation, as SysGetOrientation numbers it; 0 until the core says. UI thread.
     private var guestOrientation = 0
 
-    // From the core's guest thread (android_main.cpp, by name) when the guest OS turns its screen.
+    // From the core (android_main.cpp, by name) when the guest screen turns.
     fun onGuestOrientation(orientation: Int) = runOnUiThread {
         Log.i(TAG, "guest orientation $orientation")
         guestOrientation = orientation

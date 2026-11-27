@@ -451,6 +451,36 @@ static void spitzBoard() {
     assert(read(soc, GPIO) & irq);
 }
 
+static void spitzLcdDisable() {
+    std::vector<uint8_t> rom(8u << 20, 0xff), nand(spitzNandRawSize, 0xff);
+    SocPXA soc(deviceTypeSpitz, 64u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2, true);
+    constexpr uint32_t lcd = 0x44000000, cken = 0x41300004, lcdClock = 1u << 16;
+    constexpr uint32_t descriptor = 0xa0001000, pixels = 0xa0002000;
+    write(soc, 0xa0000000, 0xeafffffe);
+    cpuSetReg(soc.GetCpu(), 15, 0xa0000000);
+
+    write(soc, descriptor, descriptor);
+    write(soc, descriptor + 4, pixels);
+    write(soc, descriptor + 8, 0);
+    write(soc, descriptor + 12, 480 * 640 * 2);
+    write(soc, lcd + 0x200, descriptor);
+    write(soc, lcd + 4, 0x2d7c9ddf);
+    write(soc, lcd + 8, 0x01000a7f);
+    write(soc, lcd + 12, 0x04300001);
+    constexpr uint32_t enabled = 0x07b008f9;
+    write(soc, lcd, enabled);
+    write(soc, cken, read(soc, cken) | lcdClock);
+    run(soc, 1);
+
+    write(soc, lcd, enabled | 0x400);  // LCCR0[DIS]
+    run(soc, 1);
+    assert((read(soc, lcd) & 1) && !(read(soc, lcd + 0x38) & 1));
+
+    write(soc, cken, read(soc, cken) & ~lcdClock);
+    run(soc, 1);
+    assert(!(read(soc, lcd) & 1) && (read(soc, lcd + 0x38) & 1));  // LCSR0[LDD]
+}
+
 static void spitzUsbDevice() {
     std::vector<uint8_t> rom(8u << 20, 0xff), nand(spitzNandRawSize, 0xff);
     SocPXA soc(deviceTypeSpitz, 64u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2, true);
@@ -798,6 +828,12 @@ static void spitzDirectWake() {
     constexpr uint32_t resume = 0xa0004000, rtc = 0x40900000;
     std::vector<uint8_t> rom(8u << 20, 0xff), nand(spitzNandRawSize, 0xff);
     SocPXA soc(deviceTypeSpitz, 64u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2, true);
+    auto* mem = cpuGetMem(soc.GetCpu());
+    constexpr uint32_t sleepWrite = 0xfe0, alias = 0x00800000 + sleepWrite;
+    uint8_t value = 0x41;
+    assert((memAccess<1, true>(mem, sleepWrite, &value)));
+    assert(memAccess(mem, alias, 1, true, &value));
+    assert(read(soc, sleepWrite) == UINT32_MAX && read(soc, alias) == UINT32_MAX);
     write(soc, resume, 0xeafffffe);
     write(soc, PM + 8, resume);
     write(soc, PM + 0x0c, 1u << 31);
@@ -1150,6 +1186,7 @@ static void spitzWifiSocket() {
 
 int main() {
     spitzBoard();
+    spitzLcdDisable();
     spitzUsbDevice();
     spitzCodecControl();
     spitzStorage();

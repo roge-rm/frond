@@ -177,9 +177,8 @@ void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp) {
     env->DeleteLocalRef(activity);
 }
 
-// The core's guest thread, when the guest OS turns its screen (the Zodiac): tells FrondActivity, which
-// turns the app to match when its Orientation is Follow the program. orientation is SysGetOrientation's
-// number (1 portrait, 2 landscape, 3 reverse portrait, 4 reverse landscape).
+// Tells FrondActivity when the Zodiac or Zaurus turns its screen. The activity can turn to match
+// when Orientation is Follow the program. 1 is portrait, 2 landscape, 3 reverse portrait, 4 reverse landscape.
 void frondGuestOrientationChanged(int orientation) {
     auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
     auto activity = static_cast<jobject>(SDL_AndroidGetActivity());

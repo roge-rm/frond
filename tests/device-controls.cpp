@@ -16,6 +16,7 @@
 #include "SdlRenderer.h"
 #include "DisplayChange.h"
 #include "WindowScale.h"
+#include "ZaurusSwivel.h"
 #include "zodiac_input.h"
 #include "guest_orientation.h"
 #include "zodiac_panel.h"
@@ -3171,6 +3172,146 @@ static void barHidden() {
     key(SDLK_F1,true);input.HandleEvents();guest.expect({{keyIdHard1,true}});
     key(SDLK_F1,false);input.HandleEvents();guest.expect({{keyIdHard1,false}});
 }
+static void zaurusSwivelPanel() {
+    Guest guest(deviceTypeSpitz);
+    DisplayConfiguration display{480, 640, 0, 192};
+    guest.setDisplay(display);
+    constexpr uint32_t colours[] = {0xff0000ff, 0xff00ff00, 0xffff0000, 0xff00ffff};
+    guest.frame.resize(display.width * display.height);
+    for (unsigned y = 0; y < display.height; ++y) {
+        for (unsigned x = 0; x < display.width; ++x) {
+            const unsigned quadrant = (x >= display.width / 2) + 2 * (y >= display.height / 2);
+            guest.frame[y * display.width + x] = colours[quadrant];
+        }
+    }
+    DeviceControlView view;
+    view.zaurus = ZaurusStyle::view;
+    for (const auto [ww, wh, fit] : {std::tuple{1500, 900, WindowFit::fit}, std::tuple{800, 1000, WindowFit::fit},
+                                     std::tuple{1500, 900, WindowFit::fill}}) {
+        SDL_Window* window = SDL_CreateWindow("Zaurus Folded", 0, 0, ww, wh, 0);
+        assert(window);
+        for (const auto rotation : {Rotation::portrait_0, Rotation::landscape_90,
+                                    Rotation::portrait_180, Rotation::landscape_270}) {
+            SdlRenderer renderer(window, &guest, 1, display, rotation, false, fit, 0, view);
+            assert(renderer.Valid());
+            renderer.Draw(true);
+            const auto layout = renderer.Layout();
+            const bool turned = int(rotation) % 2;
+            const auto lcd = zaurusDeviceLayout(turned ? display.height : display.width,
+                                                turned ? display.width : display.height, *view.zaurus).screen;
+            auto* output = SDL_GetRenderer(window);
+            SDL_RenderSetScale(output, 1, 1);
+            SDL_RenderSetViewport(output, nullptr);
+            auto* shot = SDL_CreateRGBSurfaceWithFormat(0, ww, wh, 32, SDL_PIXELFORMAT_RGBA32);
+            assert(shot);
+            assert(SDL_RenderReadPixels(output, nullptr, shot->format->format, shot->pixels, shot->pitch) == 0);
+            SdlEventHandler input(&guest, 1, display, rotation, view);
+            input.SetDirectCapture(false);
+            input.SetLayout(layout, true);
+            for (const int px : {8, lcd.w - 9}) for (const int py : {8, lcd.h - 9}) {
+                const int x = layout.x + int((lcd.x + px + 0.5f) * layout.scaleX);
+                const int y = layout.y + int((lcd.y + py + 0.5f) * layout.scaleY);
+                const int dx = int((x + 0.5f - layout.x) / layout.scaleX) - lcd.x;
+                const int dy = int((y + 0.5f - layout.y) / layout.scaleY) - lcd.y;
+                const int rawX = rotation == Rotation::landscape_90 ? lcd.h - 1 - dy :
+                                 rotation == Rotation::landscape_270 ? dy :
+                                 rotation == Rotation::portrait_180 ? lcd.w - 1 - dx : dx;
+                const int rawY = rotation == Rotation::landscape_90 ? dx :
+                                 rotation == Rotation::landscape_270 ? lcd.w - 1 - dx :
+                                 rotation == Rotation::portrait_180 ? lcd.h - 1 - dy : dy;
+                const uint32_t colour = guest.frame[rawY * display.width + rawX];
+                const auto pixel = readPixel(shot, x, y);
+                assert(pixel.r == (colour & 255) && pixel.g == ((colour >> 8) & 255) && pixel.b == ((colour >> 16) & 255));
+                SDL_Event event{};
+                event.type = SDL_MOUSEBUTTONDOWN;
+                event.button.button = SDL_BUTTON_LEFT;
+                event.button.x = x;
+                event.button.y = y;
+                input.HandleEvent(event);
+                guest.pen(true, rawX, rawY);
+                event.type = SDL_MOUSEBUTTONUP;
+                input.HandleEvent(event);
+                guest.pen(false);
+            }
+            SDL_FreeSurface(shot);
+        }
+        SDL_DestroyWindow(window);
+    }
+}
+
+static void zaurusSwivelRepaint() {
+    constexpr uint64_t ms = 1'000'000;
+    constexpr ZaurusViewState portrait{true, true}, foldedLandscape{true, false};
+    constexpr unsigned width = 480, height = 640;
+    constexpr uint32_t white = 0xffffffff, green = 0xff18c38c, black = 0xff000000;
+    std::vector<uint32_t> clamshell(width * height, white), folded(width * height, white);
+    for (unsigned row = 0; row < 36; ++row) {
+        std::fill_n(clamshell.begin() + row * width, 36, row < 20 ? green : black);
+        std::fill_n(folded.begin() + (height - 36 + row) * width, 36, row < 20 ? green : black);
+    }
+
+    ZaurusSwivel quick(false, width, height);
+    assert(!quick.Update(0, clamshell.data(), true));
+    quick.Observe(true, 0);
+    assert(quick.HoldFrame());
+    std::fill_n(clamshell.begin() + 48 * width, width * 500, black);
+    assert(!quick.Update(100 * ms, clamshell.data(), true));  // An app redraw never sets the angle.
+    assert(!quick.Update(200 * ms, folded.data(), true));
+    folded[100 * width] = black;
+    assert(!quick.Update(400 * ms, folded.data(), true));
+    assert(!quick.Update(1049 * ms, nullptr, true));
+    assert(quick.Update(1050 * ms, nullptr, true) == portrait && !quick.HoldFrame());
+
+    ZaurusSwivel slow(false, width, height);
+    assert(!slow.Update(0, clamshell.data(), true));
+    slow.Observe(true, 0);
+    assert(slow.Update(5000 * ms, nullptr, true) == foldedLandscape && slow.HoldFrame());
+    assert(!slow.Update(6500 * ms, folded.data(), true) && slow.HoldFrame());
+    assert(slow.Update(7150 * ms, nullptr, true) == portrait && !slow.HoldFrame());
+
+    ZaurusSwivel delayed(false, width, height);
+    assert(!delayed.Update(0, clamshell.data(), true));
+    delayed.Observe(true, 0);
+    assert(delayed.Update(5000 * ms, nullptr, true) == foldedLandscape);
+    assert(!delayed.Update(35000 * ms, clamshell.data(), true) && !delayed.Portrait());
+    assert(!delayed.Update(40000 * ms, folded.data(), true));
+    assert(delayed.Update(40650 * ms, nullptr, true) == portrait);
+
+    auto overlapping = folded;
+    for (unsigned row = 0; row < 36; ++row)
+        std::copy_n(clamshell.begin() + row * width, 36, overlapping.begin() + row * width);
+    ZaurusSwivel mixed(false, width, height);
+    assert(!mixed.Update(0, clamshell.data(), true));
+    mixed.Observe(true, 0);
+    assert(mixed.Update(5000 * ms, nullptr, true) == foldedLandscape);
+    assert(!mixed.Update(12000 * ms, overlapping.data(), true) && mixed.HoldFrame());
+    assert(!mixed.Update(13000 * ms, folded.data(), true) && mixed.HoldFrame());
+    assert(mixed.Update(13650 * ms, nullptr, true) == portrait);
+
+    ZaurusSwivel reverse(false, width, height);
+    assert(!reverse.Update(0, clamshell.data(), true));
+    reverse.Observe(true, 0);
+    reverse.Observe(false, 100 * ms);
+    assert(!reverse.Update(150 * ms, clamshell.data(), true) && !reverse.HoldFrame());
+
+    ZaurusSwivel off(false, width, height);
+    assert(!off.Update(0, clamshell.data(), true));
+    off.Observe(true, 0);
+    assert(off.Update(10 * ms, nullptr, false) == foldedLandscape);
+    assert(!off.Update(80000 * ms, nullptr, false));
+    assert(!off.Update(81000 * ms, folded.data(), true) && off.HoldFrame());
+    assert(off.Update(81650 * ms, nullptr, true) == portrait && !off.HoldFrame());
+
+    ZaurusSwivel alternate(false, width, height);
+    alternate.Observe(true, 0);
+    assert(alternate.Update(5000 * ms, nullptr, true) == foldedLandscape);
+    assert(alternate.Update(12000 * ms, nullptr, true) == portrait);
+
+    ZaurusSwivel restored(true, width, height);
+    assert(restored.Update(0, clamshell.data(), true) == foldedLandscape);
+    assert(!restored.Update(100 * ms, folded.data(), true));
+    assert(restored.Update(750 * ms, nullptr, true) == portrait);
+}
 int main(int argc,char** argv) {
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)==0);
     if(argc==2 && std::strcmp(argv[1],"--tg50-visibility")==0) {
@@ -3188,6 +3329,8 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;
     }
+    zaurusSwivelPanel();
+    zaurusSwivelRepaint();
     barHidden();
     firmwarePowerInput();
     const auto& profile=deviceControls(deviceTypeTX);

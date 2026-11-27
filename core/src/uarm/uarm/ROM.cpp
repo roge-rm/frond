@@ -16,6 +16,7 @@ struct ArmRom {
     uint32_t *data;
     uint32_t *dataPeephole;
     bool ownsData;
+    bool protectedFlash;
 };
 
 template <int size>
@@ -65,9 +66,8 @@ static bool access(uint8_t *source, void *bufP) {
 
 template <int size, bool write>
 bool romAccessF(void *userData, uint32_t pa, void *bufP) {
-    if constexpr (write) return false;
-
     struct ArmRom *rom = (struct ArmRom *)userData;
+    if constexpr (write) return rom->protectedFlash;
 
     return access<size>((uint8_t *)rom->data + (pa - rom->base), bufP);
 }
@@ -85,7 +85,7 @@ DECLARE_ACCESS_F_SIZE(32)
 DECLARE_ACCESS_F_SIZE(64)
 
 bool romAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write, void *bufP) {
-    if (write) return false;
+    if (write) return static_cast<ArmRom*>(userData)->protectedFlash;
 
     switch (size) {
         case 1:
@@ -166,6 +166,8 @@ struct ArmRom *romInit(struct ArmMem *mem, uint32_t adr, void *data, uint32_t si
 
     return rom;
 }
+
+void romSetProtectedFlash(ArmRom* rom) { rom->protectedFlash = true; }
 
 void romRelease(struct ArmRom *rom) {
     if (!rom) return;

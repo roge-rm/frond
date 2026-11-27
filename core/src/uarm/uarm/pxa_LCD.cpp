@@ -920,7 +920,12 @@ bool pxaLcdSpitzHsync(const PxaLcd* lcd, uint64_t now, uint32_t clockHz) {
 }
 
 void pxaLcdTickSpitz(PxaLcd* lcd, uint64_t now, uint32_t clockHz, uint8_t brightness, bool qvga) {
-    if (!clockHz) return;
+    const bool disable = lcd->lccr0 & 0x400;
+    if (!clockHz) {
+        // The clock gate stops scanout. Complete any disable waiting for that scan to end.
+        if (disable && (lcd->lccr0 & 1)) pxaLcdPrvTick(lcd);
+        return;
+    }
     if (lcd->brightness != brightness || lcd->qvga != qvga) {
         lcd->brightness = brightness;
         lcd->framebufferDirty = true;
@@ -941,7 +946,6 @@ void pxaLcdTickSpitz(PxaLcd* lcd, uint64_t now, uint32_t clockHz, uint8_t bright
         const uint64_t active = linePeriod * height / 1000;
         const uint64_t frame = linePeriod * (height + vsync + porches) / 1000;
 
-        const bool disable = lcd->lccr0 & 0x400;
         if (lcd->state == LCD_STATE_DMA_0_END && !(lcd->ldcmd[0] & 0x04000000)) {
             if (lcd->scanStart && now - lcd->scanStart < active) return;
             if (disable && (lcd->ldcmd[0] & 0x00200000)) lcd->lcsr |= 0x0100;

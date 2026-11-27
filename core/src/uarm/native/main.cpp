@@ -62,6 +62,7 @@ void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp);
 #include "DisplayChange.h"
 #include "SdlRenderer.h"
 #include "WindowLayout.h"
+#include "ZaurusSwivel.h"
 #include "WindowScale.h"
 #include "argparse.h"
 #include "audio_queue.h"
@@ -1161,9 +1162,9 @@ namespace {
         // The button bar draws the LED only where the device has one.
         const auto* attentionProfile = deviceProfile5(soc->GetDeviceType());
         const uint8_t ledColours = attentionProfile ? attentionProfile->capabilities.ledColours : 0;
-        bool spitzSwivelled = spitz && soc->SpitzSwivelled();
-        int guestTurns = spitz && !spitzSwivelled && !options.viewFollowsWindow ? 1 : 0;
-        rotation = Rotation(guestTurns);
+        const bool spitzSwivelled = spitz && soc->SpitzSwivelled();
+        bool spitzPortrait = spitzSwivelled;
+        int guestTurns = 0;
 
         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
 
@@ -1203,9 +1204,12 @@ namespace {
             const bool landscape = shown == Rotation::landscape_90 || shown == Rotation::landscape_270;
             controlView.arrangement = tg50Pad() && landscape ? DeviceControlArrangement::around : DeviceControlArrangement::below;
         };
+        // The Zaurus panel is wired in portrait. The clamshell view turns it a quarter.
         // The TG50 can't turn its screen, and it's square: with the game controller, landscape puts
         // the grips either side of the upright LCD instead of turning the frame.
         auto frameRotation = [&](Rotation shown) {
+            if (spitz && !spitzPortrait && !options.viewFollowsWindow)
+                return Rotation((int(shown) + 1) % 4);
             const bool landscape = shown == Rotation::landscape_90 || shown == Rotation::landscape_270;
             return tg50Pad() && landscape ? Rotation::portrait_0 : shown;
         };
@@ -1584,12 +1588,43 @@ namespace {
 
         // SDL thread state: what it drew last, whether the app is hidden, and whether the
         // window needs drawing again (redraw) or the whole frame uploaded again (redrawAll).
-        const Rotation startingRotation = rotation;
         bool appBackground = false;
         DeviceKeyMask shownButtons = 0;
         DeviceStick shownStick{};
         bool shownLcd = true;
         bool redraw = false, redrawAll = false;
+        Rotation shownRotation = rotation;
+        // A new renderer or rotation waits while the app is in the background, as Android
+        // may have no surface to draw on until it is back.
+        bool rebuild = !sdlRenderer->Valid(), rendererFailed = false;
+        optional<Rotation> rotationPending;
+        // A new renderer starts blank; draw the last frame into it at once. Returns false
+        // when SDL couldn't make one, to try again on the next wake. Its layout carries the
+        // shown controls and fit, so input on the guest thread matches what it draws.
+        auto newRenderer = [&](optional<Rotation> rotated) {
+            sdlRenderer.reset();
+            arrangeForWindow();
+            // A window that turned between portrait and landscape can turn the Zodiac's panel.
+            const Rotation drawn = rotationForWindow(shownRotation);
+            sdlRenderer = make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, drawn,
+                                                   display.smooth, display.fit, options.windowBackground, controlView);
+            if (!sdlRenderer->Valid()) {
+                if (!rendererFailed) cerr << "failed to create renderer: " << SDL_GetError() << endl;
+                rendererFailed = true;
+                return false;
+            }
+            rendererFailed = false;
+            if (rotated || drawn != drawnRotation) rotated = drawn;
+            drawnRotation = drawn;
+            link.PushLayout(sdlRenderer->Layout(), rotated,
+                            [&sdlEventHandler, &inputFitted, view = controlView, scale, fitted] {
+                                sdlEventHandler.SetView(view, scale);
+                                inputFitted = fitted;
+                            });
+            redrawAll = true;
+            return true;
+        };
+
         // Draws what the guest thread published since the last draw. In the background the
         // draw stays pending, so the newest frame is drawn on return. A draw with no new
         // frame and nothing changed is skipped.
@@ -1597,6 +1632,20 @@ namespace {
             if (appBackground || !sdlRenderer->Valid()) return;
             RenderDrawState draw;
             const bool taken = link.TakeDraw(draw);
+            if (draw.zaurus) {
+                const auto style = draw.zaurus->folded ? ZaurusStyle::view : ZaurusStyle::clamshell;
+                if (controlView.zaurus != style || spitzPortrait != draw.zaurus->portrait) {
+                    controlView.zaurus = style;
+                    spitzPortrait = draw.zaurus->portrait;
+                    if (!fitted)
+                        sdlResizeWindow(window, displayConfiguration, scale, frameRotation(shownRotation),
+                                        deviceControls(deviceType, controlView), controlView);
+                    rebuild = !newRenderer(shownRotation);
+#ifdef __ANDROID__
+                    frondGuestOrientationChanged(spitzPortrait ? 1 : 2);
+#endif
+                }
+            }
             if (!taken && !redraw && !redrawAll) return;
             if (!taken) {
                 draw.buttons = shownButtons;
@@ -1609,6 +1658,7 @@ namespace {
             shownButtons = draw.buttons;
             shownStick = draw.stick;
             shownLcd = draw.lcdEnabled;
+            if (!sdlRenderer->Valid()) return;
             if (redrawAll) {
                 sdlRenderer->RepaintControls();
                 draw.pixels = link.FrontFrame();
@@ -1647,12 +1697,27 @@ namespace {
             FILE* frameTrace = getenv("FROND_FRAME_TRACE") ? fopen(getenv("FROND_FRAME_TRACE"), "w") : nullptr;
             if (frameTrace) setvbuf(frameTrace, nullptr, _IOLBF, 0);
             // Hands the frame to the SDL thread; it uploads and presents it.
+            ZaurusSwivel swivel(spitzSwivelled, displayConfiguration.width, displayConfiguration.height);
+            const uint32_t* lastSpitzFrame = nullptr;
             auto handOff = [&](bool headless) {
                 if (headless) return;
                 const uint64_t handoffStart = zodiacSpeed ? timestampUsec() : 0;
                 const bool lcdEnabled = soc->LcdEnabled();
                 uint32_t firstDirtyLine = 0, lastDirtyLine = 0;
                 const uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
+                optional<ZaurusViewState> zaurus;
+                if (spitz) {
+                    if (frame) lastSpitzFrame = frame;
+                    const bool wasHolding = swivel.HoldFrame();
+                    const bool wasPortrait = swivel.Portrait();
+                    zaurus = swivel.Update(soc->GetTime(), frame, lcdEnabled);
+                    if (swivel.HoldFrame() && swivel.Portrait() == wasPortrait) {
+                        frame = nullptr;
+                        soc->ResetPendingFrame();
+                    } else if (wasHolding) {
+                        frame = lastSpitzFrame;
+                    }
+                }
                 DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
                 // The pad's Hold slide stays over while it's on.
                 if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
@@ -1664,9 +1729,9 @@ namespace {
                     static_cast<SocPXA*>(soc)->GetSpitzPower(power);
                     stick.lamp = uint8_t(power.chargeLed) | (uint8_t(power.diskLed) << 1);
                 }
-                const bool redrawRequested = sdlEventHandler.RedrawRequested();
+                const bool redrawRequested = sdlEventHandler.RedrawRequested() || zaurus.has_value();
                 if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
-                    link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
+                    link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick, zaurus);
                     if (frame) inputTrace::published();
                     if (frame && frameTrace)
                         fprintf(frameTrace, "%llu %llu %llu\n", (unsigned long long)timestampUsec(),
@@ -1809,6 +1874,7 @@ namespace {
                 serial.Service();
                 usb.Service();
                 infrared.Service();
+                if (spitz) swivel.Observe(soc->SpitzSwivelled(), soc->GetTime());
                 inputTrace::note("cycle", true, "start");
                 if (handOffAtSliceEnd) handOff(headless);
                 if (zodiacSpeed) {
@@ -1952,17 +2018,6 @@ namespace {
                 if (desktop && desktop->poll(commandContext)) break;
                 if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
 
-                if (spitz && spitzSwivelled != soc->SpitzSwivelled()) {
-                    spitzSwivelled = soc->SpitzSwivelled();
-                    guestTurns = !spitzSwivelled && !options.viewFollowsWindow ? 1 : 0;
-                    DisplayChange change;
-                    change.zaurus = spitzSwivelled ? ZaurusStyle::view : ZaurusStyle::clamshell;
-                    commandContext.changeDisplay(change);
-#ifdef __ANDROID__
-                    frondGuestOrientationChanged(spitzSwivelled ? 1 : 2);
-#endif
-                }
-
                 // The SDL thread resizes the window and sends the new layout back with the
                 // rotation; input uses the old rotation until then.
                 const Rotation wanted = Rotation((int(commandContext.rotation) + guestTurns) % 4);
@@ -2004,39 +2059,7 @@ namespace {
         exception_ptr renderError;
         try {
             bool captured = false;
-            Rotation shownRotation = startingRotation;
-            // A new renderer or rotation waits while the app is in the background, as Android
-            // may have no surface to draw on until it is back.
-            bool rebuild = !sdlRenderer->Valid(), rendererFailed = false;
-            optional<Rotation> rotationPending;
             optional<DisplayChange> displayPending;
-            // A new renderer starts blank; draw the last frame into it at once. Returns false
-            // when SDL couldn't make one, to try again on the next wake. Its layout carries the
-            // shown controls and fit, so input on the guest thread matches what it draws.
-            auto newRenderer = [&](optional<Rotation> rotated) {
-                sdlRenderer.reset();
-                arrangeForWindow();
-                // A window that turned between portrait and landscape can turn the Zodiac's panel.
-                const Rotation drawn = rotationForWindow(shownRotation);
-                sdlRenderer = make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, drawn,
-                                                       display.smooth, display.fit, options.windowBackground, controlView);
-                if (!sdlRenderer->Valid()) {
-                    if (!rendererFailed) cerr << "failed to create renderer: " << SDL_GetError() << endl;
-                    rendererFailed = true;
-                    return false;
-                }
-                rendererFailed = false;
-                if (rotated || drawn != drawnRotation) rotated = drawn;
-                drawnRotation = drawn;
-                link.PushLayout(sdlRenderer->Layout(), rotated,
-                                [&sdlEventHandler, &inputFitted, view = controlView, scale, fitted] {
-                                    sdlEventHandler.SetView(view, scale);
-                                    inputFitted = fitted;
-                                });
-                sdlRenderer->Render(link.FrontFrame(), 0, frameRows - 1, shownLcd, shownButtons, shownStick);
-                return true;
-            };
-
             // SDL's event pump runs the filter for desktop events and, on Android, notices
             // pause and resume (which come as semaphores, not events) and checks AAudio.
             // On Android the filter gets touches and window events without a pump, so the
@@ -2081,7 +2104,6 @@ namespace {
                 // new renderer below lays the device out with the new controls.
                 if (!appBackground && displayPending) {
                     display.Apply(*displayPending);
-                    if (displayPending->zaurus) controlView.zaurus = displayPending->zaurus;
                     displayPending.reset();
                     if (deviceType == deviceTypeTG50) {
                         controlView = deviceControlView(display.keyboard, display.jog);

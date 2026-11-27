@@ -2,6 +2,8 @@
 #include "mem.h"
 #include "RAM.h"
 #include "memory_buffer.h"
+#include "soc_PXA.h"
+#include "spitz_nand.h"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace {
 constexpr uint32_t ram = 0xa0000000, usb = 0x4c000000;
@@ -171,5 +174,22 @@ int main(int argc, char** argv) {
     m.write(usb + 8, 2);
     m.frame();
     assert((m.read(usb + 0x0c) & 0x10) && (m.read(usb + 4) & 0xc0) == 0xc0);
+    // A reset starts a new bus session with the same drive still plugged in.
+    // Loading a session drops the live host file attachment.
+    std::vector<uint8_t> rom(8u << 20, 0xff), nand(spitzNandRawSize, 0xff);
+    const uint32_t loop = 0xeafffffe;
+    std::memcpy(rom.data(), &loop, sizeof(loop));
+    SocPXA soc(deviceTypeSpitz, 64u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2);
+    assert(soc.SetSpitzUsbDrive(argv[1]));
+    assert(soc.SpitzUsbDriveAttached() && !soc.SetUsbTestCable(true));
+    assert(soc.Save());
+    const auto checkpoint = soc.GetSavestate();
+    const auto* bytes = static_cast<const uint8_t*>(checkpoint.data);
+    std::vector<uint8_t> saved(bytes, bytes + checkpoint.size);
+    soc.Reset();
+    assert(soc.SpitzUsbDriveAttached() && !soc.SetUsbTestCable(true));
+    assert(soc.Load(saved.size(), saved.data()));
+    assert(!soc.SpitzUsbDriveAttached() && soc.SetUsbTestCable(true));
+
     std::puts("Zaurus OHCI hub, USB enumeration, multi-page READ(10), write protection and DMA checks passed");
 }

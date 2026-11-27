@@ -154,12 +154,16 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
         }
     }
     rom = romInit(mem, ROM_BASE, romData, romSize, true);
-    if (spitz && !memRegionAdd(mem, 0x00800000, 0x03800000,
-            [](void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
-                // Stock software reads the 8 MiB chip through higher CS0 addresses.
-                return memAccess(static_cast<ArmMem*>(context), address & 0x007fffff, size, write, data);
-            }, mem)) {
-        ERR("cannot map the Spitz CS0 alias");
+    if (spitz) {
+        // Sharp writes to CS0 before entering power sleep. The boot flash is read-only.
+        romSetProtectedFlash(rom);
+        if (!memRegionAdd(mem, 0x00800000, 0x03800000,
+                [](void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
+                    // Stock software reads the 8 MiB chip through higher CS0 addresses.
+                    return memAccess(static_cast<ArmMem*>(context), address & 0x007fffff, size, write, data);
+                }, mem)) {
+            ERR("cannot map the Spitz CS0 alias");
+        }
     }
 
 
@@ -1648,12 +1652,12 @@ void SocPXA::StateReplacementRefused(const std::function<void()>& restore) {
     RefreshIrMode(this);
 }
 
-void SocPXA::StateReplaced() {
+void SocPXA::StateReplaced(StateReplacement replacement) {
     displacedPalmSdioWifi.reset();
     if (!RestoringCheckpoint()) {
         if (SpitzRemoteInserted()) headphones = false;
         if (spitzOhci) {
-            SetSpitzUsbDrive({});
+            if (replacement == StateReplacement::load) SetSpitzUsbDrive({});
             spitzOhci->MediaStateReplaced();
         }
         if (palmSdioWifi) palmSdioWifi->DropHost();

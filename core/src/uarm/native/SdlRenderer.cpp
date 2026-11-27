@@ -216,42 +216,57 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
                          .w = int(scale * displayConfiguration.width),
                          .h = int(scale * displayConfiguration.height)};
 
-        SDL_Point origin;
+        if (controlView.zaurus && rotation != Rotation::portrait_0) {
+            // The SDL software renderer scales the viewport offset again on a rotated copy.
+            // Use output pixels and turn the panel around the centre of the LCD opening.
+            float sx, sy;
+            SDL_RenderGetScale(renderer, &sx, &sy);
+            const float w = screen.w * sx, h = screen.h * sy;
+            const bool quarter = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
+            const float rawWidth = quarter ? h : w, rawHeight = quarter ? w : h;
+            const SDL_FRect panel{screen.x * sx + (w - rawWidth) * 0.5f,
+                                  screen.y * sy + (h - rawHeight) * 0.5f, rawWidth, rawHeight};
+            SDL_RenderSetScale(renderer, 1, 1);
+            SDL_RenderCopyExF(renderer, frameTexture, nullptr, &panel, -90 * int(rotation), nullptr, SDL_FLIP_NONE);
+            SDL_RenderSetScale(renderer, sx, sy);
+        } else {
+            SDL_Point origin;
 
-        switch (rotation) {
-            case Rotation::landscape_90:
-                dest.y = (controlView.zaurus ? screen.y : 0) + int(scale * displayConfiguration.width);
-                origin = {0, 0};
-                SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 270, &origin,
-                                 SDL_FLIP_NONE);
+            switch (rotation) {
+                case Rotation::landscape_90:
+                    dest.y = int(scale * displayConfiguration.width);
+                    origin = {0, 0};
+                    SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 270, &origin,
+                                     SDL_FLIP_NONE);
 
-                break;
+                    break;
 
-            case Rotation::portrait_180:
-                dest.y = (controlView.zaurus ? screen.y : 0) + int(scale * displayConfiguration.graffitiHeight);
+                case Rotation::portrait_180:
+                    dest.y = int(scale * displayConfiguration.graffitiHeight);
 
-                SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 180, nullptr,
-                                 SDL_FLIP_NONE);
+                    SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 180, nullptr,
+                                     SDL_FLIP_NONE);
 
-                break;
+                    break;
 
-            case Rotation::landscape_270:
-                dest.x += int(scale * (displayConfiguration.height +
-                                  displayConfiguration.graffitiHeight - displayConfiguration.width));
-                dest.y = (controlView.zaurus ? screen.y : 0) + int(scale * displayConfiguration.width);
+                case Rotation::landscape_270:
+                    dest.x += int(scale * (displayConfiguration.height +
+                                      displayConfiguration.graffitiHeight - displayConfiguration.width));
+                    dest.y = int(scale * displayConfiguration.width);
 
-                origin = {int(scale * displayConfiguration.width), 0};
+                    origin = {int(scale * displayConfiguration.width), 0};
 
-                SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 90, &origin,
-                                 SDL_FLIP_NONE);
+                    SDL_RenderCopyEx(renderer, frameTexture, nullptr, &dest, 90, &origin,
+                                     SDL_FLIP_NONE);
 
-                break;
+                    break;
 
-            default:
+                default:
 
-                SDL_RenderCopy(renderer, frameTexture, nullptr, &dest);
+                    SDL_RenderCopy(renderer, frameTexture, nullptr, &dest);
 
-                break;
+                    break;
+            }
         }
     }
 

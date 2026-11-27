@@ -289,7 +289,8 @@ class SoC {
     virtual void BeforeStateReplacement() {}
     virtual void DiscardMemoryStickSaveImage() {}
     // After a reset, or a load that succeeded.
-    virtual void StateReplaced() {}
+    enum class StateReplacement { reset, load };
+    virtual void StateReplaced(StateReplacement) {}
     // A load was refused; restore loads the previous state back.
     virtual void StateReplacementRefused(const std::function<void()>& restore) { restore(); }
     virtual void BeginSerialCheckpoint() {}

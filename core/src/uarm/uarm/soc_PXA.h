@@ -230,7 +230,7 @@ class SocPXA : public SocGeneric<SocPXA> {
     std::function<void()> CapturePeripheralInput() override;
     void BeforeStateReplacement() override;
     void DiscardMemoryStickSaveImage() override;
-    void StateReplaced() override;
+    void StateReplaced(StateReplacement) override;
     void StateReplacementRefused(const std::function<void()>& restore) override;
     void BeginSerialCheckpoint() override;
     void EndSerialCheckpoint() override;
