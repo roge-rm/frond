@@ -37,8 +37,8 @@ A session has your firmware, installed apps and personal data in it. Keep it to 
 
 Choose **Add device → Sharp Zaurus SL-C3000**. Pick an SL-C3000 `SYSTC300.DBK` backup or raw NAND dump with spare bytes, and supply the internal disk. Frond keeps its own copies of these images.
 
-- On desktop, choose **Use an existing CF image** for a raw disk image. To build an image, choose **Create a CF image**, pick the matching Sharp HDD1 archive and set **Capacity** from 4 to 32 GB. The archive needs its embedded factory seed. Creation uses Python 3, e2fsprogs and mtools. The image is sparse and takes more host space as sectors are written.
-- On Android, pick **Existing CF image**. You can use an image made by the desktop builder or `tools/create-zaurus-cf.py`.
+- On desktop, choose **Use an existing CF image** for a raw disk image. To build an image, choose **Create a CF image**, pick the matching Sharp HDD1 archive and set **Capacity** from 4 to 32 GB. The archive needs its embedded factory seed. The image is sparse and takes more host space as sectors are written.
+- On Android, pick **Existing CF image**. You can use an image made by the desktop builder or `frond --zaurus-cf`.
 - **CS0 boot PROM** is optional. With an existing CF image, supplying a CS0 dump boots through it. For a new desktop CF image, the builder can use CS0 to fill the stock LC Fonts and the machine boots straight into the kernel. Direct boot needs the LC Fonts on the disk.
 
 Leave **Engine** at **Fast** for normal use. On the first boot, follow Qtopia’s touchscreen, date and owner setup. A fresh start can take several minutes. Sharp 1.01 NAND backups from Conics, TRIsoft and an original SL-C3000 have reached setup. A reconstructed Sharp 1.11 image has reached touchscreen setup in Exact. The TRIsoft English backup can be restored through Qtopia’s **Backup/Restore** from `Backup_Files` at the root of a partitioned FAT16 SD image. An OpenZaurus kernel also needs its matching root filesystem.

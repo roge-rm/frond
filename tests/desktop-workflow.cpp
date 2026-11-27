@@ -2855,23 +2855,26 @@ for line in s.makefile('rb'):
         QTRY_VERIFY(window.findChild<QPushButton*>("addDevice")->isEnabled());
         window.close();
 
-        // The builder receives the selected capacity and the optional font source.
-        QFile python(root.filePath("python3"));
-        QVERIFY(python.open(QIODevice::WriteOnly));
-        python.write(R"PY(#!/usr/bin/python3
+        // The core's builder receives the selected capacity and the optional font source.
+        const auto builderPath = root.filePath("builder-core");
+        QFile builder(builderPath);
+        QVERIFY(builder.open(QIODevice::WriteOnly));
+        builder.write(R"PY(#!/usr/bin/python3
 import pathlib, sys
-assert 'def create_image' in sys.stdin.read()
-assert '--require-fonts' in sys.argv
+assert sys.argv[1] == '--zaurus-cf'
+assert '--require-fonts' in sys.argv and '--progress' in sys.argv
 assert pathlib.Path(sys.argv[sys.argv.index('--font-rom') + 1]).name == 'cs0.bin'
 output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])
+for percent in (0, 50, 100):
+    print(f'progress {percent}', flush=True)
 with output.open('wb') as image:
     image.truncate(int(sys.argv[sys.argv.index('--size-gb') + 1]) * 10**9)
 )PY");
-        python.close();
-        QVERIFY(python.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-        const auto oldPath = qgetenv("PATH");
-        const auto restorePath = qScopeGuard([&] { qputenv("PATH", oldPath); });
-        qputenv("PATH", root.path().toLocal8Bit() + ':' + oldPath);
+        builder.close();
+        QVERIFY(builder.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto oldCore = frondCards::defaultCore();
+        const auto restoreCore = qScopeGuard([&] { frondCards::defaultCore() = oldCore; });
+        frondCards::defaultCore() = builderPath;
         const frondSessions::Preferences fresh;
         FirmwareDialog dialog(root.path(), zaurus, nullptr, &fresh);
         dialog.offerCards(cardsSessions());

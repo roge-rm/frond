@@ -89,6 +89,14 @@ SIZE is in MiB for an SD card or a Memory Stick Pro and in MB for a classic stic
 
 The card files, journals, settle rules and session media are in [Storage formats](#storage-formats).
 
+`frond --zaurus-cf` builds a sparse SL-C3000 internal CF from a Sharp HDD1 archive (`.tar`, `.tar.gz` or `.tgz`) and its factory seed, with no host tools. The desktop's **Create a CF image** runs it:
+
+```sh
+frond --zaurus-cf --hdd1 ARCHIVE [--size-gb 4-32] [--font-rom CS0] [--require-fonts] [--progress] --output IMAGE
+```
+
+The layout matches `tools/create-zaurus-cf.py`. `--font-rom` fills the empty LC Fonts from an 8 MiB CS0 dump and `--require-fonts` refuses an archive left without them. With `--progress`, standard output has `progress PERCENT` lines. Errors go to standard error and the exit status is 1. An existing output is refused, and a failed run leaves nothing.
+
 The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `--core-68k PATH` (the same for 68k devices like the Palm IIIx or m515, default `frond-68k` beside the ARM core), `-h` and `-v`.
 
 ## Storage formats
@@ -1061,7 +1069,7 @@ All in `tools/`. Most take `--help`.
 | `check-usb-printer-capture.py` | Compares a private USB packet trace with one finished raw print job (`doc/usb-printer-runtime.md`). |
 | `generate-device-data.py` | Writes the device profile data for Python and Android. `--check` fails if it's stale. |
 | `zodiac-rom.py` | Makes the Zodiac ROM from Tapwave's Zodiac 1.1 update zip or the PRC inside it, with the same checks as the app's import. |
-| `create-zaurus-cf.py` | Builds a sparse stock SL-C3000 internal CF from a complete `--hdd1 ARCHIVE` and its factory seed. Supply `--size-gb` from 4 to 32 and `--output IMAGE`. Use `--require-fonts` for direct boot and `--font-rom ROM` if the archive needs the LC Fonts from CS0. Requires e2fsprogs and mtools. |
+| `create-zaurus-cf.py` | Builds a sparse stock SL-C3000 internal CF from a complete `--hdd1 ARCHIVE` and its factory seed. Supply `--size-gb` from 4 to 32 and `--output IMAGE`. Use `--require-fonts` for direct boot and `--font-rom ROM` if the archive needs the LC Fonts from CS0. Requires e2fsprogs and mtools. Kept as the reference `make test-zaurus-cf-builder` checks `frond --zaurus-cf` against. |
 | `zaurus-glyphs.py` | Generates the Zaurus keyboard's Japanese legend bitmaps from Noto Sans CJK JP for `ZaurusGlyphs.h`. |
 | `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
