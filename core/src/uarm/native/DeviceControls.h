@@ -124,7 +124,11 @@ inline bool parseJogPlacement(const std::string& value, JogPlacement& placement)
     return true;
 }
 inline DeviceControlView deviceControlView(bool keyboard, JogPlacement jog) {
-    return {keyboard,jog!=JogPlacement::hidden,jog==JogPlacement::keyboard};
+    DeviceControlView view;
+    view.keyboard=keyboard;
+    view.sideTab=jog!=JogPlacement::hidden;
+    view.sideTabBesideKeyboard=jog==JogPlacement::keyboard;
+    return view;
 }
 // Pressed keys, one bit per KeyId.
 __extension__ typedef unsigned __int128 DeviceKeyMask;

@@ -79,7 +79,8 @@ static void lists() {
         const auto& strip = deviceControls(profile.art, profile.frontend.clieGamepad);
         for (auto key : keys) {
             const KeyId id = palmKeyToKeyId(key);
-            bool found = key == PalmKey::power || key == PalmKey::voice ||
+            // The Zaurus keys are on its own panel, not a strip.
+            bool found = key == PalmKey::power || key == PalmKey::voice || profile.deviceType == deviceTypeSpitz ||
                          (zodiacController(profile) && key <= PalmKey::right);  // the Zodiac's stick
             for (size_t i = 0; i < strip.count; ++i) found |= strip.buttons[i].key == id;
             if (!found) std::fprintf(stderr, "%s: %s isn't on its strip\n", profile.name, palmKeyId(key));
