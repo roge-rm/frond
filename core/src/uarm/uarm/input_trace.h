@@ -192,7 +192,7 @@ inline void guestFrame(const uint32_t* pixels, size_t count) {
         size_t changed = 0;
         if (s.previous.size() == count) for (size_t j = 0; j < count; ++j) changed += pixels[j] != s.previous[j];
         s.previous.assign(pixels, pixels + count);
-        lineLocked("change", true, "%zu", changed);
+        lineLocked("change", true, "%llu", static_cast<unsigned long long>(changed));
     }
     if (!s.frameArmed || count != s.baseline.size()) return;
     size_t i = 0;
