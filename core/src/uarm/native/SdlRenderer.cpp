@@ -392,7 +392,7 @@ void SdlRenderer::DrawZaurus(DeviceKeyMask buttons, bool changed) {
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
             SDL_RenderClear(renderer);
             drawZaurusControls(renderer, zaurusDeviceLayout(width, height, *controlView.zaurus), held);
-            SDL_SetRenderTarget(renderer, nullptr);
+            DrawOnDevice();
             SDL_RenderSetScale(renderer, sx, sy);
             controlsPainted = true;
         }

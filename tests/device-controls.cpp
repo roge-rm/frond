@@ -3284,6 +3284,17 @@ static void zaurusSwivelPanel() {
                 input.HandleEvent(event);
                 guest.pen(false);
             }
+            // The first draw repaints the controls: they and the off lamps land in the fitted window.
+            const auto device = zaurusDeviceLayout(turned ? display.height : display.width,
+                                                   turned ? display.width : display.height, *view.zaurus);
+            const auto& body = device.side;
+            auto windowPixel = [&](float dx, float dy) {
+                return readPixel(shot, layout.x + int((dx + 0.5f) * layout.scaleX), layout.y + int((dy + 0.5f) * layout.scaleY));
+            };
+            const auto lamp = windowPixel(body.x + 27, body.y + body.h - 11);
+            assert(std::abs(lamp.r - 75) < 12 && std::abs(lamp.g - 78) < 12 && std::abs(lamp.b - 82) < 12);
+            const auto art = windowPixel(body.x + body.w / 2.f, body.y + body.h / 2.f);
+            assert(art.r + art.g + art.b > 30);
             SDL_FreeSurface(shot);
         }
         SDL_DestroyWindow(window);
