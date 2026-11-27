@@ -118,14 +118,18 @@ int main() {
     soc.scriptedPreflight = true;
     // Failed preparation is not a speculative export. Repeated not-ready
     // attempts must retain progress rather than restoring the same busy state.
+    // A not-ready preparation tries more than once (the first tenth, then the rest of the budget).
     for (unsigned attempt = 1; attempt <= 3; ++attempt) {
         const auto before = soc.GetTime();
+        const unsigned calls = soc.preflightCalls;
         { GuestExport exportGuest(soc); assert(!exportGuest.Ready()); }
-        assert(soc.preflightCalls == attempt && soc.GetTime() > before);
-        assert(ram[9000] == attempt && cpuGetRegExternal(cpu, 0) == attempt);
-        assert(static_cast<uint8_t*>(soc.GetNandData().data)[123] == attempt);
+        const unsigned now = soc.preflightCalls;
+        assert(now > calls && soc.GetTime() > before);
+        assert(ram[9000] == uint8_t(now) && cpuGetRegExternal(cpu, 0) == now);
+        assert(static_cast<uint8_t*>(soc.GetNandData().data)[123] == uint8_t(now));
         assert(soc.IsNandDirty());
     }
+    const unsigned failedCalls = soc.preflightCalls;
 
     soc.preflightReady = true;
     uint64_t preparedTime = 0;
@@ -133,7 +137,7 @@ int main() {
     bool failed = false;
     try {
         GuestExport exportGuest(soc);
-        assert(exportGuest.Ready() && soc.preflightCalls == 4);
+        assert(exportGuest.Ready() && soc.preflightCalls == failedCalls + 1);
         preparedTime = soc.GetTime();
         preparedRam.assign(ram, ram + soc.GetMemoryData().size);
         syscall68k_MemPtrNew(soc.GetSyscallDispatch(), SC_EXECUTE_FULL, 4);
@@ -142,21 +146,21 @@ int main() {
     // preflight's RAM/NAND/CPU state and its elapsed guest time.
     assert(failed && soc.GetTime() == preparedTime);
     assert(!std::memcmp(preparedRam.data(), ram, preparedRam.size()));
-    assert(cpuGetRegExternal(cpu, 0) == 4);
+    assert(cpuGetRegExternal(cpu, 0) == failedCalls + 1);
     assert(static_cast<uint8_t*>(soc.GetNandData().data)[0] == 0xff);
-    assert(static_cast<uint8_t*>(soc.GetNandData().data)[123] == 4 && soc.IsNandDirty());
+    assert(static_cast<uint8_t*>(soc.GetNandData().data)[123] == uint8_t(failedCalls + 1) && soc.IsNandDirty());
     assert(!syscallDispatchInProgress(soc.GetSyscallDispatch()) && soc.suspended == 0);
 
     // Successful export work has the same rollback boundary.
     {
         GuestExport exportGuest(soc);
-        assert(exportGuest.Ready() && soc.preflightCalls == 5);
+        assert(exportGuest.Ready() && soc.preflightCalls == failedCalls + 2);
         preparedTime = soc.GetTime();
         ram[9001] ^= 1;
         cpuSetReg(cpu, 0, 999);
         soc.Run(1000, 100000000);
     }
-    assert(soc.GetTime() == preparedTime && cpuGetRegExternal(cpu, 0) == 5);
-    assert(ram[9000] == 5 && ram[9001] == preparedRam[9001]);
+    assert(soc.GetTime() == preparedTime && cpuGetRegExternal(cpu, 0) == failedCalls + 2);
+    assert(ram[9000] == uint8_t(failedCalls + 2) && ram[9001] == preparedRam[9001]);
     puts("PASS: live preflight progress survives not-ready; export timeout/success restore the prepared guest");
 }

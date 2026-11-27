@@ -2,8 +2,9 @@
 #define FROND_68K_IR_PHONE_TRANSPORT_H
 
 // The IR port's transport: a host link (HostTransport68k), in phone mode a mobile phone with a data
-// modem (frondIr::IrPhone) whose calls reach a PPP server and slirp, or in printer mode an IrDA
-// printer (frondIr::IrPrinter). The guest's IR bytes are raw SIR; phone and printer are the IrLAP
+// modem (frondIr::IrPhone) whose calls reach a PPP server and slirp, in printer mode an IrDA
+// printer (frondIr::IrPrinter), or in sync mode a PC running HotSync over IrCOMM
+// (frondIr::IrSync). The guest's IR bytes are raw SIR; phone, printer and PC are the IrLAP
 // secondary. Its clock is guest time in nanoseconds that never
 // runs backwards, so a session load doesn't upset its timers. All on the emulator thread.
 
@@ -16,6 +17,7 @@
 #include "ir/IrPhone.h"
 #include "ir/IrPrinter.h"
 #include "ir/IrPrinterControl.h"
+#include "ir/IrSync.h"
 #include "modem/PppServer.h"
 #include "net/SlirpIp.h"
 
@@ -27,6 +29,9 @@ class IrPhoneTransport68k : public EmTransportSerial {
     const HostTransport68k& Host() const { return host; }
     bool PhoneMode() const { return bool(engine); }
     bool PrinterMode() const { return bool(printer); }
+    bool SyncMode() const { return bool(sync); }
+    // The phone, printer or PC is on the port in place of a host link.
+    bool PeerMode() const { return Peer(); }
     // The printer needs the guest to run (frondIr::IrPrinter::NeedsGuest).
     bool PrinterNeedsGuest() { return printer && printer->NeedsGuest(Now()); }
     frondIr::IrPrinter* Printer() { return printer.get(); }
@@ -41,6 +46,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
             return;
         }
         engine.reset();
+        sync.reset();
         printer = std::make_unique<frondIr::IrPrinter>();
         credit.Restart();
     }
@@ -63,6 +69,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
             return false;
         }
         SetPrinterMode(false);
+        sync.reset();
         engine = std::move(made);
         credit.Restart();
         // A session saved mid-call and started before phone mode came on.
@@ -71,13 +78,28 @@ class IrPhoneTransport68k : public EmTransportSerial {
         return true;
     }
 
-    // phone idle, phone linked, phone dialling or phone online SPEED.
-    std::string Describe() const { return engine ? engine->phone.Describe() : printer ? printer->Describe() : "off"; }
+    // Sync mode on or off: the HotSync PC, with a Sync Manager endpoint while it's on.
+    void SetSyncMode(bool on) {
+        if (on == SyncMode()) return;
+        if (!on) {
+            sync.reset();
+            return;
+        }
+        SetPrinterMode(false);
+        engine.reset();
+        sync = std::make_unique<frondIr::IrSync>();
+        credit.Restart();
+    }
+
+    // phone idle, phone linked, phone dialling or phone online SPEED, or the printer's or PC's state.
+    std::string Describe() const {
+        return engine ? engine->phone.Describe() : printer ? printer->Describe() : sync ? sync->Describe() : "off";
+    }
 
     // The phone's IrLAP counters, or off outside phone mode.
     std::string Stats() const {
         if (!Peer()) return "off";
-        const auto& lap = engine ? engine->phone.Lap() : printer->Lap();
+        const auto& lap = Linked() ? Linked()->Lap() : printer->Lap();
         const auto& s = lap.GetStats();
         return std::string("port=") + (powered ? "open" : "closed") + " frames_in=" + std::to_string(s.framesIn) +
                " frames_out=" + std::to_string(s.framesOut) + " bad=" + std::to_string(lap.BadFrames()) +
@@ -97,7 +119,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
     bool Close() override {
         powered = false;
         if (!Peer()) return host.Close();
-        if (engine) engine->phone.Drop(Now());
+        if (auto* peer = Linked()) peer->Drop(Now());
         return true;
     }
 
@@ -112,7 +134,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
         if (!Peer()) return host.Write(count, data);
         if (powered && count > 0) {
             const auto* bytes = static_cast<const uint8_t*>(data);
-            if (engine) engine->phone.Write(bytes, size_t(count), Now());
+            if (auto* peer = Linked()) peer->Write(bytes, size_t(count), Now());
             else printer->Write(bytes, size_t(count), Now());
             WakeForAnswer();
         }
@@ -149,7 +171,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
             return host.Service(lineDriverOn);
         }
         if (lineDriverOn != powered) lineDriverOn ? Open() : Close();
-        if (engine) engine->phone.Service(Now());
+        if (auto* peer = Linked()) peer->Service(Now());
         else printer->Service(Now());
         printerControl.Observe(printer.get());
         WakeForAnswer();
@@ -169,6 +191,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
         } else {
             droppedCall = call;
         }
+        if (sync) sync->Drop(Now());
         // The printer's job coming in is gone with the guest that sent it; held output stays.
         if (printer) printer->Drop(Now());
         credit.Restart();
@@ -185,7 +208,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
     // UART's receive interrupt would, rather than at its next timer tick.
     void WakeForAnswer() {
         if (!powered) return;
-        const uint64_t ready = engine ? engine->phone.ReadyAt() : printer->ReadyAt(), now = Now();
+        const uint64_t ready = Linked() ? Linked()->ReadyAt() : printer->ReadyAt(), now = Now();
         if (ready == UINT64_MAX) return;
         const double wait = ready > now ? double(ready - now) * gSession->GetClocksPerSecond() / 1e9 : 0;
         EmHAL::WakeAt(cycleMark + uint64_t(wait) + 1, cycleMark);
@@ -200,17 +223,22 @@ class IrPhoneTransport68k : public EmTransportSerial {
         return uint64_t(clock);
     }
 
-    bool Peer() const { return engine || printer; }
+    bool Peer() const { return engine || printer || sync; }
+    // The phone or the PC: the peers that lose their link when the transceiver goes off.
+    frondIr::IrPeer* Linked() const {
+        return engine ? static_cast<frondIr::IrPeer*>(&engine->phone) : sync.get();
+    }
     size_t PeerRead(uint8_t* data, size_t max, uint64_t now) {
-        return engine ? engine->phone.Read(data, max, now) : printer->Read(data, max, now);
+        return Linked() ? Linked()->Read(data, max, now) : printer->Read(data, max, now);
     }
     size_t PeerAvailable(uint64_t now) const {
-        return engine ? engine->phone.Available(now) : printer->Available(now);
+        return Linked() ? Linked()->Available(now) : printer->Available(now);
     }
 
     HostTransport68k host;
     std::unique_ptr<Engine> engine;
     std::unique_ptr<frondIr::IrPrinter> printer;
+    std::unique_ptr<frondIr::IrSync> sync;
     frondIr::IrPrinterControl printerControl;
     std::string droppedCall;
     bool powered{false};

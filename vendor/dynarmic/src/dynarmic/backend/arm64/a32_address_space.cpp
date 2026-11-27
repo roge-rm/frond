@@ -549,6 +549,7 @@ void A32AddressSpace::EmitPrelude() {
     prelude_info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
     prelude_info.call_svc = EmitCallTrampoline<&A32::UserCallbacks::CallSVC>(code, conf.callbacks);
     prelude_info.interpreter_fallback = EmitCallTrampoline<&A32::UserCallbacks::InterpreterFallback>(code, conf.callbacks);
+    prelude_info.frond_page_guard_exit = EmitCallTrampoline<&A32::UserCallbacks::FrondPageGuardExit>(code, conf.callbacks);
     prelude_info.exception_raised = EmitCallTrampoline<&A32::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
     prelude_info.isb_raised = EmitCallTrampoline<&A32::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);
     prelude_info.add_ticks = EmitCallTrampoline<&A32::UserCallbacks::AddTicks>(code, conf.callbacks);
@@ -776,9 +777,7 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .check_halt_on_memory_access = conf.check_halt_on_memory_access,
         .check_halt_on_link = conf.check_halt_on_link,
         .max_unchecked_instructions = conf.enable_cycle_counting ? conf.max_unchecked_instructions : 0,
-        .frond_page_guard = conf.frond_page_guard,
-        .frond_page_guard_end = conf.frond_page_guard_end,
-        .frond_page_guard_fpscr = conf.frond_page_guard_fpscr,
+        .frond_page_guard_config = &conf,
 
         .page_table_pointer = mcl::bit_cast<u64>(conf.page_table),
         .page_table_address_space_bits = 32,

@@ -38,7 +38,6 @@
 #include <QSpinBox>
 #include <QSlider>
 #include <QProcess>
-#include <QTcpServer>
 #include <QTcpSocket>
 #include <QImage>
 #include "MainWindow.h"
@@ -62,6 +61,7 @@
 #include <QJsonObject>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QNetworkInterface>
 #include <QTcpServer>
 #include <QUdpSocket>
 #include <atomic>
@@ -102,6 +102,7 @@ struct TestHub {
         env.insert("FROND_LINK_PORT", QString::number(port)); env.insert("FROND_LINK_DISCOVERY_PORT", "0");
         env.insert("FROND_BTVIRT", fakeRadio());
         env.remove("FROND_LINK_SOCKET");
+        env.remove("FROND_LINK_ALLOW_NETWORK");
     }
     QString store() const { return data + "/frond/connections"; }
     QString socket() const { return run + "/frond/link.sock"; }
@@ -1296,7 +1297,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
     message={b'device-state':device,b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
     if cmd==b'irda-mode':
-        state=b'off' if arg==b'off' else arg+b' 127.0.0.1:'+arg.split(b':')[-1]+b' waiting'
+        state=b'off' if arg==b'off' else b'sync idle; waiting infrared' if arg==b'sync' else arg+b' 127.0.0.1:'+arg.split(b':')[-1]+b' waiting'
         s.sendall(b'0\tevent\tinfrared\t'+state.hex().encode()+b'\n');message=state
     if cmd==b'keyboard-attach':message=b'attached' if arg==b'on' else b'detached'
     if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
@@ -1316,6 +1317,17 @@ for line in s.makefile('rb'):
             QTRY_VERIFY(keyboard->isEnabled()); QTRY_COMPARE(state->text(),QString());
             keyboard->click(); QTRY_VERIFY(keyboard->isChecked() && !mode->isEnabled());
             QTRY_VERIFY(keyboard->isEnabled()); keyboard->click(); QTRY_VERIFY(mode->isEnabled());
+            // IR HotSync: the Sync Manager is in the list on every Palm OS device with infrared. The Zire 72 has no
+            // cradle HotSync, so no HotSync button on the bar and no Sync Manager on the serial port.
+            const bool cradle=deviceId!="palm-zire-72";
+            auto* view=qobject_cast<QListView*>(mode->view()); QVERIFY(view); QVERIFY(!view->isRowHidden(mode->findData("sync")));
+            auto* serialMode=window.findChild<QComboBox*>("serialMode"); QVERIFY(serialMode);
+            if (auto* serialView=qobject_cast<QListView*>(serialMode->view()); serialView && serialMode->findData("sync")>=0)
+                QCOMPARE(serialView->isRowHidden(serialMode->findData("sync")),!cradle);
+            auto* barSync=window.findChild<RunningBar*>("runningBar")->findChild<QAction*>("barSync"); QVERIFY(barSync);
+            QTRY_COMPARE(barSync->isVisible(),cradle);
+            mode->setCurrentIndex(mode->findData("sync")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+            QTRY_COMPARE(state->text(),QString("Infrared: Sync Manager")); QTRY_VERIFY(!keyboard->isEnabled());
             mode->setCurrentIndex(mode->findData("tcp")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
             QTRY_VERIFY(state->text().contains("waiting")); QTRY_VERIFY(!keyboard->isEnabled());
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);
@@ -2362,6 +2374,45 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    // The device picker is a menu: Detect, Recent when there are any, then a submenu for each group.
+    void devicePickerMenu() {
+        QSettings().clear();
+        QTemporaryDir root;
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic);
+            auto* menu = dialog.findChild<QPushButton*>("deviceButton")->menu();
+            auto* device = dialog.findChild<QComboBox*>("device");
+            emit menu->aboutToShow();
+            QStringList top;
+            for (auto* a : menu->actions()) top << a->text();
+            QCOMPARE(top, QStringList({"Detect from the NOR image", "Palm OS 5", "Palm classic", "Sony CLIÉ", "Tapwave", "HP", "AlphaSmart", "IBM"}));
+            QStringList tapwave;
+            QAction* zodiac1 = nullptr;
+            for (auto* a : menu->actions())
+                if (a->text() == "Tapwave") for (auto* b : a->menu()->actions()) { tapwave << b->text(); if (b->data() == "tapwave-zodiac-1") zodiac1 = b; }
+            QCOMPARE(tapwave, QStringList({"Tapwave Zodiac 1", "Tapwave Zodiac 2"}));
+            QVERIFY(zodiac1);
+            zodiac1->trigger();
+            QCOMPARE(device->currentData().toString(), QString("tapwave-zodiac-1"));
+            QCOMPARE(dialog.findChild<QPushButton*>("deviceButton")->text(), QString("Tapwave Zodiac 1"));
+            menu->actions().first()->trigger();
+            QVERIFY(device->currentData().toString().isEmpty());
+        }
+        // Recent lists the stored devices, newest first, after Detect.
+        QSettings().setValue("recentDevices", QStringList({"palm-tx", "palm-e2", "unknown-device"}));
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic);
+            auto* menu = dialog.findChild<QPushButton*>("deviceButton")->menu();
+            emit menu->aboutToShow();
+            QCOMPARE(menu->actions().at(1)->text(), QString("Recent"));
+            QStringList recent;
+            for (auto* a : menu->actions().at(1)->menu()->actions()) recent << a->text();
+            QCOMPARE(recent, QStringList({"Palm TX", "Tungsten E2"}));
+            menu->actions().at(1)->menu()->actions().at(1)->trigger();
+            QCOMPARE(dialog.findChild<QComboBox*>("device")->currentData().toString(), QString("palm-e2"));
+        }
+        QSettings().clear();
+    }
     // A new Zodiac starts on Fast and the T|X, Zire 72 too, and other new machines on Exact, until the Engine is changed by hand; an
     // existing Zodiac keeps the engine it has, and Fast starts its core with --engine fast.
     void zodiacEngineDefault() {
@@ -2374,24 +2425,35 @@ for line in s.makefile('rb'):
             auto* device = dialog.findChild<QComboBox*>("device");
             auto* engine = dialog.machineSettings->engine;
             const auto pick = [&](const char* id) { device->setCurrentIndex(device->findData(QString(id))); };
+            auto* directStick = dialog.machineSettings->directStick;
             pick("tapwave-zodiac-2");
             QVERIFY(engine->isEnabled() && engine->currentData().toBool() && dialog.machineSettings->values().fastEngine);
+            // Direct stick: Zodiac only, on by default, greyed in Exact.
+            QVERIFY(!directStick->isHidden() && directStick->isEnabled() && directStick->isChecked());
             pick("palm-e2");
-            QVERIFY(!engine->currentData().toBool());
+            QVERIFY(!engine->currentData().toBool() && directStick->isHidden());
             pick("tapwave-zodiac-2");
-            QVERIFY(engine->currentData().toBool());
+            QVERIFY(engine->currentData().toBool() && !directStick->isHidden() && directStick->isEnabled());
             // Exact chosen by hand stays when the device changes.
             engine->setCurrentIndex(engine->findData(false));
             emit engine->activated(engine->currentIndex());
+            QVERIFY(!directStick->isEnabled());
             pick("palm-e2"); pick("tapwave-zodiac-2");
             QVERIFY(!engine->currentData().toBool() && !dialog.machineSettings->values().fastEngine);
+            QVERIFY(!directStick->isEnabled() && dialog.machineSettings->values().directStick);
+            engine->setCurrentIndex(engine->findData(true));
+            QVERIFY(directStick->isEnabled());
+            directStick->setChecked(false);
+            QVERIFY(!dialog.machineSettings->values().directStick);
         }
         {
             MachineSettingsDialog dialog(zodiac, fresh);
             QVERIFY(dialog.controls->engine->isEnabled() && !dialog.controls->values().fastEngine);
-            auto fast = fresh; fast.fastEngine = true;
+            QVERIFY(!dialog.controls->directStick->isEnabled() && dialog.controls->directStick->isChecked());
+            auto fast = fresh; fast.fastEngine = true; fast.directStick = false;
             MachineSettingsDialog fastDialog(zodiac, fast);
-            QVERIFY(fastDialog.controls->values().fastEngine);
+            QVERIFY(fastDialog.controls->values().fastEngine && !fastDialog.controls->values().directStick);
+            QVERIFY(fastDialog.controls->directStick->isEnabled() && !fastDialog.controls->directStick->isChecked());
         }
     }
     void zodiacCradle() {
@@ -2604,7 +2666,10 @@ for line in s.makefile('rb'):
             const auto real = QFileInfo(a).canonicalFilePath();
             QVERIFY2(commands.contains("sd-attach\t\"" + real + "/sd.frondsd\" " + n1.key + " writable sd\n"), qPrintable(commands));
             QVERIFY2(commands.contains("sd2-attach\t\"" + real + "/sd2.frondsd\" " + n2.key + " writable mmc\n"), qPrintable(commands));
-            QVERIFY(commands.indexOf("sd2-attach\t") < commands.indexOf("network-state\t"));
+            // network-state can come after the picks show, so wait for it before checking the order.
+            QTRY_VERIFY(read("commands").contains("network-state\t"));
+            const auto ordered = read("commands");
+            QVERIFY2(ordered.indexOf("sd2-attach\t") < ordered.indexOf("network-state\t"), qPrintable(ordered));
             // No card in slot 2: eject after the confirmation, take out, to the drawer. The view setting
             // sent at start holds the request slot and a pick during it does nothing, so wait it out.
             QTRY_VERIFY(read("commands").contains("dana-view\tkeyboard="));
@@ -3824,6 +3889,14 @@ def emitcam():
         except OSError: continue
         cam=text; s.sendall(b'0\tevent\tcamera\t'+text.hex().encode()+b'\n')
 threading.Thread(target=emitcam,daemon=True).start()
+# The text put in the "emitsync" file goes to the app as a sync event.
+def emitsync():
+    while True:
+        time.sleep(0.02)
+        try: text=open(here+'/emitsync','rb').read(); os.remove(here+'/emitsync')
+        except OSError: continue
+        s.sendall(b'0\tevent\tsync\t'+text.hex().encode()+b'\n')
+threading.Thread(target=emitsync,daemon=True).start()
 mic=b'off'
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
@@ -3852,6 +3925,13 @@ for line in s.makefile('rb'):
         s.sendall(b'0\tevent\tsync\t'+b'syncing usb backup 1/2 Memo'.hex().encode()+b'\n')
         time.sleep(0.3)
         s.sendall(b'0\tevent\tsync\t'+b'done usb: Backup complete'.hex().encode()+b'\n')
+    # ActiveSync waits at the partnership question until the app answers.
+    if cmd==b'activesync-start':
+        s.sendall(b'0\tevent\tsync\t'+b'syncing usb partnership-question'.hex().encode()+b'\n')
+    if cmd==b'activesync-answer':
+        s.sendall(b'0\tevent\tsync\t'+b'syncing usb files'.hex().encode()+b'\n')
+        time.sleep(0.2)
+        s.sendall(b'0\tevent\tsync\t'+b'done usb: Windows Mobile connected.'.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY").replace("DEVICE", device));
         core.close();
@@ -4266,12 +4346,15 @@ for line in s.makefile('rb'):
         const auto path = library.ProfilePath(profile);
         const auto device = frondSync::MachineDeviceKey("active-test");
         frondSync::SyncProfile storage;
-        QVERIFY(act("Pair on next sync", true));
+        // A device that hasn't chosen pairs on its next sync.
+        QVERIFY(act("Cancel request", true));
+        QVERIFY(storage.Open(path, problem));
+        QVERIFY(storage.ActiveSyncPairing(device).empty());
+        QVERIFY(!frondSync::ActiveSyncFilesFolder(path).empty());
+        storage.Close();
+        QVERIFY(act("Pair on next sync", false));
         QVERIFY(storage.Open(path, problem));
         QCOMPARE(QString::fromStdString(storage.ActiveSyncPairing(device)), QString("requested"));
-        QVERIFY(!frondSync::ActiveSyncFilesFolder(path).empty());
-        QVERIFY(act("Cancel request", false));
-        QVERIFY(storage.ActiveSyncPairing(device).empty());
         storage.Close();
         QVERIFY(library.DeleteProfile(profile.id, problem));
     }
@@ -4382,6 +4465,73 @@ for line in s.makefile('rb'):
         QVERIFY(renamed.open(QIODevice::ReadOnly));
         QCOMPARE(renamed.readAll().trimmed(), machine);
         QVERIFY(!QFileInfo::exists(ids.fileName()));
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // ActiveSync asks before a first partnership; the answer goes to the core and the box closes
+    // by itself when the core moves on without one.
+    void activeSyncPartnershipQuestion() {
+        QSettings().clear();
+        QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Pocket", 6, "hp-ipaq-rx1950", 0);
+        QTemporaryDir files;
+        menuCore(files.path(), "hp-ipaq-rx1950");
+        if (QTest::currentTestFailed()) return;
+        frondSync::SyncLibrary library;
+        QString error;
+        QVERIFY2(frondDesktopSync::openLibrary(library, error), qPrintable(error));
+        frondSync::ProfileInfo profile;
+        std::string problem;
+        QVERIFY(library.CreateProfile("Pocket PC", profile, problem));
+        MainWindow window(files.filePath("core"));
+        window.show();
+        window.openSession(managedSession("Pocket"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        auto* sync = bar->findChild<QAction*>("barSync");
+        QVERIFY(sync);
+        QTRY_VERIFY_WITH_TIMEOUT(sync->isVisible() && sync->isEnabled(), 5000);
+        QCOMPARE(sync->text(), QString("ActiveSync"));
+        QFile ids(frondSessions::syncIdPath(managedSession("Pocket")));
+        QTRY_VERIFY_WITH_TIMEOUT(ids.exists(), 5000);
+        QVERIFY(ids.open(QIODevice::ReadOnly));
+        const auto machine = ids.readAll().trimmed().toStdString();
+        ids.close();
+        QVERIFY(library.Assign(frondSync::MachineDeviceKey(machine), profile.id, problem, "winmo"));
+        auto readSent = [&] {
+            QFile file(files.filePath("sent"));
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray{};
+        };
+        auto question = [&] { return window.findChild<QMessageBox*>("partnershipQuestion"); };
+        auto* label = bar->findChild<QLabel*>("barStatus");
+
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-start ask"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        QCOMPARE(question()->text(), QString("Set up an ActiveSync partnership with this device?"));
+        question()->findChild<QPushButton*>("partnershipGuest")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-answer guest"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("ActiveSync complete:"), 3000);
+        QVERIFY(!question());
+
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        question()->findChild<QPushButton*>("partnershipSetUp")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(readSent().contains("activesync-answer set-up"), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(label->toolTip().startsWith("ActiveSync complete:"), 3000);
+
+        // The guest's cable came out: the core ends the sync and the question goes with it.
+        sync->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(question() && question()->isVisible(), 3000);
+        QFile events(files.filePath("emitsync"));
+        QVERIFY(events.open(QIODevice::WriteOnly));
+        events.write("failed usb: ActiveSync ended before the partnership question was answered.");
+        events.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!question(), 3000);
+        QCOMPARE(readSent().count("activesync-answer"), 2);
+        window.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QVERIFY(library.DeleteProfile(profile.id, problem));
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
@@ -6346,6 +6496,8 @@ for line in s.makefile('rb'):
         ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
         ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1,127.0.0.2:%1").arg(ub));
         hb.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ub));
+        ha.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
+        hb.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
         hb.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(ua));
         HubUser a(ha), a1(ha);
         auto b = std::make_unique<HubUser>(hb), b1 = std::make_unique<HubUser>(hb);
@@ -6409,6 +6561,7 @@ for line in s.makefile('rb'):
         const quint16 ua = freeUdpPort();
         TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
         ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
+        ha.env.insert("FROND_LINK_ALLOW_NETWORK", "1");
         ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(freeUdpPort()));
         HubUser a(ha), b(hb), a1(ha);
         QVERIFY(pairHubs(a, b, false));
@@ -6556,7 +6709,7 @@ for line in s.makefile('rb'):
             QVERIFY(cw->nearbyEmpty->isVisible() && !cw->pairButton->isEnabled());
             typeInto("Desk");
             cw->rename->click();
-            QTRY_COMPARE_WITH_TIMEOUT(cw->header->text(), QString("This Frond: Desk"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(cw->header->text().startsWith("This Frond: Desk"), 5000);
             // Add by address, then the code Bee shows.
             b.got.clear();
             typeInto("127.0.0.1:" + hb.env.value("FROND_LINK_PORT"));
@@ -8457,6 +8610,87 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }
+    void linkListenLoopback() {
+        QTcpServer probe;
+        const bool ipv6 = probe.listen(QHostAddress::LocalHostIPv6, 0);
+        probe.close();
+        const auto discovery = freeUdpPort();
+        TestHub hub({}, "loopback", 0);
+        hub.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(discovery));
+        HubUser user(hub);
+        user.client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+        const auto state = user.last("state");
+        const auto port = quint16(state.value("port").toInt());
+        QVERIFY(port != 0);
+        const auto addresses = QString("127.0.0.1:%1").arg(port) +
+            (ipv6 ? QString(", [::1]:%1").arg(port) : QString());
+        QCOMPARE(state.value("listen").toString(), addresses);
+        const auto reaches = [port](const QHostAddress& address) {
+            QTcpSocket client;
+            client.connectToHost(address, port);
+            return client.waitForConnected(1000);
+        };
+        QVERIFY(reaches(QHostAddress::LocalHost));
+        if (ipv6) QVERIFY(reaches(QHostAddress::LocalHostIPv6));
+        for (const auto& address : QNetworkInterface::allAddresses()) {
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback())
+                QVERIFY(!reaches(address));
+        }
+        QUdpSocket udp;
+        QVERIFY(udp.bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress));
+        udp.close();
+        // The Connections switch moves the listener to the network and is saved.
+        const auto identity = [&hub] {
+            QFile f(hub.store() + "/identity.json");
+            return f.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(f.readAll()).object() : QJsonObject();
+        };
+        QVERIFY(!identity().value("network").toBool(true));
+        QVERIFY(!state.value("network").toBool(true));
+        user.client.send({{"op", "network"}, {"on", true}});
+        QTRY_VERIFY_WITH_TIMEOUT(user.last("state").value("network").toBool(), 10000);
+        QVERIFY(identity().value("network").toBool());
+        for (const auto& address : QNetworkInterface::allAddresses()) {
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback())
+                QVERIFY(reaches(address));
+        }
+        QVERIFY(QUdpSocket().bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress) == false);
+        killHub(user);
+    }
+
+    // An identity saved before the setting existed keeps network links when it has paired peers.
+    void linkNetworkMigration() {
+        for (const bool paired : {false, true}) {
+            QTemporaryDir dir(QDir::currentPath() + "/build/lkm-XXXXXX");
+            TestHub hub(dir.path(), "m", freePort());
+            {
+                HubUser user(hub);
+                user.client.setSticky("watch", {{"op", "watch"}});
+                QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+                killHub(user);
+            }
+            QFile f(hub.store() + "/identity.json");
+            QVERIFY(f.open(QIODevice::ReadWrite));
+            auto o = QJsonDocument::fromJson(f.readAll()).object();
+            o.remove("network");
+            f.resize(0);
+            f.write(QJsonDocument(o).toJson());
+            f.close();
+            if (paired) {
+                QFile list(hub.store() + "/connections.json");
+                QVERIFY(list.open(QIODevice::WriteOnly));
+                const QString key(64, 'a'), id(32, 'b');
+                list.write(QJsonDocument(QJsonObject{{"version", 1}, {"entries", QJsonArray{QJsonObject{
+                    {"id", id}, {"name", "Old"}, {"key", key}, {"paired", true}}}}}).toJson());
+            }
+            HubUser user(hub);
+            user.client.setSticky("watch", {{"op", "watch"}});
+            QTRY_VERIFY_WITH_TIMEOUT(!user.last("state").isEmpty(), 10000);
+            QCOMPARE(user.last("state").value("network").toBool(), paired);
+            killHub(user);
+        }
+    }
+
     // Pairing by an IPv6 loopback address.
     void linkPairingIpv6() {
         QTcpServer probe;

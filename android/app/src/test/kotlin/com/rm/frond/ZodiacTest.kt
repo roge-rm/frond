@@ -2,8 +2,10 @@ package com.rm.frond
 
 import android.content.pm.ActivityInfo
 import android.view.KeyEvent
+import java.nio.file.Files
 import com.rm.frond.ZodiacPad.Event.Axis
 import com.rm.frond.ZodiacPad.Event.Button
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,16 +14,21 @@ import org.junit.Test
 
 class ZodiacTest {
     private val zodiac = Device.byId(Device.ZODIAC_ID)!!
+    private val zodiac1 = Device.byId("tapwave-zodiac-1")!!
 
     @Test fun listedWithItsScreenAndNoFirmwareVariant() {
-        assertTrue(zodiac in Device.shown)
-        assertTrue(zodiac.zodiac)
-        assertEquals(480 to 320, zodiac.width to zodiac.height)
-        assertEquals(8192000L, zodiac.norSize)
-        assertTrue(zodiac.sound)
-        assertFalse(zodiac.lowLatencyAudio)
-        assertFalse(zodiac.runs68k)
-        assertFalse(Device.entries.any { it.zodiac && it != zodiac })
+        for (model in listOf(zodiac1, zodiac)) {
+            assertTrue(model in Device.shown)
+            assertTrue(model.zodiac)
+            assertEquals(480 to 320, model.width to model.height)
+            assertEquals(8192000L, model.norSize)
+            assertTrue(model.irPhone)
+            assertTrue(model.sound)
+            assertTrue(model.sdWriteProtection)
+            assertFalse(model.lowLatencyAudio)
+            assertFalse(model.runs68k)
+            assertEquals(Engine.FAST, MachineSettings.defaults(model).engine)
+        }
     }
 
     @Test fun newMachinesRunFastAtOriginalSpeed() {
@@ -35,6 +42,23 @@ class ZodiacTest {
         assertFalse("--no-sound" in MachineSettings.defaults(zodiac).arguments(soundSupported = zodiac.sound))
         val lowLatency = MachineSettings(fastAudio = true).audioArguments(zodiac.lowLatencyAudio, 256) { true }
         assertFalse("--fast-audio" in lowLatency || "--low-latency-queue" in lowLatency)
+    }
+
+    @Test fun directStickIsOnAndGoesToTheCoreInFastOnly() {
+        for (model in listOf(zodiac1, zodiac)) {
+            val fresh = MachineSettings.defaults(model)
+            assertTrue(fresh.directStick)
+            assertEquals(listOf("--direct-stick"), fresh.directStickArguments())
+            assertEquals(emptyList<String>(), fresh.copy(engine = Engine.EXACT).directStickArguments())
+            assertEquals(emptyList<String>(), fresh.copy(directStick = false).directStickArguments())
+        }
+        // Settings saved before it read as on; off is saved and read back, on isn't written.
+        val old = JSONObject().put("engine", "fast")
+        assertTrue(MachineSettings.from(old).directStick)
+        assertFalse(MachineSettings().json().has("directStick"))
+        val off = MachineSettings(engine = Engine.FAST, directStick = false)
+        assertFalse(MachineSettings.from(JSONObject(off.json().toString())).directStick)
+        assertFalse("--direct-stick" in off.arguments())
     }
 
     @Test fun choosingAnotherDeviceKeepsAChosenEngine() {
@@ -63,6 +87,15 @@ class ZodiacTest {
         val info = Firmware.inspect(size) { at, count -> image.copyOfRange(at.toInt(), (at + count).toInt()) }
         assertEquals(zodiac, info.device)
         assertTrue(info.validLayout)
+        val rom = Files.createTempFile("zodiac-nor", ".rom").toFile()
+        try {
+            rom.writeBytes(image)
+            assertEquals(zodiac, Firmware.detect(rom))
+            assertNull(Firmware.check(zodiac, rom, null))
+            assertNull(Firmware.check(zodiac1, rom, null))
+        } finally {
+            rom.delete()
+        }
     }
 
     private fun pad(): Pair<ZodiacPad, MutableList<ZodiacPad.Event>> {
@@ -200,6 +233,96 @@ class ZodiacTest {
         pad.replaceMap(ControllerMap.defaults(zodiac).clear(PalmButton.APP2))
         assertEquals(Button(1, ZodiacPad.BUTTON_B, false), events.last())
         assertFalse(pad.key(1, KeyEvent.KEYCODE_BUTTON_B, true))
+    }
+
+    @Test fun theMapChoosesTheStickThatMovesTheZodiacStick() {
+        assertEquals(ZodiacStick.LEFT, ControllerMap.defaults(zodiac).stick)
+        assertFalse(ControllerMap.defaults(zodiac).encode().contains("stick:"))
+        assertEquals("Stick press (centre)", PalmButton.STICK_PRESS.label(zodiac))
+        val rightUp = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.UP)
+        val right = ControllerMap.defaults(zodiac).assign(PalmButton.APP4, rightUp).withStick(ZodiacStick.RIGHT)
+        // The chosen stick's own direction keys come off; the saved text round-trips, as the desktop's.
+        assertFalse(rightUp in right.keys)
+        assertTrue(right.encode().endsWith(",stick:right"))
+        assertEquals(right, ControllerMap.decode(right.encode(), zodiac))
+        assertEquals(ZodiacStick.NONE, ControllerMap.decode("stick:none", zodiac).stick)
+        assertEquals(ZodiacStick.LEFT, ControllerMap.decode("96:app1,stick:sideways", zodiac).stick)
+
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(right) { events += it }
+        pad.axes(1, 1f, 0f, 0f, 0f, 0f, 0f, rightX = 0f, rightY = -1f)
+        assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_Y, -32768)), events)
+        events.clear()
+        pad.replaceMap(right.withStick(ZodiacStick.NONE))
+        events.clear()
+        pad.axes(1, 1f, 1f, 0f, 0f, 0f, 0f, rightX = 1f, rightY = 1f)
+        assertEquals(emptyList<ZodiacPad.Event>(), events)
+        pad.key(1, KeyEvent.KEYCODE_DPAD_LEFT, true)
+        assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_X, -32768)), events)
+    }
+
+    @Test fun eachStickAxisTakesAnyControllerAxisAndCanBeInverted() {
+        // Old saved values are the presets they were.
+        assertEquals(ZodiacStick.LEFT, ControllerMap.decode("96:app1", zodiac).stick)
+        val oldRight = ControllerMap.decode("96:app1,stick:right", zodiac)
+        assertEquals(StickAxis(PadAxis.RIGHT_X), oldRight.stickX)
+        assertEquals(StickAxis(PadAxis.RIGHT_Y), oldRight.stickY)
+        assertEquals(PadAxis.NONE, ControllerMap.decode("stick:none", zodiac).stickX.axis)
+        // Right stick X, left stick Y upside down; the keys at those axes' ends come off.
+        val rightLeft = ControllerMap.stickKey(ControllerMap.STICK_RIGHT, StickDirection.LEFT)
+        val leftUp = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.UP)
+        val custom = ControllerMap.defaults(zodiac).assign(PalmButton.APP1, rightLeft).assign(PalmButton.APP2, leftUp)
+            .withStickAxis(false, PadAxis.RIGHT_X, false).withStickAxis(true, PadAxis.LEFT_Y, true)
+        assertEquals(ZodiacStick.CUSTOM, custom.stick)
+        assertFalse(rightLeft in custom.keys)
+        assertFalse(leftUp in custom.keys)
+        assertTrue(custom.encode().endsWith(",stickx:rightx,sticky:-lefty"))
+        assertEquals(custom, ControllerMap.decode(custom.encode(), zodiac))
+        assertEquals(ZodiacStick.LEFT, ControllerMap.decode("stickx:sideways,sticky:-", zodiac).stick)
+        // Keys at an axis the text binds come off, whichever comes first.
+        val leftUpKey = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.UP)
+        val leftLeftKey = ControllerMap.stickKey(ControllerMap.STICK_LEFT, StickDirection.LEFT)
+        for (text in listOf("$leftUpKey:app2,$leftLeftKey:app1,stickx:rightx,sticky:lefty",
+                            "stickx:rightx,sticky:lefty,$leftUpKey:app2,$leftLeftKey:app1")) {
+            val decoded = ControllerMap.decode(text, zodiac)
+            assertFalse(leftUpKey in decoded.keys)
+            assertTrue(leftLeftKey in decoded.keys)
+        }
+
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(custom) { events += it }
+        pad.axes(1, 1f, 0.5f, 0f, 0f, 0f, 0f, rightX = -1f, rightY = 0f)
+        assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_X, -32768), Axis(1, ZodiacPad.AXIS_LEFT_Y, -16383)), events)
+        // A trigger can be an axis.
+        pad.replaceMap(custom.withStickAxis(false, PadAxis.NONE, true).withStickAxis(true, PadAxis.RIGHT_TRIGGER, false))
+        events.clear()
+        pad.axes(2, 1f, 1f, 0f, 0f, 0f, 1f)
+        assertEquals(listOf(Axis(2, ZodiacPad.AXIS_LEFT_Y, 32767)), events)
+        assertEquals(ZodiacStick.LEFT, custom.withStick(ZodiacStick.LEFT).stick)
+    }
+
+    @Test fun aReboundDpadDirectionIsSavedAndUsed() {
+        // A hat d-pad is assigned while a button waits, as the d-pad key.
+        val assigned = mutableListOf<Pair<Int, Boolean>>()
+        val hat = HatKeys()
+        hat.update(1, 0f, -1f) { key, down -> assigned += key to down }
+        hat.update(1, 0f, -1f) { key, down -> assigned += key to down }
+        hat.update(1, 0f, 0f) { key, down -> assigned += key to down }
+        assertEquals(listOf(KeyEvent.KEYCODE_DPAD_UP to true, KeyEvent.KEYCODE_DPAD_UP to false), assigned)
+
+        // Up goes to Action 2, the key comes off Stick up, and the saved map keeps it.
+        val map = ControllerMap.defaults(zodiac).clear(PalmButton.UP).assign(PalmButton.APP2, KeyEvent.KEYCODE_DPAD_UP)
+        assertEquals(map, ControllerMap.decode(map.encode(), zodiac))
+        assertEquals(listOf(KeyEvent.KEYCODE_DPAD_UP), map.keysFor(PalmButton.APP2).filter { it == KeyEvent.KEYCODE_DPAD_UP })
+        assertTrue(map.keysFor(PalmButton.UP).isEmpty())
+
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(map) { events += it }
+        pad.axes(1, 0f, 0f, 0f, -1f, 0f, 0f, 0f, 0f)
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_B, true)), events)
+        events.clear()
+        pad.axes(1, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_B, false)), events)
     }
 
     @Test fun theRightStickPressesWhatTheMapGivesIt() {

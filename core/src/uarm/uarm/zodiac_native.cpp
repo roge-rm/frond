@@ -9,6 +9,7 @@
 
 #include "Defer.h"
 #include "SoC.h"
+#include "device_profile5.h"
 #include "soc_IMX1.h"
 #include "syscall_dispatch.h"
 
@@ -59,7 +60,7 @@ void require(bool ok, const char* reason) {
 }
 
 SocIMX1* zodiac(SoC& soc) {
-    return soc.GetDeviceType() == DeviceType5::deviceTypeZodiac2 ? static_cast<SocIMX1*>(&soc) : nullptr;
+    return deviceTypeIsZodiac5(soc.GetDeviceType()) ? static_cast<SocIMX1*>(&soc) : nullptr;
 }
 
 uint32_t word(SocIMX1& soc, uint32_t address) {
@@ -114,8 +115,12 @@ bool Prepare(SoC& soc, bool wake) {
         if (!romChecks(*z)) return false;
         if (z->GuestCallPending() && z->NativeSite() == site) return validate(*z);
         if (z->GuestCallPending()) return false;
-        if (z->RunToGuestPc(site | 1, prepareBudget, hz)) return validate(*z);
-        // An app waiting with no timeout leaves the UI task blocked for good.
+        // As on the T|X: 0.1 s for an app on its way to its event wait, then one waiting with no timeout
+        // (it leaves the UI task blocked for good) is woken when the guest idles; a busy one gets the rest and then the same wake.
+        constexpr uint64_t grace = prepareBudget / 10;
+        if (z->RunToGuestPc(site | 1, grace, hz)) return validate(*z);
+        if (wake && z->WakeIdle()) return z->RunToGuestPc(site | 1, prepareBudget, hz) && validate(*z);
+        if (z->RunToGuestPc(site | 1, prepareBudget - grace, hz)) return validate(*z);
         return wake && z->WakeIdle() && z->RunToGuestPc(site | 1, prepareBudget, hz) && validate(*z);
     } catch (const std::runtime_error&) {
         return false;

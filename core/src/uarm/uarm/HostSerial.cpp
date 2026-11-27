@@ -38,7 +38,7 @@
 // Tests only: runs on the worker after a host write, before the sent bytes leave the queue.
 void (*hostSerialAfterWriteHook)() = nullptr;
 
-namespace {
+namespace hostSerial {
 // Queues shared by the emulator thread and the worker. Only the worker touches
 // descriptors other than the eventfd; only the emulator thread touches the UART.
 struct Shared {
@@ -88,6 +88,11 @@ struct Shared {
         if (scopedReceive) {ClearReceive();++peerGeneration;}
     }
 };
+
+}  // namespace hostSerial
+
+namespace {
+using hostSerial::Shared;
 
 void closeFd(int& fd) {
     if (fd >= 0) close(fd);
@@ -458,7 +463,7 @@ bool HostSerial::Parse(const std::string& text, Config& config) {
         return true;
     }
     if (text == "pty") {
-        config = {Kind::pty, 0};
+        config = {Kind::pty, 0, {}};
         return true;
     }
     if (text == "sync") {
@@ -477,7 +482,7 @@ bool HostSerial::Parse(const std::string& text, Config& config) {
         port = port * 10 + unsigned(text[i] - '0');
     }
     if (port > 65535) return false;
-    config = {Kind::tcp, uint16_t(port)};
+    config = {Kind::tcp, uint16_t(port), {}};
     return true;
 }
 

@@ -88,6 +88,8 @@ std::unique_ptr<S3c2442Machine> S3c2442Machine::create(const S3c2442Options& opt
         return nullptr;
     }
     patchDispatchSetCpu(patches, m->cpuCore);
+    // Fast keys code and table watches by the first copy of the SDRAM (leanPage folds the copies onto one buffer).
+    cpuArm920SetRamMirror(m->cpuCore, sdramBase, options.ramBytes, sdramBase + bank6Size);
     cpuArm920EnableWait(m->cpuCore);
     cpuArm920SetMemoryCheck(m->cpuCore, cacheCheck, m.get());
     cpuSetUndefinedHook(m->cpuCore, undefinedTaken, m.get());
@@ -102,6 +104,7 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
     memory.reset();
     pwm.reset();
     watchdog.reset();
+    rtc.binaryYear = options.rtcBinaryYear;
     rtc.reset(options.rtcStart);
     sdi.reset();
     usbDevice.reset();
@@ -477,8 +480,19 @@ void S3c2442Machine::setPin(S3cGpio::Port port, unsigned bit, bool level) {
 }
 
 void S3c2442Machine::setUsbVbus(bool on) {
+    // GPG5's level says whether VBUS was there; it's saved with the state, where usbVbusOn isn't.
+    const bool had = !(gpio.input[S3cGpio::g] & (1u << 5));
     usbVbusOn = on;
     setPin(S3cGpio::g, 5, !on);
+    // ASSUMPTION "rx1950 suspend on cable out": with the cable out the bus goes quiet and the device controller
+    // sees suspend. WM5's driver (sc2440usbfn.dll, the cable thread at 0x176a50c) turns the D+ pull-up off,
+    // waits 500 ms and then reads USB_INT_REG for it; only SUSPEND_INT tells the USB function layer the host has
+    // gone, so without it ActiveSync stays connected. Also after a load, when the state had the cable in.
+    if (had && !on) {
+        usbVbusOffNs = nanoseconds();
+        usbDevice.busSuspend();
+        usbHostChanged();
+    }
     usbPins();
 }
 

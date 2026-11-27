@@ -29,6 +29,8 @@ class RunningBar : public QToolBar {
  signals:
     void chosen(runningRules::Id id);
     void pressed(RunningBar::Button button);
+    // The Record button went down (true) or was let go (false).
+    void recordHeld(bool down);
     void networkChosen(const QString& mode);
  private:
     void update();
@@ -39,6 +41,6 @@ class RunningBar : public QToolBar {
     std::map<runningRules::Id, QAction*> actions;
     std::map<runningRules::Id, QString> keyText;  // the keys shown beside a row
     QString syncIcon = "hotsync";
-    QAction *stopAction, *applicationsAction, *cardAction, *syncAction, *soundAction, *powerAction, *keyboardAction, *forceAction;
+    QAction *stopAction, *applicationsAction, *cardAction, *syncAction, *soundAction, *powerAction, *recordAction, *keyboardAction, *forceAction;
     bool shown{true}, wantVisible{false};
 };

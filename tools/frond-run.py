@@ -28,7 +28,7 @@ from firmware_variants import firmware_variant
 # The Zodiac has no setup recipe, as nothing is injected into it: it runs from a saved session, or cold from
 # its ROM with no setup (with out/frond-zodiac-developer and FROND_ZODIAC_STATE, a bring-up state).
 DEVICES = {name: device for name, device in FRONTEND_DEVICES.items()
-           if name not in DEVICES_68K and (device['setup'] or name == 'tapwave-zodiac-2')}
+           if name not in DEVICES_68K and (device['setup'] or device['cohort'] == 'zodiac-nor')}
 
 
 class RunError(Exception):

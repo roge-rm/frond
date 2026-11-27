@@ -40,6 +40,7 @@ class PppServer : public ModemLine {
     Phase GetPhase() const { return phase; }
     bool LcpOpen() const { return lcp.ackedOurs && lcp.ackedTheirs; }
     bool IpcpOpen() const { return ipcp.ackedOurs && ipcp.ackedTheirs; }
+    size_t Available() const { return out.size(); }
     // Frames dropped for a bad FCS or length.
     unsigned BadFrames() const { return badFrames; }
     // Login and password as typed at the prompt, and the PAP peer ID.

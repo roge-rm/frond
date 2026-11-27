@@ -14,6 +14,12 @@
 #include <string>
 #include <thread>
 
+// libmain.so only: libmain68k.so has no input trace.
+#if __has_include("input_trace.h")
+#define FROND_HAS_INPUT_TRACE 1
+#include "input_trace.h"
+#endif
+
 int frond_core_main(int argc, char** argv);
 
 #define LOG(...) logFormat(__VA_ARGS__)
@@ -162,6 +168,30 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushAxis(JNIEnv*, 
     event.caxis.value = Sint16(value);
     SDL_PushEvent(&event);
 }
+
+#ifdef FROND_HAS_INPUT_TRACE
+// Input trace (input_trace.h), from InputTrace.kt on the UI thread: an Android input event as the activity
+// got it, with its own time (CLOCK_MONOTONIC, the trace's host clock), and Choreographer's frame times.
+extern "C" JNIEXPORT jboolean JNICALL Java_com_rm_frond_InputTrace_nativeOn(JNIEnv*, jclass) { return inputTrace::on; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_InputTrace_nativeEvent(JNIEnv* env, jclass, jstring kind, jlong eventUsec,
+                                                                          jint action, jint a, jint b, jint history, jlong oldestUsec) {
+    if (!inputTrace::on) return;
+    const char* name = env->GetStringUTFChars(kind, nullptr);
+    char text[160];
+    std::snprintf(text, sizeof text, "%s %d %d %d event=%lld history=%d oldest=%lld", name, int(action), int(a), int(b),
+                  (long long)eventUsec, int(history), (long long)oldestUsec);
+    env->ReleaseStringUTFChars(kind, name);
+    inputTrace::note("android", false, text);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_InputTrace_nativeFrame(JNIEnv*, jclass, jlong frameUsec) {
+    if (!inputTrace::on) return;
+    char text[48];
+    std::snprintf(text, sizeof text, "%lld", (long long)frameUsec);
+    inputTrace::note("vsync", false, text);
+}
+#endif
 
 // The core's guest thread, when the guest changes its LED or vibrate motor (AttentionState.h): tells
 // FrondActivity, which drives a controller's or the phone's vibrator. The LED itself is in the core's button bar.

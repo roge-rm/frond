@@ -259,6 +259,7 @@ open class FrondActivity : SDLActivity() {
         // The core names a new machine's file on its first save, so an older path may not be the one in use.
         sessionPath = Sessions.resolve(this, intent?.getStringExtra(EXTRA_SESSION))
         machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
+        recordKey = machineSettings.recordKey
         val device = launchDevice()
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
@@ -270,10 +271,15 @@ open class FrondActivity : SDLActivity() {
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
             if (name == "sync") runOnUiThread { syncState(state) }
+            if (name == "winmo-apps" || name == "winmo-apps-error") runOnUiThread {
+                menuModel?.acceptInstalledPrograms(name == "winmo-apps", state)
+            }
             if (name == "serial" || name == "usb") runOnUiThread {
                 menuModel?.acceptSyncRoute(name, state)
                 if (name == "usb") menuModel?.acceptUsbCable(state)
             }
+            if (name == "serial") SerialLink.acceptNativeState(state)
+            if (name == "infrared") IrLink.acceptNativeState(state)
             if (name == "microphone") {
                 Log.i(TAG, "microphone: $state")
                 // The core turns capture off and on by itself too, around a TG50 sleep.
@@ -295,9 +301,9 @@ open class FrondActivity : SDLActivity() {
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO", "1", true)
         setCoreTestEnvironment()
         HostDns.start(applicationContext)
-        // A btvirt and sockets left by an emulator that was killed.
-        BtLink.cleanLater(applicationContext)
         super.onCreate(savedInstanceState)
+        UnbufferedInput.request(window.decorView)
+        InputTrace.followFrames()
         // After the core's library loads, which ZodiacMidi tells when the device fails.
         midiOutId?.let { zodiacMidi = ZodiacMidi(this, it) }
         fitInsideSystemBars()
@@ -333,26 +339,39 @@ open class FrondActivity : SDLActivity() {
                 }.apply { isDaemon = true }.start()
             }
         }
+        // A 68k ROM before Palm OS 3.3 has no IR HotSync; the core says which this one is.
+        IrLink.syncWorks = true
+        if (launchDevice().runs68k && launchDevice().infrared && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC &&
+            machineSettings.infrared != InfraredChoice.SYNC_MANAGER)
+            link.whenConnected { Thread { checkIrSync() }.apply { isDaemon = true }.start() }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
         val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
         val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
-        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter
+        val infraredSync = machineSettings.infrared == InfraredChoice.SYNC_MANAGER && launchDevice().infrared &&
+            SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
+        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter || infraredSync
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
+        val serialPpp = machineSettings.serial == InfraredChoice.PPP && launchDevice().runs68k && launchDevice().serialPort
         val serialSync = machineSettings.serial == InfraredChoice.SYNC_MANAGER &&
-            launchDevice().serialPort && SyncProtocol.forDevice(launchDevice()) == SyncProtocol.HOT_SYNC
+            launchDevice().serialPort && SyncProtocol.cradleHotSync(launchDevice())
         val serialWired = InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort
-        val serialLink = serialWired || serialModem || serialSync
+        val serialKeyboard = machineSettings.serial == InfraredChoice.KEYBOARD && launchDevice().serialKeyboard
+        val serialLink = serialWired || serialModem || serialPpp || serialSync || serialKeyboard
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
-            if ((infraredLink && !infraredPhone && !infraredPrinter) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
+            if ((infraredLink && !infraredPhone && !infraredPrinter && !infraredSync) || serialWired || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
             link.whenConnected {
                 Thread({
-                    val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label
-                    if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
+                    val session = Sessions.forPath(applicationContext, sessionPath)
+                    val name = session?.name ?: launchDevice().label
+                    if (infraredSync && launchDevice().runs68k && !checkIrSync()) Log.w(TAG, "infrared: IR HotSync needs Palm OS 3.3 or later")
+                    else if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
                         ?.let { Log.w(TAG, "infrared: $it") }
-                    if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label)
+                    if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label,
+                        modemSync = session != null)
                         ?.let { Log.w(TAG, "serial: $it") }
-                    if (bluetoothLink) BluetoothLink.apply(applicationContext, link, machineSettings.bluetooth, name, launchDevice().label)
+                    if (serialKeyboard) runOnUiThread { if (!leaving) readKeyboard() }
+                    if (bluetoothLink) BluetoothLink.apply(applicationContext, link, machineSettings.bluetooth, name, launchDevice().label, session?.id)
                         ?.let { Log.w(TAG, "bluetooth: $it") }
                 }, "FrondLinks").apply { isDaemon = true }.start()
             }
@@ -418,6 +437,7 @@ open class FrondActivity : SDLActivity() {
         arguments += listOf("--battery", battery.launchSpec())
         if (launchDevice().zodiac) {
             arguments += machineSettings.musicArguments(File(machineSettings.soundFont).isFile, midiOutId)
+            arguments += machineSettings.directStickArguments()
         }
         arguments += listOf("--window-background", BACKGROUND_HEX)
         // The core turns the Zodiac's view with its OS only when the app turns with it too.
@@ -665,6 +685,7 @@ open class FrondActivity : SDLActivity() {
     override fun onBackPressed() = back()
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        InputTrace.key(event)
         if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
             if (event.action == android.view.KeyEvent.ACTION_UP) back()
             return true
@@ -680,6 +701,12 @@ open class FrondActivity : SDLActivity() {
                 editor.assign(event.keyCode)
                 assignedKey = event.keyCode
             }
+            return true
+        }
+        // The phone key chosen for Record is held down for as long as it is, and is used up here.
+        if (recordKey.matches(event.keyCode) && !leaving) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) holdRecord(true)
+            else if (event.action == android.view.KeyEvent.ACTION_UP) holdRecord(false)
             return true
         }
         // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
@@ -703,7 +730,15 @@ open class FrondActivity : SDLActivity() {
     private val rightStick = RightStickAxes()
     private val captureSticks = StickKeys()
     private val captureRight = RightStickAxes()
+    private val captureHat = HatKeys()
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        InputTrace.motion("touch", event)
+        UnbufferedInput.touch(window.decorView, event)
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK)) InputTrace.motion("joystick", event)
         val editor = bar.controls
         if (editor != null && event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             // A stick pushed past half travel is assigned; the Palm gets nothing while a button waits.
@@ -714,6 +749,8 @@ open class FrondActivity : SDLActivity() {
             captureSticks.update(event.deviceId, ControllerMap.STICK_RIGHT,
                 captureRight.value(event.deviceId, 0, event.getAxisValue(android.view.MotionEvent.AXIS_Z), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_Z)),
                 captureRight.value(event.deviceId, 1, event.getAxisValue(android.view.MotionEvent.AXIS_RZ), RightStickAxes.centred(event, android.view.MotionEvent.AXIS_RZ)), assign)
+            captureHat.update(event.deviceId, event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
+                event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y), assign)
             if (capture) return true
         }
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
@@ -774,6 +811,19 @@ open class FrondActivity : SDLActivity() {
             padAttached = on
             palmButtons?.padAttached = on
         }
+    }
+
+    // Asks frond-68k whether the ROM takes IR HotSync and keeps the answer in the machine's settings for the
+    // home settings, which can't ask. Runs off the main thread.
+    private fun checkIrSync(): Boolean {
+        val works = IrLink.checkSync(link)
+        if (machineSettings.irSync != works) try {
+            val id = Sessions.forPath(applicationContext, sessionPath)?.id ?: return works
+            Sessions.updateSettings(applicationContext, id) { it.copy(irSync = works) }
+        } catch (e: Exception) {
+            Log.w(TAG, "IR HotSync setting: ${e.message}")
+        }
+        return works
     }
 
     // The pad state the core reports (RunningMenu.gamepadState): the buttons follow it, and an
@@ -1192,7 +1242,7 @@ open class FrondActivity : SDLActivity() {
 
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
-    private fun readKeyboard() {
+    fun readKeyboard() {
         if (launchDevice().isDana()) {
             keyboardButton?.visibility = if (leaving || touchHidden) View.GONE else View.VISIBLE
             return
@@ -1259,14 +1309,16 @@ open class FrondActivity : SDLActivity() {
         bar.soundKey = RunningBar.soundKey(device)
         bar.sound = sound
         bar.powerKey = RunningBar.powerKey(device)
+        bar.recordKey = RunningBar.recordKey(device)
         bar.syncMachine = session?.id
         bar.syncProtocol = session?.let { SyncProtocol.forDevice(device) }
+        bar.syncButton = SyncProtocol.startsFromBar(device)
         val owner = BarOwner().also { it.create() }
         barOwner = owner
         val results = BarResults(this)
         barResults = results
         val model = RunningModel(
-            ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}),
+            ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}, ::syncState),
             device, SdCard(this, link, sessionPath, device), PalmDatabases(this, link), link, session?.name ?: device.label,
         )
         menuModel = model
@@ -1287,11 +1339,12 @@ open class FrondActivity : SDLActivity() {
             setContent {
                 androidx.compose.runtime.CompositionLocalProvider(androidx.activity.compose.LocalActivityResultRegistryOwner provides results) {
                     com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
-                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
+                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() }, record = { holdRecord(it) },
                         keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) }, autoHide = { setBarShown(false, remember = false) },
                         openMenu = { openMenu() }, menuRow = { menuRow(it) },
                         openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
                         startSync = ::startSync, syncMachines = { Sessions.list(this@FrondActivity) },
+                        answerPartnership = ::answerPartnership,
                     ))
                 }
             }
@@ -1354,7 +1407,7 @@ open class FrondActivity : SDLActivity() {
     }
 
     private fun startSync() {
-        val protocol = bar.syncProtocol ?: return
+        val protocol = bar.syncProtocol?.takeIf { bar.syncButton } ?: return
         val machine = bar.syncMachine ?: return
         val scope = barOwner?.lifecycleScope ?: return
         if (bar.syncStarting || bar.syncRunning || menuModel?.busy != null || leaving) return
@@ -1370,6 +1423,8 @@ open class FrondActivity : SDLActivity() {
                         val connection = SyncNative.call(this@FrondActivity, "hotsync-transport",
                             "profile" to assigned, "device" to SyncNative.deviceKey(machine)).getString("connection")
                         link.request(protocol.startCommand, connection, timeoutSeconds = 10)
+                    } else if (protocol == SyncProtocol.ACTIVE_SYNC) {
+                        link.request(protocol.startCommand, PartnershipQuestion.START_ARGUMENT, timeoutSeconds = 10)
                     } else link.request(protocol.startCommand, timeoutSeconds = 10)
                 }
                 if (reply == null) bar.syncAssignment = true
@@ -1385,11 +1440,31 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    // Answered once per question; the core moving on (or the session ending) closes it.
+    private var partnershipAnswered = false
+
+    private fun answerPartnership(setUp: Boolean) {
+        if (!bar.partnershipQuestion) return
+        bar.partnershipQuestion = false
+        partnershipAnswered = true
+        val scope = barOwner?.lifecycleScope ?: return
+        scope.launch {
+            val reply = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                link.request(PartnershipQuestion.ANSWER_COMMAND, PartnershipQuestion.answer(setUp), timeoutSeconds = 10)
+            }
+            if (!reply.ok && reply.code != "none") menuModel?.note = reply.message
+        }
+    }
+
     private fun syncState(raw: String) {
         val state = raw.substringBefore("; profile ")
         val label = bar.syncProtocol?.label ?: return
         bar.syncRunning = state.startsWith("syncing ")
+        val question = PartnershipQuestion.open(state)
+        if (!question) partnershipAnswered = false
+        bar.partnershipQuestion = question && !partnershipAnswered
         bar.syncStatus = when {
+            question -> "Waiting for an answer"
             bar.syncRunning -> state.removePrefix("syncing ")
             state.startsWith("waiting ") && bar.syncStatus != null -> "Waiting for $label"
             else -> null
@@ -1580,6 +1655,31 @@ open class FrondActivity : SDLActivity() {
         }, "FrondBarSound").apply { isDaemon = true }.start()
     }
 
+    // The phone key held to record, from the machine's settings.
+    private var recordKey = RecordKey.NONE
+    private var recordHeld = false
+    // Key changes go to the core one at a time, in order.
+    private val recordSender = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "FrondRecordKey").apply { isDaemon = true } }
+
+    fun applyRecordKey() {
+        val key = Sessions.forPath(this, sessionPath)?.settings?.recordKey ?: return
+        runOnUiThread {
+            // Letting go of a key that is no longer the record key must not leave the Palm's key down.
+            if (key != recordKey) holdRecord(false)
+            recordKey = key
+        }
+    }
+
+    // Holds the Palm's voice or record key down or lets it go; a repeat of the same state is ignored.
+    private fun holdRecord(down: Boolean) {
+        if (down == recordHeld) return
+        recordHeld = down
+        recordSender.execute {
+            val reply = link.request("voice-key", if (down) "d" else "u", timeoutSeconds = 10)
+            if (!reply.ok) Log.w(TAG, "record: ${reply.code} ${reply.message}")
+        }
+    }
+
     // Presses and releases the Palm's power key by key replay on the control link.
     private fun pressPower() {
         if (leaving) return
@@ -1628,14 +1728,13 @@ open class FrondActivity : SDLActivity() {
             val error = synchronized(debugLock) {
                 // Back right at launch already stopped it.
                 if (debugStopped) return@Thread
-                DebugLink.relay(BeamMode.Listen(settings.debuggerPort), port)
+                DebugLink.relay(BeamMode.Listen(settings.debuggerPort, settings.debuggerNetwork), port)
             }
-            val addresses = NetRelay.addresses(applicationContext)
-            val text = when {
-                error != null -> error
-                addresses.isEmpty() -> "Waiting for gdb on port ${settings.debuggerPort}"
-                else -> "Waiting for gdb at " + addresses.joinToString(", ") { "$it:${settings.debuggerPort}" }
-            }
+            val relay = DebugLink.status.value
+            val addresses = if (settings.debuggerNetwork && relay.phase == NetRelay.Phase.WAITING)
+                NetRelay.addresses(applicationContext) else emptyList()
+            val text = error ?: if (addresses.isEmpty()) com.rm.frond.ui.debuggerText(relay)
+                else "Waiting for gdb at " + addresses.joinToString(", ") { NetRelay.hostPort(it, settings.debuggerPort) }
             runOnUiThread { if (!(gdbBlocksLink && link.connectedOnce) && !leaving) { note.text = text; note.visibility = View.VISIBLE } }
             // Nothing can reach the core's gdb port, so let the Palm run without it.
             if (error != null) releaseDebugger(port)

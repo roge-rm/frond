@@ -845,6 +845,8 @@ void zip_close(struct zip_t *zip) {
     mz_zip_writer_end(&(zip->archive));
     mz_zip_reader_end(&(zip->archive));
 
+    // A read-only walk can end with an entry still open.
+    CLEANUP(zip->entry.name);
     CLEANUP(zip);
   }
 }

@@ -2689,6 +2689,8 @@ static MZ_FORCEINLINE mz_bool mz_zip_reader_filename_less(const mz_zip_array *pC
 // directory searches by mz_zip_reader_locate_file(). (Could also use qsort(),
 // but it could allocate memory.)
 static void mz_zip_reader_sort_central_dir_offsets_by_filename(mz_zip_archive *pZip) {
+    // Nothing to sort, and the offsets array has no storage to point into.
+    if (pZip->m_total_files < 2) return;
     mz_zip_internal_state *pState = pZip->m_pState;
     const mz_zip_array *pCentral_dir_offsets = &pState->m_central_dir_offsets;
     const mz_zip_array *pCentral_dir = &pState->m_central_dir;

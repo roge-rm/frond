@@ -31,16 +31,37 @@ internal enum class SyncProtocol(val label: String, val startCommand: String) {
     ACTIVE_SYNC("ActiveSync", "activesync-start");
 
     companion object {
+        // HotSync on a Palm OS device with a cradle HotSync or infrared (IR HotSync), ActiveSync on the rx1950. The
+        // Dana's ROM has no IR connection for HotSync, so it has neither.
         fun forDevice(device: Device): SyncProtocol? = when {
-            device.palmOs && device.hotSyncButton && (device.serialPort || device.usb) -> HOT_SYNC
+            cradleHotSync(device) || device.palmOs && device.infrared && !device.isDana() -> HOT_SYNC
             device.rx1950 && device.usb -> ACTIVE_SYNC
             else -> null
         }
+
+        // HotSync over the serial or USB cradle, started with the HotSync button.
+        fun cradleHotSync(device: Device): Boolean = device.palmOs && device.hotSyncButton && (device.serialPort || device.usb)
+
+        // Whether the bar's HotSync or ActiveSync button and sync-start work: a device with infrared only syncs from the guest.
+        fun startsFromBar(device: Device): Boolean = cradleHotSync(device) || forDevice(device) == ACTIVE_SYNC
     }
 }
 
+// ActiveSync's first-connect question: the core waits at this stage until the app answers.
+internal object PartnershipQuestion {
+    const val START_ARGUMENT = "ask"
+    const val ANSWER_COMMAND = "activesync-answer"
+
+    fun open(syncState: String): Boolean {
+        val words = syncState.substringBefore("; profile ").split(' ')
+        return words.size >= 3 && words[0] == "syncing" && words[2] == "partnership-question"
+    }
+
+    fun answer(setUp: Boolean) = if (setUp) "set-up" else "guest"
+}
+
 internal fun Device.supportsNetworkHotSync() =
-    SyncProtocol.forDevice(this) == SyncProtocol.HOT_SYNC &&
+    SyncProtocol.cradleHotSync(this) &&
         (id == "palm-tx" || modem || irPhone || usbWifi || builtInWifi)
 
 internal enum class SyncKind(val wire: String, val label: String) {

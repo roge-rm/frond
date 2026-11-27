@@ -51,6 +51,36 @@ static void rom68k(QFile& rom, qint64 size, quint16 version, quint16 flags = 0x0
 class FirmwareInputTest : public QObject {
     Q_OBJECT
  private slots:
+    // Each group lists its devices oldest first; the Zodiac 1 comes before the Zodiac 2, the E3 straight after the E2.
+    void pickerGroupOrder() {
+        const auto ids = [](DeviceGroup5 group) {
+            QStringList result;
+            for (auto d : frondFirmware::devicesInGroup(group)) result << frondFirmware::deviceId(d);
+            return result;
+        };
+        QCOMPARE(ids(DeviceGroup5::palmOs5), QStringList({"palm-zire-72", "palm-e2", "palm-e2-franken", "palm-tx"}));
+        QCOMPARE(ids(DeviceGroup5::palmClassic), QStringList({"palm-iii", "palm-iiix", "palm-v", "palm-iiie", "palm-vx", "palm-iiixe", "palm-iiic",
+            "palm-m100", "palm-m105", "palm-m500", "palm-m505", "palm-m125", "palm-m515", "palm-m130", "palm-m520"}));
+        QCOMPARE(ids(DeviceGroup5::sonyClie), QStringList({"sony-clie-t415", "sony-clie-tg50"}));
+        QCOMPARE(ids(DeviceGroup5::tapwave), QStringList({"tapwave-zodiac-1", "tapwave-zodiac-2"}));
+        QCOMPARE(ids(DeviceGroup5::hp), QStringList({"hp-ipaq-rx1950"}));
+        QCOMPARE(ids(DeviceGroup5::alphaSmart), QStringList({"alphasmart-dana", "alphasmart-dana-wireless"}));
+        QCOMPARE(ids(DeviceGroup5::ibm), QStringList({"ibm-workpad-c500"}));
+        size_t total = 0;
+        for (auto group : deviceGroups5) total += frondFirmware::devicesInGroup(group).size();
+        QCOMPARE(total, frondFirmware::devices.size());
+    }
+    // The last 3 devices, newest first; a repeat moves to the front.
+    void recentDevices() {
+        QStringList recent;
+        for (const char* id : {"palm-tx", "palm-e2", "palm-v"}) recent = frondFirmware::pushRecentDevice(recent, id);
+        QCOMPARE(recent, QStringList({"palm-v", "palm-e2", "palm-tx"}));
+        recent = frondFirmware::pushRecentDevice(recent, "palm-tx");
+        QCOMPARE(recent, QStringList({"palm-tx", "palm-v", "palm-e2"}));
+        recent = frondFirmware::pushRecentDevice(recent, "palm-m515");
+        QCOMPARE(recent, QStringList({"palm-m515", "palm-tx", "palm-v"}));
+        QCOMPARE(frondFirmware::pushRecentDevice(recent, QString()), recent);
+    }
     void zodiac() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
@@ -64,14 +94,15 @@ class FirmwareInputTest : public QObject {
             QCOMPARE(nor.write(company, 4), qint64(4));
         }
         nor.flush();
-        // Detected and taken as itself, with no NAND, and never as another device.
+        // The same NOR serves both models. Auto still selects the Zodiac 2.
         const auto zodiac = frondFirmware::deviceFromId("tapwave-zodiac-2");
-        QVERIFY(zodiac != Device::automatic);
+        const auto zodiac1 = frondFirmware::deviceFromId("tapwave-zodiac-1");
+        QVERIFY(frondFirmware::isZodiac(zodiac) && frondFirmware::isZodiac(zodiac1));
         QCOMPARE(frondFirmware::detectDevice(path), zodiac);
-        for (Device selected : {Device::automatic, zodiac}) {
+        for (Device selected : {Device::automatic, zodiac, zodiac1}) {
             Device resolved = Device::automatic;
             QCOMPARE(frondFirmware::validateFiles(selected, path, {}, &resolved), QString());
-            QCOMPARE(resolved, zodiac);
+            QCOMPARE(resolved, selected == Device::automatic ? zodiac : selected);
         }
         for (Device selected : {Device::tx, Device::e2})
             QCOMPARE(frondFirmware::validateFiles(selected, path, {}),
@@ -407,12 +438,37 @@ class FirmwareInputTest : public QObject {
             for (auto other : {Device::tx, Device::e2, Device::zire72})
                 QVERIFY2(frondFirmware::validateFiles(other, romPath, {}).contains("Choose Palm IIIx"), kind.name);
         }
-        // A 68328-only ROM, a header version 2 ROM and another 4.1 device's IDs have the header but can't run.
-        rom68k(rom, 0x128000, 3, 0x0010);
+        // A RAM-only ROM, a header version 1 ROM and another 4.1 device's IDs have the header but can't run.
+        rom68k(rom, 0x128000, 3, 0x0001);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
         QCOMPARE(frondFirmware::detectDevice(romPath), Device::automatic);
-        rom68k(rom, 0x128000, 2);
+        rom68k(rom, 0x128000, 1, 0);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        // A ROM with no EZ flag (OS 3.0 is header version 2, 3.3 version 3, 4.1 version 5 with the "rcky" HAL)
+        // is the Palm III's alone.
+        const auto iii = frondFirmware::deviceFromId("palm-iii");
+        QVERIFY(iii != Device::automatic);
+        for (int version : {2, 3, 5}) {
+            rom68k(rom, 0x200000, version, 0x0000, 0x70616c6d, 0x72636b79, 0x8226);
+            Device device = Device::automatic;
+            QVERIFY(frondFirmware::validateFiles(Device::automatic, romPath, {}, &device).isEmpty());
+            QCOMPARE(device, iii);
+            QCOMPARE(frondFirmware::detectDevice(romPath), iii);
+            QVERIFY(frondFirmware::validateFiles(iii, romPath, {}).isEmpty());
+            QVERIFY(!frondFirmware::validateFiles(iiix, romPath, {}).isEmpty());
+            QVERIFY(!frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-iiie"), romPath, {}).isEmpty());
+        }
+        // Not the Palm III's: HandEra (v4, 0x0040), Palm VII (v4, 0x0010), Symbol (v2 and v3 with ScanMgr).
+        auto refusedRom = [&](int version, quint16 flags, const char* text) {
+            rom68k(rom, 0x200000, version, flags);
+            if (text) { rom.seek(0x1000); rom.write(text); rom.flush(); }
+            QCOMPARE(frondFirmware::detectDevice(romPath), Device::automatic);
+            QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        };
+        refusedRom(4, 0x0040, nullptr);
+        refusedRom(4, 0x0010, "RAM NetIF");
+        refusedRom(2, 0x0000, "ScanMgr");
+        refusedRom(3, 0x0010, "ScanMgr");
         rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x12345678);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
         // Over the 2 MiB flash part, or truncated.
@@ -459,7 +515,7 @@ class FirmwareInputTest : public QObject {
                 for (auto other : {Device::tx, Device::e2, Device::zire72})
                     QVERIFY(!frondFirmware::validateFiles(other, romPath, {}).isEmpty());
             }
-            rom68k(rom, 0x178000, 3, 0x0010);
+            rom68k(rom, 0x178000, 3, 0x0001);
             QVERIFY(frondFirmware::validateFiles(device, romPath, {}).contains("can run"));
         }
         // An m100 series ROM names the m100, which the m105 may also be chosen for; a name only in the

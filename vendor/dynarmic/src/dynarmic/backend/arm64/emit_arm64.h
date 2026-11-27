@@ -34,6 +34,10 @@ enum class Cond;
 enum class Opcode;
 }  // namespace Dynarmic::IR
 
+namespace Dynarmic::A32 {
+struct UserConfig;
+}
+
 namespace Dynarmic::Backend::Arm64 {
 
 struct EmitContext;
@@ -75,6 +79,7 @@ enum class LinkTarget {
     ExclusiveWriteMemory128,
     CallSVC,
     InterpreterFallback,
+    FrondPageGuardExit,
     ExceptionRaised,
     InstructionSynchronizationBarrierRaised,
     InstructionCacheOperationRaised,
@@ -126,10 +131,7 @@ struct EmitConfig {
     bool check_halt_on_link = false;
     // Frond: LinkBlockFast checks the cycles left like LinkBlock (A32 only).
     std::size_t max_unchecked_instructions = 0;
-    // Frond: A32::UserConfig::frond_page_guard (A32 only).
-    const std::uint8_t* frond_page_guard = nullptr;
-    std::uint32_t frond_page_guard_end = 0;
-    std::uint32_t frond_page_guard_fpscr = 0;
+    const A32::UserConfig* frond_page_guard_config = nullptr;
 
     // Page table
     u64 page_table_pointer;

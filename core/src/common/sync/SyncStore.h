@@ -124,6 +124,12 @@ struct InstallItem {
     int64_t queuedAt{0}, doneAt{0};
 };
 
+// Whether a queued item applies to a device of this assignment kind (palm or winmo). An empty kind keeps every item.
+inline bool InstallItemFitsKind(const InstallItem& item, const std::string& kind) {
+    if (kind.empty()) return true;
+    return (item.target == "cab") == (kind == "winmo");
+}
+
 struct SyncLogEntry {
     std::string deviceKey;
     int64_t time{0};
@@ -216,9 +222,12 @@ class SyncProfile {
 
     bool ActiveSyncUsesSerial(const std::string& deviceKey);
     bool SetActiveSyncSerial(const std::string& deviceKey, bool serial, std::string& error);
+    // "requested" (also with nothing chosen yet), "confirmed", or empty when the user cancelled (stored as "").
     std::string ActiveSyncPairing(const std::string& deviceKey);
     bool RequestActiveSyncPairing(const std::string& deviceKey, bool request, std::string& error);
     bool ConfirmActiveSyncPairing(const std::string& deviceKey, std::string& error);
+    // Back to nothing chosen, which pairs on the next sync.
+    bool ForgetActiveSyncPairing(const std::string& deviceKey, std::string& error);
     bool ClearConfirmedActiveSyncPairing(const std::string& deviceKey, std::string& error);
 
     // Small per-device values kept between syncs (last backup time and the like).

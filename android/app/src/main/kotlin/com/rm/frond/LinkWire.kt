@@ -80,6 +80,9 @@ object LinkWire {
         out.write(v and 0xff)
     }
 
+    // A peer's name cut to 64 chars, without leaving half of a surrogate pair at the end.
+    fun name64(s: String): String = if (s.length <= 64) s else s.take(if (s[63].isHighSurrogate()) 63 else 64)
+
     fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     // Lower-case hex of exactly n bytes, or null.
@@ -124,7 +127,7 @@ object LinkWire {
         val id = r.take(16)
         val name = r.str8()
         if (!r.ok || step != 0 || id == null) return PairFrame.Bad
-        return PairFrame.Request(id, name.take(64))
+        return PairFrame.Request(id, name64(name))
     }
 
     // One whole frame's body from the start of buf, and its length with the u16 prefix; null while short.
@@ -154,7 +157,7 @@ object LinkWire {
         val type = r.u8()
         val id = r.take(16)
         val port = r.u16()
-        val name = r.str8().take(64)
+        val name = name64(r.str8())
         if (!r.ok || version != 1 || id == null) return null
         return Beacon(type, id, port, name)
     }
@@ -221,6 +224,8 @@ object LinkWire {
         val up: Boolean, val rtt: Long, val keyChanged: Boolean, val forgotten: Boolean, val seen: String, val channels: String,
         // Whose radio Bluetooth uses with it: here or there.
         val bluetoothRadio: String = "here",
+        // False when the link service takes no network connections, so a peer can't reach it.
+        val network: Boolean = true,
     )
 
     fun connectionStatus(c: ConnectionRow): String = when {
@@ -228,6 +233,7 @@ object LinkWire {
         c.forgotten -> "Not paired on ${c.peerName}, pair again"
         c.up -> "Connected · ${c.rtt} ms" + if (c.channels.isNotEmpty()) " · ${c.channels}" else ""
         c.seen.isNotEmpty() -> "Seen at ${c.seen}"
+        !c.network -> "Not seen, network connections are off"
         else -> "Not seen"
     }
 

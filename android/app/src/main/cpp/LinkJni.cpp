@@ -59,6 +59,11 @@ struct PairWrap {
     std::unique_ptr<Pairing> pairing;
 };
 
+// A part of a Java array as Kotlin passes it; false for one that isn't inside the array.
+bool inside(JNIEnv* env, jbyteArray a, jint offset, jint n) {
+    return a && n > 0 && offset >= 0 && offset <= env->GetArrayLength(a) - n;
+}
+
 Link* L(jlong h) { return reinterpret_cast<Link*>(h); }
 PairWrap* P(jlong h) { return reinterpret_cast<PairWrap*>(h); }
 std::shared_ptr<PairCode>* C(jlong h) { return reinterpret_cast<std::shared_ptr<PairCode>*>(h); }
@@ -142,7 +147,7 @@ jlong FN(linkAnswerUtf8)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, 
 void FN(linkFree)(JNIEnv*, jclass, jlong h) { delete L(h); }
 
 void FN(linkReceive)(JNIEnv* env, jclass, jlong h, jbyteArray data, jint n, jlong now) {
-    if (n <= 0) return;
+    if (!inside(env, data, 0, n)) return;
     jbyte* p = env->GetByteArrayElements(data, nullptr);
     L(h)->receive(reinterpret_cast<const uint8_t*>(p), size_t(n), uint64_t(now));
     env->ReleaseByteArrayElements(data, p, JNI_ABORT);
@@ -197,13 +202,15 @@ jboolean FN(muxBusyUtf8)(JNIEnv* env, jclass, jlong h, jint ch, jbyteArray machi
 void FN(muxClose)(JNIEnv*, jclass, jlong h, jint ch, jint reason) { L(h)->mux().close(uint16_t(ch), CloseReason(reason)); }
 void FN(muxSendState)(JNIEnv*, jclass, jlong h, jint ch, jint state) { L(h)->mux().sendState(uint16_t(ch), PeerState(state)); }
 jint FN(muxSend)(JNIEnv* env, jclass, jlong h, jint ch, jbyteArray data, jint offset, jint n) {
-    if (n <= 0) return 0;
+    if (!inside(env, data, offset, n)) return 0;
     jbyte* p = env->GetByteArrayElements(data, nullptr);
     const size_t taken = L(h)->mux().send(uint16_t(ch), reinterpret_cast<const uint8_t*>(p) + offset, size_t(n));
     env->ReleaseByteArrayElements(data, p, JNI_ABORT);
     return jint(taken);
 }
-void FN(muxConsumed)(JNIEnv*, jclass, jlong h, jint ch, jint n) { L(h)->mux().consumed(uint16_t(ch), size_t(n)); }
+void FN(muxConsumed)(JNIEnv*, jclass, jlong h, jint ch, jint n) {
+    if (n > 0) L(h)->mux().consumed(uint16_t(ch), size_t(n));
+}
 
 // The next channel event as bytes, or null: kind u8, channel u16, channel kind u8, code u8,
 // machine str8, device str8, then the data. LinkEvents.kt reads it.
@@ -257,7 +264,7 @@ jlong FN(pairAnswerUtf8)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, 
 
 void FN(pairFree)(JNIEnv*, jclass, jlong h) { delete P(h); }
 void FN(pairReceive)(JNIEnv* env, jclass, jlong h, jbyteArray data, jint n, jlong now) {
-    if (n <= 0) return;
+    if (!inside(env, data, 0, n)) return;
     jbyte* p = env->GetByteArrayElements(data, nullptr);
     P(h)->pairing->receive(reinterpret_cast<const uint8_t*>(p), size_t(n), uint64_t(now));
     env->ReleaseByteArrayElements(data, p, JNI_ABORT);

@@ -150,6 +150,10 @@ bool cpuSetFastEngine(bool fast);
 void cpuSetJitSync(bool sync);
 // Exception returns (MOVS PC, LR and SUBS PC, LR, #4) run in generated code, in every CPU so far (tests).
 uint64_t cpuJitExceptionReturns();
+// ARM920T Fast blocks: stores that changed a table word a kept JIT page entry's walk read, in every CPU so far (tests).
+uint64_t cpuJitKeepStoreDrops();
+// Code pages dropped for a changed mapping, in every CPU so far (tests).
+uint64_t cpuJitMapDrops();
 // MSR CPSR writes generated code hands to the interpreter's code, in every CPU so far (tests).
 uint64_t cpuJitCpsrWrites();
 // MSR CPSRs that couldn't run in place and went to the interpreter, in every CPU so far (tests).
@@ -364,6 +368,9 @@ void cpuArm920ApplyState(ArmCpu*, const Arm920SavedState&);
 using Arm920LeanPage = uint8_t* (*)(void* context, uint32_t pa, bool write, bool* counted);
 using Arm920LeanGuard = bool (*)(uint32_t instruction, const uint32_t* registers, uint32_t cpsr, uint32_t spsr);
 void cpuArm920SetLean(ArmCpu*, Arm920LeanPage page, Arm920LeanGuard guard, void* context);
+// Fast: RAM at base repeats every size bytes (a power of two) up to end, so the code maps and the JIT treat each
+// copy as the first one. size 0 for none.
+void cpuArm920SetRamMirror(ArmCpu*, uint32_t base, uint32_t size, uint32_t end);
 // CP15 c1 A (alignment fault checking) on an ARM920T: misaligned word and halfword accesses take a data abort.
 bool cpuArm920AlignmentFaults(const ArmCpu*);
 // read(context, pa, size, pc, ran, left, single, value, cost) may answer a read of up to a word from a page that

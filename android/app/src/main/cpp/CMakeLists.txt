@@ -90,6 +90,30 @@ target_compile_options(frondnet PRIVATE -O2 -g -Wno-unused-parameter)
 target_link_libraries(frondnet PUBLIC frondcommon slirp
     "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)
 target_link_libraries(frondcore PUBLIC frondnet)
+
+# The same Bluetooth phone peer as desktop, connected to Android's packaged btvirt.
+set(bluez_build "${FROND_BLUETOOTH_ROOT}/${ANDROID_ABI}")
+set(bluez "${bluez_build}/source")
+set(phone_tools "${FROND_REPO}/tools")
+add_executable(frond-bluetooth-phone
+    "${phone_tools}/bluetooth-opp-peer.c" "${phone_tools}/bluetooth-dun.cpp"
+    "${phone_tools}/bluetooth-hotsync.cpp" "${bluez_build}/phone/emulator/bthost.c"
+    "${bluez}/emulator/smp.c" "${bluez}/lib/bluetooth/bluetooth.c"
+    "${bluez}/src/shared/queue.c" "${bluez}/src/shared/util.c"
+    "${bluez}/src/shared/crypto.c" "${bluez}/src/shared/ecc.c"
+    "${bluez}/src/shared/io-mainloop.c" "${bluez}/src/shared/timeout-mainloop.c"
+    "${bluez}/src/shared/mainloop.c" "${bluez}/src/shared/mainloop-notify.c")
+set_target_properties(frond-bluetooth-phone PROPERTIES
+    OUTPUT_NAME "libfrond-bluetooth-phone.so"
+    RUNTIME_OUTPUT_DIRECTORY "${FROND_PHONE_OUTPUT}/${ANDROID_ABI}")
+target_include_directories(frond-bluetooth-phone PRIVATE "${bluez_build}" "${bluez}"
+    "${bluez}/emulator" "${phone_tools}")
+target_compile_definitions(frond-bluetooth-phone PRIVATE HAVE_CONFIG_H)
+# The shared peer uses assertions for some protocol setup calls.
+target_compile_options(frond-bluetooth-phone PRIVATE -UNDEBUG -Wno-macro-redefined -ffunction-sections -fdata-sections)
+target_link_libraries(frond-bluetooth-phone PRIVATE frondnet z)
+target_link_options(frond-bluetooth-phone PRIVATE "-Wl,--gc-sections" "-Wl,-z,max-page-size=16384")
+
 target_compile_definitions(frondcore PUBLIC _FILE_OFFSET_BITS=64)
 # The core is too slow to use at -O0, so debug builds optimise it as well.
 target_compile_options(frondcore PRIVATE -O2 -g

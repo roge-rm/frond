@@ -22,6 +22,28 @@ class RunningBarTest {
         assertFalse(RunningBar.powerKey(tx.copy(buttonsText = tx.buttons.filter { it != "power" }.joinToString("|"))))
     }
 
+    @Test fun recordFollowsTheVoiceKey() {
+        val withKey = Device.entries.filter { RunningBar.recordKey(it) }.map { it.id }.toSet()
+        assertEquals(setOf("palm-zire-72", "sony-clie-tg50", "hp-ipaq-rx1950"), withKey)
+        for (device in Device.entries) assertEquals(device.id, device.voiceKey, RunningSheets.AudioRow.RECORD_KEY in RunningSheets.audioRows(device))
+    }
+
+    @Test fun recordKeyChoiceMapsToPhoneKeysAndIsRemembered() {
+        assertEquals(RecordKey.NONE, MachineSettings().recordKey)
+        assertFalse(MachineSettings().json().has("recordKey"))
+        assertFalse(RecordKey.NONE.matches(0) || RecordKey.NONE.matches(android.view.KeyEvent.KEYCODE_VOLUME_DOWN))
+        assertTrue(RecordKey.VOLUME_DOWN.matches(android.view.KeyEvent.KEYCODE_VOLUME_DOWN))
+        assertFalse(RecordKey.VOLUME_DOWN.matches(android.view.KeyEvent.KEYCODE_VOLUME_UP))
+        assertTrue(RecordKey.VOLUME_UP.matches(android.view.KeyEvent.KEYCODE_VOLUME_UP))
+        assertTrue(RecordKey.L3.matches(android.view.KeyEvent.KEYCODE_BUTTON_THUMBL))
+        assertTrue(RecordKey.SELECT.matches(android.view.KeyEvent.KEYCODE_BUTTON_SELECT))
+        for (key in RecordKey.entries) {
+            val settings = MachineSettings(recordKey = key)
+            assertEquals(key, MachineSettings.from(settings.json()).recordKey)
+        }
+        assertEquals(RecordKey.NONE, RecordKey.byArg("junk"))
+    }
+
     @Test fun barModeIsRemembered() {
         assertEquals(BarMode.AUTO_HIDE, MachineSettings().barMode)
         assertEquals(BarMode.AUTO_HIDE, MachineSettings.from(JSONObject()).barMode)

@@ -25,6 +25,9 @@ object RunningBar {
     // Power shows only where the device's button bar has a power key (a firmware without one drops it).
     fun powerKey(device: Device) = "power" in device.buttons
 
+    // Record shows only where the device has a voice or record key.
+    fun recordKey(device: Device) = device.voiceKey
+
     // Sound shows only on devices that make sound.
     fun soundKey(device: Device) = device.sound
 

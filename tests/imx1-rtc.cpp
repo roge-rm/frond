@@ -273,8 +273,46 @@ static void externalReset() {
     Imx1Bootstrap cold;
     assert(read(cold, 0x0021b000) == 0x0f00ac03 && read(cold, 0x0021b800) == 0);
 }
+// A session opened again: the RTC moves on by the time it was closed, from the time the guest set, as the same
+// CLK32 periods would have moved it. The prescaler is kept, events passed on the way latch (an alarm in the gap
+// among them), and an RTC with no known time is left alone.
+static void forwardOnReopen() {
+    Imx1Rtc unknown;
+    assert(!unknown.forwardSeconds(60));
+    for (unsigned offset : {0u, 4u, 32u}) read(unknown, offset, A::externalInput);
+    Imx1Rtc a;
+    assert(a.initialise({1, 12, 34, 56}));
+    // The time the user set: day 100, 08:05:30, part way into a second.
+    write(a, 32, 100); write(a, 0, 0x0805); write(a, 4, 30);
+    a.advanceReference(1000, 1);
+    write(a, 24, 0x0c);  // the day and alarm events on
+    write(a, 36, 102); write(a, 8, 0x0906); write(a, 12, 0);  // an alarm at day 102, 09:06:00
+    Imx1Rtc b = a;
+    const uint64_t closed = 2 * 86400 + 3600 + 30;
+    assert(a.forwardSeconds(closed));
+    b.advanceReference(closed * 32768, 1);
+    same(a, b);
+    assert(read(a, 32) == 102 && read(a, 0) == 0x0906 && read(a, 4) == 0 && read(a, 20) == 0x0c);
+    assert(a.assertedInterrupts() == (uint64_t(1) << 17));
+    // A second later on: the prescaler was kept, so it ticks 1000 periods early.
+    a.advanceReference(32768 - 1001, 1); assert(read(a, 4) == 0);
+    a.advanceReference(1, 1); assert(read(a, 4) == 1);
+    // Longer than the day counter's 512-day cycle comes round to the same time with every event set.
+    Imx1Rtc c, d;
+    assert(c.initialise({3, 4, 5, 6}) && d.initialise({3, 4, 5, 6}));
+    write(c, 24, 0x3e); write(d, 24, 0x3e);
+    assert(c.forwardSeconds(uint64_t(512) * 86400 * 3 + 7));
+    d.advanceReference((uint64_t(512) * 86400 * 3 + 7) * 32768, 1);
+    same(c, d);
+    // Through the board, as the reopen does.
+    Imx1Bootstrap board;
+    assert(!board.forwardRtc(10));
+    assert(board.setRtcInitialTime({1, 12, 34, 56}));
+    assert(board.forwardRtc(86400 + 4));
+    assert(read(board, base + 32) == 2 && read(board, base + 0) == 0x0c23 && read(board, base + 4) == 0);
+}
 int main() {
     externalReset();
-    resetAndRegisters(); elapsedAndEvents(); fractionsAndBounds(); clocksAndInterrupts();
+    resetAndRegisters(); elapsedAndEvents(); fractionsAndBounds(); clocksAndInterrupts(); forwardOnReopen();
     std::puts("PASS: RTC retained domain, explicit time, binary ranges, elapsed CLK32, events, phases, rollover, SPLL stall and IRQ guards");
 }

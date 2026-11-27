@@ -125,6 +125,7 @@ void Imx1Ymf768::write(bool dataPort, uint8_t value) {
     // Any register can change which channels sample mixes, so the next quiet sample runs in full.
     quietOutput = false;
     if (index == 0x0f) { bank = value & 1; regs[0][0x0f] = regs[1][0x0f] = value; return; }
+    if (bank > 1) return;
     if (bank == 0 && index == 0x00) { fifoByte(); return; }
     if (bank == 1 && index == 0x30) powerWrite(regs[1][0x30], value);
     regs[bank][index] = value;

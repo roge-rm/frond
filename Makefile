@@ -313,7 +313,7 @@ out/frond-sync: $(COMMON_LIB) core/src/common/sync/SyncTool.cpp
 	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common/sync core/src/common/sync/SyncTool.cpp \
 		$(COMMON_LIB) -lpthread -o out/frond-sync$(EXE_SUFFIX)
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-window-layout test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
 
 # The checks that used to be recipe lines of test: itself, each a target so it is recorded.
 .PHONY: test-battery-power test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
@@ -434,6 +434,27 @@ test-zaurus-art: prepare
 		tests/zaurus-art.cpp core/src/uarm/native/DeviceControls.cpp \
 		$(shell pkg-config --libs sdl2 SDL2_image) -o $(OBJ_ROOT)/test-zaurus-art
 	$(OBJ_ROOT)/test-zaurus-art $(ZAURUS_ART_OUT)
+
+.PHONY: test-palm-candidate-art
+test: test-palm-candidate-art
+# Art for Palms not emulated yet. PALM_CANDIDATE_ART_OUT=folder also writes preview PNGs there.
+test-palm-candidate-art: prepare
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/common \
+		tests/palm-candidate-art.cpp core/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(OBJ_ROOT)/test-palm-candidate-art
+	$(OBJ_ROOT)/test-palm-candidate-art $(PALM_CANDIDATE_ART_OUT)
+.PHONY: test-sony-candidate-art
+test: test-sony-candidate-art
+# Art for CLIEs not emulated yet. SONY_CANDIDATE_ART_OUT=folder also writes preview PNGs there.
+test-sony-candidate-art: prepare
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/common \
+		tests/sony-candidate-art.cpp core/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(OBJ_ROOT)/test-sony-candidate-art
+	$(OBJ_ROOT)/test-sony-candidate-art $(SONY_CANDIDATE_ART_OUT)
 
 .PHONY: test-dana-view
 test: test-dana-view
@@ -808,11 +829,18 @@ test-modem: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 		$(shell pkg-config --cflags --libs slirp) -o $(OBJ_ROOT)/test-modem
 	$(OBJ_ROOT)/test-modem
 
+.PHONY: test-portable-keyboard
+test: test-portable-keyboard
+test-portable-keyboard: prepare
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -Wall -Wextra -UNDEBUG -Icore/src/common \
+		$(shell pkg-config --cflags sdl2) tests/portable-keyboard.cpp -o $(OBJ_ROOT)/test-portable-keyboard
+	$(OBJ_ROOT)/test-portable-keyboard
+
 .PHONY: test-rndis-host
 test: test-rndis-host
 test-rndis-host: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -UNDEBUG -Icore/src/common tests/rndis-host.cpp \
-		$(COMMON_NET_LIB) $(COMMON_LIB) \
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address -Wall -Wextra -Wno-unused-parameter -UNDEBUG -Icore/src/common tests/rndis-host.cpp \
+		core/src/common/RndisHost.cpp $(COMMON_NET_LIB) $(COMMON_LIB) \
 		$(shell pkg-config --cflags --libs slirp) -o $(OBJ_ROOT)/test-rndis-host
 	$(OBJ_ROOT)/test-rndis-host
 
@@ -820,7 +848,7 @@ test-rndis-host: prepare $(COMMON_LIB) $(COMMON_NET_LIB)
 test: test-ir-peer
 test-ir-peer: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/ir-peer.cpp \
-		$(COMMON_LIB) -o $(OBJ_ROOT)/test-ir-peer
+		$(COMMON_LIB) -lpthread -o $(OBJ_ROOT)/test-ir-peer
 	$(OBJ_ROOT)/test-ir-peer
 
 .PHONY: test-ir-printer
@@ -862,6 +890,11 @@ test-net-wifi-router: prepare $(COMMON_NET_LIB) $(COMMON_LIB)
 test-scheduler: prepare $(COMMON_LIB)
 	$(CXX) -std=c++17 -O2 -Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common tests/scheduler-order.cpp $(COMMON_LIB) -o $(OBJ_ROOT)/test-scheduler-order
 	$(OBJ_ROOT)/test-scheduler-order
+
+.PHONY: test-window-layout
+test-window-layout: prepare
+	g++ -std=c++17 -O1 -Wall -Wextra -Icore/src/uarm/native tests/window-layout.cpp -o $(OBJ_ROOT)/test-window-layout
+	$(OBJ_ROOT)/test-window-layout
 
 .PHONY: test-device-controls
 test-device-controls: out/frond
@@ -1115,6 +1148,12 @@ test-native-budget:
 test-frond-arm-big-install: out/frond
 	python3 tests/frond-arm-big-install.py
 
+# 13 installs in a row on the T|X over the socket, timed (12 small, one 2 MB with 521 resources),
+# then all listed. Same sessions as above.
+.PHONY: test-frond-arm-batch-install
+test-frond-arm-batch-install: out/frond
+	python3 tests/frond-arm-batch-install.py
+
 # A guest-ready check wakes nothing; a host call wakes the T|X's UI task, and a refused one on the Zire 72
 # wakes it at most once (GDB breakpoint on EvtWakeup). Same sessions as above.
 .PHONY: test-host-call-wake
@@ -1139,6 +1178,11 @@ test-battery-control: out/frond out/frond-68k
 
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
+# The top bar's HotSync on a T|X with USB HotSync up presses without replugging; needs the T|X smoke machine, else skipped.
+.PHONY: test-tx-hotsync-top-bar
+test-tx-hotsync-top-bar: out/frond
+	@session=build/smoke/machines/palm-tx; if [ -e $$session ]; then rm -rf build/tx-hotsync-top-bar && python3 tests/tx-hotsync-top-bar.py $$session build/tx-hotsync-top-bar; else echo "tx-hotsync-top-bar: no T|X smoke machine, skipped"; fi
+
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
 # that side is skipped.
 .PHONY: test-core-control
@@ -1324,19 +1368,35 @@ test-zodiac-bluetooth: $(OBJ_ROOT)/test-zodiac-bluetooth
 
 # The Zodiac hands each frame to the window when the next slice is due, from a short cold boot of ZODIAC_ROM.
 # Skipped without it.
+.PHONY: test-zodiac-1-boot
+# The same 1.1 firmware boots both Zodiac models with their own RAM and saved device name.
+test-zodiac-1-boot: out/frond
+	ZODIAC_ROM="$(ZODIAC_ROM)" python3 tests/zodiac-1-boot.py
+
 .PHONY: test-zodiac-frame-handoff
 test-zodiac-frame-handoff: out/frond
 	ZODIAC_ROM="$(ZODIAC_ROM)" python3 tests/zodiac-frame-handoff.py
 
-.PHONY: test-zodiac-session-cards
+.PHONY: test-zodiac-session-cards test-zodiac-card-swap-cli
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
-test-zodiac-session-cards: out/frond
+test-zodiac-session-cards: $(OBJ_ROOT)/test-zodiac-session-cards
+	$(OBJ_ROOT)/test-zodiac-session-cards
+
+$(OBJ_ROOT)/test-zodiac-session-cards: out/frond tests/zodiac-session-cards.cpp
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/zodiac-session-cards-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
 		tests/zodiac-session-cards.cpp @$(OBJ_ROOT)/zodiac-session-cards-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -lz -o $(OBJ_ROOT)/test-zodiac-session-cards
-	$(OBJ_ROOT)/test-zodiac-session-cards
+
+# The same fixture through the native runner's Unix desktop control socket.
+ifeq ($(HOST_OS),windows)
+test-zodiac-card-swap-cli:
+	@echo 'Zodiac card swap CLI: SKIP, needs a Unix desktop control socket'
+else
+test-zodiac-card-swap-cli: $(OBJ_ROOT)/test-zodiac-session-cards
+	python3 tests/zodiac-card-swap-cli.py $(OBJ_ROOT)/test-zodiac-session-cards
+endif
 
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.
@@ -1767,6 +1827,33 @@ device-session-probe: out/frond
 		tests/device-session.cpp @$(OBJ_ROOT)/device-session-core.rsp $(COMMON_LIB) \
 		$(CPU_TEST_LDLIBS) -o $(OBJ_ROOT)/test-device-session
 
+# With QtCore the desktop store cases are in too, and with a JDK's jni.h the link JNI case.
+FUZZ_REGRESSIONS_QT = $(if $(shell pkg-config --exists Qt6Core && echo yes),-fPIC -Idesktop -Icore/src/uarm/native $(shell pkg-config --cflags Qt6Core))
+FUZZ_REGRESSIONS_QT_LIBS = $(if $(FUZZ_REGRESSIONS_QT),$(shell pkg-config --libs Qt6Core) -lz)
+.PHONY: test-fuzz-regressions
+test: test-fuzz-regressions
+test-fuzz-regressions: prepare
+	$(CC) -std=gnu99 -O1 -g -fsanitize=address -Icore/src/common -c core/src/common/zip/miniz.c -o $(OBJ_ROOT)/miniz-fuzz-regressions.o
+	$(CC) -std=gnu99 -O1 -g -fsanitize=address -Icore/src/common -c core/src/common/zip/zip.c -o $(OBJ_ROOT)/zip-fuzz-regressions.o
+	$(CC) -std=c99 -O1 -g -fsanitize=address -c link/monocypher/monocypher.c -o $(OBJ_ROOT)/monocypher-fuzz-regressions.o
+	$(if $(FUZZ_REGRESSIONS_QT),$(CXX) -std=c++17 -O1 -g -fsanitize=address -Icore/src/common $(FUZZ_REGRESSIONS_QT) \
+		-c tests/fuzz-regressions-qt.cpp -o $(OBJ_ROOT)/fuzz-regressions-qt.o && \
+		$(CXX) -std=c++17 -O1 -g -fsanitize=address $(FUZZ_REGRESSIONS_QT) -c desktop/LinkStore.cpp -o $(OBJ_ROOT)/linkstore-fuzz-regressions.o)
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address -Wall -Wextra -Werror -Icore/src/common -Icore/src/common/savestate \
+		-Itests/fuzz -Ilink $(if $(FUZZ_JNI_INCLUDE),-DFROND_FUZZ_JNI -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux) $(if $(FUZZ_REGRESSIONS_QT),-DFROND_FUZZ_QT) \
+		tests/fuzz-regressions.cpp core/src/common/ZipfileWalker.cpp core/src/common/session/session_file5.cpp \
+		core/src/common/savestate/Chunk.cpp core/src/common/Logging.cpp $(LINK_SOURCES) $(OBJ_ROOT)/miniz-fuzz-regressions.o \
+		$(OBJ_ROOT)/zip-fuzz-regressions.o $(OBJ_ROOT)/monocypher-fuzz-regressions.o $(if $(FUZZ_REGRESSIONS_QT),$(OBJ_ROOT)/fuzz-regressions-qt.o $(OBJ_ROOT)/linkstore-fuzz-regressions.o) $(FUZZ_REGRESSIONS_QT_LIBS) \
+		-o $(OBJ_ROOT)/test-fuzz-regressions
+	$(OBJ_ROOT)/test-fuzz-regressions
+
+.PHONY: test-gdbstub-68k-stop
+test: test-gdbstub-68k-stop
+test-gdbstub-68k-stop: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wno-unused-parameter -Icore/src/common $(FUZZ_EXTRA_gdbstub-68k) tests/gdbstub-68k-stop.cpp core/src/common/Logging.cpp \
+		-o $(OBJ_ROOT)/test-gdbstub-68k-stop
+	$(OBJ_ROOT)/test-gdbstub-68k-stop
+
 .PHONY: test-savestate-layout
 test: test-savestate-layout
 test-savestate-layout: prepare
@@ -1913,9 +2000,11 @@ count-check: benchmark-replay
 # Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
 # Its source, with Frond's changes, is in vendor/dynarmic. Ninja runs every time so edits there
 # are rebuilt; the stamp only moves when libdynarmic.a changed. A build folder configured from
-# another source path is wiped first.
+# another source path is wiped first. Native CMake on Windows records a drive-letter path.
 $(OBJ_ROOT)/dynarmic/.built: FORCE
-	grep -qx 'CMAKE_HOME_DIRECTORY:INTERNAL=$(abspath $(DYNARMIC_SRC))' $(OBJ_ROOT)/dynarmic/CMakeCache.txt 2>/dev/null || rm -rf $(OBJ_ROOT)/dynarmic
+	source_dir='$(abspath $(DYNARMIC_SRC))'; \
+	$(if $(filter windows,$(HOST_OS)),source_dir=$$(cygpath -am "$$source_dir") &&) \
+	{ grep -Fqx "CMAKE_HOME_DIRECTORY:INTERNAL=$$source_dir" "$(OBJ_ROOT)/dynarmic/CMakeCache.txt" 2>/dev/null || rm -rf "$(OBJ_ROOT)/dynarmic"; }
 	[ -f $(OBJ_ROOT)/dynarmic/build.ninja ] || cmake -S $(DYNARMIC_SRC) -B $(OBJ_ROOT)/dynarmic -G Ninja -DCMAKE_BUILD_TYPE=Release \
 		-DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
 		-DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF $(DYNARMIC_CMAKE_ARGS)
@@ -3115,7 +3204,7 @@ test-zodiac-faster: $(OBJ_ROOT)/zodiac-boot-probe
 # The Zodiac checks not listed elsewhere in the suite. Left out for time: arm-add-pc, ldm-return and fast-lean;
 # cs4-capture is a diagnostic kept outside make test.
 .PHONY: test-zodiac
-test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-worker test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-music-hook test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-speed-line test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
+test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-worker test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-music-hook test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-card-swap-cli test-zodiac-stick-view test-zodiac-sound test-zodiac-speed-line test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
 test: test-zodiac
 
 # The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,
@@ -3362,3 +3451,123 @@ test-sony-ma2-fm:
 	$(CXX) -std=c++17 -O2 -Icore/src/common/audio \
 		tests/sony-ma2-fm.cpp core/src/common/audio/SonyMa2Fm.cpp -o $(OBJ_ROOT)/test-sony-ma2-fm
 	$(OBJ_ROOT)/test-sony-ma2-fm
+
+# Fuzz targets (clang and libFuzzer), one per parser of outside data; harnesses in tests/fuzz/.
+# make fuzz builds them all in FUZZ_ROOT with seed corpora from tests/fuzz/seeds.cpp;
+# make fuzz-run FUZZ_TIME=120 (after make fuzz) runs each for that many seconds (FUZZ_ONLY picks some), logs and
+# crashes to FUZZ_OUT; FUZZ_FLAGS adds libFuzzer options. wifi-router and slirp-ip run in their own network
+# namespace (unshare -rn), as libslirp opens host sockets for what the guest sends (netlib too, for NetLib's internet mode), and refuse to run outside one. The core's common library is built again with the
+# sanitizers in FUZZ_ROOT; after changing FUZZ_CFLAGS delete FUZZ_ROOT/core and FUZZ_ROOT/link.
+FUZZ_TARGETS := hayes-modem ppp-server irda-phone netsync-wakeup hotsync-link hotsync-session dlp activesync-connect rapi \
+	wbxml airsync-http link-wire link-mux link-pairing link-handshake \
+	palm-db pim-record installer session-file rom-info gunzip zip rx1950-nand sync-profile \
+	wifi-router slirp-ip rndis-host usb-bus-host gdbstub-arm gdbstub-68k desktop-channel \
+	savestate card-container fat-image zodiac-rom zodiac-smf bluetooth-hci conduit-ipc netlib jni-link jni-sync
+FUZZ_CC ?= $(or $(shell command -v clang-19 2>/dev/null),clang)
+FUZZ_CXX ?= $(or $(shell command -v clang++-19 2>/dev/null),clang++)
+FUZZ_ROOT = $(OBJ_ROOT)/fuzz
+FUZZ_OUT ?= build/fuzzing
+FUZZ_TIME ?= 120
+# miniz reads unaligned on purpose (MINIZ_USE_UNALIGNED_LOADS_AND_STORES) and offsets null pointers by
+# zero, so those two checks are off; ASan still catches real out of bounds access.
+FUZZ_SANITIZE = -fsanitize=address,undefined -fno-sanitize=alignment,pointer-overflow -fno-sanitize-recover=undefined
+FUZZ_CFLAGS = -O1 -g -fno-omit-frame-pointer $(FUZZ_SANITIZE) -fsanitize=fuzzer-no-link
+FUZZ_INCLUDE = -Itests/fuzz -Icore/src/common -Icore/src/common/sync -Ilink -Icore/src/uarm/uarm
+FUZZ_COMMON_LIB = $(FUZZ_ROOT)/core/common/libcommon.a
+FUZZ_LINK_LIB = $(FUZZ_ROOT)/link/libfrondlink.a
+FUZZ_LIBS = $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB) -lpthread -ldl -lm
+FUZZ_EXTRA_rx1950-nand = core/src/uarm/uarm/rx1950_nand_image.cpp core/src/uarm/uarm/s3c2442_nand.cpp
+# libslirp is built from its pinned source with the sanitizers so its guest input is covered too;
+# FUZZ_SLIRP_TARBALL is the archive android/build-network.py fetches (checked against its SHA-256).
+FUZZ_SLIRP_VERSION = libslirp-v4.9.7
+FUZZ_SLIRP_SHA256 = 363dfacf2821758c52388303b691093030b43ce8fd63142a55e878cbeb9a889c
+FUZZ_SLIRP_TARBALL ?= android/build/net/sources/$(FUZZ_SLIRP_VERSION).tar.bz2
+FUZZ_SLIRP_LIB = $(FUZZ_ROOT)/slirp/build/libslirp.a
+FUZZ_SLIRP = -Wno-deprecated-declarations -I$(FUZZ_ROOT)/slirp/$(FUZZ_SLIRP_VERSION)/src -I$(FUZZ_ROOT)/slirp/build $(FUZZ_SLIRP_LIB) \
+	$(shell pkg-config --libs glib-2.0) -lresolv
+FUZZ_EXTRA_wifi-router = -Icore/src/common/net core/src/common/net/WifiRouter.cpp $(FUZZ_SLIRP)
+FUZZ_EXTRA_slirp-ip = -Icore/src/common/net core/src/common/net/SlirpIp.cpp $(FUZZ_SLIRP)
+FUZZ_EXTRA_usb-bus-host = core/src/common/UsbBusHost.cpp
+FUZZ_EXTRA_gdbstub-arm = -Icore/src/uarm -pthread
+FUZZ_68K_PLATFORM = core/src/cloudpilot/emulator/palm/Platform
+FUZZ_EXTRA_gdbstub-68k = -DEMULATION_LEVEL=EMULATION_UNIX -Wno-multichar -Wno-pragma-pack -Icore/src/cloudpilot/emulator \
+	-Icore/src/cloudpilot/emulator/hardware -Icore/src/cloudpilot/emulator/uae -Icore/src/cloudpilot/emulator/patch \
+	-Icore/src/cloudpilot/emulator/palm/Device -I$(FUZZ_68K_PLATFORM) -I$(FUZZ_68K_PLATFORM)/Core/Hardware/IncsPrv \
+	-I$(FUZZ_68K_PLATFORM)/Core/System/IncsPrv -I$(FUZZ_68K_PLATFORM)/Incs -I$(FUZZ_68K_PLATFORM)/Incs/Core \
+	-I$(FUZZ_68K_PLATFORM)/Incs/Core/Hardware -I$(FUZZ_68K_PLATFORM)/Incs/Core/System -I$(FUZZ_68K_PLATFORM)/Incs/Core/UI \
+	-I$(FUZZ_68K_PLATFORM)/Incs/Libraries -Icore/src/cloudpilot/emulator/suspend -Icore/src/cloudpilot/native \
+	core/src/cloudpilot/native/GdbStub.cpp
+FUZZ_EXTRA_zodiac-rom = -Izodiac-rom zodiac-rom/ZodiacRom.cpp -lz
+FUZZ_EXTRA_bluetooth-hci = core/src/uarm/uarm/BluetoothBackend.cpp
+FUZZ_EXTRA_netlib = -Icore/src/uarm core/src/uarm/uarm/HostNetwork.cpp -pthread
+# The JNI targets build the Android sources against the JDK's jni.h.
+FUZZ_JNI_INCLUDE ?= $(firstword $(wildcard /usr/lib/jvm/default-java/include /usr/lib/jvm/*/include))
+FUZZ_EXTRA_jni-link = -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux
+FUZZ_EXTRA_jni-sync = -I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux -Icore/src/common/sync/vendor/arduinojson
+$(FUZZ_ROOT)/fuzz-conduit-ipc: core/src/common/sync/PalmConduit.cpp core/src/common/sync/PalmConduitProcess.h installer-shims/PalmConduitProtocol.h
+$(FUZZ_ROOT)/fuzz-netlib: core/src/uarm/uarm/NetworkSimulation.cpp core/src/uarm/uarm/HostNetwork.cpp
+$(FUZZ_ROOT)/fuzz-bluetooth-hci: core/src/uarm/uarm/BluetoothBackend.cpp
+$(FUZZ_ROOT)/fuzz-jni-link: android/app/src/main/cpp/LinkJni.cpp
+$(FUZZ_ROOT)/fuzz-jni-sync: android/app/src/main/cpp/SyncJni.cpp
+$(FUZZ_ROOT)/fuzz-wifi-router $(FUZZ_ROOT)/fuzz-slirp-ip: $(FUZZ_SLIRP_LIB) core/src/common/net/WifiRouter.cpp \
+	core/src/common/net/SlirpIp.cpp $(wildcard core/src/common/net/*.h)
+# The desktop's Qt parsers, against QtCore only (no GUI), when Qt 6 is there.
+FUZZ_QT := $(shell pkg-config --exists Qt6Core && echo yes)
+FUZZ_QT_TARGETS := $(if $(FUZZ_QT),qt-firmware-input qt-desktop-client qt-session-store qt-link-store qt-link-lines)
+FUZZ_TARGETS += $(FUZZ_QT_TARGETS)
+FUZZ_QT_FLAGS = -fPIC -Idesktop $(shell pkg-config --cflags Qt6Core)
+FUZZ_EXTRA_qt-firmware-input = $(FUZZ_QT_FLAGS) $(shell pkg-config --libs Qt6Core)
+FUZZ_EXTRA_qt-desktop-client = $(FUZZ_QT_FLAGS) -I$(FUZZ_ROOT)/moc $(shell pkg-config --cflags --libs Qt6Network)
+FUZZ_EXTRA_qt-session-store = $(FUZZ_QT_FLAGS) -Icore/src/uarm/native $(shell pkg-config --libs Qt6Core) -lz
+FUZZ_EXTRA_qt-link-store = $(FUZZ_QT_FLAGS) desktop/LinkStore.cpp $(shell pkg-config --libs Qt6Core)
+FUZZ_EXTRA_qt-link-lines = $(FUZZ_QT_FLAGS) desktop/LinkLines.cpp $(shell pkg-config --libs Qt6Core)
+$(FUZZ_ROOT)/fuzz-qt-session-store: $(wildcard desktop/*Store.h desktop/Dana*.h desktop/FolderCard.h desktop/CardStorage.h desktop/FirmwareInput.h)
+$(FUZZ_ROOT)/fuzz-qt-link-store: desktop/LinkStore.cpp desktop/LinkStore.h
+$(FUZZ_ROOT)/fuzz-qt-link-lines: desktop/LinkLines.cpp desktop/LinkLines.h
+FUZZ_MOC ?= $(or $(wildcard /usr/lib/qt6/libexec/moc),moc)
+$(FUZZ_ROOT)/moc/DesktopClient.moc.cpp: desktop/DesktopClient.h
+	mkdir -p $(dir $@)
+	$(FUZZ_MOC) -i $< -o $@
+$(FUZZ_ROOT)/fuzz-qt-desktop-client: $(FUZZ_ROOT)/moc/DesktopClient.moc.cpp desktop/DesktopClient.cpp
+
+.PHONY: fuzz fuzz-run $(FUZZ_COMMON_LIB)
+fuzz: $(FUZZ_TARGETS:%=$(FUZZ_ROOT)/fuzz-%) $(FUZZ_ROOT)/.seeds
+
+$(FUZZ_COMMON_LIB):
+	$(MAKE) -C core/src/common FROND_CORE_OBJ=$(abspath $(FUZZ_ROOT))/core CC_NATIVE=$(FUZZ_CC) CXX_NATIVE=$(FUZZ_CXX) \
+		CFLAGS_NATIVE="$(FUZZ_CFLAGS)" bin
+
+$(FUZZ_SLIRP_LIB):
+	echo "$(FUZZ_SLIRP_SHA256)  $(FUZZ_SLIRP_TARBALL)" | sha256sum -c --quiet
+	rm -rf $(FUZZ_ROOT)/slirp && mkdir -p $(FUZZ_ROOT)/slirp
+	tar -xjf $(FUZZ_SLIRP_TARBALL) -C $(FUZZ_ROOT)/slirp
+	CC=$(FUZZ_CC) CFLAGS="$(FUZZ_CFLAGS)" meson setup --default-library=static --buildtype=plain \
+		$(FUZZ_ROOT)/slirp/build $(FUZZ_ROOT)/slirp/$(FUZZ_SLIRP_VERSION)
+	ninja -C $(FUZZ_ROOT)/slirp/build libslirp.a
+
+$(FUZZ_LINK_LIB): $(LINK_SOURCES) $(wildcard link/*.h)
+	mkdir -p $(FUZZ_ROOT)/link
+	$(FUZZ_CC) -std=c99 $(FUZZ_CFLAGS) -c link/monocypher/monocypher.c -o $(FUZZ_ROOT)/link/monocypher.o
+	for f in $(LINK_SOURCES); do $(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) -c $$f -o $(FUZZ_ROOT)/link/$$(basename $$f .cpp).o || exit 1; done
+	ar rcs $@.new $(patsubst link/%.cpp,$(FUZZ_ROOT)/link/%.o,$(LINK_SOURCES)) $(FUZZ_ROOT)/link/monocypher.o
+	mv -f $@.new $@
+
+$(FUZZ_ROOT)/fuzz-%: tests/fuzz/%.cpp $(wildcard tests/fuzz/*.h) $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
+	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) -fsanitize=fuzzer $(FUZZ_INCLUDE) $< $(FUZZ_EXTRA_$*) $(FUZZ_LIBS) -o $@
+
+# Seeds are written again on each build; the runs keep their own corpus in FUZZ_OUT.
+$(FUZZ_ROOT)/.seeds: tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp tests/fuzz/seeds-host.cpp tests/fuzz/SeedFdp.h $(FUZZ_COMMON_LIB) $(FUZZ_LINK_LIB)
+	$(FUZZ_CXX) -std=c++17 $(FUZZ_CFLAGS) $(FUZZ_INCLUDE) tests/fuzz/seeds.cpp tests/fuzz/seeds-storage.cpp tests/fuzz/seeds-host.cpp $(FUZZ_LIBS) -o $(FUZZ_ROOT)/fuzz-seeds
+	rm -rf $(FUZZ_ROOT)/seeds && ASAN_OPTIONS=detect_leaks=0 $(FUZZ_ROOT)/fuzz-seeds $(FUZZ_ROOT)/seeds
+	touch $@
+
+fuzz-run:
+	umask 077 && mkdir -p $(FUZZ_OUT)/scratch && chmod 700 $(FUZZ_OUT) && ulimit -c 0 && \
+	for t in $(or $(FUZZ_ONLY),$(FUZZ_TARGETS)); do \
+		mkdir -p $(FUZZ_OUT)/corpus/$$t $(FUZZ_OUT)/crashes/$$t; \
+		case $$t in wifi-router|slirp-ip|netlib) wrap="unshare -rn";; *) wrap=;; esac; \
+		FROND_FUZZ_SCRATCH=$(abspath $(FUZZ_OUT))/scratch $$wrap $(FUZZ_ROOT)/fuzz-$$t -max_total_time=$(FUZZ_TIME) \
+			-artifact_prefix=$(FUZZ_OUT)/crashes/$$t/ -rss_limit_mb=2048 -timeout=30 -print_final_stats=1 $(FUZZ_FLAGS) \
+			$(FUZZ_OUT)/corpus/$$t $(FUZZ_ROOT)/seeds/$$t > $(FUZZ_OUT)/$$t-$(FUZZ_TIME)s.log 2>&1; \
+		echo "$$t: exit $$? $$(grep -m1 -o 'SUMMARY: .*' $(FUZZ_OUT)/$$t-$(FUZZ_TIME)s.log)"; \
+	done

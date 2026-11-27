@@ -217,6 +217,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             : QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
         installFiles(paths);
     });
+    connect(appsPanel, &AppsPanel::refreshInstalledPrograms, this, [this] {
+        if (send("winmo-apps")) appsPanel->loadingInstalledPrograms();
+    });
+    connect(&client, &DesktopClient::installedPrograms, appsPanel, &AppsPanel::showInstalledPrograms);
     connect(appsPanel, &AppsPanel::otherRequested, this, &MainWindow::otherDatabase);
     connect(appsPanel, &AppsPanel::launchRequested, this, [this](const QString& name) { send("launch-app", name); });
     connect(appsPanel, &AppsPanel::exportAllRequested, this, [this] {
@@ -272,14 +276,18 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         });
     }
     // A switch between apps waiting for the background slot goes once it's free.
-    connect(&client, &DesktopClient::backgroundResult, this, [this] { QTimer::singleShot(0, this, [this] { sendAppActive(); }); });
+    connect(&client, &DesktopClient::backgroundResult, this, [this] { QTimer::singleShot(0, this, [this] { sendAppActive(); sendVoiceKey(); sendPartnershipAnswer(); }); });
     connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
         if (command == "speed-state" && runningPreferences.showMips) {
             palmHolder->setMips(ok ? message : QString());
             const auto figure = ok ? runningRules::speedFigure(message) : QString();
             if (figure != speedText) { speedText = figure; if (!embedded) updateBarMachine(); }
         }
+        if (command == "voice-key") {
+            if (ok) voiceSent = message == "down"; else voiceWanted = voiceSent = false;
+        }
         if (command == "gamepad-state" && ok) gamepadReply(message);
+        if (command == "activesync-answer" && !ok) log->appendPlainText(command + ": " + message);
         if (command == "cradle-setting") showCradle(ok ? message : QString());
         if (command == "zaurus-hardware" && ok) showZaurusHardware(message);
         if (command == "zaurus-remote-state" && zaurusRemoteState.isEmpty()) {
@@ -306,6 +314,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(printerTimer, &QTimer::timeout, this, [this] {
         printerPoll();
         pollGamepad();
+        sendPartnershipAnswer();
         if (frondFirmware::isZaurus(runningDevice) && client.available() && !stopping)
             client.requestBackground(zaurusRemoteState.isEmpty() ? "zaurus-remote-state" : "zaurus-hardware");
     });
@@ -704,6 +713,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
     irda->addItem(tr("Printer"),"printer");
+    irda->addItem(tr("Sync Manager"),"sync");
     irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Pairing."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
@@ -986,6 +996,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(runningBar, &RunningBar::chosen, this, &MainWindow::barChosen);
     connect(runningBar->menu(), &QMenu::aboutToShow, this, [this] { pollGamepad(); });
     connect(runningBar, &RunningBar::pressed, this, &MainWindow::barPressed);
+    connect(runningBar, &RunningBar::recordHeld, this, [this](bool down) { voiceWanted = down; sendVoiceKey(); });
     connect(runningBar, &RunningBar::networkChosen, this, [this](const QString& mode) {
         if (const auto index = network->findData(mode); index >= 0 && network->isEnabled()) { network->setCurrentIndex(index); emit network->activated(index); }
     });
@@ -1010,6 +1021,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
                "On the Sony CLIÉ T415, F1 to F4 are Date Book, Address, To Do and Memo Pad, Page Up and Page Down turn the Jog Dial, End presses it, and Home is the Jog Dial's Back.\n"
+               "On the Tapwave Zodiac, the arrow keys push the stick, Enter and F10 press its centre, F1 to F4 are the Action buttons (bottom, right, left, top), F6 is Home, F7 is Function, and F8 and F9 are the left and right triggers.\n"
+               "On the HP iPAQ rx1950, F5 is the record button.\n"
                "Escape: Power, on devices with a power key in the button bar, except the de-NVFS E2\n\n"
                "Shortcuts, in the Palm window and in this one:\n"
                "Ctrl+S: Save. Ctrl+Shift+S: Save a copy. Ctrl+W: Save and Stop. Ctrl+I: Install.\n"
@@ -1074,10 +1087,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         zaurusPcLink->machineStopped();
         zaurusRemoteRelease->stop();
         zaurusRemoteKey.clear();
-        syncMachineId.clear(); syncMachineError.clear(); syncRunning = false;
+        syncMachineId.clear(); syncMachineError.clear(); syncRunning = false; voiceWanted = voiceSent = false;
+        askPartnership(false);
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
+        irSyncWorks = true; irSyncStartupPending = false;
         holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); cradleSetting.clear(); cradleStartupPending = false; showCamera("pattern");
         mipsTimer->stop();
         batteryTimer->stop();
@@ -1181,6 +1196,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         QTimer::singleShot(0, this, [this] {
             if (internalListWanted) listInternal();
             if (appsStale) listApps();
+            sendPartnershipAnswer();
         });
         // The answer is the map the core now uses, already saved; nothing to show.
         if (command == "controller-map") {
@@ -1192,6 +1208,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (stopping) { save(); return; }
             if (ok) { if (!syncRunning) notify(message, 0); }
             else { log->appendPlainText(command + ": " + message); notify(message, 8000); }
+            return;
+        }
+        if (command == "irda-sync-support") {
+            const bool startup = irSyncStartupPending;
+            irSyncStartupPending = false;
+            // An older core without the command takes it as it always did.
+            irSyncWorks = !ok || message != "no";
+            if (irSyncWorks) irSyncRefused.remove(sessionPath); else irSyncRefused.insert(sessionPath);
+            refresh();
+            if (stopping) save();
+            else if (startup) afterIrSync();
             return;
         }
         if (command == "cradle-setting") {
@@ -1248,6 +1275,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             return;
         }
         if (command == "db-list") { databasesReply(ok, code, message); return; }
+        if (command == "winmo-apps") {
+            if (!ok) appsPanel->showInstalledPrograms(false, message);
+            return;
+        }
         if (command == "wifi-module-state") {
             if (ok) printerPanel->setModuleReadout(frondPrint::moduleReadout(message, printerPanel->moduleOn()));
             return;
@@ -1354,7 +1385,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         // Windows CE: install takes the SD card out and puts it back, so once the last file is done the core is
         // asked where the card is now. One request at a time, so not while the batch goes on.
-        if (command == "install" && frondFirmware::installsToCard(runningDevice)) {
+        if ((command == "install" || command == "install-copy") && frondFirmware::installsToCard(runningDevice)) {
             if (installTotal > 0 && installResult(ok, code, message)) {
                 if (installTotal == 0 && !stopping) send(cardCommand("state"));
                 return;
@@ -1365,7 +1396,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(cardCommand("state"));
             return;
         }
-        if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
+        if ((command == "install" || command == "install-copy") && installTotal > 0 && installResult(ok, code, message)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
@@ -1474,6 +1505,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             else send(storageSupported() ? cardCommand("state", 0) : "network-state");
             return;
         }
+        if (command == "hard-reset" && frondFirmware::installsToCard(currentDevice()))
+            appsPanel->setDatabases({});
         if ((command == "save" || command == "reset" || command == "hard-reset") && !stopping &&
             frondFirmware::profile(runningDevice).frontend.camera) cameraRead = true;
         if ((command == "hold" || command == "reset" || command == "hard-reset") &&
@@ -1481,7 +1514,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send("hold-state");
             return;
         }
-        if (!stopping && frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2" &&
+        if (!stopping && frondFirmware::isZodiac(runningDevice) &&
             (command == "cradle" || command == "reset" || command == "hard-reset") && send("cradle-setting")) return;
         if (!stopping && frondFirmware::isZaurus(runningDevice) &&
             (command == "reset" || command == "hard-reset")) {
@@ -1647,7 +1680,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             firstStartPending = false;
             firstDone = true;
         }
-        const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
+        const bool zodiac = frondFirmware::isZodiac(runningDevice);
         const bool sdWriteProtection = deviceProfileSdWriteProtection5(int(runningDevice));
         if (!stopping && sdWriteProtection && cardPresent && command == "sd-state" && send("sd-protection")) {
             protectionStartPending = true;
@@ -1897,6 +1930,7 @@ void MainWindow::refresh() {
         const QSignalBlocker blocked(serial);
         const auto mode = serial->currentData();
         frondLink::setModemChoice(serial, caps.modem);
+        frondLink::setKeyboardChoice(serial, m68k && caps.serial, frondFirmware::serialKeyboard(currentDevice()));
         if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
     }
     shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
@@ -1923,7 +1957,7 @@ void MainWindow::refresh() {
     if (speedBox->count() != frondSessions::speedChoices(m68k).size())
         fillSpeedBox(speedBox, m68k, frondSessions::speedName(runningPreferences));
     liveDisplay({});
-    shown(frondFirmware::deviceId(currentDevice()) == "tapwave-zodiac-2", {cradleToggle});
+    shown(frondFirmware::isZodiac(currentDevice()), {cradleToggle});
     cradleToggle->setEnabled(enabled && !cradleSetting.isEmpty());
     cradleToggle->setChecked(cradleSetting == "attached");
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
@@ -1954,7 +1988,8 @@ void MainWindow::refresh() {
             if (auto* item = model->item(row)) item->setEnabled(on);
         if (auto* view = qobject_cast<QListView*>(combo->view())) view->setRowHidden(row, !on);
     };
-    const bool hotSyncAvailable = syncAvailable && protocol == frondDesktopSync::Protocol::hotSync;
+    // Serial and USB Sync Manager need a cradle HotSync; IR HotSync only a HotSync device with infrared.
+    const bool hotSyncAvailable = syncAvailable && frondDesktopSync::cradleHotSync(currentDevice());
     offerMode(serial, "sync", hotSyncAvailable);
     if (!hotSyncAvailable && serial->currentData() == "sync") serial->setCurrentIndex(serial->findData("off"));
     serial->setEnabled(editable && caps.serial);
@@ -1980,6 +2015,10 @@ void MainWindow::refresh() {
     if (usbNetwork) usbPort->setVisible(false);
     usb->setEnabled(editable && (zaurus ? running && zaurusUsbDriveKnown && !zaurusUsbDriveAttached : caps.usb));
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
+    // IR HotSync: the HotSync app's IR to a PC/Handheld, on a HotSync device with infrared.
+    const bool irSyncAvailable = syncAvailable && protocol == frondDesktopSync::Protocol::hotSync && caps.infrared && irSyncWorks;
+    offerMode(irda, "sync", irSyncAvailable);
+    if (!irSyncAvailable && irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
     irdaPort->setEnabled(caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp"); irdaPort->setReadOnly(!editable);
     irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
@@ -1998,7 +2037,7 @@ void MainWindow::refresh() {
     traits.syncManager = protocol != frondDesktopSync::Protocol::none;
     const bool guest = traits.guestServices;
     appsPanel->setEnabled(enabled && (guest || traits.cardInstall || zaurus));
-    appsPanel->setInstallOnly(!guest);
+    appsPanel->setInstallOnly(!guest, !guest && traits.cardInstall);
     appsPanel->setPackageQueue(zaurus);
     appsPanel->setToolTip(guest || traits.cardInstall || zaurus ? QString() : reason);
     zaurusSdFamilyRow->setVisible(zaurus && supported);
@@ -2058,7 +2097,7 @@ void MainWindow::refresh() {
     sdExchange->setVisible(known && cardPresent && (!zaurus || !cardInserted));
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
-    const bool zodiac = frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2";
+    const bool zodiac = frondFirmware::isZodiac(runningDevice);
     const bool sdWriteProtection = deviceProfileSdWriteProtection5(int(runningDevice));
     sdRetry->setVisible(!known || ((memoryStick || sdWriteProtection) && cardPresent && !protectionKnown));
     cardPick->setVisible(known);
@@ -2160,7 +2199,8 @@ void MainWindow::refresh() {
                                                 : runningRules::cardIcon(supported, known, primaryPresent,
                                                                          cardInserted || palmWifiInserted),
                       caps.sound && runningPreferences.audio, modes);
-    const auto syncLabel = protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
+    const bool syncButton = frondDesktopSync::startsFromBar(currentDevice());
+    const auto syncLabel = !syncButton ? QString() : protocol == frondDesktopSync::Protocol::hotSync ? tr("HotSync") :
                            protocol == frondDesktopSync::Protocol::activeSync ? tr("ActiveSync") : QString();
     runningBar->setSyncButton(syncLabel, protocol == frondDesktopSync::Protocol::activeSync ? "activesync" : "hotsync",
                               syncAvailable && !syncRunning && enabled && !outOfCradle());
@@ -2523,7 +2563,16 @@ void MainWindow::afterDevice() {
     // Asks the core what it supports, once a second until it answers, then the host battery once a minute.
     batteryTimer->start(1000);
     batteryTick();
-    if (frondFirmware::deviceId(runningDevice) == "tapwave-zodiac-2" && send("cradle-setting")) {
+    const auto protocol = frondDesktopSync::protocol(runningDevice);
+    if (frondFirmware::runs68k(runningDevice) && frondFirmware::capabilities(runningDevice).infrared &&
+        frondDesktopSync::available(protocol) && protocol == frondDesktopSync::Protocol::hotSync && send("irda-sync-support")) {
+        irSyncStartupPending = true;
+        return;
+    }
+    afterIrSync();
+}
+void MainWindow::afterIrSync() {
+    if (frondFirmware::isZodiac(runningDevice) && send("cradle-setting")) {
         cradleStartupPending = true;
         return;
     }
@@ -2615,6 +2664,12 @@ void MainWindow::runShortcut(runningRules::Shortcut what) {
         case Shortcut::FullScreen: toggleFullScreen(); break;
         case Shortcut::Quit: break;
     }
+}
+// Sends the Record button's state to the core when it differs from what the core has. One request is
+// in flight at a time; the reply sends the next change.
+void MainWindow::sendVoiceKey() {
+    if (voiceWanted == voiceSent || !client.available()) return;
+    client.requestBackground("voice-key", voiceWanted ? "d" : "u");
 }
 void MainWindow::barPressed(RunningBar::Button button) {
     switch (button) {
@@ -2820,6 +2875,11 @@ void MainWindow::editSession(const QString& path) {
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
     MachineSettingsDialog dialog(device, prefs, this);
+    {
+        const auto protocol = frondDesktopSync::protocol(device);
+        const bool hotSync = frondDesktopSync::available(protocol) && protocol == frondDesktopSync::Protocol::hotSync;
+        dialog.controls->offerSync(frondDesktopSync::cradleHotSync(device), hotSync && !irSyncRefused.contains(canonicalSession(path)));
+    }
     if (frondDesktopSync::available(frondDesktopSync::protocol(device))) {
         auto* sync = new QPushButton(tr("Sync settings…"), &dialog);
         sync->setObjectName("machineSyncSettings");
@@ -3044,6 +3104,8 @@ void MainWindow::addDevice() {
         return;
     }
     const auto chosenCards = dialog.chosenCards();
+    settings.setValue("recentDevices", frondFirmware::pushRecentDevice(
+        settings.value("recentDevices").toStringList(), frondFirmware::deviceId(device)));
     const auto name = frondSessions::reserve(sessionFolder(), frondFirmware::deviceName(device), frondFirmware::deviceId(device));
     if (name.isEmpty())
         return failure(tr("Could not create the session storage directory."));
@@ -3228,6 +3290,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (syncMachineId.isEmpty()) {
         if (serial->currentData() == "sync") serial->setCurrentIndex(serial->findData("off"));
         if (usb->currentData() == "sync") usb->setCurrentIndex(usb->findData("off"));
+        if (irda->currentData() == "sync") irda->setCurrentIndex(irda->findData("off"));
     }
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     // A PTY for Modem Sync calls to the HotSync number, there whenever the modem is picked.
@@ -3252,10 +3315,13 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     appActiveUnsent = QGuiApplication::applicationState() == Qt::ApplicationActive ? "on" : "off";
     if (runningPreferences.controllerMapSet && !runningPreferences.controllerMap.isEmpty())
         arguments << "--controller-map" << runningPreferences.controllerMap;
-    if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac) arguments << frondSessions::musicArguments(runningPreferences);
+    if (frondFirmware::profile(startDevice).board == DeviceBoard5::imx1Zodiac)
+        arguments << frondSessions::musicArguments(runningPreferences) << frondSessions::directStickArguments(runningPreferences);
     // Nothing is known about this machine yet; the core's answer to battery-state sets it right.
     batteryKnown = batterySupported = false;
     batteryChargingSupported = true;
+    // The core starts, or reopens a saved machine, with the host's level now, not the default until the first read.
+    if (runningPreferences.batteryMode == "host") hostBattery = frondBattery::readHost();
     batterySent = batterySpec();
     arguments << "--battery" << batterySent;
     if (runningPreferences.headphonesIn && (frondFirmware::isZaurus(runningDevice) ||
@@ -3482,6 +3548,12 @@ void MainWindow::showIrda(const QString& state) {
         const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
     }
     if (mode == "printer") { irdaState->setText(tr("Printer: ready")); refresh(); return; }
+    // "sync idle|linked|open; SYNC-STATE": the IR HotSync PC.
+    if (mode == "sync") {
+        const auto phase = parts.value(1).section(';', 0, 0);
+        irdaState->setText(phase == "idle" ? tr("Infrared: Sync Manager") : tr("Infrared: Sync Manager, linked"));
+        refresh(); return;
+    }
     if (mode == "phone") {
         const auto phase = parts.value(1);
         irdaState->setText(phase == "online" && parts.size() > 2 ? tr("Mobile phone: online at %1").arg(parts[2])
@@ -3553,6 +3625,9 @@ void MainWindow::showSyncManager() {
             syncWindow->machineNames.insert(QString::fromStdString(frondSync::MachineDeviceKey(id.toStdString())),
                                             QFileInfo(path).completeBaseName());
     }
+    // Opened during a session: only what applies to that device's kind.
+    const auto protocol = client.running() ? frondDesktopSync::protocol(runningDevice) : frondDesktopSync::Protocol::none;
+    syncWindow->setDeviceKind(protocol == frondDesktopSync::Protocol::hotSync ? "palm" : protocol == frondDesktopSync::Protocol::activeSync ? "winmo" : "");
     syncWindow->show();
     syncWindow->refresh();
     syncWindow->raise();
@@ -3568,14 +3643,15 @@ bool MainWindow::editSyncSettings(const QString& session, QWidget* parent) {
     }
     const auto device = client.running() ? runningDevice : frondFirmware::deviceFromId(infoFor(session).device);
     if (!frondDesktopSync::editMachine(parent, id, frondDesktopSync::protocol(device),
-                                       deviceProfileNetworkHotSync5(frondFirmware::profile(device)))) return false;
+                                       frondDesktopSync::cradleHotSync(device) &&
+                                           deviceProfileNetworkHotSync5(frondFirmware::profile(device)))) return false;
     if (syncWindow) syncWindow->refresh();
     return true;
 }
 
 void MainWindow::startSync() {
     if (!client.available() || busy || stopping || syncRunning || exchangeStage != ExchangeStage::None ||
-        !frondDesktopSync::available(frondDesktopSync::protocol(runningDevice))) return;
+        !frondDesktopSync::startsFromBar(runningDevice)) return;
     if (syncMachineId.isEmpty()) return failure(syncMachineError);
     frondSync::SyncLibrary library;
     QString error;
@@ -3590,7 +3666,7 @@ void MainWindow::startSync() {
         if (!assignment) return;
     }
     if (frondDesktopSync::protocol(runningDevice) == frondDesktopSync::Protocol::activeSync) {
-        send("activesync-start");
+        send("activesync-start", "ask");
         return;
     }
     QString connection;
@@ -3611,7 +3687,10 @@ void MainWindow::showSyncStatus(const QString& state) {
     if (wasRunning != syncRunning) refresh();
     const bool active = frondDesktopSync::protocol(runningDevice) == frondDesktopSync::Protocol::activeSync;
     const auto label = active ? tr("ActiveSync") : tr("HotSync");
-    if (syncRunning) notify(tr("%1: %2").arg(label, state.mid(8)), 0);
+    const bool question = active && syncRunning && state.section(' ', 2, 2) == "partnership-question";
+    askPartnership(question);
+    if (question) notify(tr("ActiveSync: waiting for an answer"), 0);
+    else if (syncRunning) notify(tr("%1: %2").arg(label, state.mid(8)), 0);
     else if (state.startsWith("done ") || state.startsWith("failed ")) {
         const bool failed = state.startsWith("failed ");
         const auto details = state.section(": ", 1);
@@ -3620,6 +3699,44 @@ void MainWindow::showSyncStatus(const QString& state) {
         if (!failed && panels->current() == 0) { appsStale = true; listApps(); }
         if (syncWindow && !QApplication::activeModalWidget()) syncWindow->refresh();
     } else if (state == "off" && wasRunning) notify({}, 0);
+}
+
+// Opened without a nested event loop, like failure(). Closing it (Esc) connects as a guest, as
+// cancelling desktop ActiveSync's setup did.
+void MainWindow::askPartnership(bool open) {
+    if (!open) {
+        partnershipUnsent.clear();
+        partnershipAnswered = false;
+        if (auto* box = partnershipBox.data()) {
+            partnershipBox = nullptr;
+            box->close();
+        }
+        return;
+    }
+    if (partnershipBox || partnershipAnswered) return;
+    auto* box = new QMessageBox(QMessageBox::Question, tr("ActiveSync"), tr("Set up an ActiveSync partnership with this device?"),
+                                QMessageBox::NoButton, this);
+    box->setObjectName("partnershipQuestion");
+    auto* setUp = box->addButton(tr("Set up"), QMessageBox::AcceptRole);
+    auto* guest = box->addButton(tr("Connect as guest"), QMessageBox::RejectRole);
+    setUp->setObjectName("partnershipSetUp");
+    guest->setObjectName("partnershipGuest");
+    box->setDefaultButton(setUp);
+    box->setEscapeButton(guest);
+    connect(box, &QDialog::finished, box, &QObject::deleteLater);
+    connect(box, &QDialog::finished, this, [this, box, setUp] {
+        if (partnershipBox != box) return;
+        partnershipBox = nullptr;
+        partnershipAnswered = true;
+        partnershipUnsent = box->clickedButton() == setUp ? "set-up" : "guest";
+        sendPartnershipAnswer();
+    });
+    partnershipBox = box;
+    box->open();
+}
+void MainWindow::sendPartnershipAnswer() {
+    if (partnershipUnsent.isEmpty() || !client.running() || stopping || !client.available()) return;
+    if (client.requestBackground("activesync-answer", partnershipUnsent)) partnershipUnsent.clear();
 }
 
 QString MainWindow::serialChoice() const {
@@ -3683,6 +3800,12 @@ void MainWindow::showSerial(const QString& state) {
     if (state.isEmpty()) serialState->clear();
     else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
     else if (parts[0] == "sync") serialState->setText(tr("Serial: Sync Manager"));
+    else if (parts[0] == "keyboard") {
+        // "keyboard ready|low-power|pulsing|asleep|idle" from the core's Palm Portable Keyboard.
+        const auto phase = parts.value(1);
+        serialState->setText(phase == "ready" ? tr("Keyboard: ready") : phase == "pulsing" ? tr("Keyboard: waking the driver")
+                             : phase == "asleep" ? tr("Keyboard: no driver answered") : tr("Keyboard: low power"));
+    }
     else if (parts[0] == "modem" && parts.size() > 1) {
         // "modem STATE [SPEED]; hotsync pty /dev/pts/N connected|waiting" with a HotSync link.
         const auto modem = state.section("; ", 0, 0).split(' ');
@@ -3700,6 +3823,8 @@ void MainWindow::loadSerialSettings() {
     const auto& value = runningPreferences.serial;
     const QSignalBlocker blocked(serial);
     frondLink::setModemChoice(serial, frondFirmware::capabilities(runningDevice).modem);
+    frondLink::setKeyboardChoice(serial, frondFirmware::runs68k(runningDevice) && frondFirmware::capabilities(runningDevice).serial,
+                                 frondFirmware::serialKeyboard(runningDevice));
     frondLink::addConnectionChoices(serial, value);
     serial->setCurrentIndex(std::max(0, serial->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     serialPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5023);
@@ -4223,8 +4348,8 @@ bool MainWindow::canQueueZaurus(int slot) const {
 }
 
 bool MainWindow::sendInstall(const QString& path) {
-    return zaurusInstallSlot.isEmpty() ? send("install", path)
-                                       : send("zaurus-install", zaurusInstallSlot + ' ' + path);
+    if (!zaurusInstallSlot.isEmpty()) return send("zaurus-install", zaurusInstallSlot + ' ' + path);
+    return send(frondFirmware::installsToCard(runningDevice) ? "install-copy" : "install", path);
 }
 
 void MainWindow::installFiles(const QStringList& paths) {

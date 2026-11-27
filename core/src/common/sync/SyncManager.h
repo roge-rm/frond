@@ -2,17 +2,19 @@
 #define FROND_SYNC_MANAGER_H
 
 // Frond's built-in HotSync desktop. A core process has one manager; its HotSync ports
-// (serial, USB, the modem's HotSync number, Network HotSync through the virtual router) set
-// to "sync" each run an endpoint, a thread that waits for the handheld to start a HotSync and
+// (serial, USB, the modem's HotSync number, Network HotSync through the virtual router, the IR
+// port's HotSync PC) set to "sync" each run an endpoint, a thread that waits for the handheld to start a HotSync and
 // runs it against the assigned profile. The frontends read Status() through the cores'
 // sync-state command and start a sync with sync-start, which presses the device's HotSync
 // button with a port routed here. Thread-safe.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -20,7 +22,7 @@
 
 namespace frondSync {
 
-enum class Transport { serial, usb, modem, network };
+enum class Transport { serial, usb, modem, network, infrared };
 const char* TransportName(Transport transport);
 
 struct SyncOptions {
@@ -30,6 +32,9 @@ struct SyncOptions {
     bool network{false};    // route the virtual host's Network HotSync to this manager
     std::string userName;    // name for a handheld that has no user yet; empty: the profile's name
     int networkReplyIdleMs{0}; // override the default DLP reply deadline for a slow network route
+    // A frontend is there to answer: a Windows Mobile device with no partnership and no saved
+    // answer waits on AnswerPartnership. Off, it pairs without asking (scripted runs).
+    bool askPartnership{false};
 };
 
 bool ConfiguredHotSyncUsesNetwork(const SyncOptions& options);
@@ -72,6 +77,12 @@ class SyncManager {
     // Used by the session while it runs.
     void Update(const std::function<void(SyncStatus&)>& change);
 
+    // The session's partnership question: the stage reads partnership-question until the frontend
+    // answers. Blocks the session's thread; empty when `ended` turns true first (polled).
+    std::optional<bool> AskPartnership(const std::function<bool()>& ended);
+    // From the frontend: true sets up a partnership, false connects as a guest. False with no question open.
+    bool AnswerPartnership(bool setUp);
+
    private:
     SyncManager() = default;
     mutable std::mutex mutex;
@@ -81,6 +92,10 @@ class SyncManager {
     SyncStatus status;
     int endpoints{0};
     std::function<void(const std::string&)> listener;
+    std::mutex questionMutex;
+    std::condition_variable questionChanged;
+    bool questionOpen{false};
+    std::optional<bool> answer;
 };
 
 // A thread running SyncManager::Serve on a stream, for a transport that polls a SyncPipe.

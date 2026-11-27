@@ -66,6 +66,8 @@ class SocS3C2442 : public SoC {
     // The battery reaches the guest through AIN0 and the AC and charge pins, set again after every load and reset.
     bool BatterySupported() const override { return true; }
     bool SetBattery(const BatteryPower& value) override;
+    // The RTC on by the time a session was closed (rx1950RtcForward).
+    void ForwardClock(uint64_t seconds) override;
     // Headphones on GPG12 (EINT20), low while they're in; put back after every load and reset like the battery.
     bool HeadphonesSupported() const override { return true; }
     bool HeadphonesIn() const override { return headphones; }
@@ -107,10 +109,14 @@ class SocS3C2442 : public SoC {
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
     bool SetUsbCable(bool attached);
-    void StartActiveSync();
+    std::shared_ptr<frondSync::ActiveSyncSession> StartActiveSync(bool listApplications = false);
+    bool ActiveSyncRunning() const;
+    void StopActiveSync();
     bool StartSerialActiveSync();
     bool StopSerialActiveSync();
     bool UsbCableAttached() const { return machine->usbVbus(); }
+    // The earliest guest time the cable may go in again after it went out (0: any time).
+    uint64_t UsbPlugReadyAt() const;
     bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
     // The desktop behind the USB cable's RNDIS link (UsbHostBridge's ethernet hooks, a DesktopLink): made at the
     // first poll, dropped at a reset or load, left alone while the network is frozen for a checkpoint.

@@ -194,7 +194,11 @@ void opl_registers_base<Revision>::operator_map(operator_mapping &dest) const
 template<int Revision>
 bool opl_registers_base<Revision>::write(uint16_t index, uint8_t data, uint32_t &channel, uint32_t &opmask)
 {
-	assert(index < REGISTERS);
+	if (index >= REGISTERS)
+	{
+		assert(index < REGISTERS);
+		return false;
+	}
 
 	// writes to the mode register with high bit set ignore the low bits
 	if (index == REG_MODE && bitfield(data, 7) != 0)

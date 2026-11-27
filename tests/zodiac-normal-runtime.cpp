@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iterator>
 #include <vector>
 
@@ -260,6 +261,9 @@ void run(SocIMX1& soc, int slices = 4) { for (int i = 0; i < slices; ++i) soc.Ru
 
 void buttonsFromReset() {
     const auto o = zodiacMachineOptions(nullptr);
+    const auto first = zodiacMachineOptions(nullptr, deviceTypeZodiac1);
+    assert(o.ramMiB == 128 && first.ramMiB == 32);
+    assert((o.gpioDInput ^ first.gpioDInput) == (1u << 6) && (first.gpioDInput & (1u << 6)));
     // Every button pin reads high, released, from reset, and nothing is scheduled to change them.
     assert(o.gpioAInputMaskedKnown && (o.gpioAInput & 0x780) == 0x780 && o.gpioDInputKnown && (o.gpioDInput & 0x7780) == 0x7780);
     // The cradle line D22 reads high too, off the cradle.
@@ -363,10 +367,19 @@ void machine() {
     // A process has one machine, so the stop case is a second run of this test. Its ROM starts with
     // an undefined instruction, the other one loops.
     const bool stop = std::getenv("ZODIAC_TEST_STOP") != nullptr;
-    const auto image = romWith(stop ? 0xe7f000f0 : 0xeafffffe);
+    auto image = romWith(stop ? 0xe7f000f0 : 0xeafffffe);
+    // The 1.1 ROM's stick filter, which direct stick needs, in the looping one only.
+    if (!stop) {
+        image.resize(zodiacStickWeights + sizeof zodiacStickWeightsData - zodiacRomBase);
+        std::memcpy(&image[zodiacStickFilter - zodiacRomBase], zodiacStickFilterCode, sizeof zodiacStickFilterCode);
+        std::memcpy(&image[zodiacStickWeights - zodiacRomBase], zodiacStickWeightsData, sizeof zodiacStickWeightsData);
+    }
     SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), error);
     assert(soc && error.empty());
     if (stop) {
+        // A ROM without the known stick filter gets no direct stick, in any engine.
+        assert(!soc->SetDirectStick(true) && !soc->DirectStickOn());
+        assert(soc->SetFastEngine(true) && !soc->DirectStickOn() && soc->SetFastEngine(false));
         // A stopped machine says why in one line and is not saved.
         run(*soc);
         assert(soc->Halted() && soc->StopText().find("unsupported-instruction") == 0);
@@ -492,7 +505,14 @@ void machine() {
     play();
     soc->Reset();
     assert(audioQueuePendingSamples(queue) == 0 && sink.sound.currentGain() == 0);
-    std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset, the redraw flag, the engine and the sound queue");
+    // Direct stick hooks the filter in Fast only, follows the engine both ways and goes off when asked.
+    assert(soc->SetFastEngine(false) && !soc->DirectStickOn() && soc->SetDirectStick(true) && !soc->DirectStickOn());
+    assert(soc->SetFastEngine(true) && soc->DirectStickOn());
+    run(*soc, 1);
+    assert(soc->DirectStickOn() && soc->DirectStickSamples() == 0 && !soc->Halted());
+    assert(soc->SetFastEngine(false) && !soc->DirectStickOn() && soc->SetFastEngine(true) && soc->DirectStickOn());
+    assert(!soc->SetDirectStick(false) && !soc->DirectStickOn() && soc->SetFastEngine(false));
+    std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset, the redraw flag, the engine, the sound queue and direct stick");
     cardThroughLoad(*soc);
 }
 }  // namespace

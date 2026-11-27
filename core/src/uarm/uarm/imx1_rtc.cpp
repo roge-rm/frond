@@ -71,6 +71,13 @@ bool Imx1Rtc::referenceEvent(uint64_t& phase, uint64_t& den, uint64_t& target) c
     target = ticks;
     return true;
 }
+bool Imx1Rtc::forwardSeconds(uint64_t seconds) {
+    if (!known || !(control & 0x80)) return false;
+    // Whole cycles of the day counter change nothing but the events, which one cycle already sets.
+    if (seconds > cycle) seconds = cycle + seconds % cycle;
+    advanceTicks(seconds * divisor());
+    return true;
+}
 void Imx1Rtc::advanceTicks(uint64_t ticks) {
     if (!ticks) return;
     for (unsigned bit = 8; bit < 16; ++bit) {

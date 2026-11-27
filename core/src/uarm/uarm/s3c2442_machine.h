@@ -33,6 +33,8 @@ struct S3c2442Options {
     // GSTATUS2 after a power-on reset.
     uint32_t resetCause = 1;
     S3cRtc::Time rtcStart{6, 1, 1, 7, 12, 0, 0};
+    // The year byte counts binary years from 1950 (WM5) and not two BCD digits.
+    bool rtcBinaryYear = false;
     // Board pin levels per port, A to J. Every pin reads high unless set.
     uint32_t pinLevels[S3cGpio::ports] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
     // nGCS5 (0x28000000, the debug board on a development unit) is an empty bus: writes are dropped and
@@ -234,6 +236,9 @@ class S3c2442Machine {
     // FIFO accesses that leave a packet for the host or take the last byte of one (host side, not saved).
     void setUsbVbus(bool on);
     bool usbVbus() const { return usbVbusOn; }
+    // The guest time VBUS last went away (a cable out, or a load of a state that had it in), UINT64_MAX if it hasn't
+    // since the machine was made. Host side, not saved.
+    uint64_t usbVbusOffAt() const { return usbVbusOffNs; }
     bool usbListening() const;
     // Times usbListening went on since the machine was made, for the host to see a reconnect.
     uint32_t usbEnableCount() const { return usbEnables; }
@@ -334,6 +339,7 @@ class S3c2442Machine {
     // After a GPIO or clock write: whether the host sees the USB device, counting each time it shows up.
     void usbPins();
     bool usbVbusOn = false, usbListeningWas = false;
+    uint64_t usbVbusOffNs = UINT64_MAX;
     uint32_t usbEnables = 0;
     // The Wi-Fi chip's power and reset pins after a GPIO change; its events and interrupt pin.
     void wifiPins();

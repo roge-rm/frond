@@ -19,6 +19,8 @@ class ConnectionsModel(private val context: Context) {
 
     var name by mutableStateOf("")
         private set
+    var listenAddresses by mutableStateOf("")
+        private set
     var loaded by mutableStateOf(false)
         private set
     var rows by mutableStateOf(emptyList<LinkWire.ConnectionRow>())
@@ -94,6 +96,7 @@ class ConnectionsModel(private val context: Context) {
         when (e.optString("type")) {
             "state" -> {
                 name = e.optString("name")
+                listenAddresses = e.optString("listen")
                 loaded = true
                 rows = parseRows(e)
                 val near = e.optJSONArray("nearby")
@@ -134,6 +137,7 @@ class ConnectionsModel(private val context: Context) {
                     keyChanged = it.optBoolean("keyChanged"), forgotten = it.optBoolean("forgotten"),
                     seen = it.optString("seen"), channels = it.optString("channels"),
                     bluetoothRadio = if (it.optString("bluetoothRadio") == "there") "there" else "here",
+                    network = e.optBoolean("network", true),
                 )
             }
         }

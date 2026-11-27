@@ -12,6 +12,7 @@
 \* ===================================================================== */
 
 #include "EmRegs328.h"
+#include "EmSPISlave.h"
 
 #include <cmath>
 
@@ -1159,11 +1160,13 @@ int32 EmRegs328::GetInterruptLevel(void) {
 
     if ((intStatusHi & hwr328IntHiPen) != 0) return 5;
 
-    // Level 4 = SPIM, TMR2, UART, WDT, RTC, KB, PWM, INT0 - INT7.
+    // Level 4 = SPIM, TMR2, UART, WDT, RTC, KB, PWM, INT0 - INT7. A guest stopped for a received
+    // byte (IrLib, serial) wakes on the UART's.
 
     if ((intStatusLo & (hwr328IntLoAllKeys | hwr328IntLoPWM | hwr328IntLoKbd |
                         //	hwr328IntLoLCDC |
-                        hwr328IntLoRTC | hwr328IntLoWDT | hwr328IntLoTimer2 | hwr328IntLoSPIM)) !=
+                        hwr328IntLoRTC | hwr328IntLoWDT | hwr328IntLoUART | hwr328IntLoTimer2 |
+                        hwr328IntLoSPIM)) !=
         0)
         return 4;
 
@@ -1941,7 +1944,18 @@ void EmRegs328::spiMasterControlWrite(emuptr address, int size, uint32 value) {
 
 #define BIT_MASK (hwr328SPIMControlExchange | hwr328SPIMControlIntEnable)
     if ((spiMasterControl & BIT_MASK) != 0) {
-        // If so, assert the interrupt and clear the exchange bit.
+        // Talk to the slave if there is one: send the data, read its reply.
+
+        const uint16 enabled = hwr328SPIMControlExchange | hwr328SPIMControlEnable;
+        EmSPISlave* spiSlave = (spiMasterControl & enabled) == enabled ? GetSPISlave() : nullptr;
+        if (spiSlave) {
+            const uint16 numBits = (spiMasterControl & hwr328SPIMControlBitsMask) + 1;
+            const uint16 newData =
+                spiSlave->DoExchange(spiMasterControl, READ_REGISTER(spiMasterData));
+            WRITE_REGISTER(spiMasterData, newData & ~(~0u << numBits));
+        }
+
+        // Assert the interrupt and clear the exchange bit.
 
         spiMasterControl |= hwr328SPIMControlIntStatus;
         spiMasterControl &= ~hwr328SPIMControlExchange;
@@ -1964,6 +1978,8 @@ void EmRegs328::spiMasterControlWrite(emuptr address, int size, uint32 value) {
         */
     }
 }
+
+EmSPISlave* EmRegs328::GetSPISlave(void) { return nullptr; }
 
 // ---------------------------------------------------------------------------
 //		� EmRegs328::uartWrite

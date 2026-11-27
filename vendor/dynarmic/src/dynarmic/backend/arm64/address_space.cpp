@@ -379,6 +379,9 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
         case LinkTarget::InterpreterFallback:
             c.BL(prelude_info.interpreter_fallback);
             break;
+        case LinkTarget::FrondPageGuardExit:
+            c.BL(prelude_info.frond_page_guard_exit);
+            break;
         case LinkTarget::ExceptionRaised:
             c.BL(prelude_info.exception_raised);
             break;

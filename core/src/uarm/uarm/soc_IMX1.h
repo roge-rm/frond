@@ -21,14 +21,14 @@
 #include "zodiac_music.h"
 #include "zodiac_panel.h"
 
-// The Tapwave Zodiac 2 in the normal runtime. It runs the guarded i.MX1 machine (imx1_boot_probe.h)
+// The Tapwave Zodiac in the normal runtime. It runs the guarded i.MX1 machine (imx1_boot_probe.h)
 // and nothing else: no PACE or guest calls, and input reaches the ROM as pen samples, pin levels and
 // stick values. One per process, as the machine is.
 
 // The machine's options. Every button is released from reset: the pins read high, A7 to A10 and
 // D7 to D10 and D12 to D14. The other levels are the bring-up's. A saved state only loads into a
 // machine made with these, or with imx1StateAllowBootInputs when only the button levels differ.
-Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom);
+Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom, DeviceType5 device = deviceTypeZodiac2);
 
 // How long a hard reset holds power, in ms of guest time. ROM facts: right after reset the boot ROM (20003948)
 // makes A7, A10 and D12 inputs, waits, then reads Home (A7), power (A10) and Function (D12) in that order, low
@@ -42,6 +42,24 @@ inline constexpr uint32_t zodiacRomBase = 0x20000000;
 // Where an injected call returns to: never code, as the run stops before fetching it.
 inline constexpr uint32_t zodiacInjectedReturn = 0xfffffff0;
 
+// Facts of the 1.1 ROM: the stick filter (Thumb, 20095de6, called only from the stick sample at 2009617a every
+// 30 ms) takes the raw axes through r0 and r1 as pointers and writes the filtered ones back. Its state, at r4 from
+// 20095dfa on, is x[3] (+0), y[3] (+12), the last raw x and y (+24, +28), the first sample to weigh (+32) and the
+// slot the next raw goes in (+36). At 20095e2a r0 and r1 hold the raw axes and r2 and r3 how far each moved from
+// the last raw (0 on the first sample); a move over 200 on either drops the sample. The rest weighs the three
+// slots 27, 46 and 27 (table 200d3ad4) and divides by 100, so three slots of the same raw give that raw.
+inline constexpr uint32_t zodiacStickFilter = 0x20095de6, zodiacStickFilterHook = 0x20095e2a, zodiacStickWeights = 0x200d3ad4;
+inline constexpr uint16_t zodiacStickFilterCode[] = {
+    0xb5f3, 0xb081, 0x4649, 0x6809, 0x6809, 0x4894, 0x1840, 0x6900, 0x30ff, 0x3001, 0x6804, 0x9901, 0x6808, 0x9902,
+    0x6809, 0x69a2, 0x2a00, 0xdd0d, 0x69e3, 0x2b00, 0xdd0a, 0x4282, 0xdd01, 0x1a12, 0xe000, 0x1a82, 0x428b, 0xdd01,
+    0x1a5b, 0xe003, 0x1acb, 0xe001, 0x2200, 0x2300, 0x61a0, 0x61e1, 0x2ac8, 0xdc01, 0x2bc8, 0xdd03, 0x4888, 0xbcfe,
+    0xbc08, 0x4718, 0x6a62, 0x2500, 0x0092, 0x50a0, 0x6a60, 0x0080, 0x1900, 0x60c1, 0x6a20, 0x2100, 0x2200, 0x2803,
+    0xdb00, 0x2000, 0x4e80, 0x0093, 0x447e, 0x58f6, 0x0083, 0x58e7, 0x46b4, 0x437e, 0x191b, 0x68db, 0x1871, 0x4666,
+    0x435e, 0x1975, 0x3001, 0x3201, 0x2a03, 0xdbea, 0x2064, 0xf031, 0xfcaa, 0x1c06, 0x1c29, 0x2064, 0xf031, 0xfca5,
+    0x9901, 0x600e, 0x9902, 0x6008, 0x6a20, 0x2100, 0x2802, 0xd101, 0x6221, 0xe001, 0x3001, 0x6220, 0x6a60, 0x2802,
+    0xd101, 0x6261, 0xe001, 0x3001, 0x6260, 0x2000, 0xe7bf};
+inline constexpr uint32_t zodiacStickWeightsData[] = {27, 46, 27};
+
 // Facts of the 1.1 ROM for the Bluetooth shim (zodiac_bluetooth.cpp): BtlsLib's start, stop, write and read
 // (ARM), the DAL's doze (Thumb) and the IRQ handler's call of the DAL's interrupt dispatch (ARM, SVC mode), where
 // received bytes are handed to the serial driver, and the receive callback's wait for its port (Thumb).
@@ -51,7 +69,7 @@ inline constexpr uint32_t zodiacBluetoothHooks[] = {0x200f778c, 0x200f77c8, 0x20
 class SocIMX1 : public SoC {
    public:
     // nullptr with the reason in error when the ROM can't run.
-    static SocIMX1* Create(const uint8_t* rom, size_t size, std::string& error);
+    static SocIMX1* Create(const uint8_t* rom, size_t size, std::string& error, DeviceType5 device = deviceTypeZodiac2);
 
     void Reset() override;
     // A reset through RESET_IN with power held from it on for zodiacHardResetHoldMs of guest time.
@@ -124,12 +142,14 @@ class SocIMX1 : public SoC {
     bool FrameQuarterTurn() const override { return true; }
     unsigned GuestOrientation() override;
     Attention GuestAttention() override;
-    DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
+    DeviceType5 GetDeviceType() override { return device; }
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}
     bool LcdEnabled() override;
     // The battery level reaches the guest through the graphics chip's mode 1 ADC and the ASP's U input, set
     // again after every load and reset.
+    // The i.MX1 RTC on by the time a session was closed.
+    void ForwardClock(uint64_t seconds) override;
     bool BatterySupported() const override { return true; }
     bool SetBattery(const BatteryPower& value) override;
     // The battery inputs the machine has now, for tests: the ASP U word, the mode 1 sample and GPIO B14 (low
@@ -186,7 +206,11 @@ class SocIMX1 : public SoC {
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
     // changes between Run calls only, so always at a slice boundary, and stays through Load and Reset.
     // False on a stopped machine.
-    bool SetFastEngine(bool fast) { return imx1MachineSetFastEngine(machine, fast); }
+    bool SetFastEngine(bool fast) {
+        const bool set = imx1MachineSetFastEngine(machine, fast);
+        if (directStick.wanted) ApplyCodeHooks();
+        return set;
+    }
     bool FastEngine() const { return imx1MachineFastEngine(machine); }
     // Instructions retired and idle clocks skipped so far, for speed readouts.
     Imx1MachineCheapStatus Status() const { return imx1MachineGetStatus(machine); }
@@ -272,6 +296,13 @@ class SocIMX1 : public SoC {
         samples = sounding = 0;
         if (machine) imx1MachineYmfSamples(machine, &samples, &sounding);
     }
+    // Direct stick, Fast only: a code hook in the ROM's stick filter (zodiacStickFilter above) fills its
+    // history with each raw sample, so the filtered value is the stick as it is now and no jump is dropped. Exact
+    // never gets the hook. False, with it off, when the ROM's filter isn't one Frond knows.
+    bool SetDirectStick(bool on);
+    bool DirectStickOn() const { return directStick.wanted && directStick.known && FastEngine(); }
+    // Stick samples the hook has taken so far, for tests.
+    uint64_t DirectStickSamples() const { return directStick.samples; }
     // The events caught, for the player and tests.
     zodiac_music::Hooks& MusicHooks() { return music.hooks; }
     const zodiac_music::Library& MusicLibrary() const { return music.library; }
@@ -293,12 +324,13 @@ class SocIMX1 : public SoC {
     std::function<void()> CapturePeripheralInput() override;
 
    private:
-    SocIMX1() = default;
+    explicit SocIMX1(DeviceType5 type);
+    const DeviceType5 device;
     void PumpInput();
     void StateChanged();
     // Runs until the pc stop or for ticks of guest time. True on the stop.
     bool RunToStop(uint64_t ticks);
-    // Sets the machine's code hooks: the trace hooks, Bluetooth's and the music hooks.
+    // Sets the machine's code hooks: the trace hooks, Bluetooth's, direct stick's and the music hooks.
     void ApplyCodeHooks();
     // A run ended on a code hook: Bluetooth takes it, or the instruction runs.
     void CodeHookHit();
@@ -311,6 +343,12 @@ class SocIMX1 : public SoC {
     } music;
     // SetFmMuted's setting, host only.
     bool fmMuted{false};
+    // SetDirectStick's setting, host only.
+    struct DirectStick {
+        bool wanted{false}, searched{false}, known{false};
+        uint64_t samples{0};
+    } directStick;
+    void DirectStickHook(const uint32_t (&r)[16]);
     void MusicHook(uint32_t pc, const uint32_t (&r)[16]);
     // The Bluetooth shim (zodiac_bluetooth.cpp). Host only: the guest's side of it is in guest memory.
     // started: the guest's start went to the backend and no stop came since, so the hooks stay on while it runs

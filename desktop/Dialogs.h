@@ -55,6 +55,8 @@ class MachineSettings : public QWidget {
     QLabel* jogLandscapeLabel;
     // Never shown for 68k devices.
     QComboBox* engine;
+    // Zodiac only, used in Fast only.
+    QCheckBox* directStick;
     // 68k devices only.
     QSlider* contrast;
     QComboBox* speed;
@@ -69,6 +71,8 @@ class MachineSettings : public QWidget {
     QComboBox* bluetooth;
     QLineEdit* bluetoothSocket;
     void showPeripherals(bool shown);
+    // Sync Manager (data "sync") on the serial and infrared pickers, where the main window offers it.
+    void offerSync(bool serialSync, bool infraredSync);
     // A new machine: the Engine follows the chosen device's default until it is changed by hand.
     void setNewMachine();
  private:

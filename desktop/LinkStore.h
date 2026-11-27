@@ -43,6 +43,8 @@ class Store {
     QString name() const { return QString::fromStdString(info.name); }
     void setName(const QString& name);
     quint16 port{defaultPortValue};
+    // Accept incoming links and answer discovery on the network, not only on loopback.
+    bool allowNetwork{false};
     QVector<Peer> peers;
     Peer* find(const frond::link::InstallId& id);
     Peer* find(const QString& hex);

@@ -168,7 +168,11 @@ class RenderLink {
     // otherwise. Every event goes straight to the guest thread's queue and is dropped from
     // SDL's own, and wakes the guest thread if it sleeps (WaitForInput). Input doesn't wake
     // the SDL thread; window, app and render events do, so it can lay out, redraw or pump.
+    // Joystick events are let through: SDL makes the game controller events from them in an
+    // event watch, which only sees what the filter keeps. They wait in SDL's queue and
+    // DrainQueue drops them after the pump.
     static int SDLCALL Filter(void* userdata, SDL_Event* event) {
+        if (JoystickEvent(event->type)) return 1;
         auto& link = *static_cast<RenderLink*>(userdata);
         traceInputEvent("host", false, *event);
         if (link.beforeEvent) link.beforeEvent(*event);
@@ -370,6 +374,7 @@ class RenderLink {
 
     // Watch used while InstallFilter runs: holds each new event, in order.
     static int SDLCALL Hold(void* userdata, SDL_Event* event) {
+        if (JoystickEvent(event->type)) return 1;
         auto& link = *static_cast<RenderLink*>(userdata);
         std::lock_guard<std::mutex> lock(link.mutex);
         link.held.push_back(*event);
@@ -379,11 +384,14 @@ class RenderLink {
     // For SDL_FilterEvents: takes each queued event the watch doesn't hold and removes all.
     static int SDLCALL Queued(void* userdata, SDL_Event* event) {
         auto& link = *static_cast<RenderLink*>(userdata);
-        if (event->common.timestamp == heldStamp) return 0;
+        if (event->common.timestamp == heldStamp || JoystickEvent(event->type)) return 0;
         std::lock_guard<std::mutex> lock(link.mutex);
         link.Take(*event);
         return 0;
     }
+    // SDL's joystick layer (SDL_JOYAXISMOTION to SDL_JOYBATTERYUPDATED); the guest takes the
+    // game controller events made from them.
+    static bool JoystickEvent(uint32_t type) { return type >= SDL_JOYAXISMOTION && type < SDL_CONTROLLERAXISMOTION; }
     // With the mutex held: the events the watch held, behind the ones taken so far.
     void ReleaseHeld() {
         for (const auto& event : held) Take(event);

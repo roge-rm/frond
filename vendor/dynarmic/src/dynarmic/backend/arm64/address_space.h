@@ -172,6 +172,7 @@ protected:
 
         void* call_svc;
         void* interpreter_fallback;
+        void* frond_page_guard_exit;
         void* exception_raised;
         void* dc_raised;
         void* ic_raised;

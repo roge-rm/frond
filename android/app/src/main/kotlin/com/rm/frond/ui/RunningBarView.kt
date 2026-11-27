@@ -78,6 +78,7 @@ class RunningBarState {
     var sound by mutableStateOf(true)
     var soundKey by mutableStateOf(false)
     var powerKey by mutableStateOf(false)
+    var recordKey by mutableStateOf(false)
     var keyboardKey by mutableStateOf(false)
     var menuOpen by mutableStateOf(false)
     // The device and model behind the menu; null until the firmware is resolved.
@@ -90,6 +91,8 @@ class RunningBarState {
     // The controls editor behind the Controls sheet.
     var controls by mutableStateOf<ControlsEditor?>(null)
     internal var syncProtocol by mutableStateOf<SyncProtocol?>(null)
+    // The bar's sync button: off on a device that only syncs over infrared, started from the guest.
+    internal var syncButton by mutableStateOf(false)
     internal var syncMachine by mutableStateOf<String?>(null)
     internal var syncStatus by mutableStateOf<String?>(null)
     internal var syncStarting by mutableStateOf(false)
@@ -98,12 +101,16 @@ class RunningBarState {
     internal var syncManager by mutableStateOf(false)
     internal var syncSettings by mutableStateOf(false)
     internal var syncAssignment by mutableStateOf(false)
+    // The core's ActiveSync partnership question is open and not yet answered.
+    internal var partnershipQuestion by mutableStateOf(false)
 }
 
 class RunningBarActions(
     val back: () -> Unit,
     val toggleSound: () -> Unit,
     val power: () -> Unit,
+    // The Record button went down (true) or was let go (false).
+    val record: (Boolean) -> Unit,
     val keyboard: () -> Unit,
     val show: () -> Unit,
     val hide: () -> Unit,
@@ -115,6 +122,8 @@ class RunningBarActions(
     val filesOpen: (Boolean) -> Unit,
     val startSync: () -> Unit,
     val syncMachines: () -> List<Session>,
+    // true sets up an ActiveSync partnership, false connects as a guest.
+    val answerPartnership: (Boolean) -> Unit,
 )
 
 @Composable
@@ -123,7 +132,7 @@ fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
         val menuOpen = state.menuOpen
         val pcLinkOpen = state.model?.pcLink != null
         val overlayOpen = state.sheet != null || pcLinkOpen
-        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment ||
+        val dialogOpen = state.dialog != null || state.syncManager || state.syncSettings || state.syncAssignment || state.partnershipQuestion ||
             state.model?.let { it.busy != null || it.path != null || it.log != null } == true
         if (RunningBar.autoHides(state.mode, state.shown, menuOpen, overlayOpen, dialogOpen)) {
             LaunchedEffect(state.touches, menuOpen, overlayOpen, dialogOpen) {
@@ -185,7 +194,7 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
                 }
                 else -> Unit
             }
-            state.syncProtocol?.let { protocol ->
+            state.syncProtocol?.takeIf { state.syncButton }?.let { protocol ->
                 LaunchedEffect(state.model) { state.model?.readCradle() }
                 IconButton(actions.startSync, Modifier.size(button), enabled = !state.syncStarting && !state.syncRunning && state.model?.busy == null && state.model?.outOfCradle != true) {
                     Icon(painterResource(if (protocol == SyncProtocol.ACTIVE_SYNC) R.drawable.ic_activesync else R.drawable.ic_hotsync), contentDescription = protocol.label)
@@ -197,6 +206,18 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
             if (device != null && !device.runs68k) BarButton({ state.model?.rotate() }, button) {
                 Icon(painterResource(R.drawable.ic_rotate_device), contentDescription = "Rotate")
             }
+            if (state.recordKey) IconButton({}, Modifier.size(button).pointerInput(Unit) {
+                // Held down to record: the key is down for as long as the finger is.
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    actions.record(true)
+                    try {
+                        do { val event = awaitPointerEvent() } while (event.changes.any { it.pressed })
+                    } finally {
+                        actions.record(false)
+                    }
+                }
+            }) { Icon(painterResource(R.drawable.ic_mic), contentDescription = "Record") }
             if (state.powerKey) BarButton(actions.power, button) { Icon(painterResource(R.drawable.ic_power), contentDescription = "Power") }
             Box {
                 BarButton(actions.openMenu, button) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
@@ -249,7 +270,7 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
     if (state.syncManager) {
         val machines = remember { actions.syncMachines() }
         Dialog({ state.syncManager = false }, DialogProperties(usePlatformDefaultWidth = false)) {
-            Surface(Modifier.fillMaxSize()) { SyncManagerScreen(machines, refresh = state.syncRefresh) { state.syncManager = false } }
+            Surface(Modifier.fillMaxSize()) { SyncManagerScreen(machines, refresh = state.syncRefresh, protocol = state.syncProtocol) { state.syncManager = false } }
         }
     }
     state.syncMachine?.let { machine ->
@@ -257,6 +278,15 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
         if (state.syncSettings) SyncDeviceDialog(machine, onClose = { state.syncSettings = false },
             protocol = state.syncProtocol, networkHotSync = model.device.supportsNetworkHotSync())
     }
+    // Back connects as a guest, as cancelling desktop ActiveSync's setup did; a tap outside does nothing.
+    if (state.partnershipQuestion) AlertDialog(
+        onDismissRequest = { actions.answerPartnership(false) },
+        properties = DialogProperties(dismissOnClickOutside = false),
+        title = { Text("ActiveSync") },
+        text = { Text("Set up an ActiveSync partnership with this device?") },
+        confirmButton = { TextButton(onClick = { actions.answerPartnership(true) }) { Text("Set up") } },
+        dismissButton = { TextButton(onClick = { actions.answerPartnership(false) }) { Text("Connect as guest") } },
+    )
     BusyDialog(model)
     AlertBox(model)
     CardPickerDialogs(model)

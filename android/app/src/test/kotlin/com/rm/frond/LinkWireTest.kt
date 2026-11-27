@@ -116,6 +116,7 @@ class LinkWireTest {
         assertEquals("Couldn't reach Pixel.", LinkWire.pairResultText("unreachable", "Pixel"))
         val row = LinkWire.ConnectionRow("id", "Desk", "dan-laptop", "", up = true, rtt = 4, keyChanged = false, forgotten = false, seen = "", channels = "Infrared: TX – E2")
         assertEquals("Connected · 4 ms · Infrared: TX – E2", LinkWire.connectionStatus(row))
+        assertEquals("Not seen, network connections are off", LinkWire.connectionStatus(row.copy(up = false, network = false)))
         assertEquals("Key changed, pair again", LinkWire.connectionStatus(row.copy(keyChanged = true)))
         assertEquals("Not paired on dan-laptop, pair again", LinkWire.connectionStatus(row.copy(up = false, forgotten = true)))
         assertEquals("Seen at 192.168.1.20", LinkWire.connectionStatus(row.copy(up = false, seen = "192.168.1.20")))
@@ -139,5 +140,17 @@ class LinkWireTest {
         assertEquals(listOf("Desk", "Old"), rows.map { it.name })
         assertEquals("Connected · 3 ms", LinkWire.connectionStatus(rows[0]))
         assertEquals("Key changed, pair again", LinkWire.connectionStatus(rows[1]))
+    }
+
+    // Found by LinkWireFuzzTest: a name cut at 64 chars kept half of an emoji, which came back as '?'.
+    @Test fun namesAreCutBetweenSurrogatePairs() {
+        val name = "a".repeat(63) + "\uD83D\uDE00"
+        assertEquals("a".repeat(63), LinkWire.name64(name))
+        assertEquals("a".repeat(62) + "\uD83D\uDE00", LinkWire.name64("a".repeat(62) + "\uD83D\uDE00" + "b"))
+        val beacon = LinkWire.parseBeacon(LinkWire.beacon(LinkWire.BEACON, id, 5035, name))!!
+        assertEquals("a".repeat(63), beacon.name)
+        val frame = LinkWire.pairRequest(id, name)
+        val request = LinkWire.parsePairFrame(frame.copyOfRange(2, frame.size)) as LinkWire.PairFrame.Request
+        assertEquals("a".repeat(63), request.name)
     }
 }

@@ -474,11 +474,21 @@ UsbDevicePort SocS3C2442::GetUsbPort() {
     return {this, ops};
 }
 
-void SocS3C2442::StartActiveSync() {
+std::shared_ptr<frondSync::ActiveSyncSession> SocS3C2442::StartActiveSync(bool listApplications) {
     StopSerialActiveSync();
     usbDesktop.reset();
-    activeSync = std::make_shared<frondSync::ActiveSyncSession>();
+    activeSync = std::make_shared<frondSync::ActiveSyncSession>(false, listApplications);
     activeSync->Start();
+    return activeSync;
+}
+
+bool SocS3C2442::ActiveSyncRunning() const {
+    return (activeSync && activeSync->Running()) || (serialSync && serialSync->session->Running());
+}
+
+void SocS3C2442::StopActiveSync() {
+    usbDesktop.reset();
+    activeSync.reset();
 }
 
 bool SocS3C2442::StartSerialActiveSync() {
@@ -503,14 +513,19 @@ bool SocS3C2442::StopSerialActiveSync() {
 
 bool SocS3C2442::SetUsbCable(bool attached) {
     if (halted) return false;
-    if (!attached) {
-        usbDesktop.reset();
-        activeSync.reset();
-    }
+    if (!attached) StopActiveSync();
     machine->setUsbVbus(attached);
     // USB power is AC to the battery driver.
     rx1950ApplyBattery(*machine, battery);
     return true;
+}
+
+// ASSUMPTION "rx1950 cable out time": WM5's cable thread (sc2440usbfn.dll 0x176a50c) turns the pull-up off when
+// VBUS goes, waits 500 ms and looks again. With VBUS back by then it never turns the pull-up on again, so the
+// cable stays out a second, as when a session saved with it in is opened with it in.
+uint64_t SocS3C2442::UsbPlugReadyAt() const {
+    const uint64_t off = machine->usbVbusOffAt();
+    return off <= machine->nanoseconds() ? off + 1000000000 : 0;
 }
 
 void SocS3C2442::TickUsbHost(uint64_t t) {
@@ -532,6 +547,7 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
     soc->battery = battery;
     S3c2442Options options;
     options.rtcStart = rx1950RtcStart;
+    options.rtcBinaryYear = true;
     // No serial cable.
     options.pinLevels[rx1950CablePort] &= ~(1u << rx1950CableBit);
     rx1950BatteryPins(soc->battery, options);
@@ -943,6 +959,12 @@ bool SocS3C2442::SetBattery(const BatteryPower& value) {
     battery = value;
     if (machine) rx1950ApplyBattery(*machine, battery);
     return true;
+}
+
+void SocS3C2442::ForwardClock(uint64_t seconds) {
+    if (!seconds || halted) return;
+    if (!rx1950RtcForward(machine->rtc, machine->intc, seconds))
+        std::cerr << "rx1950: the clock was left as saved, its registers don't hold a time" << std::endl;
 }
 
 // The charge and notification LED, stepped by the board's blinker in guest time. No vibrate motor.

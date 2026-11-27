@@ -46,13 +46,16 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
 
     int renderHeight = windowHeight, renderWidth = windowWidth;
     SDL_GetRendererOutputSize(renderer, &renderWidth, &renderHeight);
+    const auto metrics = consistentWindowMetrics(windowWidth, windowHeight, renderWidth, renderHeight);
+    windowWidth = metrics.width;
+    windowHeight = metrics.height;
+    const float pixelsX = metrics.pixelsX, pixelsY = metrics.pixelsY;
 
-    if (renderHeight != windowHeight || renderWidth != windowWidth) {
-        SDL_RenderSetScale(renderer, static_cast<float>(renderWidth) / windowWidth,
-                           static_cast<float>(renderHeight) / windowHeight);
-    }
+    deviceScaleX = pixelsX;
+    deviceScaleY = pixelsY;
+    if (pixelsX != 1.f || pixelsY != 1.f) SDL_RenderSetScale(renderer, pixelsX, pixelsY);
 
-    artworkScale = scale * static_cast<float>(renderWidth) / windowWidth;
+    artworkScale = scale * pixelsX;
 
     if (fit != WindowFit::none) {
         const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
@@ -62,17 +65,24 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
             landscape ? displayConfiguration.width : screenHeight, controlView);
         layout = fitWindowLayout(fit, size.x, size.y, windowWidth, windowHeight);
 
-        // The viewport is in output pixels while the scale is 1, then the scale maps device
-        // pixels into it.
-        const float pixelsX = static_cast<float>(renderWidth) / windowWidth;
-        const float pixelsY = static_cast<float>(renderHeight) / windowHeight;
+        // The device's place in output pixels. It is drawn on a texture of that size, the scale mapping
+        // device pixels into it, and copied there on each present.
         SDL_RenderSetScale(renderer, 1, 1);
-        const SDL_Rect viewport{int(std::lround(layout.x * pixelsX)), int(std::lround(layout.y * pixelsY)),
-                                int(std::lround(layout.width * pixelsX)),
-                                int(std::lround(layout.height * pixelsY))};
-        SDL_RenderSetViewport(renderer, &viewport);
-        SDL_RenderSetScale(renderer, layout.scaleX * pixelsX, layout.scaleY * pixelsY);
-        artworkScale = std::max(layout.scaleX * pixelsX, layout.scaleY * pixelsY);
+        const SDL_Rect place{int(std::lround(layout.x * pixelsX)), int(std::lround(layout.y * pixelsY)),
+                             int(std::lround(layout.width * pixelsX)), int(std::lround(layout.height * pixelsY))};
+        deviceScaleX = layout.scaleX * pixelsX;
+        deviceScaleY = layout.scaleY * pixelsY;
+        if (place.w > 0 && place.h > 0)
+            deviceTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET, place.w, place.h);
+        if (deviceTexture) {
+            SDL_SetTextureBlendMode(deviceTexture, SDL_BLENDMODE_NONE);
+            devicePlace = place;
+        } else {
+            // Without the texture: a viewport, right on SDL2 only.
+            SDL_RenderSetViewport(renderer, &place);
+        }
+        DrawOnDevice();
+        artworkScale = std::max(deviceScaleX, deviceScaleY);
     } else {
         layout = WindowLayout{scale, scale, 0, 0, windowWidth, windowHeight};
     }
@@ -105,10 +115,29 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
 
     ClearWindow();
     DrawSilkscreen();
+    Present();
+}
+
+void SdlRenderer::DrawOnDevice() {
+    // A texture target starts at scale 1 in SDL2 and SDL3, and SDL2 restores the window's own scale.
+    SDL_SetRenderTarget(renderer, deviceTexture);
+    SDL_RenderSetScale(renderer, deviceScaleX, deviceScaleY);
+}
+
+void SdlRenderer::Present() {
+    if (deviceTexture) {
+        SDL_SetRenderTarget(renderer, nullptr);
+        SDL_RenderSetScale(renderer, 1, 1);
+        SDL_SetRenderDrawColor(renderer, background >> 16, (background >> 8) & 0xff, background & 0xff, 0xff);
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, deviceTexture, nullptr, &devicePlace);
+    }
     SDL_RenderPresent(renderer);
+    if (deviceTexture) DrawOnDevice();
 }
 
 SdlRenderer::~SdlRenderer() {
+    SDL_DestroyTexture(deviceTexture);
     SDL_DestroyTexture(frameTexture);
     SDL_DestroyTexture(intermediateTexture);
     SDL_DestroyTexture(silkscreenTexture);
@@ -126,12 +155,11 @@ bool SdlRenderer::SaveFramebuffer(const char* path, bool& blank) {
     if (blank) {
         success = SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 0xff)) == 0;
     } else {
-        SDL_Texture* previous = SDL_GetRenderTarget(renderer);
         success = SDL_SetRenderTarget(renderer, frameTexture) == 0;
         if (success)
             success = SDL_RenderReadPixels(renderer, nullptr, surface->format->format,
                                            surface->pixels, surface->pitch) == 0;
-        SDL_SetRenderTarget(renderer, previous);
+        DrawOnDevice();
     }
     if (success) success = IMG_SavePNG(surface, path) == 0;
     SDL_FreeSurface(surface);
@@ -200,7 +228,7 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
         } else {
             SDL_RenderCopyEx(renderer, intermediateTexture, &rect, &rect, 0, nullptr, SDL_FLIP_NONE);
         }
-        SDL_SetRenderTarget(renderer, nullptr);
+        DrawOnDevice();
 
         frameTextureValid = true;
     }
@@ -292,7 +320,7 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
         // Controls all beside the screen leave nothing to draw under it.
         if(!deviceControlsUnits(controls,controlView)) {
             DrawSidebar(controls,screenWidth,screenHeight,buttons,stick,controlsChanged);
-            SDL_RenderPresent(renderer);
+            Present();
             return;
         }
         if(!controlsTexture)
@@ -307,7 +335,7 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
                 SDL_SetRenderDrawColor(renderer,0,0,0,0);
                 SDL_RenderClear(renderer);
                 drawDeviceControls(renderer,controls,screenWidth,0,artworkScale,buttons,controlView,stick);
-                SDL_SetRenderTarget(renderer,nullptr);
+                DrawOnDevice();
                 SDL_RenderSetScale(renderer,sx,sy);
                 controlsPainted=true;
             }
@@ -320,7 +348,7 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
         // so the strip's texture can't cover the part beside the buttons.
         if(controls.sideTabWidth>0) DrawSidebar(controls,screenWidth,screenHeight,buttons,stick,controlsChanged);
     }
-    SDL_RenderPresent(renderer);
+    Present();
 }
 
 SDL_Rect SdlRenderer::ScreenRect() const {
@@ -418,7 +446,7 @@ void SdlRenderer::DrawSidebar(const DeviceControlProfile& controls, int screenWi
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
         SDL_RenderClear(renderer);
         drawDeviceSidebar(renderer, controls, screenWidth, screenHeight, scale, buttons, controlView, stick);
-        SDL_SetRenderTarget(renderer, nullptr);
+        DrawOnDevice();
         SDL_RenderSetScale(renderer, sx, sy);
         sidebarPainted = true;
     }

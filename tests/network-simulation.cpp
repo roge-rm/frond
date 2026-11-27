@@ -65,6 +65,11 @@ int main() {
     assert(net.Handle(nullptr, 0xa801));
     assert(d0 == 0 && get(0x302, 2) == 0);
     start();
+    arg(2, 0xc000022a);
+    arg(6, 0x320);
+    assert(net.Handle(nullptr, 0xa805));
+    assert(d0 == 0x320 && std::strcmp(reinterpret_cast<const char*>(memory + 0x320), "192.0.2.42") == 0);
+    start();
     arg(2, 2, 1);
     arg(4, 1, 1);
     arg(12, 0x302);

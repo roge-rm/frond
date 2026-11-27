@@ -82,6 +82,11 @@ class SyncPipe {
         std::lock_guard lock(mutex);
         return closed;
     }
+    // Closed, or the device side finished sending.
+    bool Ended() const {
+        std::lock_guard lock(mutex);
+        return closed || inputFinished;
+    }
 
     // Engine side.
     class End final : public SyncStream {
@@ -99,9 +104,11 @@ class SyncPipe {
         bool Write(const uint8_t* data, size_t size) override {
             auto& p = *pipe;
             std::unique_lock lock(p.mutex);
+            // A Clear while this waits for room ends the write: the rest belongs to the session before it.
+            const uint64_t started = p.generation;
             while (size) {
-                p.changed.wait(lock, [&] { return p.closed || p.toDevice.size() < queueBytes; });
-                if (p.closed) return false;
+                p.changed.wait(lock, [&] { return p.closed || p.generation != started || p.toDevice.size() < queueBytes; });
+                if (p.closed || p.generation != started) return false;
                 const size_t n = std::min(size, queueBytes - p.toDevice.size());
                 p.toDevice.insert(p.toDevice.end(), data, data + n);
                 data += n;

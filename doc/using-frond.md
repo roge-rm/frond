@@ -21,6 +21,7 @@ The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by 
 
 Which ROM each 68k device and the Zodiac take:
 
+- The Palm III takes its OS 3.0, 3.3 or 4.1 ROM (2, 1.3 and 1.7 MB, retail or debug). Pick 3.0 for the OS it shipped with, 3.3 for the last 3.x one and 4.1 for the newest, which boots like the IIIx 4.1. 3.3 and 4.1 have the setup pages, 3.0 goes straight to Preferences. The IIIx and the rest take no Palm III ROM.
 - The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. For a IIIe, select Palm IIIe when importing the IIIx retail OS 3.1 ROM (1,212,416 bytes).
 - The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes).
 - The m100 and m105 take the OS 3.5.1 ROM (2 MiB). Frond offers the m100 when it sees one, so choose the m105 yourself.
@@ -28,7 +29,7 @@ Which ROM each 68k device and the Zodiac take:
 - The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's.
 - The CLIÉ T415 takes the retail T415 ROM, including the 8 MiB dump with two identical copies of its 4 MiB flash. The Sony T400 ROM from POSE also works.
 - Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana.
-- For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
+- Zodiac 1 (32 MiB) and Zodiac 2 (128 MiB) use the same 1.1 ROM. Choose **Tapwave Zodiac 1** when adding that model. Automatic detection picks the Zodiac 2. For either model, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 
 A session has your firmware, installed apps and personal data in it. Keep it to yourself.
 
@@ -113,7 +114,7 @@ Under Applications (the Linux panel or the Android sheet):
 
 Close Palm dialogs first if an install or export can't get through.
 
-On the rx1950 **Install…** copies files onto the SD card's top folder, so it needs a card in the slot. Windows Mobile sees the card go out and come back. To install a CAB, open Storage Card in File Explorer and tap it. The application list, Launch, Export, Other… and Export all… are greyed. Use Files under Storage to copy files off the card.
+On the rx1950 **Install…** copies files to the top folder of the SD card. With one CAB selected, Windows Mobile opens its installer when the card goes back in. Accept the publisher prompt on the emulated screen and finish the install there. If the installer does not open, or you picked several files, open Storage Card in File Explorer and tap the CAB. In Applications, **Refresh** reads the installed programs over ActiveSync. Use Files under Storage to copy files off the card.
 
 ### FrondBench
 
@@ -146,7 +147,7 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Music output | Zodiac only. Where the games' music goes. See [Music output](#music-output). |
 | Contrast | The grey 68k Palms and Dana only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
 | Battery | Maximum (the default, with Charging off), Set level (a 0 to 100 slider) or Host battery, which follows this computer's level and charging, read about once a minute (a computer with no battery reads 100% on external power). Charging says whether the device sits on its charger, for Maximum and Set level. Low levels bring up the device's own warnings and auto-off. It applies at once, is in the Display panel too, and is saved with the machine, not the session. Greyed in the Display panel on devices that don't have it yet, and Charging is greyed there where the charger isn't modelled (the saved choice is kept). |
-| Speed | Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k Palms stop at 4×); the multiples run that many times faster than Original. On the 68k Palms and Dana, Original runs at the real clock (16.58 MHz on the IIIx, IIIe, IIIxe, V, m100 and m105, 20.25 MHz on the Vx and IIIc, 33.16 MHz on the m125, m130, m500, c500, m505, m515 and m520) and Uncapped lets the host run it as fast as it can (timers stay real time); it's in the Display panel or sheet too and applies at once. On the other devices Original follows the clock the Palm OS sets (312 MHz turbo on the T|X and Zire 72, about 199 MHz on the E2, E3 and TG50, lower when the OS slows the chip down) and Uncapped passes `--mips 3000`; both apply at the next start. |
+| Speed | Original, 1.5×, 2×, 3×, 4×, 8× or Uncapped (the 68k Palms stop at 4×); the multiples run that many times faster than Original. On the 68k Palms and Dana, Original runs at the real clock (16.58 MHz on the Palm III, IIIx, IIIe, IIIxe, V, m100 and m105, 20.25 MHz on the Vx and IIIc, 33.16 MHz on the m125, m130, m500, c500, m505, m515 and m520) and Uncapped lets the host run it as fast as it can (timers stay real time); it's in the Display panel or sheet too and applies at once. On the other devices Original follows the clock the Palm OS sets (312 MHz turbo on the T|X and Zire 72, about 199 MHz on the E2, E3 and TG50, lower when the OS slows the chip down) and Uncapped passes `--mips 3000`; both apply at the next start. |
 | Engine | Exact or Fast. See [performance.md](performance.md). The 68k Palms and Dana only have Exact, so it never shows there. |
 
 Android also has Settings in the home menu: Orientation (follow the phone, portrait or landscape), the gdb server and its port, and the controller keys.
@@ -177,18 +178,21 @@ Click or tap the buttons under the screen and the silkscreen areas. Click and ho
 
 Keys, with the infrared keyboard detached (attached, they go to the Palm's keyboard driver instead, see [Infrared keyboard](#infrared-keyboard)):
 
-| Key | T\|X | E2 / E3 | Zire 72 | TG50 | 68k Palms |
-|---|---|---|---|---|---|
-| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | scroll rocker (up and down) |
-| F1 | Home | Calendar | Calendar | Date Book | Date Book |
-| F2 | Calendar | Contacts | Contacts | Address | Address |
-| F3 | Contacts | Tasks | Music | To Do | To Do List |
-| F4 | Web | Note Pad | Camera | Memo Pad | Memo Pad |
-| F5 | | | Voice button (hold to record) | Voice button | |
-| F6 | | | | Home | |
-| Escape | Power | E2: Power | Power | Power | Power |
+| Key | T\|X | E2 / E3 | Zire 72 | TG50 | Zodiac | 68k Palms |
+|---|---|---|---|---|---|---|
+| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | pushes the stick, Enter presses its centre | scroll rocker (up and down) |
+| F1 | Home | Calendar | Calendar | Date Book | Action 1 (bottom) | Date Book |
+| F2 | Calendar | Contacts | Contacts | Address | Action 2 (right) | Address |
+| F3 | Contacts | Tasks | Music | To Do | Action 3 (left) | To Do List |
+| F4 | Web | Note Pad | Camera | Memo Pad | Action 4 (top) | Memo Pad |
+| F5 | | | Voice button (hold to record) | Voice button | | |
+| F6 | | | | Home | Home | |
+| F7 | | | | | Function | |
+| F8, F9 | | | | | Left and right triggers | |
+| F10 | | | | | Stick centre | |
+| Escape | Power | E2: Power | Power | Power | | Power |
 
-On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
+On the Zodiac, F1 to F4 are the Action buttons and Enter and F10 press the stick's centre. On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
 
 **Game controller** (TG50, in the Machine menu on Linux and the corner menu on Android) plugs Sony's CLIÉ game controller into the connector or takes it out while the machine runs. It's drawn in place of the keyboard, and after Rotate its grips sit either side of the upright screen. The TG50's own driver runs it. It's saved for each machine; a session loaded later brings its own state. It's greyed while serial, infrared or USB has the connector. While it's in, the arrows are its arrows, Z and X are A and B, A and S are X and Y, Q is Home, W is Menu and H moves the Hold slide, and these keys no longer type. A game controller works it too: the d-pad or left stick, A, B, X and Y, Start for Home, Back for Menu and the right shoulder button for Hold. On Android, a game controller's d-pad, A, B, X, Y, Start (Home), Select (Menu) and R3 (Hold) press the CLIÉ controller's buttons while it's in, and the CLIÉ's own Home and Menu while it's out, and Settings → Controller → Set controls lists them for the TG50.
 
@@ -363,13 +367,15 @@ Open Pairing… from the File menu on Linux or Connections from the Home ⋮ men
 
 - Connected, with the round trip time and what it carries, for example "Connected · 4 ms · Infrared: Palm TX – Tungsten E2".
 - Seen at 192.168.1.20, which means it's on the network but nothing is using the link.
-- Not seen.
+- Not seen. When network connections are off it says "Not seen, network connections are off".
 - Key changed, pair again, see below.
 - Not paired on <name>, pair again, which means that install forgot you.
 
 On Linux "This computer" is the first row. It joins machines running in different windows on the same computer, needs no pairing and is always there.
 
 A row's menu (right-click on Linux, ⋮ on Android) has Rename, Address…, Bluetooth radio and Forget. Rename is only your name for it. Address… sets an address to try when the install isn't found by itself, and Forget removes the pairing, after which the other install shows "pair again".
+
+Connections only takes links from this computer or phone unless you allow the network. To accept incoming links and use Nearby across the network, turn on **Allow incoming Frond links over the network**, in Settings on Android or at the top of Connections on Linux. On Android it applies when the link service next starts, so close Connections and stop any machines using it before reopening. On Linux it applies at once. Connections shows the listening addresses. Installs that already had paired connections before this setting existed keep it on, and new installs start with it off. On Linux `FROND_LINK_ALLOW_NETWORK=1` (or `0`) overrides the setting.
 
 To pair, open Connections on both. The other install shows up under Nearby, and Pair (or Add by address… if it isn't listed, with an address like `192.168.1.20`) asks it for a code. It shows a 6-digit code, for example "dan-laptop wants to pair. Code 482 913", and you type that code in on the first one ("Enter the code shown on Pixel 8"). The code lasts 2 minutes. After 3 wrong tries, or once the code runs out, that install won't take a new pairing for a minute. Pairing swaps keys, and every later link checks them. If an install's key doesn't match, the row says "Key changed, pair again" and Frond doesn't link until you pair again. That happens after a reinstall, and it can also mean someone else is using that address.
 
@@ -408,7 +414,7 @@ Without a connection, serial, USB HotSync and infrared beaming have an endpoint 
 
 The choice is saved with each machine. A status line shows the endpoint and whether a peer is connected. Changing the choice while the machine runs closes the old connection. Nothing from the host is saved in a session, and reset, true sleep and loading a session close the connection.
 
-On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server all go over the network, to another Frond or to the link tools below on a computer.
+On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server all go over the network, to another Frond or to the link tools below on a computer. Wait for a peer on Android has an Allow network peers switch. Without it the port only takes connections from the device itself, and the status line says "network connections are off". A Wait for a peer saved before the switch existed keeps taking network peers.
 
 Android has no PTYs. Its USB HotSync row has Off, Wait for a peer (all addresses, port 5034, and it shows the phone's address) and Connect to an address, to reach a link tool on a computer. Infrared, serial and Bluetooth on Android use connections only.
 
@@ -446,7 +452,9 @@ On the CLIÉ T415, set USB to Off in Connections to use Serial for HotSync. Use 
 
 A 68k Palm's serial port is the cradle connector, set to Off, a PTY or a TCP port like the other serial ports. Serial HotSync works with pilot-link on that path (`pilot-xfer -p /dev/pts/N -l`): press HotSync in the Connections panel, then start HotSync on the Palm. Infrared beaming works as on the other devices.
 
-A 68k Palm reaches the network the way the real ones did, with PPP over the serial port to a PPP server on the host. Frond doesn't redirect NetLib for it. Put the serial port on a PTY or TCP port, from the command line:
+A 68k Palm reaches the network with PPP over its serial port. On Android set **Serial port** to **Direct PPP** in **Edit settings** or **Connections**, then set up Palm OS as described below. The built-in router gives the guest 10.0.2.15, with DNS at 10.0.2.3.
+
+On desktop you can also use the built-in router with `--serial ppp`, or connect a host PPP server to a PTY or TCP port:
 
 ```sh
 out/frond-68k iiix.frond --serial pty     # prints: serial: pty /dev/pts/N connected
@@ -500,6 +508,8 @@ Disconnect hangs up. Loading a session saved while online gives NO CARRIER, as i
 
 ### HotSync by modem
 
+On Android, assign the machine a Sync Manager profile and set **Serial port** to **Modem**. In the HotSync app select **Modem** and dial 4687962 to sync straight to that profile. For Network HotSync, set **Connection** to **Network** in **Sync settings**, then tap Frond's HotSync button or reopen the machine. Use 10.0.2.2 as the Primary PC Address in the guest and select the dial-up service in **Modem Sync Prefs**.
+
 On Linux the modem can HotSync with pilot-link two ways. The state line shows the PTY for the first, for example "Modem: idle, HotSync on /dev/pts/5".
 
 - Modem Sync to a number: dial 4687962 (HOTSYNC on a keypad) and the call goes straight to that PTY. Run `pilot-xfer -p /dev/pts/5 -l` (or another pilot-link command), then in the HotSync app tap Modem, enter 4687962 as the phone number, keep Palm Modem US/Canada and tap the HotSync button. With a dial prefix like `9,` it still works.
@@ -513,18 +523,20 @@ Devices with an infrared phone can use Mobile phone in the Infrared list (Linux,
 2. Palm OS 4.1: use the built-in IR to Phone connection.
 3. Dial any number, with PPP and Query DNS as above, and Connect.
 
+On a Zodiac, make a new connection in Prefs → Connection. Set **Connect to** to **Modem** and **Via** to **Infrared**, then select that connection in the Network panel.
+
 The state line reads "Mobile phone: idle", "linked" once the Palm has found the phone, "dialling", then "online at 33600". It takes about 5 to 20 seconds to come up. Infrared beaming to another Frond is off while Mobile phone is on.
 
 ### Mobile phone over Bluetooth
 
-Devices with Bluetooth can use Mobile phone in the Bluetooth list on Linux. It's This Frond's radio with a phone called "Frond Phone" on it, which offers Dial-up Networking and has the same modem and internet as the infrared phone. Machines on This Frond's radio still find each other.
+Devices with Bluetooth can use **Mobile phone** in the Bluetooth list on Android and Linux. Look for "Frond Phone", which offers Dial-up Networking and has the same modem and internet as the infrared phone. On Android the phone uses a radio private to the running machine's Sync Manager profile. On Linux the phone shares This Frond's radio.
 
 1. In Prefs, Connection, make a connection to a phone via Bluetooth, and find Frond Phone with Device. Pair with the passkey 1234.
 2. Dial any number, with PPP and Query DNS as above, and Connect.
 
-The status reads "Bluetooth: This Frond's radio, Mobile phone: idle", then "dialling" and "online at 33600" during a call. The Debian package includes the phone; a source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built. Android doesn't have it yet.
+The phone status shows "idle", then "dialling" and "online at 33600" during a call. The Android app and Debian package include the phone. A Linux source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built.
 
-For Zodiac Network HotSync over Bluetooth dial-up, start the phone peer on the virtual radio with a Sync Manager folder:
+For Zodiac Network HotSync over Bluetooth dial-up on Android, assign a profile in **Sync settings** and select **Mobile phone**. On Linux, start the phone peer with a Sync Manager folder:
 
 ```sh
 build/bluetooth-opp-peer/bluetooth-opp-peer RADIO-SOCKET --dun --sync-folder PROFILE-FOLDER
@@ -537,13 +549,14 @@ Modem and phone by device:
 | | Modem on serial | Mobile phone on infrared | Mobile phone on Bluetooth |
 |---|---|---|---|
 | 68k Palms | yes, Palm OS 3.1, 3.5, 4.1, not the m100 and m105 | yes, Palm OS 3.5 and 4.1 | no |
-| T\|X, TG50, E2, Zire 72 | no | yes | yes, Linux |
+| T\|X, TG50, E2, Zire 72 | no | yes | yes, Android and Linux |
+| Zodiac 1 and 2 | no | yes | yes, Android and Linux |
 | Tungsten E3 | no | no | no |
 | Dana, Dana Wireless | no | no | no |
 
 ### USB HotSync
 
-Plugs the device's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
+Plugs the device's USB port into the computer. On Android use Wait for a peer, turn on **Allow network peers**, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
 
 ### Sync Manager
 
@@ -553,7 +566,7 @@ Open **Sync Manager** from **…** on Android or from **…** or **File** on the
 
 Use Frond CSV to keep all fields and data when exporting records. Contacts also support vCard, calendar and tasks support iCalendar, and you can import or export a memo as a UTF-8 text file. iCalendar supports single-day appointments and tasks without repeats or alarms. Records with repeats or alarms can be exported as CSV.
 
-**Connections** can route a Palm OS serial or USB link to **Sync Manager** so you can start HotSync from the handheld. USB and serial HotSync can still go to a PTY or TCP port for external tools.
+**Connections** can route a Palm OS serial, USB or infrared link to **Sync Manager** so you can start HotSync from the handheld. USB and serial HotSync can still go to a PTY or TCP port for external tools.
 
 #### Queue applications from an installer
 
@@ -565,7 +578,7 @@ Documents To Go needs a first desktop run for the handheld’s Palm user. HotSyn
 
 ### ActiveSync
 
-On the rx1950, click **ActiveSync** in the top bar to connect to the assigned profile. It uses USB by default. Choose **Serial** under **Connection** in the machine’s sync settings to use the serial cable. Use **Sync Manager** to queue a Windows Mobile CAB. ActiveSync sends one CAB at a time to the installer on the device, where you can finish the installation. Contacts, calendar, tasks and contact pictures sync. ActiveSync is available on Windows, Linux, macOS and Android.
+On the rx1950, click **ActiveSync** in the top bar to connect to the assigned profile. It uses USB by default. Choose **Serial** under **Connection** in the machine’s sync settings to use the serial cable. Use **Sync Manager** to queue a Windows Mobile CAB. ActiveSync sends one CAB at a time to the installer on the device, where you can finish the installation. Contacts, calendar, tasks and contact pictures sync. The first time a device connects, Frond asks whether to set up a partnership, like desktop ActiveSync. **Set up** pairs it in that sync, so its ActiveSync app shows the last sync. **Connect as guest** skips the partnership and Pocket Outlook, while queued CABs and Files still go, and isn't asked again. Use **Pair on next sync** or **Cancel request** next to **Partnership** in the sync settings to change it later. ActiveSync is available on Windows, Linux, macOS and Android.
 
 Enable **Files** in the sync settings, or run `frond-sync files PROFILE` to make and print the profile’s Files folder. ActiveSync exchanges files in it with `My Documents\Frond Sync` on the device. It exchanges files up to 16 MB with portable ASCII names. Once both copies match, edits and deletions go both ways. If both sides change before the next sync, Frond keeps both versions and reports the difference in the sync log. Make the two copies match to resolve the difference. Previous copies of files Frond replaces or removes are kept in the `.frond-recovery` subfolder on the side that received the change.
 
@@ -609,9 +622,17 @@ python3 tools/link-irda.py 5030 5031
 
 `link-irda.py` reconnects when a device wakes.
 
+### IR HotSync
+
+Every Palm OS device with infrared can HotSync over infrared to its Sync Manager profile, the Zire 72 and TG50 included, which have no other HotSync in Frond. The Dana's ROM has no IR connection for HotSync. Assign the profile in **Sync settings** first, then pick **Sync Manager** in the Infrared list (Linux: the Infrared beaming row; Android: Infrared beaming in Connections, or the machine's settings). In the HotSync app choose **Local**, set the list under the icon to **IR to a PC/Handheld** and tap the icon. The Palm finds "Frond" and syncs as it would in the cradle, only slower, so a full backup of a T|X takes a while. IR HotSync is always started from the Palm; Frond's Sync button uses the cradle, so a device without one has no Sync button. It needs Palm OS 3.3 or later; the Palm III's 3.0 ROM has no IR HotSync, so Frond leaves Sync Manager out there once the machine has run. Detach the infrared keyboard first, as they share the port.
+
 ### Infrared keyboard
 
 Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keyboard, on the T|X, E2, E3, Zire 72 and TG50. It needs Palm's Universal Wireless Keyboard driver 1.13 in the Palm (the infrared one, not the Bluetooth Palm Wireless Keyboard driver), which Frond doesn't include. Install it, reset when it asks, open Keyboard in Palm OS and set Status to ON. Then attach the keyboard (the Machine menu on Linux, the corner menu on Android) and type in the device window. If the driver isn't in the Palm when you attach the keyboard, Frond says so. While it's attached every key goes to the driver, arrows included, so with the driver off nothing you type reaches the Palm. Left Alt is Fn and right Alt is AltGr, and the layout follows physical US keys, so pick the matching one in the driver. F1 to F4 and Escape keep their button and power uses. The attachment is saved with the machine.
+
+### Palm Portable Keyboard
+
+Serial port set to Palm Portable Keyboard plugs Palm's folding cradle keyboard into the Palm III, IIIx, IIIe, IIIxe and IIIc, on Linux and Android. It needs the Palm Portable Keyboard driver (Keyboard.prc) in the Palm, which Frond doesn't include. Install it and reset. The keyboard pulses the HotSync line when it's plugged in or a key wakes it, and the driver opens the port and takes it, so no HotSync starts. Type in the device window on Linux, or on a hardware or the on-screen keyboard on Android. Left Alt is Fn, right Alt is Alt and the Windows key is Cmd. F5 to F8 are the four application keys, F9 is Done, Page Up and Page Down scroll. F1 to F4 and Escape keep their button and power uses. The state line under Serial port says "Keyboard: ready" while the driver listens and "Keyboard: low power" between keys, as the driver closes the port when idle. "Keyboard: no driver answered" means the driver isn't there or is off.
 
 ### Bluetooth
 
@@ -638,7 +659,7 @@ What each device has, beyond the Devices table in the [README](../README.md#devi
 | Sound | yes | yes | yes | yes | yes, see below | yes, piezo | yes |
 | Low-latency audio | yes | yes | yes | yes | shorter queue | | shorter queue |
 | Microphone | | | | yes | yes | | yes |
-| Network | yes | | | | | PPP over serial | Virtual Wi-Fi |
+| Network | Virtual Wi-Fi, IR and Bluetooth dial-up | Virtual Wi-Fi card, IR and Bluetooth dial-up | | Virtual Wi-Fi card, IR and Bluetooth dial-up | IR and Bluetooth dial-up | Direct PPP, modem and IR dial-up where supported | Virtual Wi-Fi |
 | Serial port | yes | yes | yes | not offered | yes | yes | ActiveSync |
 | USB HotSync | yes | yes | yes | yes | yes | | ActiveSync |
 | Infrared beaming | yes | yes | yes | yes | yes | yes | yes |
@@ -660,7 +681,7 @@ The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its early Palm OS 5 
 
 The Tapwave Zodiac plays sound and takes two SD cards, see [Zodiac and 68k Palm cards](#zodiac-and-68k-palm-cards). It has infrared beaming, Bluetooth (tested with sending files and InkStorm multiplayer) and HotSync over USB or the serial cradle, each to a PTY or TCP port. In Connections, turn on **Cradle attached** to dock the Zodiac, then use **HotSync** to press the cradle button. A connected virtual USB cable also docks the Zodiac. Bluetooth dial-up and Network HotSync use the [virtual mobile phone](#mobile-phone-over-bluetooth).
 
-The 68k Palms, from the Palm IIIx to the m520, the Dana and the CLIÉ T415, run in their own runner, `frond-68k`, on Linux and Android. They have a backlight, serial with the cradle's HotSync button, infrared and, on the grey ones, the screen contrast. Serial HotSync is tested with pilot-link on a 68k Palm (install, fetch, backup). Networking is PPP over the serial port or the dial-up modem, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). They have no Fast engine and no Bluetooth or Wi-Fi, as on the real ones. The m125, m130, m500, m505, m515, m520, WorkPad c500 and CLIÉ T415 also support USB HotSync. The m520 can time out on writes larger than its 8 KiB HotSync queue. The m125, m130, m500, c500, m505, m515 and m520 have an SD or MMC slot, the others have no card. The IIIc, m130, m505, m515 and m520 have colour screens, the rest are grey. The grey ones show the backlight as a green panel. The debugger works with prc-tools' gdb, see [68k Palms](developer-reference.md#68k-palms-frond-68k).
+The 68k Palms, from the Palm III to the m520, the Dana and the CLIÉ T415, run in their own runner, `frond-68k`, on Linux and Android. They have a backlight, serial with the cradle's HotSync button, infrared and, on the grey ones, the screen contrast. Serial HotSync is tested with pilot-link on a 68k Palm (install, fetch, backup). Networking is PPP over the serial port or the dial-up modem, see [68k Palm serial and PPP](#68k-palm-serial-and-ppp). They have no Fast engine and no Bluetooth or Wi-Fi, as on the real ones. The m125, m130, m500, m505, m515, m520, WorkPad c500 and CLIÉ T415 also support USB HotSync. The m520 can time out on writes larger than its 8 KiB HotSync queue. The m125, m130, m500, c500, m505, m515 and m520 have an SD or MMC slot, the others have no card. The IIIc, m130, m505, m515 and m520 have colour screens, the rest are grey. The grey ones show the backlight as a green panel. The debugger works with prc-tools' gdb, see [68k Palms](developer-reference.md#68k-palms-frond-68k).
 
 The AlphaSmart Dana has the wide screen, the built-in keyboard, sound, infrared beaming, two SD or MMC slots and a USB port for a printer or a USB Wi-Fi adapter, on Linux and Android. The Dana Wireless has the same, with Wi-Fi built in instead of the adapter. See [Dana screen and keyboard](#dana-screen-and-keyboard), [Dana USB port](#dana-usb-port) and [Dana Wireless](#dana-wireless). Its USB computer link is there through the native localhost debug path, and the app's USB computer controls stay greyed out. Peer to Peer (ad hoc) Wi-Fi finds nobody. On Android a Dana session with cards in it can't be copied or imported yet, but each card can still be exported.
 

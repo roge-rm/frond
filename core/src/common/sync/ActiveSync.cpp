@@ -95,9 +95,48 @@ DeviceInfo Connect(SyncStream& control, SyncStream& rapi) {
     return info;
 }
 
+std::unique_ptr<FrondRapi, decltype(&FrondRapiClose)> OpenRapi(SyncStream& rapi) {
+    FrondRapiStream stream{
+        &rapi,
+        [](void* self, void* data, size_t size, int timeoutMs) {
+            return Read(*static_cast<SyncStream*>(self), data, size, timeoutMs);
+        },
+        [](void* self, const void* data, size_t size) {
+            return static_cast<SyncStream*>(self)->Write(static_cast<const uint8_t*>(data), size);
+        },
+        [](void* self) { static_cast<SyncStream*>(self)->Abort(); },
+    };
+    std::unique_ptr<FrondRapi, decltype(&FrondRapiClose)> client(FrondRapiOpen(stream), FrondRapiClose);
+    if (!client || !FrondRapiReady(client.get())) throw std::runtime_error("Windows Mobile did not answer RAPI.");
+    return client;
+}
+
 std::vector<uint16_t> WideAscii(const std::string& ascii) {
     std::vector<uint16_t> out(ascii.begin(), ascii.end());
     out.push_back(0);
+    return out;
+}
+
+std::string Utf8(const uint16_t* text) {
+    std::string out;
+    while (*text) {
+        uint32_t c = *text++;
+        if (c >= 0xd800 && c <= 0xdbff && *text >= 0xdc00 && *text <= 0xdfff)
+            c = 0x10000 + ((c - 0xd800) << 10) + (*text++ - 0xdc00);
+        else if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd;
+        if (c < 0x80) out.push_back(char(c));
+        else if (c < 0x800) {
+            out.push_back(char(0xc0 | (c >> 6)));
+            out.push_back(char(0x80 | (c & 0x3f)));
+        } else {
+            if (c >= 0x10000) {
+                out.push_back(char(0xf0 | (c >> 18)));
+                out.push_back(char(0x80 | ((c >> 12) & 0x3f)));
+            } else out.push_back(char(0xe0 | (c >> 12)));
+            out.push_back(char(0x80 | ((c >> 6) & 0x3f)));
+            out.push_back(char(0x80 | (c & 0x3f)));
+        }
+    }
     return out;
 }
 
@@ -240,7 +279,7 @@ std::string ActiveSyncSession::SyncPocketOutlook(FrondRapi* client, SyncProfile&
 ActiveSyncSession::~ActiveSyncSession() { Stop(); }
 
 void ActiveSyncSession::Start() {
-    SyncManager::Get().Update([this](SyncStatus& status) {
+    if (!listApplications) SyncManager::Get().Update([this](SyncStatus& status) {
         const auto count = status.syncs;
         status = {};
         status.syncs = count;
@@ -257,9 +296,32 @@ void ActiveSyncSession::Stop() {
     if (worker.joinable()) worker.join();
 }
 
+void ActiveSyncSession::ReadApplications(SyncStream& control, SyncStream& rapi) {
+    try {
+        Connect(control, rapi);
+        auto client = OpenRapi(rapi);
+        // Use the same read-only query as Remove Programs.
+        const auto query = WideAscii(
+            R"(<wap-provisioningdoc><characteristic-query type="UnInstall" recursive="false"/></wap-provisioningdoc>)");
+        std::vector<uint16_t> reply(32768);
+        if (!FrondRapiProvision(client.get(), query.data(), reply.data(), reply.size()))
+            throw std::runtime_error("Couldn't read the installed programs from Windows Mobile.");
+        applications = Utf8(reply.data());
+    } catch (const std::exception& error) {
+        applicationError = error.what();
+    }
+    control.Abort();
+    rapi.Abort();
+    running = false;
+}
+
 void ActiveSyncSession::Run() {
     auto& manager = SyncManager::Get();
     SyncPipe::End control(pipes[0]), rapi(pipes[1]);
+    if (listApplications) {
+        ReadApplications(control, rapi);
+        return;
+    }
     std::string message;
     bool ok = false;
     const auto progress = [&](const std::string& stage, int done, int total, const std::string& name) {
@@ -292,18 +354,7 @@ void ActiveSyncSession::Run() {
         const auto info = Connect(control, rapi);
         const auto key = machine.empty() ? "winmo:" + info.guid : machine;
 
-        FrondRapiStream stream{
-            &rapi,
-            [](void* self, void* data, size_t size, int timeoutMs) {
-                return Read(*static_cast<SyncStream*>(self), data, size, timeoutMs);
-            },
-            [](void* self, const void* data, size_t size) {
-                return static_cast<SyncStream*>(self)->Write(static_cast<const uint8_t*>(data), size);
-            },
-            [](void* self) { static_cast<SyncStream*>(self)->Abort(); },
-        };
-        std::unique_ptr<FrondRapi, decltype(&FrondRapiClose)> client(FrondRapiOpen(stream), FrondRapiClose);
-        if (!client || !FrondRapiReady(client.get())) throw std::runtime_error("Windows Mobile did not answer RAPI.");
+        auto client = OpenRapi(rapi);
 
         const auto current = library.FindAssignment(key);
         if (assigned && (!current || current->profileId != assigned->profileId))
@@ -318,22 +369,51 @@ void ActiveSyncSession::Run() {
             if (!library.FinishAssignment(connected, error)) throw std::runtime_error(error);
         } else if (!library.UpdateAssignment(connected, error)) {
             throw std::runtime_error(error);
+        } else if (const auto made = library.FindAssignment(key)) {
+            connected.generation = made->generation;  // so FinishAssignment after pairing finds the new row
         }
         manager.Update([&](SyncStatus& status) { status.profile = confirmed->name; });
 
-        const auto pairing = profile.ActiveSyncPairing(key);
-        bool partnershipMissing = false;
+        // A device that has never chosen gets a partnership on its first sync, as desktop
+        // ActiveSync's setup does; without one the guest's ActiveSync shows no sync at all.
+        // With a frontend there it asks first, holding the connection open like the desktop's
+        // setup wizard; a guest connection stores "declined" so it isn't asked again.
+        auto pairing = profile.ActiveSyncPairing(key);
+        bool partnershipMissing = false, paired = false, guest = false;
+        std::string pairingNote;
+        if (pairing == "confirmed") {
+            progress("partnership", 0, 0, {});
+            paired = HasActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
+            if (!paired) {
+                // Gone after a hard reset or removed on the device: set it up again now.
+                partnershipMissing = true;
+                if (!profile.ClearConfirmedActiveSyncPairing(key, error)) throw std::runtime_error(error);
+                pairing = profile.ActiveSyncPairing(key);
+            }
+        }
+        if (pairing == "requested" && options.askPartnership && profile.DeviceValue(key, "activesync-pair").empty()) {
+            const auto answer = manager.AskPartnership([this] { return pipes[0]->Ended() || pipes[1]->Ended(); });
+            if (!answer) throw std::runtime_error("ActiveSync ended before the partnership question was answered.");
+            if (!*answer) {
+                if (!profile.RequestActiveSyncPairing(key, false, error)) throw std::runtime_error(error);
+                pairing = profile.ActiveSyncPairing(key);
+                guest = true;
+            }
+        }
         if (pairing == "requested") {
+            const bool automatic = profile.DeviceValue(key, "activesync-pair").empty();
             progress("partnership", 0, 0, {});
-            connected.userId = EnsureActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
-            if (!library.FinishAssignment(connected, error) ||
-                !profile.ConfirmActiveSyncPairing(key, error))
-                throw std::runtime_error(error);
-        } else if (pairing == "confirmed") {
-            progress("partnership", 0, 0, {});
-            partnershipMissing = !HasActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
-            if (partnershipMissing && !profile.ClearConfirmedActiveSyncPairing(key, error))
-                throw std::runtime_error(error);
+            try {
+                connected.userId = EnsureActiveSyncPartnership(client.get(), profile.PcId(), info.guid);
+                if (!library.FinishAssignment(connected, error) || !profile.ConfirmActiveSyncPairing(key, error))
+                    throw std::runtime_error(error);
+                paired = true;
+            } catch (const std::exception& failure) {
+                // An asked-for pairing fails the sync and stays pending; an automatic one is tried again next time.
+                if (!automatic || !FrondRapiConnected(client.get())) throw;
+                pairingNote = "Couldn't set up a desktop partnership: " + std::string(failure.what());
+                profile.Log(key, "ActiveSync: " + pairingNote);
+            }
         }
 
         progress("files", 0, 0, {});
@@ -348,7 +428,7 @@ void ActiveSyncSession::Run() {
         }
 
         std::string outlook;
-        if (pairing == "requested" || (pairing == "confirmed" && !partnershipMissing)) {
+        if (paired) {
             std::vector<PimKind> kinds;
             for (const auto kind : {PimKind::contacts, PimKind::calendar, PimKind::tasks})
                 if (profile.GetPimAction(key, kind) != PimAction::skip) kinds.push_back(kind);
@@ -383,8 +463,10 @@ void ActiveSyncSession::Run() {
             sent = 1;
         }
         message = sent ? "CAB sent. Finish installation on the device." : "Windows Mobile connected. No CABs queued.";
-        if (partnershipMissing) message += " Desktop partnership missing. Pair again in sync settings.";
-        else if (pairing == "requested" || pairing == "confirmed") message += " Desktop partnership verified.";
+        if (paired) message += partnershipMissing ? " Desktop partnership set up again." : " Desktop partnership verified.";
+        else if (partnershipMissing) message += " Desktop partnership missing.";
+        if (guest) message += " Connected as a guest.";
+        if (!pairingNote.empty()) message += " " + pairingNote;
         if (!files.empty()) message += " " + files;
         if (!outlook.empty()) message += " " + outlook;
         profile.Log(key, "ActiveSync: " + message);

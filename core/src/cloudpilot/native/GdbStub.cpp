@@ -732,7 +732,7 @@ const char* GdbStub::StopReason() const {
             return reason;
 
         default:
-            EmAssert(false);
-            return GDB_SIG0;
+            // Nothing has stopped yet, so answer as a stub that halted at the start of the program.
+            return GDB_SIGTRAP;
     }
 }

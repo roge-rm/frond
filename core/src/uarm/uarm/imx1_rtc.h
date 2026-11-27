@@ -15,6 +15,10 @@ class Imx1Rtc {
     static const char* registerName(uint32_t address);
     Imx1RtcAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
     bool referenceRatioSupported(uint64_t denominator) const;
+    // The time moved on by whole seconds, as the RTC counts with the device asleep that long (a session opened
+    // again): the events it passes set their status bits. The prescaler and the alarm are kept. False with the time
+    // not known or the RTC off.
+    bool forwardSeconds(uint64_t seconds);
     // Elapsed CLK32 periods, independent of System PLL output edges.
     void advanceReference(uint64_t numerator, uint64_t denominator);
     // Steps of numerator/denominator CLK32 periods until a status bit can next be set.

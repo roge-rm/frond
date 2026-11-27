@@ -15,11 +15,16 @@
 #include "ZaurusMicrodriveJournal.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <vector>
 
 // Native save/load of a machine folder. A lone v6 .frond extracts into <stem>/.
 namespace frondNative {
@@ -104,8 +109,50 @@ inline std::filesystem::path machineFolderForSave(const std::filesystem::path& p
     return folder;
 }
 
-// The session metadata of an rx1950 made with --any-firmware. Other sessions leave the metadata empty.
+// The session metadata, one record a line: "any-firmware" for an rx1950 made with --any-firmware,
+// "saved-at N", the host's time at the save in Unix seconds, and "zaurus-microdrive-v1 TOKEN", the Zaurus
+// Microdrive generation a save published. Older sessions hold "any-firmware" alone or nothing.
 inline constexpr char anyFirmwareRecord[] = "any-firmware";
+inline constexpr char savedAtRecord[] = "saved-at ";
+
+struct SessionRecords {
+    bool anyFirmware = false;
+    std::optional<int64_t> savedAt;
+    std::string microdrive;  // the Microdrive generation token, empty for none; checked by the reader
+};
+
+inline std::vector<uint8_t> sessionMetadata(const SessionRecords& records) {
+    std::string text;
+    if (records.anyFirmware) text += std::string(anyFirmwareRecord) + "\n";
+    if (records.savedAt) text += savedAtRecord + std::to_string(*records.savedAt) + "\n";
+    if (!records.microdrive.empty()) text += microdriveRecord + records.microdrive + "\n";
+    return {text.begin(), text.end()};
+}
+
+// Lines it doesn't know are skipped, so a later record doesn't stop an older build.
+inline SessionRecords parseSessionMetadata(const std::vector<uint8_t>& metadata) {
+    SessionRecords records;
+    std::string text(metadata.begin(), metadata.end());
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        const std::string line = text.substr(start, end - start);
+        start = end + 1;
+        if (line == anyFirmwareRecord) {
+            records.anyFirmware = true;
+        } else if (line.rfind(savedAtRecord, 0) == 0) {
+            const std::string number = line.substr(sizeof(savedAtRecord) - 1);
+            char* stop = nullptr;
+            errno = 0;
+            const long long value = std::strtoll(number.c_str(), &stop, 10);
+            if (!number.empty() && stop && !*stop && errno == 0) records.savedAt = int64_t(value);
+        } else if (line.rfind(microdriveRecord, 0) == 0) {
+            records.microdrive = line.substr(sizeof(microdriveRecord) - 1);
+        }
+    }
+    return records;
+}
 
 inline void fillState(SoC& soc, frondSession::Contents& contents) {
     const auto* profile = deviceProfile5(soc.GetDeviceType());
@@ -117,8 +164,8 @@ inline void fillState(SoC& soc, frondSession::Contents& contents) {
         return b.size && p ? std::vector<uint8_t>(p, p + b.size) : std::vector<uint8_t>{};
     };
     contents.nor = copy(soc.GetRomData());
-    // A session made with --any-firmware reopens without it.
-    if (soc.AnyFirmware()) contents.metadata.assign(std::begin(anyFirmwareRecord), std::end(anyFirmwareRecord) - 1);
+    // A session made with --any-firmware reopens without it; the save's time moves the clock on at a reopen.
+    contents.metadata = sessionMetadata({soc.AnyFirmware(), int64_t(std::time(nullptr)), {}});
     // Internal NAND saves to nand.frondnand (frondNand), never into the .frond.
     contents.memory = copy(soc.GetMemoryData());
     contents.savestate = copy(soc.GetSavestate());
@@ -235,8 +282,9 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
     if (out.publishMicrodrive) {
         const auto& token = out.microdriveRedo.empty() ? microdriveGeneration() : out.microdriveRedo;
         if (!token.empty()) {
-            const auto record = microdriveRecord + token;
-            contents.metadata.assign(record.begin(), record.end());
+            auto records = parseSessionMetadata(contents.metadata);
+            records.microdrive = token;
+            contents.metadata = sessionMetadata(records);
         }
     }
     const double stateMs = saveTimingMs(started);

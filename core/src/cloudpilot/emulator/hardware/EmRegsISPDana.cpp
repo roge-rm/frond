@@ -341,7 +341,7 @@ uint32 EmRegsISPDana::DeviceRead() {
     if(dcCommand>=0x10 && dcCommand<=0x1f) {
         if(accessCancelled) return 0;
         auto& ep=fifo[e]; auto& b=ep.packet[ep.cpu];
-        if(!b.full || cursor> (b.length+1)/2) {
+        if(!b.full || cursor> (b.length+1u)/2) {
             DanaUnqualified("ISP DC FIFO read boundary", "endpoint %u, word %u", e, cursor);
             return 0xffff;
         }
@@ -422,7 +422,7 @@ void EmRegsISPDana::DeviceWrite(uint16 value) {
             }
             b={}; b.writing=true; b.length=value; cursor=1; return;
         }
-        if(cursor>(b.length+1)/2) {
+        if(cursor>(b.length+1u)/2) {
             DanaUnqualified("ISP DC FIFO write boundary", "endpoint %u, word %u", unsigned(dcCommand), cursor);
             return;
         }
@@ -593,7 +593,7 @@ void EmRegsISPDana::Load(SavestateLoader<ChunkType>& l) {
             if(!allocated || !(dcEndpoints[e]&128) ||
                ((dcCommand<0x10) != bool(dcEndpoints[e]&64)) ||
                (dcCommand>=0x10 ? !b.full : !b.writing) ||
-               cursor>1+(b.length+1)/2 ||
+               cursor>1+(b.length+1u)/2 ||
                (dcCommand<0x10 && b.words!=cursor-1)) invalid=true;
         }
     }

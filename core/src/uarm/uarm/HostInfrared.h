@@ -9,7 +9,8 @@ class SocPXA;
 // A SIR byte endpoint. The guest owns IrLAP, IAS, TinyTP and OBEX.
 // Or, in phone mode, the core's mobile phone (frondIr::IrPhone, the IrLAP secondary) with PPP
 // and slirp behind its modem, on guest time; or in printer mode the core's IrDA printer
-// (frondIr::IrPrinter).
+// (frondIr::IrPrinter); or in sync mode a PC running HotSync over IrCOMM (frondIr::IrSync) that feeds
+// the Sync Manager.
 // All calls run on the emulation thread; HostByteLink owns the host worker.
 class HostInfrared {
  public:
@@ -34,6 +35,12 @@ class HostInfrared {
     bool StartPrinter(HostInfraredPort* port,std::string& error);
     bool StartPrinter(SocPXA* soc,std::string& error);
     bool StartPrinter(std::nullptr_t,std::string& error) {return StartPrinter(static_cast<HostInfraredPort*>(nullptr),error);}
+    // The HotSync PC in place of a host endpoint, the phone or the printer; Start, StartPhone,
+    // StartPrinter or Stop ends it.
+    bool StartSync(HostInfraredPort* port,std::string& error);
+    bool StartSync(SocPXA* soc,std::string& error);
+    bool StartSync(std::nullptr_t,std::string& error) {return StartSync(static_cast<HostInfraredPort*>(nullptr),error);}
+    bool SyncMode() const;
     // The port in use, null when off.
     HostInfraredPort* Port() const;
     bool PrinterMode() const;
@@ -41,9 +48,9 @@ class HostInfrared {
     bool PrinterNeedsGuest();
     // irprinter status|save PATH|clear (frondIr::IrPrinterControl).
     bool PrinterCommand(const std::string& action,const std::string& argument,std::string& result);
-    // A host endpoint or the phone is on the IR port.
+    // A host endpoint, the phone, the printer or the PC is on the IR port.
     bool Active() const;
-    // The phone's or printer's IrLAP counters.
+    // The phone's, printer's or PC's IrLAP counters.
     std::string PhoneStats() const;
     void Service();
     HostSerial::Config GetConfig() const;

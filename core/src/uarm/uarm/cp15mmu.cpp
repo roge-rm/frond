@@ -76,8 +76,9 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
     if (cp15->arm920Bootstrap) {
         // DDI0151C 2.3: reject unmodelled forms before they can change CPU state.
         if (Rx == 15) return false;
-        // Control, TTB, domain and TLB writes can change any translation the Fast engine holds.
-        if (!read && (CRn == 1 || CRn == 2 || CRn == 3 || CRn == 8)) cpuArm920LeanFlush(cpu);
+        // Control, TTB and domain writes can change any translation the Fast engine holds. The TLB operations
+        // below flush it through mmuTlbInvalidate, which the JIT tells from the rest.
+        if (!read && (CRn == 1 || CRn == 2 || CRn == 3)) cpuArm920LeanFlush(cpu);
         if (CRn == 0 && CRm == 0 && op2 == 0 && read) {
             cpuSetReg(cpu, Rx, 0x41129200);  // Table 2-5, the ARM920T main ID. TCPMP reads it to pick its CPU code.
             return true;
@@ -183,13 +184,13 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
             return !cp15->dataCache.guard.active;
         }
         if (CRn == 8 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7)) {
-            mmuTlbFlush(cp15->mmu);
+            mmuTlbInvalidate(cp15->mmu);
             return true;
         }
         // Single entry by MVA for the I or D TLB (DDI0151C 2.3.9); the model's TLB holds both, so all of it
         // goes and later walks refill it. Windows CE uses these.
         if (CRn == 8 && op2 == 1 && (CRm == 5 || CRm == 6)) {
-            mmuTlbFlush(cp15->mmu);
+            mmuTlbInvalidate(cp15->mmu);
             return true;
         }
         return false;

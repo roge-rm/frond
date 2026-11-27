@@ -2,6 +2,7 @@
 // replaced, and a copy that fails part way leaves the old file whole. Run on a raw image, where data writes go
 // straight in.
 #include "CardInstallCopy.h"
+#include "WinCeAutorun.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -89,6 +90,29 @@ int main(int argc, char** argv) {
         bool threw = false;
         try { copy(fat, "Docs", small); } catch (const Error&) { threw = true; }
         CHECK(threw && fat.find("/Docs") && fat.find("/Docs")->directory);
+        const auto endedEarly = [](char*, int64_t) -> int64_t { return 0; };
+        CHECK(!frondNative::stageWinCeAutorun(fat, endedEarly, 10));
+        CHECK(!fat.find("/2577"));
+        size_t offset = 0;
+        const auto readCab = [&](char* buffer, int64_t n) {
+            const auto count = std::min(size_t(n), fresh.size() - offset);
+            std::memcpy(buffer, fresh.data() + offset, count);
+            offset += count;
+            return int64_t(count);
+        };
+        CHECK(frondNative::stageWinCeAutorun(fat, readCab, int64_t(fresh.size())));
+        CHECK(contents(fat, "/2577/FrondPending.cab") == fresh);
+        const std::vector<uint8_t> helper(std::begin(frondNative::winCeAutorun), std::end(frondNative::winCeAutorun));
+        CHECK(contents(fat, "/2577/autorun.exe") == helper);
+        frondNative::clearWinCeAutorun(fat);
+        CHECK(!fat.find("/2577/FrondPending.cab") && !fat.find("/2577/autorun.exe"));
+        CHECK(contents(fat, "/setup.cab") == fresh);
+        fat.add("/2577", "autorun.exe", [](char* buffer, int64_t) { *buffer = 'x'; return 1; }, 1);
+        frondNative::clearWinCeAutorun(fat);
+        CHECK(!frondNative::stageWinCeAutorun(fat, endedEarly, 10));
+        CHECK(contents(fat, "/2577/autorun.exe") == std::vector<uint8_t>{'x'});
+        CHECK(!fat.find("/2577/FrondPending.cab"));
+        CHECK(fat.check().empty());
     }
     fs::remove(image);
     std::puts("card install: ok");

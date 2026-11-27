@@ -20,7 +20,8 @@ bool ConfiguredActiveSyncUsesSerial();
 // The emulation thread owns the guest network; all file and profile work runs here.
 class ActiveSyncSession {
    public:
-    explicit ActiveSyncSession(bool serial = false) : serial(serial) {}
+    explicit ActiveSyncSession(bool serial = false, bool listApplications = false)
+        : serial(serial), listApplications(listApplications) {}
     ~ActiveSyncSession();
     ActiveSyncSession(const ActiveSyncSession&) = delete;
     ActiveSyncSession& operator=(const ActiveSyncSession&) = delete;
@@ -28,6 +29,9 @@ class ActiveSyncSession {
     void Start();
     void Stop();
     bool Running() const { return running; }
+    // Read after Running becomes false.
+    const std::string& Applications() const { return applications; }
+    const std::string& ApplicationError() const { return applicationError; }
     SyncPipe& Pipe(size_t channel) { return *pipes[channel]; }
     // A pipe for a new guest connection to desktop port 26675, or nullptr while Pocket Outlook
     // sync isn't running. Called from the emulation thread.
@@ -35,6 +39,7 @@ class ActiveSyncSession {
 
    private:
     void Run();
+    void ReadApplications(SyncStream& control, SyncStream& rapi);
     // Serves Desktop AirSync until the guest's sync finishes. Returns the summary.
     std::string SyncPocketOutlook(FrondRapi* client, SyncProfile& profile, const std::string& key,
                                   const std::string& guid, const std::vector<PimKind>& kinds);
@@ -43,7 +48,8 @@ class ActiveSyncSession {
     std::vector<std::thread> airThreads;
     std::vector<std::shared_ptr<SyncPipe>> airPipes;
     std::array<std::shared_ptr<SyncPipe>, 2> pipes{std::make_shared<SyncPipe>(), std::make_shared<SyncPipe>()};
-    const bool serial;
+    const bool serial, listApplications;
+    std::string applications, applicationError;
     std::thread worker;
     std::atomic<bool> running{false};
 };

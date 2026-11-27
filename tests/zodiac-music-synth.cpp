@@ -478,6 +478,34 @@ void marksInOrder() {
 
 }  // namespace
 
+// The device gain (the Zodiac's speaker volume): full is TinySoundFont's own mix, a quarter scales the note to
+// about a quarter, 0 leaves only the guest's sound.
+void deviceGain(const Bytes& font) {
+    const uint32_t gains[3] = {65536, 16384, 0};
+    std::vector<int16_t> outs[3];
+    for (int i = 0; i < 3; ++i) {
+        ZodiacMusicSynth synth;
+        const bool loaded = synth.load(font.data(), int(font.size()));
+        assert(loaded);
+        (void)loaded;
+        zodiac_music::Hooks hooks;
+        hooks.enable();
+        synth.attach(&hooks);
+        Guest guest;
+        call(hooks, guest, volumePc, 5000 * ms, 127, 0, 0, 0);
+        call(hooks, guest, noteOnPc, 5050 * ms, 1, 0, 60, 127);
+        call(hooks, guest, noteOffPc, 5150 * ms, 1, 0, 60, 0);
+        synth.pump();
+        synth.setDeviceGain(gains[i]);
+        outs[i].assign(44100 * 2, 0);
+        synth.mix(outs[i].data(), 44100);
+    }
+    const uint64_t full = energy(outs[0], 2205, 6615), quarter = energy(outs[1], 2205, 6615);
+    assert(full > uint64_t(4410) * 2 * 1000);
+    assert(quarter > full / 5 && quarter < full * 3 / 10);
+    assert(same(outs[2], 0, 44100, 0));
+}
+
 int main() {
     ZodiacMusicSynth synth;
     const Bytes junk(64, 0x55);
@@ -544,9 +572,10 @@ int main() {
     heldAndBacklog(font);
     guestClock(font);
     marksInOrder();
+    deviceGain(font);
     threads(font);
     std::printf("PASS: Zodiac music synth (SoundFont load and refusal, nothing before the first note, note on and off "
                 "on time, release, late events, a guest song through the helper, Helds freed, hold, backlog, clock on the guest "
-                "audio across stalls, gaps and a hold, a deep queue, a stale cue, marks in order, three threads)\n");
+                "audio across stalls, gaps and a hold, a deep queue, a stale cue, marks in order, device gain, three threads)\n");
     return 0;
 }

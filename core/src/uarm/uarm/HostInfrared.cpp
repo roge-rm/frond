@@ -6,6 +6,7 @@
 #include "ir/IrPhone.h"
 #include "ir/IrPrinter.h"
 #include "ir/IrPrinterControl.h"
+#include "ir/IrSync.h"
 #include "modem/PppServer.h"
 #include "net/SlirpIp.h"
 namespace {
@@ -52,6 +53,11 @@ struct HostInfrared::Impl {
     }
     std::unique_ptr<Phone> phone;
     std::unique_ptr<frondIr::IrPrinter> printer;
+    std::unique_ptr<frondIr::IrSync> sync;
+    // The phone or the HotSync PC: the peers that lose their link when the transceiver goes off.
+    frondIr::IrPeer* Linked() const {
+        return phone ? static_cast<frondIr::IrPeer*>(&phone->ir) : sync.get();
+    }
     frondIr::IrPrinterControl printerControl;
     // The IR transceiver was on at the last Service in phone or printer mode.
     bool phoneHeard{false};
@@ -81,13 +87,14 @@ struct HostInfrared::Impl {
             if(!count)break;
             std::copy_n(transmit.begin(),count,data);
             const size_t sent=link.SendForPeer(data,count,transmitPeer);if(!sent)break;
-            for(size_t i=0;i<sent;++i)transmit.pop_front();budget-=sent;
+            for(size_t i=0;i<sent;++i)transmit.pop_front();
+            budget-=sent;
         }
     }
     static uint_fast16_t Read(void* context) {
         auto& s=*static_cast<Impl*>(context);
         uint8_t value;
-        if(s.phone) return s.phone->ir.Read(&value,1,s.Now())==1 ? value : UART_CHAR_NONE;
+        if(auto* peer=s.Linked()) return peer->Read(&value,1,s.Now())==1 ? value : UART_CHAR_NONE;
         if(s.printer) return s.printer->Read(&value,1,s.Now())==1 ? value : UART_CHAR_NONE;
         return s.link.Receive(&value,1)==1 ? value : UART_CHAR_NONE;
     }
@@ -95,7 +102,7 @@ struct HostInfrared::Impl {
         auto& s=*static_cast<Impl*>(context);
         if (value&~0xffu) { ++s.dropped; return; }
         // The UART paced this byte, so now is when its last bit went out.
-        if (s.phone) { const uint8_t byte=uint8_t(value); s.phone->ir.Write(&byte,1,s.Now()); return; }
+        if (auto* peer=s.Linked()) { const uint8_t byte=uint8_t(value); peer->Write(&byte,1,s.Now()); return; }
         if (s.printer) { const uint8_t byte=uint8_t(value); s.printer->Write(&byte,1,s.Now()); return; }
         const auto generation=s.link.PeerGeneration();
         if(!s.transmit.empty() && s.transmitPeer!=generation){s.dropped+=s.transmit.size();s.transmit.clear();}
@@ -109,20 +116,20 @@ struct HostInfrared::Impl {
     }
     static bool Pending(void* context) {
         auto& s=*static_cast<Impl*>(context);
-        if (s.phone) return s.phone->ir.Available(s.Now())!=0;
+        if (auto* peer=s.Linked()) return peer->Available(s.Now())!=0;
         if (s.printer) return s.printer->Available(s.Now())!=0;
         return s.link.PendingReceive()!=0;
     }
     static void ModeChanged(void* context) {
-        auto& s=*static_cast<Impl*>(context);if (!s.soc || s.phone || s.printer) return;
+        auto& s=*static_cast<Impl*>(context);if (!s.soc || s.Linked() || s.printer) return;
         const auto state=s.soc->Mode();
         const uint64_t tag=(uint64_t(state.baud)<<16)|state.format;
         s.link.SetReceiveWindow(s.soc->PowerEnabled() && state.receive,tag);
     }
     static void Replaced(void* context) {
         auto& s=*static_cast<Impl*>(context);
-        // The phone loses its link and call, as after a reset, sleep or load.
-        if (s.phone) { s.phone->ir.Drop(s.Now()); return; }
+        // The phone loses its link and call, as after a reset, sleep or load; the PC its link.
+        if (auto* peer=s.Linked()) { peer->Drop(s.Now()); return; }
         // The printer throws away a job that was coming in.
         if (s.printer) { s.printer->Drop(s.Now()); return; }
         // Closing the peer, rather than just clearing the userspace queues,
@@ -144,6 +151,12 @@ bool HostInfrared::StartPhone(SocPXA* machine,std::string& error) {
     impl->KeepPxaPort(machine,spare);
     return ok;
 }
+bool HostInfrared::StartSync(SocPXA* machine,std::string& error) {
+    std::unique_ptr<HostInfraredPort> spare;
+    const bool ok=StartSync(impl->PxaPort(machine,spare),error);
+    impl->KeepPxaPort(machine,spare);
+    return ok;
+}
 bool HostInfrared::StartPrinter(SocPXA* machine,std::string& error) {
     std::unique_ptr<HostInfraredPort> spare;
     const bool ok=StartPrinter(impl->PxaPort(machine,spare),error);
@@ -156,7 +169,7 @@ bool HostInfrared::Start(HostInfraredPort* soc,const HostSerial::Config& config,
     // old peer and stay the guest's, as when a load replaces the peer. Taking the hooks again
     // would be refused until the guest had read them.
     if (impl->soc && impl->soc==soc && config.kind!=HostSerial::Kind::off) {
-        impl->phone.reset();impl->printer.reset();
+        impl->phone.reset();impl->printer.reset();impl->sync.reset();
         impl->link.Close();impl->transmit.clear();impl->restart=false;impl->error.clear();
         error.clear();impl->dropped=impl->discarded=0;impl->config={};
         if (!impl->link.Open(config,error,true)) {Stop();return false;}
@@ -183,7 +196,7 @@ bool HostInfrared::StartPhone(HostInfraredPort* soc,std::string& error) {
     auto phone=std::make_unique<Impl::Phone>();
     if (!phone->network.Valid()) {error="slirp did not start";return false;}
     if (impl->phone && impl->soc==soc) return true;
-    impl->printer.reset();
+    impl->printer.reset();impl->sync.reset();
     // A host endpoint on the same machine hands its hooks over, as Start does between endpoints.
     if (impl->soc==soc) {
         impl->link.Close();impl->transmit.clear();impl->restart=false;impl->error.clear();
@@ -205,7 +218,7 @@ bool HostInfrared::StartPrinter(HostInfraredPort* soc,std::string& error) {
     error.clear();
     if (!soc) {error="This device has no infrared port.";return false;}
     if (impl->printer && impl->soc==soc) return true;
-    impl->phone.reset();
+    impl->phone.reset();impl->sync.reset();
     if (impl->soc==soc) {
         impl->link.Close();impl->transmit.clear();impl->restart=false;impl->error.clear();
         impl->dropped=impl->discarded=0;impl->config={};
@@ -223,30 +236,52 @@ bool HostInfrared::StartPrinter(HostInfraredPort* soc,std::string& error) {
     impl->printerControl.Reset();
     return true;
 }
+bool HostInfrared::StartSync(HostInfraredPort* soc,std::string& error) {
+    error.clear();
+    if (!soc) {error="This device has no infrared port.";return false;}
+    if (impl->sync && impl->soc==soc) return true;
+    impl->phone.reset();impl->printer.reset();
+    if (impl->soc==soc) {
+        impl->link.Close();impl->transmit.clear();impl->restart=false;impl->error.clear();
+        impl->dropped=impl->discarded=0;impl->config={};
+    } else {
+        Stop();impl->dropped=impl->discarded=0;
+        IrHostHooks hooks{impl.get(),Impl::Read,Impl::Write,Impl::Pending,Impl::Replaced,Impl::ModeChanged};
+        if (!soc->SetHooks(&hooks)) {
+            error="Infrared UART is busy; detach the keyboard, or wait for the Palm to finish sending.";return false;
+        }
+        impl->soc=soc;
+    }
+    impl->clockMark=soc->Time();
+    impl->phoneHeard=false;
+    impl->sync=std::make_unique<frondIr::IrSync>();
+    return true;
+}
+bool HostInfrared::SyncMode() const {return bool(impl->sync);}
 bool HostInfrared::PrinterMode() const {return bool(impl->printer);}
 bool HostInfrared::PrinterNeedsGuest() {return impl->printer && impl->printer->NeedsGuest(impl->Now());}
 bool HostInfrared::PrinterCommand(const std::string& action,const std::string& argument,std::string& result) {
     return impl->printerControl.Command(impl->printer.get(),action,argument,result);
 }
 bool HostInfrared::PhoneMode() const {return bool(impl->phone);}
-bool HostInfrared::Active() const {return impl->phone || impl->printer || impl->config.kind!=HostSerial::Kind::off;}
+bool HostInfrared::Active() const {return impl->phone || impl->printer || impl->sync || impl->config.kind!=HostSerial::Kind::off;}
 std::string HostInfrared::PhoneStats() const {
-    if (!impl->phone && !impl->printer) return "off";
-    const auto& lap=impl->phone ? impl->phone->ir.Lap() : impl->printer->Lap();const auto& s=lap.GetStats();
+    if (!impl->Linked() && !impl->printer) return "off";
+    const auto& lap=impl->Linked() ? impl->Linked()->Lap() : impl->printer->Lap();const auto& s=lap.GetStats();
     return "frames_in="+std::to_string(s.framesIn)+" frames_out="+std::to_string(s.framesOut)+
         " bad="+std::to_string(lap.BadFrames())+" connects="+std::to_string(s.connects)+
         " resent="+std::to_string(s.resent)+" timeouts="+std::to_string(s.timeouts);
 }
 void HostInfrared::Stop() {
     if (impl->soc) impl->soc->SetHooks(nullptr);
-    impl->phone.reset();impl->printer.reset();
+    impl->phone.reset();impl->printer.reset();impl->sync.reset();
     impl->link.Close();impl->transmit.clear();impl->soc=nullptr;impl->config={};impl->restart=false;impl->error.clear();
 }
 void HostInfrared::Service() {
     auto* soc=impl->soc;
     if (!soc || soc->HostIoPaused()) return;
     if (soc->Sleeping()) {
-        if (!impl->phone && !impl->printer && impl->link.IsOpen()) Impl::Replaced(impl.get());
+        if (!impl->Linked() && !impl->printer && impl->link.IsOpen()) Impl::Replaced(impl.get());
         return;
     }
     if (impl->printer) {
@@ -258,15 +293,15 @@ void HostInfrared::Service() {
             soc->Kick();
         return;
     }
-    if (impl->phone) {
+    if (auto* peer=impl->Linked()) {
         const uint64_t now=impl->Now();
         // A transceiver turned off (IR closed, or a reset) ends the link and drops unread answers.
         const bool heard=soc->PowerEnabled();
-        if (impl->phoneHeard && !heard) impl->phone->ir.Drop(now);
+        if (impl->phoneHeard && !heard) peer->Drop(now);
         impl->phoneHeard=heard;
-        impl->phone->ir.Service(now);
+        peer->Service(now);
         // Wake the UART once an answer's turnaround time has passed.
-        if (soc->PowerEnabled() && soc->ReceiveEnabled() && impl->phone->ir.Available(now))
+        if (soc->PowerEnabled() && soc->ReceiveEnabled() && peer->Available(now))
             soc->Kick();
         return;
     }
@@ -294,7 +329,7 @@ uint64_t HostInfrared::DroppedReceive() const {return impl->discarded+impl->link
 size_t HostInfrared::PendingReceive() const {return impl->link.PendingReceive();}
 HostSerial::Counters HostInfrared::GetCounters() const {return impl->link.GetCounters();}
 std::string HostInfrared::Describe() const {
-    if (impl->phone) return impl->phone->ir.Describe();
+    if (auto* peer=impl->Linked()) return peer->Describe();
     if (impl->printer) return impl->printer->Describe();
     if (impl->config.kind==HostSerial::Kind::off) return impl->error.empty()?"off":"off error: "+impl->error;
     return HostSerial::Format(impl->config)+" "+impl->link.Endpoint()+

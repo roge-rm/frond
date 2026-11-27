@@ -53,6 +53,8 @@ data class Device internal constructor(
     val id: String,
     val label: String,
     // Group from deviceProfiles5: ez68k-rom and vz68k-rom are the DragonBall EZ and VZ boards.
+    val group: String,
+    val released: Int,
     val cohort: String = "",
     val norSize: Long,
     val nandSize: Long,
@@ -93,9 +95,13 @@ data class Device internal constructor(
     val wifiOnlyNetwork: Boolean = false,
     // Takes the CLIE game controller (PEGA-GC10) on its interface connector, run by the core.
     val clieGamepad: Boolean = false,
+    // The Palm Portable Keyboard on the serial port (the serial choice "keyboard"), run by the core.
+    val serialKeyboard: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
+    // A voice or record key the frontends offer as a held button.
+    val voiceKey: Boolean = false,
     // A connector the device has that isn't emulated yet, shown greyed out; empty for none.
     val pendingUsb: String = "",
     // A colour LCD, shown as the guest draws it: no contrast setting.
@@ -106,10 +112,9 @@ data class Device internal constructor(
     val storageSlots: List<StorageSlot> = emptyList(),
     val vibrate: Boolean = false,
 ) {
-    // Applications and Hard reset are Palm OS guest services; a Windows CE device has its own or greys them out.
+    // Palm OS device profiles use the core’s Palm guest services.
     val palmOs: Boolean get() = os == "palm-os"
-    // Windows CE: Install copies the file onto the SD card, where the guest's File Explorer opens it (wceload for a
-    // CAB), and Hard reset is a clean boot. The application list stays greyed. The rx1950 only so far.
+    // Windows CE installs through the SD card.
     val installsToCard: Boolean get() = rx1950
     val hardResetWorks: Boolean get() = palmOs || rx1950
     // The USB link is a network (RNDIS): on or off, with no endpoint.
@@ -132,7 +137,7 @@ data class Device internal constructor(
     val networkSupported: Boolean get() = network || palmWifiCard
     val networkWifiOnly: Boolean get() = wifiOnlyNetwork || (palmWifiCard && !network)
     val headphonesSupported: Boolean get() = pxaPalm || zaurus
-    val sdWriteProtection: Boolean get() = pxaPalm || zaurus || id == "tapwave-zodiac-2"
+    val sdWriteProtection: Boolean get() = pxaPalm || zaurus || zodiac
     // A 68k device's slots take linked card files through frond-68k's sd-, sd2- and ms- commands (SdCard, Cards).
     val linkedCards: Boolean get() = runs68k && storageSlots.isNotEmpty()
     // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
@@ -158,7 +163,7 @@ data class Device internal constructor(
     val appNames: List<String> get() = appNamesText.split('|')
     // The Tapwave Zodiac: a landscape screen, an engine of its own that runs best on Fast, and an
     // analogue stick and triggers that a controller drives through the core's own mapping.
-    val zodiac: Boolean get() = id == ZODIAC_ID
+    val zodiac: Boolean get() = cohort == "zodiac-nor"
     // The HP iPAQ rx1950 (Windows Mobile 5): HP's CEBL.nbf as the NOR and CEOS.nbf as the NAND.
     val rx1950: Boolean get() = id == RX1950_ID
     val zaurus: Boolean get() = id == ZAURUS_ID

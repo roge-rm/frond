@@ -208,15 +208,16 @@ bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode)
         bool ready = soc->GuestCallPending() && soc->GuestRegisters(registers) &&
                      registers[15] == soc->PaceSites().syscallSite &&
                      (registers[1] & 0xffff) == SYSCALL_68K_EVT_GET_EVENT;
-        if (!ready)
-            ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
-                                          PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
-                                          PREPARE_INJECTED_CALL_IPS);
-        // A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself.
+        // A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself: after
+        // the first tenth of the budget it's woken as soon as the guest idles, as below.
+        const uint64_t budget = PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS;
+        if (!ready) ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget / 10, PREPARE_INJECTED_CALL_IPS);
         if (!ready && mode == SYSCALL_PREPARE_WAKE && soc->WakeIdle())
-            ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
-                                          PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
-                                          PREPARE_INJECTED_CALL_IPS);
+            ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget, PREPARE_INJECTED_CALL_IPS);
+        else if (!ready)
+            ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget - budget / 10, PREPARE_INJECTED_CALL_IPS) ||
+                    (mode == SYSCALL_PREPARE_WAKE && soc->WakeIdle() &&
+                     soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget, PREPARE_INJECTED_CALL_IPS));
         // Inside a recovery scope the helpers stay on the Zodiac; with none (a look that opens no
         // transaction) they go back, as nothing would turn them off later.
         if (ready && sd->recoverable) zodiacPaceOn(sd);
@@ -239,15 +240,18 @@ bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode)
     if (sd->nestLevel > 0) ERR("syscallDispatchPrepare is only allowed on top level\n");
 
     const bool after = mode == SYSCALL_PREPARE_AFTER_NATIVE;
-    if (sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
-                                  PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS / (after ? 4 : 1),
-                                  PREPARE_INJECTED_CALL_IPS))
-        return true;
-    // A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself.
-    return mode == SYSCALL_PREPARE_WAKE && NativeBoundary::WakeIdle(*sd->soc) &&
-           sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
-                                     PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
-                                     PREPARE_INJECTED_CALL_IPS);
+    const uint64_t budget = PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS / (after ? 4 : 1);
+    if (mode != SYSCALL_PREPARE_WAKE)
+        return sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget, PREPARE_INJECTED_CALL_IPS);
+    // An app on its way to EvtGetEvent gets there within the first tenth. One waiting for
+    // events with no timeout never gets back by itself, so it's woken as soon as the guest idles; a busy
+    // guest still busy gets the rest of the budget and then the same wake.
+    if (sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget / 10, PREPARE_INJECTED_CALL_IPS)) return true;
+    if (NativeBoundary::WakeIdle(*sd->soc))
+        return sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget, PREPARE_INJECTED_CALL_IPS);
+    if (sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget - budget / 10, PREPARE_INJECTED_CALL_IPS)) return true;
+    return NativeBoundary::WakeIdle(*sd->soc) &&
+           sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT, budget, PREPARE_INJECTED_CALL_IPS);
 }
 
 void syscallDispatchValidateMemory(struct SyscallDispatch* sd, uint32_t address, size_t size, bool write) {

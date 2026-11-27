@@ -35,6 +35,11 @@ namespace {
     constexpr size_t BUFFER_MAX_SIZE = SessionFile5::kMaxInflatedBytes;
     constexpr size_t BUFFER_MIN_SIZE = 1024;
 
+    // Deflate cannot go past about 1032 bytes out for each byte in, so a declared size beyond that cannot be true.
+    bool InflatedSizePlausible(uint64_t inflated, uint64_t compressed) {
+        return inflated <= compressed * 1040 + 1024;
+    }
+
     // Lower-case letters, digits and dashes, 1 to 31 of them.
     bool validDeviceName(const std::string& name) {
         if (name.empty() || name.size() >= SIZE_DEVICE_NAME) return false;
@@ -190,6 +195,7 @@ bool SessionFile5::SerializeAs(uint32_t writeVersion) {
         folderLayout ? (52 + mediaSize) : SIZE_TOC_V6;
     bufferSize =
         max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + tocExtra + size_t(sizeUncompressed) / 2);
+    if (!retiredBuffer) retiredBuffer = std::move(buffer);
     buffer = make_unique<uint8_t[]>(bufferSize);
     cursor = buffer.get();
 
@@ -296,6 +302,7 @@ bool SessionFile5::Deserialize(size_t size, const void* data) {
 
     sdSize = 0; sd = nullptr;
     mediaSize = 0; media = nullptr;
+    retiredBuffer.reset();
     serializedSession = reinterpret_cast<const uint8_t*>(data);
     serializedSessionSize = size;
 
@@ -452,6 +459,11 @@ bool SessionFile5::Deserialize_v6() {
         return false;
     }
 
+    if (!InflatedSizePlausible(bufferSize, serializedSessionSize - (ccursor - serializedSession))) {
+        cerr << "session image: bad image size" << endl;
+        return false;
+    }
+
     buffer = make_unique<uint8_t[]>(bufferSize);
 
     mz_ulong destLen = bufferSize;
@@ -548,6 +560,10 @@ bool SessionFile5::Deserialize_v7() {
     savestateSize = size_t(savestateLen);
 
     bufferSize = size_t(total);
+    if (!InflatedSizePlausible(bufferSize, serializedSessionSize - (ccursor - serializedSession))) {
+        cerr << "session image: bad image size" << endl;
+        return false;
+    }
     buffer = make_unique<uint8_t[]>(bufferSize ? bufferSize : 1);
 
     mz_ulong destLen = bufferSize;

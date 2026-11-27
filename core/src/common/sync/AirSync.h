@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -56,8 +57,10 @@ class AirSyncServer {
     // Appends each request and answer, for qualification captures.
     void SetTrace(FILE* file) { trace = file; }
 
-    // True once every folder has synced with nothing left to send, or the guest posted SyncEnd.
+    // True once every folder has synced with nothing left to send, or got an empty estimate
+    // and no Sync in the quiet time after (10 s), or the guest posted SyncEnd.
     bool Finished() const;
+    void SetEmptyEstimateQuiet(std::chrono::milliseconds time) { emptyEstimateQuiet = time; }
     // Time since the last request; the time since construction before the first one.
     std::chrono::steady_clock::duration Idle() const;
     unsigned Requests() const;
@@ -81,6 +84,8 @@ class AirSyncServer {
     unsigned requests{0};
     bool syncEnd{false}, stopping{false};
     std::map<PimKind, bool> settled, overwriteQueued;
+    std::set<PimKind> estimatedEmpty;
+    std::chrono::milliseconds emptyEstimateQuiet{10000};
     std::map<PimKind, PimAction> actions;
     AirSyncCounts counts;
     std::string lastError, timeZone;

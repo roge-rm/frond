@@ -18,9 +18,10 @@
 enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
                                media, music, phone, memo, graffiti, back, legend, stick, action, function,
                                trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
-                               calendarGrid };
+                               calendarGrid, menu, phoneEnd };
 enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350, m125, v, m100, m500,
-                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415 };
+                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415, iii, treo650, zire31, pilot, n710c,
+                                nx70v };
 // Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
 // it (around), and only the current arrangement's keys are shown.
@@ -150,6 +151,14 @@ inline DeviceArt deviceArt(const char* name) {
 }
 // h4350 thumb keyboard key n, 0-38 from the top left, in the keyboard id range.
 constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
+// Treo 650 thumb keyboard key n, 0-34 from the top left, and its Menu key (35), in the keyboard id
+// range until a board maps them.
+constexpr KeyId treoKey(int n) { return KeyId(keyIdKeyboard + n); }
+constexpr int treoKeyCount=36;
+// CLIE NX70V thumb keyboard key n, 0-41 from the top left, in the keyboard id range until a board
+// maps them.
+constexpr KeyId nx70vKey(int n) { return KeyId(keyIdKeyboard + n); }
+constexpr int nx70vKeyCount=42;
 // The PEGA-GC10 game controller's keys.
 constexpr bool clieGamepadKey(KeyId key) { return key>=keyIdPadUp && key<=keyIdPadHold; }
 // gamepad picks the profile with the PEGA-GC10 attached on a CLIE that takes it.
@@ -234,6 +243,10 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
                                                   DeviceControlStyle::iiie,0.5f,2};
     static const DeviceControlProfile iiixeProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
                                                    DeviceControlStyle::iiixe,0.5f,2};
+    // Palm III: the IIIx's keys, rocker and teal power key, in lighter grey plastic with the keys
+    // in raised collars.
+    static const DeviceControlProfile palmIIIProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
+                                                     DeviceControlStyle::iii,0.5f,2};
     // Palm m125 on a 160-wide screen, 2 units per pixel: four round black keys sunk in pockets in
     // the blue-grey face (Date Book, Address, To Do, Note Pad), the outer ones higher, either side
     // of two black scroll keys in a peanut-shaped well. Each app key hits its whole pocket. The
@@ -541,6 +554,93 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     };
     static const DeviceControlProfile h4350Profile{480,324,h4350,std::size(h4350),{190,32,100,76},26,{222,54,36,32},
                                                    DeviceControlStyle::h4350,0.5f,2,10,208};
+    // Treo 650 under its 320x320 screen, 1 unit per pixel: a chrome band holding the round green
+    // Phone and red End keys at the ends, Calendar and Mail inside them, the Home and Menu pills
+    // above those and the oval five-way in the middle, then the thumb keyboard in four rows that
+    // curve up at the ends. End is also the power key. The real keyboard is wider than the screen,
+    // so it is pulled in to fit.
+    static const DeviceButton treo650[] = {
+        {keyIdHard1, {13,49,32,34}, "Phone", DeviceControlIcon::phone, 15},
+        {keyIdHard2, {55,63,28,32}, "Calendar", DeviceControlIcon::calendar, 13},
+        {keyIdHome, {46,36,50,20}, "Home", DeviceControlIcon::home, 10},
+        {treoKey(35), {218,36,50,20}, "Menu", DeviceControlIcon::menu, 10},
+        {keyIdHard3, {237,63,28,32}, "Mail", DeviceControlIcon::inbox, 13},
+        {keyIdPower, {275,49,32,34}, "End and power", DeviceControlIcon::phoneEnd, 15},
+        {keyIdUp, {145,38,20,14}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {145,90,20,14}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {104,61,18,20}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {188,61,18,20}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {135,58,40,26}, "Select", DeviceControlIcon::select},
+        // Keys 27x28 on a 31.6-unit pitch; legends are in treo650Legends, in this order.
+        {treoKey(0), {4,110,27,28}, "Q", DeviceControlIcon::legend, 0, kb},
+        {treoKey(1), {35,112,27,28}, "W", DeviceControlIcon::legend, 0, kb},
+        {treoKey(2), {67,114,27,28}, "E", DeviceControlIcon::legend, 0, kb},
+        {treoKey(3), {98,115,27,28}, "R", DeviceControlIcon::legend, 0, kb},
+        {treoKey(4), {130,116,27,28}, "T", DeviceControlIcon::legend, 0, kb},
+        {treoKey(5), {162,116,27,28}, "Y", DeviceControlIcon::legend, 0, kb},
+        {treoKey(6), {193,115,27,28}, "U", DeviceControlIcon::legend, 0, kb},
+        {treoKey(7), {225,114,27,28}, "I", DeviceControlIcon::legend, 0, kb},
+        {treoKey(8), {256,112,27,28}, "O", DeviceControlIcon::legend, 0, kb},
+        {treoKey(9), {288,110,27,28}, "P", DeviceControlIcon::legend, 0, kb},
+        {treoKey(10), {4,145,27,28}, "A", DeviceControlIcon::legend, 0, kb},
+        {treoKey(11), {35,147,27,28}, "S", DeviceControlIcon::legend, 0, kb},
+        {treoKey(12), {67,149,27,28}, "D", DeviceControlIcon::legend, 0, kb},
+        {treoKey(13), {98,150,27,28}, "F", DeviceControlIcon::legend, 0, kb},
+        {treoKey(14), {130,151,27,28}, "G", DeviceControlIcon::legend, 0, kb},
+        {treoKey(15), {162,151,27,28}, "H", DeviceControlIcon::legend, 0, kb},
+        {treoKey(16), {193,150,27,28}, "J", DeviceControlIcon::legend, 0, kb},
+        {treoKey(17), {225,149,27,28}, "K", DeviceControlIcon::legend, 0, kb},
+        {treoKey(18), {256,147,27,28}, "L", DeviceControlIcon::legend, 0, kb},
+        {treoKey(19), {288,145,27,28}, "Backspace", DeviceControlIcon::legend, 0, kb},
+        {treoKey(20), {4,180,27,28}, "Option", DeviceControlIcon::legend, 0, kb},
+        {treoKey(21), {35,182,27,28}, "Z", DeviceControlIcon::legend, 0, kb},
+        {treoKey(22), {67,184,27,28}, "X", DeviceControlIcon::legend, 0, kb},
+        {treoKey(23), {98,185,27,28}, "C", DeviceControlIcon::legend, 0, kb},
+        {treoKey(24), {130,186,27,28}, "V", DeviceControlIcon::legend, 0, kb},
+        {treoKey(25), {162,186,27,28}, "B", DeviceControlIcon::legend, 0, kb},
+        {treoKey(26), {193,185,27,28}, "N", DeviceControlIcon::legend, 0, kb},
+        {treoKey(27), {225,184,27,28}, "M", DeviceControlIcon::legend, 0, kb},
+        {treoKey(28), {256,182,27,28}, "Full stop", DeviceControlIcon::legend, 0, kb},
+        {treoKey(29), {288,180,27,28}, "Enter", DeviceControlIcon::legend, 0, kb},
+        {treoKey(30), {35,219,46,24}, "Shift and Find", DeviceControlIcon::legend, 0, kb},
+        {treoKey(31), {90,221,32,24}, "0", DeviceControlIcon::legend, 0, kb},
+        {treoKey(32), {130,222,69,24}, "Space", DeviceControlIcon::legend, 0, kb},
+        {treoKey(33), {207,221,32,24}, "Alt", DeviceControlIcon::legend, 0, kb},
+        {treoKey(34), {246,219,38,24}, "Shift", DeviceControlIcon::legend, 0, kb},
+    };
+    static const DeviceControlProfile treo650Profile{320,252,treo650,std::size(treo650),{102,36,106,70},35,{135,58,40,26},
+                                                     DeviceControlStyle::treo650,0.42f,1,0,144};
+    // Zire 31 on a 160-wide screen, 2 units per pixel: a raised panel on the blue body with
+    // Calendar and Contacts as dark rounded squares either side of a black rounded-square
+    // five-way with an oval select key. The power key with its green light sits outside the
+    // screen's width on the real one, so it's pulled in to the far left.
+    static const DeviceButton zire31[] = {
+        {keyIdPower, {2,38,13,34}, "Power", DeviceControlIcon::power},
+        {keyIdHard1, {30,31,48,48}, "Calendar", DeviceControlIcon::calendar},
+        {keyIdHard2, {242,31,48,48}, "Contacts", DeviceControlIcon::contacts},
+        {keyIdUp, {150,11,20,16}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {150,86,20,16}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {117,46,18,20}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {185,46,18,20}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {140,42,40,28}, "Select", DeviceControlIcon::select},
+    };
+    static const DeviceControlProfile zire31Profile{320,112,zire31,std::size(zire31),{114,8,92,96},30,{140,42,40,28},
+                                                    DeviceControlStyle::zire31,0.3f,2};
+    // Pilot Professional on a 160-wide screen, 2 units per pixel: four round dark keys in round
+    // collars (Date Book, Address, To Do, Memo Pad) either side of two flat scroll bars, one
+    // over the other. The teal power key sits outside the screen's width on the real one, so
+    // it's pulled in to the far left.
+    static const DeviceButton pilot[] = {
+        {keyIdHard1, {17,18,46,46}, "Date Book", DeviceControlIcon::calendar},
+        {keyIdHard2, {77,18,46,46}, "Address", DeviceControlIcon::phone},
+        {keyIdUp, {136,20,48,20}, "Up", DeviceControlIcon::up, 10},
+        {keyIdDown, {136,64,48,20}, "Down", DeviceControlIcon::down, 10},
+        {keyIdHard3, {197,18,46,46}, "To Do", DeviceControlIcon::tasks},
+        {keyIdHard4, {257,18,46,46}, "Memo Pad", DeviceControlIcon::memo},
+        {keyIdPower, {1,32,13,34}, "Power", DeviceControlIcon::power, 3},
+    };
+    static const DeviceControlProfile pilotProfile{320,96,pilot,std::size(pilot),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::pilot,0.5f,2};
     // CLIE PEG-T415 under its 320-wide screen, 1 unit per pixel: four wide, flat chrome slats
     // edge to edge (Date Book, Address, To Do, Memo Pad) either side of a narrow rocker split
     // across its middle, under a dark metal strip with the keys' icons stamped on it. The Jog
@@ -557,6 +657,95 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     };
     static const DeviceControlProfile t415Profile{320,104,t415,std::size(t415),{0,0,0,0},0,{0,0,0,0},
                                                   DeviceControlStyle::t415,0.5f,1,0,0,clieJogTab(-424,208),clieJogWidth,0,0,128};
+    // CLIE PEG-T615C: the T415's body and bar. Its silkscreen is 120 rows to the T415's 128, so the
+    // side tab's top moves up by the difference to stay beside the same LCD rows.
+    static const DeviceButton t615c[] = {
+        {keyIdHard1, {4,40,66,38}, "Date Book", DeviceControlIcon::calendar, 3},
+        {keyIdHard2, {72,40,66,38}, "Address", DeviceControlIcon::phone, 3},
+        {keyIdHard3, {182,40,66,38}, "To Do", DeviceControlIcon::tasks, 3},
+        {keyIdHard4, {250,40,66,38}, "Memo Pad", DeviceControlIcon::memo, 3},
+        {keyIdUp, {143,40,34,19}, "Up", DeviceControlIcon::up, 3, DeviceControlSection::main, {143,40,34,38}},
+        {keyIdDown, {143,59,34,19}, "Down", DeviceControlIcon::down, 3, DeviceControlSection::main, {143,40,34,38}},
+        clieJogKey(0,-416),clieJogKey(1,-416),clieJogKey(2,-416),clieJogKey(3,-416),
+    };
+    static const DeviceControlProfile t615cProfile{320,104,t615c,std::size(t615c),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::t415,0.5f,1,0,0,clieJogTab(-416,208),clieJogWidth,0,0,120};
+    // CLIE PEG-N710C under its 320-wide screen, 1 unit per pixel: a chrome band, then a dark well
+    // with four oval keys (Date Book, Address, To Do, Memo Pad) either side of an hourglass rocker
+    // split across its waist. The Jog Dial and Back are on the left side, below the headphone and
+    // remote jack and above the Hold slide. Power is below the bar, so it isn't drawn.
+    static const DeviceButton n710c[] = {
+        {keyIdHard1, {34,44,46,30}, "Date Book", DeviceControlIcon::calendar, 15},
+        {keyIdHard2, {88,44,46,30}, "Address", DeviceControlIcon::phone, 15},
+        {keyIdHard3, {186,44,46,30}, "To Do", DeviceControlIcon::tasks, 15},
+        {keyIdHard4, {240,44,46,30}, "Memo Pad", DeviceControlIcon::memo, 15},
+        {keyIdUp, {140,36,40,23}, "Up", DeviceControlIcon::up, 6, DeviceControlSection::main, {140,36,40,46}},
+        {keyIdDown, {140,59,40,23}, "Down", DeviceControlIcon::down, 6, DeviceControlSection::main, {140,36,40,46}},
+        clieJogKey(0,-424),clieJogKey(1,-424),clieJogKey(2,-424),clieJogKey(3,-424),
+    };
+    static const DeviceControlProfile n710cProfile{320,100,n710c,std::size(n710c),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::n710c,0.5f,1,0,0,clieJogTab(-424,208),clieJogWidth,0,0,144};
+    // CLIE PEG-NX70V, the base of the swivel clamshell under its 320x480 screen, 1 unit per pixel:
+    // the lid's lower edge, the hinge barrel with the camera lens, then a raised panel with round
+    // Date Book and Memo Pad keys either side of a round rocker split across its middle and Address
+    // and To Do below between them, then the thumb keyboard of round keys in five rows. The Jog
+    // Dial and Back are on the base's left side by the keyboard's top. Power is on the hinge, so it
+    // isn't drawn.
+    static const DeviceButton nx70v[] = {
+        {keyIdHard1, {64,62,34,34}, "Date Book", DeviceControlIcon::calendar, 17},
+        {keyIdUp, {141,58,38,21}, "Up", DeviceControlIcon::up, 19, DeviceControlSection::main, {141,58,38,42}},
+        {keyIdDown, {141,79,38,21}, "Down", DeviceControlIcon::down, 19, DeviceControlSection::main, {141,58,38,42}},
+        {keyIdHard4, {222,62,34,34}, "Memo Pad", DeviceControlIcon::memo, 17},
+        {keyIdHard2, {101,104,34,34}, "Address", DeviceControlIcon::phone, 17},
+        {keyIdHard3, {185,104,34,34}, "To Do", DeviceControlIcon::tasks, 17},
+        // Round keys on a 29-unit pitch, rows 38 apart with the symbols printed under them; each row
+        // sits a little left of the one above, as on the real one. Legends are in nx70vLegends.
+        {nx70vKey(0), {29,164,25,25}, "Q", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(1), {58,164,25,25}, "W", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(2), {87,164,25,25}, "E", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(3), {116,164,25,25}, "R", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(4), {145,164,25,25}, "T", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(5), {174,164,25,25}, "Y", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(6), {203,164,25,25}, "U", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(7), {232,164,25,25}, "I", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(8), {261,164,25,25}, "O", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(9), {290,164,25,25}, "P", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(10), {29,202,25,25}, "A", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(11), {59,202,25,25}, "S", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(12), {89,202,25,25}, "D", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(13), {119,202,25,25}, "F", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(14), {149,202,25,25}, "G", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(15), {179,202,25,25}, "H", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(16), {209,202,25,25}, "J", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(17), {238,202,25,25}, "K", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(18), {268,202,25,25}, "L", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(19), {20,240,25,25}, "Tab", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(20), {50,240,25,25}, "Z", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(21), {80,240,25,25}, "X", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(22), {111,240,25,25}, "C", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(23), {141,240,25,25}, "V", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(24), {171,240,25,25}, "B", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(25), {201,240,25,25}, "N", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(26), {231,240,25,25}, "M", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(27), {261,240,25,25}, "Backspace", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(28), {5,278,25,25}, "Ctrl", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(29), {39,278,25,25}, "Fn", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(30), {69,278,25,25}, "Alt", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(31), {101,278,25,25}, "Comma", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(32), {131,278,25,25}, "Full stop", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(33), {161,278,25,25}, "Semicolon", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(34), {191,278,25,25}, "Page up", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(35), {226,278,50,25}, "Enter", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(36), {4,316,50,25}, "Shift", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(37), {79,316,50,25}, "Space", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(38), {151,316,25,25}, "Left", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(39), {184,316,25,25}, "Page down", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(40), {214,316,25,25}, "Right", DeviceControlIcon::legend, 12.5f, kb},
+        {nx70vKey(41), {244,316,25,25}, "Caps lock", DeviceControlIcon::legend, 12.5f, kb},
+        clieJogKey(0,-236),clieJogKey(1,-236),clieJogKey(2,-236),clieJogKey(3,-236),
+    };
+    static const DeviceControlProfile nx70vProfile{320,372,nx70v,std::size(nx70v),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::nx70v,0.5f,1,0,220,clieJogTab(-236,208),clieJogWidth};
     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
     switch(art) {
         case DeviceArt::tx: return txProfile;
@@ -567,6 +756,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::m125: return m125Profile;
         case DeviceArt::iiie: return iiieProfile;
         case DeviceArt::iiixe: return iiixeProfile;
+        case DeviceArt::iii: return palmIIIProfile;
         case DeviceArt::m100: return m100Profile;
         case DeviceArt::m105: return m105Profile;
         case DeviceArt::v: return vProfile;
@@ -579,6 +769,12 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         case DeviceArt::iiic: return iiicProfile;
         case DeviceArt::tg50: return gamepad ? tg50GamepadProfile : tg50Profile;
         case DeviceArt::t415: return t415Profile;
+        case DeviceArt::treo650: return treo650Profile;
+        case DeviceArt::zire31: return zire31Profile;
+        case DeviceArt::pilotProfessional: return pilotProfile;
+        case DeviceArt::t615c: return t615cProfile;
+        case DeviceArt::n710c: return n710cProfile;
+        case DeviceArt::nx70v: return nx70vProfile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
         case DeviceArt::hpIpaqRx1950: return rx1950Profile;
@@ -783,7 +979,7 @@ inline SDL_Rect deviceButtonRect(const DeviceControlProfile& profile,
         return r;
     }
     if(profile.style!=DeviceControlStyle::tg50 && profile.style!=DeviceControlStyle::zodiac &&
-       !deviceSideTabBesideButtons(profile,view)) {
+       !deviceSideTabBesideButtons(profile,view) && !deviceSideTabBelowScreen(profile,view)) {
         const int u=profile.unit;
         auto r=button.bounds;
         r.x=(r.x+(screenWidth*u-profile.width)/2)/u+deviceScreenLeft(profile,view);
@@ -967,7 +1163,7 @@ struct DanaKeyArt {
     const char* second;
     DanaKeyMark mark;
     // Lighter cap colour of the top row.
-    bool topRow;
+    bool topRow = false;
 };
 struct DanaKeyboardArt {
     int width, height;
@@ -1186,9 +1382,9 @@ void drawZaurusControls(SDL_Renderer* renderer, const ZaurusLayout& layout, cons
 
 // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
 // rectangles only place the artwork.
-enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast };
+enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast, hotSync, pilotApplications };
 // E2 and Zire 72: two Graffiti areas between full-height lines; the 68k Palms: one rounded box.
-enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500 };
+enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500, iii, zire31, pilot };
 struct SilkscreenButton {
     SDL_Rect bounds;
     const char* label;
@@ -1298,6 +1494,12 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     // IIIc: the IIIx's table, the same in the IIIc ROM, printed light on dark.
     static const DeviceSilkscreen iiicSilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
                                                  SilkscreenStyle::iiic,2};
+    // Palm III: the IIIx's table. The 3.0 ROM's pen button list (EvtGetPenBtnList) has the same Home,
+    // Menu, Calc and Find, EvtSysInit the same writing area (27,164,106,56), and GrfProcessStroke
+    // splits it at x 89 and opens the keyboards on taps below y 206 left of x 45 and right of x 115.
+    // Printed on a mint panel, with the Applications arrow for Home and a label round each disc.
+    static const DeviceSilkscreen palmIIISilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
+                                                    SilkscreenStyle::iii,2};
     // T415: the ROM's SilkScreenVenice 'silk' 10000 (19000 is the same), doubled from row 160 into
     // LCD pixels under the 320x320 screen. Calc and Find run to x 326 in the ROM; kept to the
     // panel's width here. The contrast spot is key 0x123 at the bottom left; the panel ends at
@@ -1313,6 +1515,61 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     };
     static const DeviceSilkscreen t415Silkscreen{320,128,t415,std::size(t415),{52,16,122,106},{174,16,94,108},
                                                  SilkscreenStyle::t415,1};
+    // Zire 31: the NOR's 'aslk' (at 0x7f0c0), in units of half an LCD pixel from row 160, 64 rows
+    // deep. HotSync and Find run to x 162 in the ROM and the keyboards to row 228; kept to the
+    // panel here.
+    static const SilkscreenButton zire31[] = {
+        {{0,4,48,60}, "Home", SilkscreenIcon::home},
+        {{0,64,48,64}, "Menu", SilkscreenIcon::menu},
+        {{276,4,44,60}, "HotSync", SilkscreenIcon::hotSync},
+        {{276,64,44,64}, "Find", SilkscreenIcon::find},
+        {{48,4,24,22}, "Clock", SilkscreenIcon::clock},
+        {{252,4,24,22}, "Display", SilkscreenIcon::contrast},
+        {{48,108,32,28}, "Letter keyboard", SilkscreenIcon::letters},
+        {{244,108,32,28}, "Number keyboard", SilkscreenIcon::numbers},
+    };
+    static const DeviceSilkscreen zire31Silkscreen{320,128,zire31,std::size(zire31),{54,4,124,112},{178,4,88,112},
+                                                   SilkscreenStyle::zire31,2};
+    // Pilot Professional: the ROM's pen button list (at 0x1da8e) has the IIIx's rectangles, with
+    // Applications in place of Home. The keyboard areas are the IIIx's too.
+    static const SilkscreenButton pilot[] = {
+        {{0,8,54,56}, "Applications", SilkscreenIcon::pilotApplications},
+        {{0,64,54,56}, "Menu", SilkscreenIcon::menu},
+        {{266,8,54,56}, "Calculator", SilkscreenIcon::calc},
+        {{266,64,54,56}, "Find", SilkscreenIcon::find},
+        {{54,92,36,28}, "Letter keyboard", SilkscreenIcon::letters},
+        {{230,92,36,28}, "Number keyboard", SilkscreenIcon::numbers},
+    };
+    static const DeviceSilkscreen pilotSilkscreen{320,120,pilot,std::size(pilot),{54,8,124,112},{178,8,88,112},
+                                                  SilkscreenStyle::pilot,2};
+    // T615C: its own SilkScreenVenice 'silk' 10000, doubled from row 160 as for the T415, with
+    // Brightness (key 0x122) at the bottom left in place of Contrast. The panel ends at Palm OS row
+    // 220, below the lowest rectangle (216).
+    static const SilkscreenButton t615c[] = {
+        {{0,14,40,40}, "Home", SilkscreenIcon::home},
+        {{2,66,38,40}, "Menu", SilkscreenIcon::menu},
+        {{280,14,40,40}, "Calc", SilkscreenIcon::calc},
+        {{280,66,40,40}, "Find", SilkscreenIcon::find},
+        {{56,94,16,18}, "Letter keyboard", SilkscreenIcon::letters},
+        {{246,94,16,18}, "Number keyboard", SilkscreenIcon::numbers},
+        {{0,94,4,18}, "Brightness", SilkscreenIcon::brightness},
+    };
+    static const DeviceSilkscreen t615cSilkscreen{320,120,t615c,std::size(t615c),{54,14,118,94},{174,14,88,94},
+                                                  SilkscreenStyle::t415,1};
+    // N710C: the 4.1 ROM's own 'silk' 10000, doubled from row 160, printed like the T415's with the
+    // Brightness spot (key 0x122) under Menu. abc and 123 sit below the writing area, at Palm OS
+    // row 220, and the panel ends at row 232, just below them.
+    static const SilkscreenButton n710c[] = {
+        {{8,10,38,38}, "Home", SilkscreenIcon::home},
+        {{8,64,38,40}, "Menu", SilkscreenIcon::menu},
+        {{272,10,38,38}, "Calc", SilkscreenIcon::calc},
+        {{272,64,38,40}, "Find", SilkscreenIcon::find},
+        {{52,120,24,22}, "Letter keyboard", SilkscreenIcon::letters},
+        {{256,120,20,22}, "Number keyboard", SilkscreenIcon::numbers},
+        {{8,108,16,16}, "Brightness", SilkscreenIcon::brightness},
+    };
+    static const DeviceSilkscreen n710cSilkscreen{320,144,n710c,std::size(n710c),{54,10,116,112},{174,10,90,112},
+                                                  SilkscreenStyle::t415,1};
     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
     switch(art) {
         case DeviceArt::e2: return e2Silkscreen;
@@ -1323,9 +1580,14 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
         case DeviceArt::m125: case DeviceArt::m100: case DeviceArt::m105: case DeviceArt::m130: return m125Silkscreen;
         case DeviceArt::m505: case DeviceArt::m520: return m505Silkscreen;
         case DeviceArt::iiic: return iiicSilkscreen;
+        case DeviceArt::iii: return palmIIISilkscreen;
         case DeviceArt::v: case DeviceArt::vx: return vSilkscreen;
         case DeviceArt::m500: case DeviceArt::c500: return m500Silkscreen;
         case DeviceArt::t415: return t415Silkscreen;
+        case DeviceArt::zire31: return zire31Silkscreen;
+        case DeviceArt::pilotProfessional: return pilotSilkscreen;
+        case DeviceArt::t615c: return t615cSilkscreen;
+        case DeviceArt::n710c: return n710cSilkscreen;
         default: return none;
     }
 }

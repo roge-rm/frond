@@ -58,7 +58,10 @@ COMMON_LIB_DIR = $(if $(FROND_CORE_OBJ),$(FROND_CORE_OBJ)/common/,../common/)
 BUILDDIR_NATIVE ?= $(FROND_CORE_OBJ_DIR).build
 DEPDIR_NATIVE ?= $(FROND_CORE_OBJ_DIR).deps
 
-DEPFLAGS_NATIVE = -MT $@ -MMD -MP -MF $(DEPDIR_NATIVE)/$*.d
+# The object is named through the variable, which make expands when it reads the depfile. MSYS2
+# turns a /c/... argument into C:/... for the native compiler, so $@ itself would name a target
+# make doesn't know and header changes wouldn't rebuild anything on Windows.
+DEPFLAGS_NATIVE = -MT '$$(BUILDDIR_NATIVE)/$*.o' -MMD -MP -MF $(DEPDIR_NATIVE)/$*.d
 
 MKDIR_NATIVE = mkdir -p $(dir $@) && mkdir -p $(DEPDIR_NATIVE)/$(dir $<)
 
@@ -89,8 +92,8 @@ clean:
 
 .SUFFIXES:
 
-# The dependency files name objects by absolute path, so once the checkout moves they match nothing
-# and header changes stop rebuilding the objects that use them. Start the objects afresh then.
+# The dependency files can name headers by absolute path, so once the checkout moves they point at
+# the old one. Start the objects afresh then.
 SOURCE_DIR_STAMP := $(BUILDDIR_NATIVE)/.source-dir
 ifneq ($(shell cat '$(SOURCE_DIR_STAMP)' 2>/dev/null),$(CURDIR))
 $(shell rm -rf '$(BUILDDIR_NATIVE)' '$(DEPDIR_NATIVE)'; mkdir -p '$(dir $(SOURCE_DIR_STAMP))' && echo '$(CURDIR)' > '$(SOURCE_DIR_STAMP)')

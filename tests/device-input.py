@@ -87,7 +87,8 @@ class DeviceInputTest(unittest.TestCase):
                                                  'SDL_AUDIODRIVER': 'dummy'})
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(message, result.stderr + result.stdout)
-        self.assertNotIn('SDL', result.stderr.split('Usage:', 1)[0])
+        # Refused before SDL starts: no SDL message ahead of the usage text, which names SDL buttons.
+        self.assertNotIn('SDL', result.stderr.split('Usage:')[0])
         return result
 
     def test_window_scaling_options(self):
@@ -114,10 +115,10 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'zire72-desktop'], ['palm-zire-72'])
         self.assertEqual([p['name'] for p in data['profiles']],
                          ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
-                          'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-iiie', 'palm-iiixe', 'palm-v', 'palm-vx',
+                          'palm-zire-72', 'sony-clie-tg50', 'palm-iii', 'palm-iiix', 'palm-iiie', 'palm-iiixe', 'palm-v', 'palm-vx',
                           'palm-m100', 'palm-m105', 'palm-m125', 'palm-m500', 'ibm-workpad-c500',
                           'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520',
-                          'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'sony-clie-t415',
+                          'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'tapwave-zodiac-1', 'sony-clie-t415',
                           'hp-ipaq-210', 'hp-ipaq-rx1950', 'sharp-zaurus-sl-c3000', 'hp-ipaq-h4350'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
@@ -129,13 +130,16 @@ class DeviceInputTest(unittest.TestCase):
                           'ez68k-rom', 'vz68k-rom', 'zodiac-nor', 'rx1950-nand', 'spitz-nand'})
         self.assertEqual(data['profiles'][2]['status'], 'experimental-desktop')
         self.assertEqual(data['profiles'][3]['status'], 'inherited-unverified')
-        iiix = data['profiles'][6]
+        iiix = {p['name']: p for p in data['profiles']}['palm-iiix']
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
-        self.assertEqual(data['profiles'][24]['status'], 'experimental-desktop')
-        self.assertEqual([p['status'] for p in data['profiles'][25:]],
-                         ['reserved', 'experimental-desktop', 'staged', 'reserved'])
-        zaurus = next(p for p in data['profiles'] if p['name'] == 'sharp-zaurus-sl-c3000')
+        by_name = {p['name']: p for p in data['profiles']}
+        self.assertEqual(by_name['sony-clie-t415']['status'], 'experimental-desktop')
+        self.assertEqual(by_name['hp-ipaq-210']['status'], 'reserved')
+        self.assertEqual(by_name['hp-ipaq-rx1950']['status'], 'experimental-desktop')
+        self.assertEqual(by_name['hp-ipaq-h4350']['status'], 'reserved')
+        self.assertEqual(by_name['sharp-zaurus-sl-c3000']['status'], 'staged')
+        zaurus = by_name['sharp-zaurus-sl-c3000']
         self.assertTrue(zaurus['sd_slot'])
         self.assertEqual((zaurus['sd_min_bytes'], zaurus['sd_max_bytes']), (32 << 20, 2048 << 20))
         colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}

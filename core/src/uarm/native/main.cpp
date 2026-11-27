@@ -145,6 +145,8 @@ struct Options {
     bool cardSwap;                  // the frontend changed the card files while the machine was off
     optional<string> cardIdentity;  // the card put in: 64 hex digits
     bool cardProtected;
+    optional<string> sd2CardIdentity;
+    bool sd2CardProtected;
     optional<string> engine;
     optional<string> spitzProm;
     optional<string> microdrive;
@@ -154,9 +156,10 @@ struct Options {
     bool spitzMmc;
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
+    bool directStick;        // --direct-stick
     optional<string> controllerMap;  // --controller-map
     bool headphonesIn;       // --headphones-in
-    BatteryPower battery;    // --battery
+    BatteryPower battery{};  // --battery
     bool anyFirmware;        // --any-firmware: any rx1950 CEBL; recorded in the session
 };
 
@@ -168,7 +171,7 @@ namespace {
     // elsewhere, or none. It resumes ejected and the card it holds now goes in once the guest has
     // run swapInsertDelay awake, as a hot swap would. The stick's write protection is set from
     // `msProtect`.
-    bool sdSwapped = false, msSwapped = false, msProtect = false;
+    bool sdSwapped = false, sd2Swapped = false, msSwapped = false, msProtect = false;
     bool sdInsertOnSwap = true;
     // The session's second SD card (the Zodiac's slot 2) was saved in its slot.
     bool secondCardIn = false;
@@ -180,6 +183,8 @@ namespace {
     bool nandFromMalloc = false;
     // The session was made with --any-firmware (its metadata says so).
     bool sessionAnyFirmware = false;
+    // The host's time when the session was saved, in Unix seconds, if its metadata has it.
+    std::optional<int64_t> sessionSavedAt;
     // Guest time awake between the eject and the insert, so the card driver handles the removal
     // first, and for an SD card until SoC::SdRemovalHandled says it has where the board can tell. A
     // guest the eject doesn't wake, or that never handles it, gets the card after swapInsertLimit.
@@ -296,15 +301,12 @@ namespace {
             cerr << "separate NAND image cannot be used with session file" << endl;
             return false;
         }
-        const std::string metadata(contents.metadata.begin(), contents.metadata.end());
-        sessionAnyFirmware = metadata == frondNative::anyFirmwareRecord;
-        if (sessionDevice == deviceTypeSpitz) {
-            const std::string_view prefix(frondNative::microdriveRecord);
-            if (metadata.compare(0, prefix.size(), prefix) == 0) {
-                const auto token = metadata.substr(prefix.size());
-                if (!frondNative::validMicrodriveToken(token)) return false;
-                frondNative::microdriveGeneration() = token;
-            }
+        const auto records = frondNative::parseSessionMetadata(contents.metadata);
+        sessionAnyFirmware = records.anyFirmware;
+        sessionSavedAt = records.savedAt;
+        if (sessionDevice == deviceTypeSpitz && !records.microdrive.empty()) {
+            if (!frondNative::validMicrodriveToken(records.microdrive)) return false;
+            frondNative::microdriveGeneration() = records.microdrive;
         }
         ramSize = contents.ramSize;
         if (ramSize == 0) ramSize = ramSizeFromMemorySize(contents.memory.size());
@@ -406,10 +408,11 @@ namespace {
             if (media.kind == frondMachine::kindMs || media.kind == frondMachine::kindMsPro) msProtect = media.writeProtected;
         }
         sdSwapped = contents.sdSwapped;
+        sd2Swapped = contents.sd2Swapped;
         msSwapped = contents.msSwapped;
         romInfo = RomInfo5(nor.data, nor.size);
         if (sessionDevice != deviceTypeSpitz && profile->detect != DeviceDetect5::norSize &&
-            romInfo.GetDeviceType() != sessionDevice) {
+            !deviceProfileTakesArmRom5(sessionDevice, romInfo.GetDeviceType())) {
             cerr << "session device profile does not match ROM" << endl;
             return false;
         }
@@ -425,16 +428,19 @@ namespace {
         std::filesystem::path folder;
         const std::filesystem::path work = options.workFolder ? *options.workFolder : std::string();
         frondSession::CardSwap swap;
-        if (options.cardIdentity) {
-            frondNative::CardIdentity identity{};
-            if (!frondNative::parseIdentityHex(*options.cardIdentity, identity)) {
-                cerr << "--card-identity takes the card's identity as 64 hex digits" << endl;
+        const auto readCardIdentity = [](const optional<string>& text, bool protect, const char* flag,
+                                         frondSession::CardSwapSlot& slot) {
+            if (text && !frondNative::parseIdentityHex(*text, slot.identity)) {
+                cerr << flag << " takes the card's identity as 64 hex digits" << endl;
                 return false;
             }
-            swap.identityGiven = true;
-            swap.identity = identity;
-        }
-        swap.writeProtected = options.cardProtected;
+            slot.identityGiven = text.has_value();
+            slot.writeProtected = protect;
+            return true;
+        };
+        if (!readCardIdentity(options.cardIdentity, options.cardProtected, "--card-identity", swap.first) ||
+            !readCardIdentity(options.sd2CardIdentity, options.sd2CardProtected, "--sd2-card-identity", swap.second))
+            return false;
         if (frondSession::loadPath(path, contents, folder, frondSession::msPhysicalBytes, work,
                                    options.cardSwap ? &swap : nullptr)) {
             sessionFolder = folder.string();
@@ -553,6 +559,14 @@ namespace {
             cerr << "--card-identity and --card-protected go with --card-swap" << endl;
             return false;
         }
+        if (!options.cardSwap && (options.sd2CardIdentity || options.sd2CardProtected)) {
+            cerr << "--sd2-card-identity and --sd2-card-protected go with --card-swap" << endl;
+            return false;
+        }
+        if (options.sd2CardProtected && !options.sd2CardIdentity) {
+            cerr << "--sd2-card-protected requires --sd2-card-identity" << endl;
+            return false;
+        }
         if (options.gdbPort && (*options.gdbPort == 0 || *options.gdbPort > 65535)) {
             cerr << "GDB port must be 1..65535" << endl;
             return false;
@@ -593,8 +607,9 @@ namespace {
         HostSerial::Config infraredConfig;
         const bool infraredPhone = options.infrared && *options.infrared == "phone";
         const bool infraredPrinter = options.infrared && *options.infrared == "printer";
-        if (options.infrared && !infraredPhone && !infraredPrinter && (!HostSerial::Parse(*options.infrared,infraredConfig) || infraredConfig.kind==HostSerial::Kind::syncManager)) {
-            cerr << "--irda must be off, pty, tcp:PORT, unix:PATH, phone or printer" << endl; return false;
+        const bool infraredSync = options.infrared && *options.infrared == "sync";
+        if (options.infrared && !infraredPhone && !infraredPrinter && !infraredSync && !HostSerial::Parse(*options.infrared,infraredConfig)) {
+            cerr << "--irda must be off, pty, tcp:PORT, unix:PATH, phone, printer or sync" << endl; return false;
         }
         const unsigned zaurusUsbProbe = options.zaurusUsbProbe + options.zaurusUsbStorageProbe +
                                         options.zaurusUsbNetworkProbe + options.zaurusUsbWriteCheck.has_value() +
@@ -703,7 +718,7 @@ namespace {
             return false;
         }
         if (!spitz && romInfo.IsValid() && deviceProfile5(romInfo.GetDeviceType()) &&
-            romInfo.GetDeviceType() != deviceType) {
+            !deviceProfileTakesArmRom5(deviceType, romInfo.GetDeviceType())) {
             cerr << "selected device profile does not match ROM" << endl;
             return false;
         }
@@ -738,7 +753,7 @@ namespace {
                 return false;
             }
         } else if (!rx1950 && !spitz) {
-            cerr << romInfo;
+            romInfo.Print(cerr, deviceType);
         }
 
         if (!spitz && !sizeDetected && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
@@ -792,7 +807,7 @@ namespace {
         }
 
         if (ramSize == 0) ramSize = isTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
-        // The Zodiac 2 has one RAM size, which its ROM header doesn't give.
+        // The ROM header doesn't distinguish the Zodiac models or report their RAM sizes.
         if (!options.ramSize && sessionDevice == deviceTypeInvalid &&
             (deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac || rx1950 || spitz))
             ramSize = deviceProfile5(deviceType)->minRam;
@@ -908,9 +923,9 @@ namespace {
             // Its machine has an engine of its own, set below; the JIT isn't used.
             cpuSetFastEngine(false);
             string why;
-            soc = SocIMX1::Create(static_cast<const uint8_t*>(nor.data), nor.size, why);
+            soc = SocIMX1::Create(static_cast<const uint8_t*>(nor.data), nor.size, why, deviceType);
             if (!soc) {
-                cerr << "Tapwave Zodiac 2: " << why << endl;
+                cerr << deviceProfile5(deviceType)->displayName << ": " << why << endl;
                 return false;
             }
 #ifdef FROND_ZODIAC_DEVELOPER
@@ -927,7 +942,8 @@ namespace {
             }
 #endif
             if (fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
-                cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
+                cerr << deviceProfile5(deviceType)->displayName << ": the Fast engine is not available here, running Exact" << endl;
+            if (options.directStick) static_cast<SocIMX1*>(soc)->SetDirectStick(true);
             // With a SoundFont or a MIDI out taking the events, the hooks don't print them.
             if (options.musicHooks || options.musicSoundFont || options.musicMidiOut)
                 static_cast<SocIMX1*>(soc)->SetMusicHooks(true, !options.musicSoundFont && !options.musicMidiOut);
@@ -1061,8 +1077,8 @@ namespace {
             msCtrlrSwapOnLoad(memoryStick, true);
         }
         soc->SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
-        // Slot 2's card goes in first, so the load carries it on from the state's SD2 section.
-        if (secondCardIn && !soc->Sd2Insert()) {
+        // Only the saved card carries on from the state's SD2 section.
+        if (secondCardIn && !sd2Swapped && !soc->Sd2Insert()) {
             cerr << "session second SD card could not be put in" << endl;
             return false;
         }
@@ -1091,10 +1107,20 @@ namespace {
                 return false;
             }
         }
+        if (savestate.size && savestate.data) {
+            // A saved machine opened again: its clock moves on by the time it was closed, as a device asleep that
+            // long. Runs on guest time, timed runs (--run-for) and scripts keep the saved one so they repeat, as do
+            // sessions saved without the time.
+            const int64_t now = int64_t(std::time(nullptr));
+            if (sessionSavedAt && !options.emulatedTime && !options.runFor && !options.script && now > *sessionSavedAt)
+                soc->ForwardClock(uint64_t(now - *sessionSavedAt));
+        }
         // A swapped slot is ejected now and its card goes in later, in the guest loop below. The
         // stick's detect line drops here, after the restore, so a guest asleep at the save wakes
         // on it as on a hot eject.
         bool sdInsertPending = false, msInsertPending = false;
+        std::optional<uint64_t> sd2InsertEpoch;
+        if (sd2Swapped && secondCardIn) sd2InsertEpoch = sdCardStore(1).epoch();
         soc->SetSdWriteProtect(frondNative::slotCards().sdProtected);
         soc->SetSd2WriteProtect(frondNative::slotCards().sd2Protected);
         if (msSwapped) {
@@ -1132,6 +1158,7 @@ namespace {
         }
         const uint64_t ejectedAt = soc->GetTime();
         std::optional<uint64_t> awakeAt;
+        uint64_t sd2AwakeTime = 0, sd2LastTime = ejectedAt;
 
         AudioQueue* audioQueue = audioQueueCreate(AUDIO_QUEUE_SIZE);
         soc->SetAudioQueue(audioQueue);
@@ -1309,7 +1336,9 @@ namespace {
                 musicSynth->setClock(&musicClock);
                 musicSynth->setSongDelay(zodiac_music::dalTickNs);
                 musicSynth->start();
-                audioDriver.SetMixer([synth = musicSynth.get()](int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                audioDriver.SetMixer([synth = musicSynth.get(), sink = &zodiacMusic->PcmSink()](
+                                         int16_t* frames, size_t count, const AudioQueueSpan& span) {
+                    synth->setDeviceGain(sink->gain.load(std::memory_order_relaxed));
                     synth->mix(frames, count, span, GuestAudioClock::steadyNs());
                 });
             }
@@ -1437,6 +1466,14 @@ namespace {
                                                        : infrared.StartPrinter(infraredPxa,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
+            cout << "infrared: " << infrared.Describe() << endl;
+        } else if (infraredSync) {
+            if (!capabilities.infrared || deviceProfileOs5(*deviceProfile5(deviceType)) != DeviceOs5::palmOs)
+                commandContext.infraredError = "This device has no IR HotSync.";
+            else if (infraredPort ? infrared.StartSync(infraredPort,commandContext.infraredError)
+                                  : infrared.StartSync(infraredPxa,commandContext.infraredError))
+                commandContext.infraredError.clear();
+            if (!infrared.SyncMode()) { cerr << "infrared: " << commandContext.infraredError << endl; return false; }
             cout << "infrared: " << infrared.Describe() << endl;
         } else if (infraredConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.infrared ||
@@ -1775,7 +1812,7 @@ namespace {
                 // A stopped Zodiac or rx1950 machine can't go on. It ends the run like any other fatal error,
                 // and nothing is saved over the session.
                 if (zodiac && zodiac->Halted())
-                    throw runtime_error("Tapwave Zodiac 2: the machine stopped: " + zodiac->StopText());
+                    throw runtime_error(string(deviceProfile5(deviceType)->displayName) + ": the machine stopped: " + zodiac->StopText());
                 if (rx1950Soc && rx1950Soc->Halted())
                     throw runtime_error("HP iPAQ rx1950: the machine stopped: " + rx1950Soc->StopText());
 
@@ -1892,17 +1929,32 @@ namespace {
                 }
                 inputTrace::note("cycle", true, "end");
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.
-                if (sdInsertPending || msInsertPending) {
+                if (sdInsertPending || msInsertPending || sd2InsertEpoch) {
                     const uint64_t time = soc->GetTime();
-                    if (!awakeAt && !(socPxa && socPxa->PowerSleeping())) awakeAt = time;
-                    const bool handled = !sdInsertPending || soc->SdRemovalHandled().value_or(true);
-                    if ((awakeAt && time - *awakeAt >= swapInsertDelay && handled) || time - ejectedAt >= swapInsertLimit) {
-                        bool inserted = false;
-                        if (sdInsertPending) soc->SdInsert(), inserted = soc->SdInserted();
-                        if (msInsertPending) inserted = msCtrlrInsert(memoryStick, true) || inserted;
-                        sdInsertPending = msInsertPending = false;
-                        // The launcher learns of a hot insert from its reply; this one gets an event.
-                        if (inserted && desktop) desktop->event("card", "inserted");
+                    const bool timedOut = time >= ejectedAt && time - ejectedAt >= swapInsertLimit;
+                    if (sdInsertPending || msInsertPending) {
+                        if (!awakeAt && !(socPxa && socPxa->PowerSleeping())) awakeAt = time;
+                        const bool handled = !sdInsertPending || soc->SdRemovalHandled().value_or(true);
+                        if ((awakeAt && time - *awakeAt >= swapInsertDelay && handled) || timedOut) {
+                            bool inserted = false;
+                            if (sdInsertPending) soc->SdInsert(), inserted = soc->SdInserted();
+                            if (msInsertPending) inserted = msCtrlrInsert(memoryStick, true) || inserted;
+                            sdInsertPending = msInsertPending = false;
+                            if (inserted && desktop) desktop->event("card", "inserted");
+                        }
+                    }
+                    if (sd2InsertEpoch) {
+                        // A card taken out, replaced or already put in while waiting supersedes the insert.
+                        if (sdCardStore(1).epoch() != *sd2InsertEpoch || soc->Sd2Inserted()) {
+                            sd2InsertEpoch.reset();
+                        } else {
+                            if (!soc->PowerSleeping() && time >= sd2LastTime) sd2AwakeTime += time - sd2LastTime;
+                            sd2LastTime = time;
+                            if (sd2AwakeTime >= swapInsertDelay || timedOut) {
+                                sd2InsertEpoch.reset();
+                                if (soc->Sd2Insert() && desktop) desktop->event("card", "sd2-inserted");
+                            }
+                        }
                     }
                 }
                 serial.Service();
@@ -2373,6 +2425,11 @@ int main(int argc, char** argv) {
         .default_value(false)
         .implicit_value(true);
 
+    program.add_argument("--direct-stick")
+        .help("Zodiac, Fast engine only: the ROM takes each stick sample as it is, without its filter")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--no-sound", "-q")
         .help("start with audio off")
         .default_value(false)
@@ -2501,6 +2558,13 @@ int main(int argc, char** argv) {
         .help("with --card-swap, a card put in is write protected")
         .default_value(false).implicit_value(true);
 
+    program.add_argument("--sd2-card-identity")
+        .help("with --card-swap, the identity of the card put in the second SD slot, as 64 hex digits")
+        .metavar("<hex>");
+    program.add_argument("--sd2-card-protected")
+        .help("with --sd2-card-identity, the card put in the second SD slot is write protected")
+        .default_value(false).implicit_value(true);
+
     program.add_argument("--serial")
         .help("connect the TX serial port to a host PTY (pty), a TCP listener on 127.0.0.1 "
               "(tcp:PORT), a Unix socket (unix:PATH, in a 0700 folder you own), one client at a time, or the "
@@ -2531,8 +2595,8 @@ int main(int argc, char** argv) {
         .implicit_value(true);
 
     program.add_argument("--irda")
-        .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, phone for the core's mobile phone or printer for its IrDA printer; exclusive with keyboard; default off")
-        .metavar("<off|pty|tcp:PORT|unix:PATH|phone|printer>");
+        .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, phone for the core's mobile phone, printer for its IrDA printer or sync for a PC running the Sync Manager (IR HotSync); exclusive with keyboard; default off")
+        .metavar("<off|pty|tcp:PORT|unix:PATH|phone|printer|sync>");
 
     program.add_argument("--usb")
         .help("connect the TX USB HotSync port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
@@ -2656,6 +2720,8 @@ int main(int argc, char** argv) {
                        .cardSwap = program.get<bool>("--card-swap"),
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),
+                       .sd2CardIdentity = program.present("--sd2-card-identity"),
+                       .sd2CardProtected = program.get<bool>("--sd2-card-protected"),
                        .engine = program.present("--engine"),
                        .spitzProm = program.present("--spitz-prom"),
                        .microdrive = program.present("--microdrive"),
@@ -2665,6 +2731,7 @@ int main(int argc, char** argv) {
                        .spitzMmc = program.get<bool>("--mmc"),
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble"),
+                       .directStick = program.get<bool>("--direct-stick"),
                        .controllerMap = program.present("--controller-map"),
                        .headphonesIn = program.get<bool>("--headphones-in"),
                        .anyFirmware = program.get<bool>("--any-firmware")};

@@ -1,11 +1,15 @@
 package com.rm.frond.ui
 
 import android.content.Context
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -14,13 +18,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.rm.frond.ControllerMap
 import com.rm.frond.Device
+import com.rm.frond.PadAxis
 import com.rm.frond.PalmButton
+import com.rm.frond.ZodiacStick
 
 // Edits one device's controller map and saves each change. `device` is the one shown; `mapDevice` is the
 // one whose buttons and defaults apply once its firmware is known. Used by Settings and the running sheet.
@@ -41,6 +48,17 @@ class ControlsEditor(private val context: Context, val device: Device, val mapDe
 
     fun removeKey(key: Int) = change(map.remove(key))
 
+    fun chooseStick(stick: ZodiacStick) {
+        capturing = null
+        if (stick != map.stick) change(map.withStick(stick))
+    }
+
+    fun chooseAxis(y: Boolean, axis: PadAxis, invert: Boolean) {
+        capturing = null
+        val bound = if (y) map.stickY else map.stickX
+        if (axis != bound.axis || (axis != PadAxis.NONE && invert != bound.invert)) change(map.withStickAxis(y, axis, invert))
+    }
+
     fun clearButton(button: PalmButton) {
         capturing = null
         change(map.clear(button))
@@ -59,10 +77,16 @@ class ControlsEditor(private val context: Context, val device: Device, val mapDe
 }
 
 // Each Palm button with the controller keys that press it. Tap one, then press a controller key or push
-// a stick to add it; its keys can be taken off one at a time there.
+// a stick to add it; its keys can be taken off one at a time there. The Zodiac starts with the controller
+// stick that moves its analogue stick.
 @Composable
 fun ControllerButtons(editor: ControlsEditor) {
     val device = editor.device
+    if (editor.mapDevice.zodiac) {
+        ZodiacStickRow(editor)
+        ZodiacAxisRow(editor, "Stick X", false)
+        ZodiacAxisRow(editor, "Stick Y", true)
+    }
     for (button in PalmButton.listed(editor.mapDevice)) {
         val waiting = editor.capturing == button
         Row(
@@ -94,5 +118,53 @@ fun ControllerButtons(editor: ControlsEditor) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ZodiacStickRow(editor: ControlsEditor) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.fillMaxWidth().clickableRow { editor.capturing = null; open = true }.padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Analogue stick", Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+            Text(editor.map.stick.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            for (stick in ZodiacStick.entries.filter { it != ZodiacStick.CUSTOM }) {
+                DropdownMenuItem(text = { Text(stick.label) }, onClick = { open = false; editor.chooseStick(stick) })
+            }
+        }
+    }
+}
+
+// One of the Zodiac stick's axes: the controller axis that moves it, and Invert.
+@Composable
+private fun ZodiacAxisRow(editor: ControlsEditor, title: String, y: Boolean) {
+    var open by remember { mutableStateOf(false) }
+    val bound = if (y) editor.map.stickY else editor.map.stickX
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.weight(1f)) {
+            Row(
+                Modifier.fillMaxWidth().clickableRow { editor.capturing = null; open = true }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                Text(bound.axis.label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                for (axis in PadAxis.entries) {
+                    DropdownMenuItem(text = { Text(axis.label) }, onClick = { open = false; editor.chooseAxis(y, axis, bound.invert) })
+                }
+            }
+        }
+        Text("Invert", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 12.dp))
+        Checkbox(
+            checked = bound.invert,
+            enabled = bound.axis != PadAxis.NONE,
+            onCheckedChange = { editor.chooseAxis(y, bound.axis, it) },
+        )
     }
 }

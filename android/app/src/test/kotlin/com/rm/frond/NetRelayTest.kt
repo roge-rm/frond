@@ -1,11 +1,15 @@
 package com.rm.frond
 
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.nio.channels.ServerSocketChannel
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.rm.frond.ui.relayText
 
 class NetRelayTest {
     @Test
@@ -17,6 +21,31 @@ class NetRelayTest {
         // gdb's usual remote port.
         assertEquals(3333, DebugLink.defaultPort)
         assertEquals(DebugLink.DEFAULT_PORT, DebugLink.defaultPort)
+    }
+
+    @Test
+    fun listenersBindLoopbackUnlessNetworkIsEnabled() {
+        val haveIpv6 = runCatching {
+            ServerSocketChannel.open().use { it.bind(InetSocketAddress(TcpListeners.ipv6Loopback, 0)) }
+        }.isSuccess
+        val local = TcpListeners.open(0, BeamMode.Listen(5034).allowNetwork, 4)
+        try {
+            val expected = listOf(TcpListeners.ipv4Loopback) +
+                if (haveIpv6) listOf(TcpListeners.ipv6Loopback) else emptyList()
+            assertEquals(expected, local.map { it.socket().inetAddress })
+            val port = local.first().socket().localPort
+            assertTrue(local.all { it.socket().localPort == port })
+            for (listener in local) {
+                Socket().use { client ->
+                    client.connect(listener.localAddress, 1000)
+                    listener.accept().use { assertTrue(it.isConnected) }
+                }
+            }
+        } finally {
+            local.forEach { it.close() }
+        }
+        val network = TcpListeners.open(0, BeamMode.Listen(5034, allowNetwork = true).allowNetwork, 4).single()
+        network.use { assertTrue(it.socket().inetAddress.isAnyLocalAddress) }
     }
 
     @Test
@@ -63,7 +92,35 @@ class NetRelayTest {
     fun modesKeepTheirPort() {
         // Saved modes carry their port, whichever relay reads them.
         assertEquals(BeamMode.Connect("10.0.2.2", 5034), BeamMode.decode(BeamMode.Connect("10.0.2.2", 5034).encode()))
-        assertEquals(BeamMode.Listen(5033), BeamMode.decode("listen:5033"))
+        // The old listen:PORT took network peers, so an upgraded install keeps taking them.
+        assertEquals(BeamMode.Listen(5033, allowNetwork = true), BeamMode.decode("listen:5033"))
+        assertEquals(BeamMode.Listen(5033), BeamMode.decode(BeamMode.Listen(5033).encode()))
+        assertEquals("listen-local:5033", BeamMode.Listen(5033).encode())
+        val network = BeamMode.Listen(5033, allowNetwork = true)
+        assertEquals(network, BeamMode.decode(network.encode()))
+        assertTrue(relayText(NetRelay.Status(BeamMode.Listen(5033), NetRelay.Phase.WAITING, listenAddresses = "127.0.0.1:5033")).endsWith(", network connections are off"))
+        assertEquals("Waiting for a peer at 10.0.0.2:5033", relayText(NetRelay.Status(network, NetRelay.Phase.WAITING, listenAddresses = "10.0.0.2:5033")))
+        assertFalse(Settings().debuggerNetwork)
+        assertFalse(Settings().linkNetwork)
+    }
+
+    @Test
+    fun linkNetworkStaysOnForPairedInstalls() {
+        val dir = java.nio.file.Files.createTempDirectory("frond-links").toFile()
+        try {
+            assertFalse(Settings.legacyLinkNetwork(dir))
+            val folder = LinkStore.folder(dir)
+            folder.mkdirs()
+            val entry = { paired: Boolean ->
+                """{"version":1,"entries":[{"id":"${"ab".repeat(16)}","key":"${"cd".repeat(32)}","name":"Desk","paired":$paired}]}"""
+            }
+            java.io.File(folder, "connections.json").writeText(entry(false))
+            assertFalse(Settings.legacyLinkNetwork(dir))
+            java.io.File(folder, "connections.json").writeText(entry(true))
+            assertTrue(Settings.legacyLinkNetwork(dir))
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     @Test

@@ -57,8 +57,15 @@ class DeviceDataTest(unittest.TestCase):
         for kotlin in (next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt'),
                        (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()):
             self.assertIn('id = "tapwave-zodiac-2"', kotlin)
+            self.assertIn('id = "tapwave-zodiac-1"', kotlin)
             self.assertIn('id = "sony-clie-tg50"', kotlin)
         self.assertEqual(profile['setup'], '')
+        first = next(p for p in inventory['profiles'] if p['name'] == 'tapwave-zodiac-1')
+        self.assertEqual((first['ram_min_bytes'], first['ram_max_bytes']), (32 << 20, 32 << 20))
+        self.assertTrue(first['available'] and first['runner_eligible'])
+        self.assertEqual(first['storage_slots'], profile['storage_slots'])
+        self.assertEqual((first['company_id'], first['hal_id']), (profile['company_id'], profile['hal_id']))
+        self.assertLess(inventory['profiles'].index(profile), inventory['profiles'].index(first))
 
     def test_rx1950_inventory(self):
         inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
@@ -104,7 +111,7 @@ class DeviceDataTest(unittest.TestCase):
         wireless = next(p for p in profiles if p['name'] == 'alphasmart-dana-wireless')
         self.assertEqual(wireless['storage_slots'], dana['storage_slots'])
         for p in profiles:
-            if p['name'] == 'tapwave-zodiac-2':
+            if p['cohort'] == 'zodiac-nor':
                 # The Zodiac's second slot is native: no linked card files.
                 self.assertEqual([s['id'] for s in p['storage_slots']], [0, 2])
             elif p is not dana and p is not wireless:
@@ -186,6 +193,8 @@ class DeviceDataTest(unittest.TestCase):
             self.assertTrue(profiles[name]['hot_sync_button'], name)
         for name in ('palm-zire-72', 'sony-clie-tg50', 'repalm'):
             self.assertFalse(profiles[name]['hot_sync_button'], name)
+        for name, has in (('palm-zire-72', True), ('sony-clie-tg50', True), ('hp-ipaq-rx1950', True), ('palm-tx', False), ('palm-e2', False)):
+            self.assertEqual(profiles[name]['voice_key'], has, name)
         kotlin = (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()
         self.assertIn('id = "palm-e2-franken"', kotlin)
         self.assertIn('hotSyncButton = true', kotlin)
@@ -220,10 +229,10 @@ class DeviceDataTest(unittest.TestCase):
         self.assertIn('msSizes = listOf(4, 8, 16, 32, 64, 128)', kotlin)
 
     def test_available_profiles_have_measured_recipes(self):
-        self.assertEqual(list(palm_boot.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm', 'palm-zire-72', 'sony-clie-tg50', 'tapwave-zodiac-2'])
+        self.assertEqual(list(palm_boot.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm', 'palm-zire-72', 'sony-clie-tg50', 'tapwave-zodiac-2', 'tapwave-zodiac-1'])
         for name, p in palm_boot.DEVICES.items():
             # The Zodiac runs with nothing injected, so it has no setup recipe.
-            if not p['available'] or name == 'tapwave-zodiac-2':
+            if not p['available'] or p['cohort'] == 'zodiac-nor':
                 continue
             self.assertIn(p['setup'], palm_boot.SETUP_RECIPES, name)
             self.assertIn(p['launcher'], palm_boot.LAUNCHER_CHECKS, name)
@@ -236,7 +245,7 @@ class DeviceDataTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('frond_run_inventory', ROOT / 'tools/frond-run.py')
         runner = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(runner)
-        self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50', 'tapwave-zodiac-2'])
+        self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50', 'tapwave-zodiac-2', 'tapwave-zodiac-1'])
         choices = next(action.choices for action in runner.parser()._actions if action.dest == 'device')
         self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K and name != 'hp-ipaq-rx1950'])
         self.assertIn('palm-iiix', palm_boot.FRONTEND_DEVICES)

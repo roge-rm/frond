@@ -7,6 +7,8 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QString>
+#include <QStringList>
+#include <algorithm>
 #include <vector>
 #include "device_profile5.h"
 
@@ -23,6 +25,28 @@ inline const auto devices = [] {
         if (p.frontend.available || p.deviceType == deviceTypeSpitz) result.push_back(static_cast<Device>(p.deviceType));
     return result;
 }();
+
+inline const DeviceProfile5& profile(Device device);
+// The devices of a picker group, oldest release first; the Zodiac 2 follows the Zodiac 1 and the table order breaks any other tie.
+inline std::vector<Device> devicesInGroup(DeviceGroup5 group) {
+    std::vector<Device> result;
+    for (auto device : devices)
+        if (deviceProfile5(int(device))->group == group) result.push_back(device);
+    std::stable_sort(result.begin(), result.end(), [](Device a, Device b) {
+        const auto &pa = *deviceProfile5(int(a)), &pb = *deviceProfile5(int(b));
+        return pa.released != pb.released ? pa.released < pb.released
+                                           : deviceProfilePickerRank5(int(a)) < deviceProfilePickerRank5(int(b));
+    });
+    return result;
+}
+// The ids of the last 3 devices a machine was made for, newest first: `id` goes to the front.
+inline QStringList pushRecentDevice(QStringList recent, const QString& id) {
+    if (id.isEmpty()) return recent;
+    recent.removeAll(id);
+    recent.prepend(id);
+    while (recent.size() > 3) recent.removeLast();
+    return recent;
+}
 
 inline const DeviceProfile5& profile(Device device) {
     const auto* p = deviceProfile5(int(device));
@@ -42,11 +66,16 @@ inline Device deviceFromId(const QString& id) {
 }
 
 inline QString deviceName(Device device) { return QString::fromUtf8(profile(device).displayName); }
+inline bool isZodiac(Device device) {
+    return device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac;
+}
 
 // Which settings a device supports, from the device table.
 using Capabilities = DeviceCapabilities5;
 inline Capabilities capabilities(Device device) { return profile(device).capabilities; }
 inline bool infraredKeyboard(Device device) { return capabilities(device).keyboard && !isDana(device); }
+// The Palm Portable Keyboard on the serial port.
+inline bool serialKeyboard(Device device) { return device != Device::automatic && deviceProfileSerialKeyboard5(int(device)); }
 
 // DragonBall devices run in frond-68k. Their capabilities list all the hardware they have, so
 // controls for anything else are hidden rather than greyed.
@@ -61,13 +90,11 @@ inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfil
 
 // Install, the application list and hard reset. Every Palm OS device has them; callers also check palmOs.
 inline bool guestServices(Device) { return true; }
-// Install, the application list and hard reset are Palm OS guest services. A Windows CE device has its own
-// (installsToCard, ceHardReset) and greys out the rest. Callers check this and guestServices.
+// Palm OS device profiles use the core's Palm guest services.
 inline bool palmOs(Device device) {
     return device == Device::automatic || deviceProfileOs5(profile(device)) == DeviceOs5::palmOs;
 }
-// Windows CE: Install copies the file onto the SD card, where the guest's File Explorer opens it (wceload for a
-// CAB); the application list stays greyed. The rx1950 only so far.
+// Windows CE installs through the SD card.
 inline bool installsToCard(Device device) {
     return device != Device::automatic && profile(device).board == DeviceBoard5::s3c2442Rx1950;
 }
@@ -149,6 +176,9 @@ inline QString importWarning(Device device, const QString& nandPath, bool anyFir
 inline bool serialAbsent(Device device) { return device == Device::zire72; }
 // The connector or cradle has a separate HotSync button on these boards.
 inline bool hasHotSyncButton(Device device) { return deviceProfileHasHotSyncButton5(int(device)); }
+
+// A voice or record key the Record button holds down.
+inline bool hasVoiceKey(Device device) { return deviceProfileHasVoiceKey5(int(device)); }
 
 // A 68k ROM's big-endian card header, read the way frond-68k reads it before its own full check.
 inline Device68kRomInfo5 inspectRom68k(QFile& rom) {
@@ -263,13 +293,14 @@ inline QString validateFiles(Device chosen, const QString& norPicked, const QStr
                                          : QStringLiteral("This NOR image has no Tungsten E2 header. Check the device choice.");
     const auto info = inspectNor(nor);
     const auto& selected = profile(device);
-    if (info.profile && info.profile != &selected && info.profile->deviceType != deviceTypeE2 &&
+    const bool takesRom = info.profile && deviceProfileTakesArmRom5(selected.deviceType, info.profile->deviceType);
+    if (info.profile && !takesRom && info.profile->deviceType != deviceTypeE2 &&
         info.profile->deviceType != deviceTypeZire72)
         return QStringLiteral("This is a %1 NOR image. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
     if (device != Device::tx && device != Device::e2 && device != Device::zire72) {
-        if (info.profile && info.profile != &selected)
+        if (info.profile && !takesRom)
             return QStringLiteral("This is a %1 NOR image. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
-        if (selected.detect == DeviceDetect5::cardHeader && info.profile != &selected)
+        if (selected.detect == DeviceDetect5::cardHeader && !takesRom)
             return QStringLiteral("This NOR image has no %1 header.").arg(deviceName(device));
         if (!info.validLayout) return QStringLiteral("This %1 NOR image has an invalid card layout.").arg(deviceName(device));
         if (!selected.nandSize && !nandPath.isEmpty()) return QStringLiteral("This device has no NAND. Leave the NAND image empty.");

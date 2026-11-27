@@ -1,4 +1,6 @@
 #include "ControlsEditor.h"
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -54,7 +56,7 @@ ControlsDialog::ControlsDialog(const DeviceProfile5& profile, const ControllerMa
 ControlsDialog::~ControlsDialog() { stopCapture(); }
 
 // A row per Palm button: its name, a button per controller key that presses it (clicking one takes
-// it off), and Add.
+// it off), and Add. The Zodiac starts with the controller stick that moves its analogue stick.
 void ControlsDialog::fill() {
     // Later, as the button that asked for this may be one of them.
     while (auto* item = grid->takeAt(0)) {
@@ -62,6 +64,53 @@ void ControlsDialog::fill() {
         delete item;
     }
     int row = 0;
+    if (zodiacController(profile)) {
+        grid->addWidget(new QLabel(tr("Analogue stick")), row, 0);
+        auto* stick = new QComboBox;
+        stick->setObjectName("controlsStick");
+        stick->addItem(tr("Left stick"), int(PadStick::left));
+        stick->addItem(tr("Right stick"), int(PadStick::right));
+        stick->addItem(tr("None"), int(PadStick::none));
+        stick->addItem(tr("Custom"), int(PadStick::custom));
+        stick->setCurrentIndex(stick->findData(int(current.preset())));
+        connect(stick, &QComboBox::activated, this, [this, stick](int index) {
+            const auto chosen = PadStick(stick->itemData(index).toInt());
+            if (chosen == current.preset()) return;
+            stopCapture();
+            current.setStick(chosen);
+            defaulted = false;
+            fill();
+            emit changed(current, false);
+        });
+        grid->addWidget(stick, row, 1, 1, 2);
+        ++row;
+        // The stick's X and Y, each from any controller axis, with Invert.
+        for (const bool y : {false, true}) {
+            grid->addWidget(new QLabel(y ? tr("Stick Y") : tr("Stick X")), row, 0);
+            auto* axis = new QComboBox;
+            axis->setObjectName(y ? "controlsStickY" : "controlsStickX");
+            for (int i = 0; i < int(PadAxis::count); ++i)
+                axis->addItem(tr(padAxisName(PadAxis(i))), i);
+            const StickAxis& bound = y ? current.stickY : current.stickX;
+            axis->setCurrentIndex(axis->findData(int(bound.axis)));
+            auto* invert = new QCheckBox(tr("Invert"));
+            invert->setObjectName(y ? "controlsStickYInvert" : "controlsStickXInvert");
+            invert->setChecked(bound.invert);
+            invert->setEnabled(bound.axis != PadAxis::none);
+            auto change = [this, y, axis, invert] {
+                stopCapture();
+                current.setStickAxis(y, PadAxis(axis->currentData().toInt()), invert->isChecked());
+                defaulted = false;
+                fill();
+                emit changed(current, false);
+            };
+            connect(axis, &QComboBox::activated, this, change);
+            connect(invert, &QCheckBox::clicked, this, change);
+            grid->addWidget(axis, row, 1);
+            grid->addWidget(invert, row, 2);
+            ++row;
+        }
+    }
     for (const auto button : controllerPalmKeys(profile)) {
         auto* name = new QLabel(QString::fromStdString(palmKeyLabel(button, profile)));
         grid->addWidget(name, row, 0);

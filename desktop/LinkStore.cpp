@@ -1,4 +1,5 @@
 #include "LinkStore.h"
+#include <algorithm>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -32,6 +33,12 @@ static QString toHex(const std::array<uint8_t, N>& a) {
     return QString::fromLatin1(QByteArray(reinterpret_cast<const char*>(a.data()), int(N)).toHex());
 }
 
+// A JSON number as a whole qint64; 0 for one outside its range, where the cast is undefined.
+static qint64 jsonInt64(const QJsonValue& value) {
+    const double d = value.toDouble();
+    return d > -9.2e18 && d < 9.2e18 ? qint64(d) : 0;
+}
+
 static bool writePrivate(const QString& path, const QJsonObject& object) {
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) return false;
@@ -49,7 +56,7 @@ QString Store::open(const QString& where) {
     lock->setStaleLockTime(0);
     if (!lock->tryLock(0)) return QStringLiteral("Another link service uses %1.").arg(folder);
     QFile identity(folder + "/identity.json");
-    bool loaded = false;
+    bool loaded = false, hasNetwork = true;
     if (identity.open(QIODevice::ReadOnly)) {
         const auto o = QJsonDocument::fromJson(identity.readAll()).object();
         Key32 secret{};
@@ -57,6 +64,8 @@ QString Store::open(const QString& where) {
             parseHex(o.value("secret").toString(), secret) && identityFromSecret(secret, info.identity)) {
             info.name = o.value("name").toString().toStdString();
             port = quint16(o.value("port").toInt(defaultPortValue));
+            hasNetwork = o.contains("network");
+            allowNetwork = o.value("network").toBool(false);
             loaded = true;
         }
         wipe(secret.data(), secret.size());
@@ -83,20 +92,26 @@ QString Store::open(const QString& where) {
             p.goodHost = e.value("lastHost").toString();
             p.goodPort = quint16(e.value("lastPort").toInt());
             p.paired = e.value("paired").toBool(true);
-            p.lastSeen = qint64(e.value("lastSeen").toDouble());
+            p.lastSeen = jsonInt64(e.value("lastSeen"));
             p.bluetoothRadio = e.value("bluetoothRadio").toString("here") == QLatin1String("there") ? "there" : "here";
-            p.bluetoothRadioAt = qint64(e.value("bluetoothRadioAt").toDouble());
+            p.bluetoothRadioAt = jsonInt64(e.value("bluetoothRadioAt"));
             p.keyChanged = e.value("keyChanged").toBool(false);
             if (p.name.isEmpty()) p.name = p.peerName;
             peers.push_back(p);
         }
+    }
+    // An identity saved before the setting existed accepted network links: keep that for installs with paired peers.
+    if (!hasNetwork) {
+        allowNetwork = std::any_of(peers.begin(), peers.end(), [](const Peer& p) { return p.paired; });
+        saveIdentity();
     }
     return {};
 }
 bool Store::saveIdentity() {
     return writePrivate(folder + "/identity.json",
                         QJsonObject{{"version", 1}, {"id", hexId(info.id)}, {"name", name()},
-                                    {"secret", toHex(info.identity.secret)}, {"port", int(port)}});
+                                    {"secret", toHex(info.identity.secret)}, {"port", int(port)},
+                                    {"network", allowNetwork}});
 }
 bool Store::save() {
     QJsonArray entries;

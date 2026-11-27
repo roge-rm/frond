@@ -1780,6 +1780,26 @@ static void ProductionCrashRecovery() {
     std::puts("production folder load/attach fork/_exit, save/adopt/reload PASS");
 }
 
+// The metadata records: an older session's bare "any-firmware" or nothing still reads, the save's time comes back,
+// and lines it doesn't know or a time it can't read are skipped.
+static void MetadataRecords() {
+    auto parse = [](const std::string& text) {
+        return frondNative::parseSessionMetadata(std::vector<uint8_t>(text.begin(), text.end()));
+    };
+    auto r = parse("");
+    assert(!r.anyFirmware && !r.savedAt);
+    r = parse("any-firmware");
+    assert(r.anyFirmware && !r.savedAt);
+    const auto bytes = frondNative::sessionMetadata({true, 1764078000});
+    assert(std::string(bytes.begin(), bytes.end()) == "any-firmware\nsaved-at 1764078000\n");
+    r = frondNative::parseSessionMetadata(bytes);
+    assert(r.anyFirmware && r.savedAt && *r.savedAt == 1764078000);
+    r = frondNative::parseSessionMetadata(frondNative::sessionMetadata({false, 42}));
+    assert(!r.anyFirmware && r.savedAt == 42);
+    r = parse("later thing\nsaved-at 12x\nsaved-at \nany-firmwarex");
+    assert(!r.anyFirmware && !r.savedAt);
+}
+
 int main() {
     ProductionCrashRecovery();
     NativeWrapperRefusal();
@@ -1807,5 +1827,6 @@ int main() {
     V7FixtureMigrates();
     LazyChunkCheck();
     NandV9Folder();
+    MetadataRecords();
     std::puts("Session v7 and streamed v6 extraction checks passed");
 }

@@ -9,6 +9,7 @@
 #include <QStackedWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QXmlStreamReader>
 
 PanelHost::PanelHost(QWidget* parent) : QFrame(parent) {
     setObjectName("panelHost");
@@ -87,6 +88,9 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
     connect(otherButton, &QPushButton::clicked, this, &AppsPanel::otherRequested);
     exportAllButton = add(tr("Export all…"), "exportRam");
     connect(exportAllButton, &QPushButton::clicked, this, &AppsPanel::exportAllRequested);
+    refreshButton = add(tr("Refresh"), "refreshInstalledPrograms");
+    refreshButton->hide();
+    connect(refreshButton, &QPushButton::clicked, this, &AppsPanel::refreshInstalledPrograms);
     layout->addLayout(buttons);
     list = new QListWidget(this);
     list->setObjectName("appsList");
@@ -98,19 +102,21 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
     empty->setObjectName("appsEmpty");
     empty->setEnabled(false);
     layout->addWidget(empty);
-    connect(list, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) { emit launchRequested(item->data(Qt::UserRole).toString()); });
+    connect(list, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
+        if (!installOnly) emit launchRequested(item->data(Qt::UserRole).toString());
+    });
 }
 
-void AppsPanel::setInstallOnly(bool on) {
-    if (on == installOnly) return;
+void AppsPanel::setInstallOnly(bool on, bool windowsMobile) {
+    if (on == installOnly && windowsMobile == listWindowsMobile) return;
     installOnly = on;
+    listWindowsMobile = windowsMobile;
     otherButton->setEnabled(!on);
     exportAllButton->setEnabled(!on);
-    list->setEnabled(!on);
-    list->clear();
-    list->setVisible(!on);
-    empty->setText(on ? tr("Not available yet") : tr("No applications"));
-    empty->setVisible(!packageQueue);
+    refreshButton->setVisible(windowsMobile);
+    list->setEnabled(!on || windowsMobile);
+    list->setVisible(!on || windowsMobile);
+    setDatabases({});
 }
 
 void AppsPanel::setPackageQueue(bool on) {
@@ -118,6 +124,56 @@ void AppsPanel::setPackageQueue(bool on) {
     packageQueue = on;
     installButton->setText(on ? tr("Queue IPK…") : tr("Install…"));
     empty->setVisible(!on);
+}
+
+void AppsPanel::loadingInstalledPrograms() {
+    readingWindowsMobile = true;
+    refreshButton->setEnabled(false);
+    empty->setText(tr("Reading installed programs…"));
+    empty->show();
+}
+
+void AppsPanel::showInstalledPrograms(bool ok, const QString& message) {
+    if (!readingWindowsMobile) return;
+    readingWindowsMobile = false;
+    refreshButton->setEnabled(true);
+    if (!ok) {
+        empty->setText(message);
+        empty->show();
+        return;
+    }
+    QXmlStreamReader xml(message);
+    QStringList programs;
+    bool uninstall = false, found = false;
+    int depth = 0;
+    while (!xml.atEnd()) {
+        const auto token = xml.readNext();
+        if (token == QXmlStreamReader::DTD) break;
+        if (token == QXmlStreamReader::StartElement) {
+            ++depth;
+            const auto type = xml.attributes().value(QLatin1String("type"));
+            if (depth == 1 && xml.name() != QLatin1String("wap-provisioningdoc")) break;
+            if (depth == 2) {
+                uninstall = xml.name() == QLatin1String("characteristic") && type == QLatin1String("UnInstall");
+                found |= uninstall;
+            }
+            if (depth == 3 && uninstall && xml.name() == QLatin1String("characteristic") && !type.isEmpty())
+                programs.push_back(type.toString());
+        } else if (token == QXmlStreamReader::EndElement) {
+            --depth;
+        }
+    }
+    if (!found || xml.hasError() || xml.tokenType() != QXmlStreamReader::EndDocument) {
+        empty->setText(tr("Windows Mobile returned an invalid program list."));
+        empty->show();
+        return;
+    }
+    programs.removeDuplicates();
+    programs.sort(Qt::CaseInsensitive);
+    list->clear();
+    list->addItems(programs);
+    empty->setText(tr("No installed programs"));
+    empty->setVisible(programs.empty());
 }
 
 QStringList AppsPanel::names() const {
@@ -157,6 +213,9 @@ void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, con
         list->setItemWidget(item, widget);
     }
     if (row >= 0 && row < list->count()) list->setCurrentRow(row);
-    empty->setText(installOnly ? tr("Not available yet") : note.isEmpty() ? tr("No applications") : note);
+    readingWindowsMobile = false;
+    refreshButton->setEnabled(true);
+    empty->setText(listWindowsMobile ? tr("Installed programs haven’t been read") :
+                   installOnly ? tr("Not available yet") : note.isEmpty() ? tr("No applications") : note);
     empty->setVisible(apps.empty() && !packageQueue);
 }

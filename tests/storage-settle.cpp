@@ -140,7 +140,7 @@ static void LeftoversFromEitherApp(const fs::path& root, const fs::path& fixture
                     media.contentGeneration = ExpectedGeneration(from.string() + ".expect");
                     assert(frondSession::settleSdJournal(load, media));
                 } else {
-                    frondSession::CardSwap swap;
+                    frondSession::CardSwapSlot swap;
                     swap.identityGiven = true;
                     swap.identity[0] = 1;
                     assert(frondSession::swappedInCard(load, frondMachine::sdSibling, swap, media));

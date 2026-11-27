@@ -41,6 +41,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     interface Host {
         // UDP port for beacons; 0 turns discovery off.
         val discoveryPort: Int
+        val allowNetwork: Boolean get() = false
+        fun networkAddresses(): List<String> = emptyList()
         // Called on the engine thread when discovery starts and stops, for the Wi-Fi multicast lock.
         fun discovery(on: Boolean) {}
         // False while Android's local network access is off for Frond.
@@ -53,6 +55,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         fun startRadio(): String? = null
         fun radioRunning(): Boolean = false
         fun stopRadio() {}
+        fun updatePhone(machine: String?) = BtLink.PhoneStatus()
     }
 
     // Gets events on the engine thread. Must not block for long.
@@ -120,6 +123,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         // Bluetooth: the engine's socket the core connects to, once per controller.
         var btServer: LocalServerSocket? = null
         var btBound: LocalSocket? = null
+        var phoneMachine: String? = null
         // Serial: the reader takes one buffer from the core at a time and waits on the gate until the mux has
         // taken it all (outHeld is what didn't fit yet), so the core's queue fills and its CTS drops. Bytes
         // from the link go to the writer thread; credit goes back as it writes them (unacked). pendingIn holds
@@ -184,7 +188,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         Thread(r, "FrondLinkCoreConnect").apply { isDaemon = true }
     }
     private var selector: Selector? = null
-    private var listener: ServerSocketChannel? = null
+    private var listeners = emptyList<ServerSocketChannel>()
+    private var listenAddresses = ""
     private var udp: DatagramChannel? = null
     private var thread: Thread? = null
     @Volatile private var running = false
@@ -201,6 +206,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     private var radioStarted = 0L
     private var radioIdleSince = 0L
     private var radioFailedAt = 0L
+    private var phoneState = BtLink.PhoneStatus()
+    private var phoneOwner: Attach? = null
     private val runs = HashMap<String, PeerRun>()
     private val nearby = HashMap<String, Nearby>()
     private val recent = HashMap<String, ArrayList<Long>>()
@@ -236,29 +243,33 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     fun start(): String? {
         val sel = Selector.open()
         selector = sel
-        val server = ServerSocketChannel.open()
         try {
-            server.setOption(StandardSocketOptions.SO_REUSEADDR, true)
-            try { server.bind(InetSocketAddress(store.identity.port), 16) } catch (e: IOException) { server.bind(InetSocketAddress(0), 16) }
+            listeners = TcpListeners.open(store.identity.port, host.allowNetwork, 16, fallbackPort = true)
+            for (server in listeners) {
+                server.configureBlocking(false)
+                server.register(sel, SelectionKey.OP_ACCEPT)
+            }
         } catch (e: IOException) {
-            server.close()
+            for (server in listeners) try { server.close() } catch (_: IOException) {}
             sel.close()
-            return "Couldn't take connections from the network."
+            return "Couldn't open the link listener."
         }
-        server.configureBlocking(false)
-        server.register(sel, SelectionKey.OP_ACCEPT)
-        listener = server
-        listenPort = server.socket().localPort
-        if (host.discoveryPort != 0) {
+        listenPort = listeners.first().socket().localPort
+        val network = if (host.allowNetwork) host.networkAddresses() else emptyList()
+        listenAddresses = if (network.isEmpty()) TcpListeners.addresses(listeners)
+            else network.joinToString(", ") { NetRelay.hostPort(it, listenPort) }
+        if (host.allowNetwork && host.discoveryPort != 0) {
             try {
                 val d = DatagramChannel.open()
+                udp = d
                 d.setOption(StandardSocketOptions.SO_REUSEADDR, true)
                 d.setOption(StandardSocketOptions.SO_BROADCAST, true)
                 d.bind(InetSocketAddress(host.discoveryPort))
                 d.configureBlocking(false)
                 d.register(sel, SelectionKey.OP_READ)
-                udp = d
             } catch (e: IOException) {
+                try { udp?.close() } catch (_: IOException) {}
+                udp = null
                 Log.w(TAG, "link: no discovery: $e")
             }
         }
@@ -303,9 +314,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         for (k in ArrayList(controllers)) dropController(k, false)
         for (a in attaches) { closeCore(a); closeBtServer(a) }
         attaches.clear()
+        host.updatePhone(null)
         if (radioOn) { host.stopRadio(); radioOn = false }
         endPairRequest("cancelled")
-        try { listener?.close() } catch (_: IOException) {}
+        for (server in listeners) try { server.close() } catch (_: IOException) {}
         try { udp?.close() } catch (_: IOException) {}
         try { selector?.close() } catch (_: IOException) {}
         if (wasActive) host.discovery(false)
@@ -326,7 +338,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                     if (!key.isValid) continue
                     when (val what = key.attachment()) {
                         is Conn -> connReady(what, key)
-                        else -> if (key.channel() === listener) incoming() else if (key.channel() === udp) datagrams()
+                        else -> when (val channel = key.channel()) {
+                            is ServerSocketChannel -> incoming(channel)
+                            udp -> datagrams()
+                        }
                     }
                 }
                 while (true) { val task = tasks.poll() ?: break; task(); if (!running) break }
@@ -370,7 +385,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             }
             "state" -> sendTo(c, snapshot())
             "rename" -> {
-                val name = op.optString("name").trim().take(64)
+                val name = LinkWire.name64(op.optString("name").trim())
                 if (name.isNotEmpty()) store.setName(name)
             }
             "peer-rename", "peer-address", "forget" -> {
@@ -378,7 +393,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                 store.find(hex) ?: return
                 when (op.optString("op")) {
                     "peer-rename" -> {
-                        val name = op.optString("name").trim().take(64)
+                        val name = LinkWire.name64(op.optString("name").trim())
                         if (name.isNotEmpty()) store.update(hex) { it.copy(name = name) }
                     }
                     "peer-address" -> {
@@ -504,9 +519,9 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         } catch (_: IOException) {}
     }
 
-    private fun incoming() {
+    private fun incoming(listener: ServerSocketChannel) {
         while (true) {
-            val s = try { listener?.accept() } catch (e: IOException) { null } ?: return
+            val s = try { listener.accept() } catch (e: IOException) { null } ?: return
             val from = (s.remoteAddress as? InetSocketAddress)?.address
             if (!LinkWire.allowedPeer(from)) { s.close(); continue }
             val t = now()
@@ -1297,9 +1312,12 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         if (attaches.any { it.client === c && it.bt }) return  // one per client
         val a = Attach(c, op.optString("machine"), op.optString("device"), op.optString("link"), op.optString("socket"),
             LinkWire.KIND_BLUETOOTH)
+        if (a.link == LinkWire.RADIO && op.optBoolean("phone")) a.phoneMachine = op.optString("syncMachine")
         attaches += a
         if (a.socketPath.isNotEmpty()) btListen(a)
-        if (a.link == LinkWire.RADIO) startRadio()
+        if (a.link == LinkWire.RADIO) {
+            if (a.phoneMachine == null) startRadio()
+        }
         else {
             val r = run(a.link)
             if (r.link == null && r.dialing == null) { r.nextTry = now(); r.backoff = 0 }
@@ -1404,13 +1422,15 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     private fun btRadioConnect(k: Controller) {
         k.radioTry = now() + RADIO_RETRY_MS
         if (k.radioSock != null) return
-        val path = startRadio() ?: return  // shown as no radio; it waits
+        val privateRadio = k.owner?.phoneMachine != null
+        val path = (if (privateRadio) phoneState.socket.takeIf { k.owner === phoneOwner } else startRadio()) ?: return
         val s = LocalSocket()
         try {
             s.connect(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
         } catch (e: IOException) {
             shut(s)
-            val starting = host.radioRunning() && now() - radioStarted < RADIO_START_MS
+            val starting = if (privateRadio) phoneState.call == "starting"
+                else host.radioRunning() && now() - radioStarted < RADIO_START_MS
             if (!starting) dropController(k)
             return
         }
@@ -1578,7 +1598,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         }
     }
 
-    private fun radioWanted() = controllers.any { it.wantsRadio } || attaches.any { it.bt && it.link == LinkWire.RADIO }
+    private fun radioWanted() = controllers.any { it.wantsRadio && it.owner?.phoneMachine == null } ||
+        attaches.any { it.bt && it.link == LinkWire.RADIO && it.phoneMachine == null }
 
     // This Frond's radio's socket, starting it if it isn't running. Null while there's none.
     private fun startRadio(): String? {
@@ -1597,6 +1618,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     private fun radioTick() {
         val t = now()
+        phoneOwner = attaches.firstOrNull { it.phoneMachine != null }
+        phoneState = host.updatePhone(phoneOwner?.phoneMachine)
         for (k in ArrayList(controllers)) if (k in controllers && k.wantsRadio && k.radioSock == null && t >= k.radioTry) btRadioConnect(k)
         if (!radioOn) return
         if (radioWanted()) { radioIdleSince = t; return }
@@ -1673,8 +1696,11 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     // ---- Status ----
 
     private fun status(a: Attach): JSONObject {
-        if (a.bt && a.link == LinkWire.RADIO)
+        if (a.bt && a.link == LinkWire.RADIO) {
             return btStatus(a).put("peer", "This Frond").put("state", if (host.radioAvailable()) "radio" else "noradio")
+                .put("phone", if (a === phoneOwner) phoneState.call else "")
+                .put("phoneSync", if (a === phoneOwner) phoneState.sync else "")
+        }
         val p = store.find(a.link)
         val r = runs[a.link]
         val state = when {
@@ -1731,7 +1757,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         val near = JSONArray()
         for ((id, n) in nearby) near.put(JSONObject().put("id", id).put("name", n.name).put("address", n.address.hostAddress).put("port", n.port))
         return JSONObject().put("type", "state").put("id", store.identity.hex).put("name", store.identity.name).put("port", listenPort)
-            .put("connections", list).put("nearby", near)
+            .put("connections", list).put("nearby", near).put("listen", listenAddresses).put("network", host.allowNetwork)
     }
 
     private fun tick() {
@@ -1767,7 +1793,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         syncCores()
         for (a in ArrayList(attaches)) if ((a.st == St.BUSY || a.st == St.IDLE) && a.retryAt <= t) matchPeer(a.link)
         // Discovery.
-        val active = discoveryActive()
+        val active = udp != null && discoveryActive()
         if (active != wasActive) host.discovery(active)
         if (active && (!wasActive || t - lastBeacon >= BEACON_MS)) {
             if (!wasActive) beacon(LinkWire.QUERY)

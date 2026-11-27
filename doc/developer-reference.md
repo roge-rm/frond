@@ -36,8 +36,10 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--zaurus-pc-link-files PORT` | In stock PC Link USB (TCP/IP) mode, forward `127.0.0.1:PORT` to the guest file server's TCP 139 after DHCP. The listener closes with the cable. |
 | `--work-folder DIR` | Run a session from elsewhere, in this empty machine folder. Its card files are copied there. |
 | `--card-swap` | Load a session whose card files the launcher changed while it was off. A slot with another card, the same card changed elsewhere, or none comes up ejected, and the card there now goes in once the Palm has run 500 ms awake (5 s at most), with a `card` event. |
-| `--card-identity HEX` | With `--card-swap`, the identity of a card put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
-| `--card-protected` | With `--card-swap`, a card put in is write protected. |
+| `--card-identity HEX` | With `--card-swap`, the identity of the first SD card or Memory Stick put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
+| `--card-protected` | With `--card-swap`, the first SD card or Memory Stick put in is write protected. |
+| `--sd2-card-identity HEX` | With `--card-swap`, the identity of the card put in the Zodiac's second SD slot. Without it, a changed card in that slot is left for `sd2-put-in`. |
+| `--sd2-card-protected` | With `--sd2-card-identity`, the second SD card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
 | `--mips N` | A fixed core clock in MHz (Uncapped passes 3000). Default: the device's own clock, as the guest sets it (CCCR and CLKCFG on the PXA devices). |
 | `--emulated-time` | Every guest second gets the full clock, however slow the host, and input replay times are guest time. A slow host runs slower in wall time instead of giving the guest fewer cycles. For tests. |
@@ -50,7 +52,7 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
 | `--serial off\|pty\|tcp:PORT\|unix:PATH` | Connect the serial port to a host PTY, a loopback TCP listener or a Unix socket, see [Connections](#connections) (one client at a time). |
 | `--usb off\|pty\|tcp:PORT\|unix:PATH` | Same for the USB HotSync port, through a built-in USB host. |
-| `--irda off\|pty\|tcp:PORT\|unix:PATH\|phone` | Same for infrared SIR bytes, or `phone` for the core's mobile phone (the `irPhone` capability). Not with the infrared keyboard. |
+| `--irda off\|pty\|tcp:PORT\|unix:PATH\|phone\|printer\|sync` | Same for infrared SIR bytes, or `phone` for the core's mobile phone (the `irPhone` capability), `printer` for its IrDA printer or `sync` for IR HotSync to the Sync Manager (Palm OS devices). Not with the infrared keyboard. |
 | `--bluetooth off\|SOCKET` | Connect the virtual radio to a local H4 controller Unix socket (such as `btvirt`). |
 | `--sync-folder DIR` | Use this directory for Sync Manager profiles. |
 | `--sync-machine KEY`, `--sync-profile NAME` | Use the key to remember the handheld's assigned profile, or name a profile for this run. |
@@ -248,7 +250,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `db-export-rom FILE` | Export RAM and ROM databases (not the PACE cache). |
 | `db-export-all FILE` | Export every database. |
 
-`install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays, and so does a launch already under way.
+`install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Over the control socket the notify and the launcher reopen wait until 0.5 s after the last `install`, or until the next other command, quit or a lost connection, and then run once for the whole batch. Another app in front stays, and so does a launch already under way.
 
 The commands you start wake a sleeping Palm first with a power button press, here and on the control socket: `install`, `launch`, `set-auto-off`, the `db-export` commands, `launch-app`, `delete-db`, `export`, `export-db`, `db-list wake` and the Memory Stick file commands. No press is added while one from the host is held or queued. The guest runs until it's awake and takes host calls, 5 guest seconds at most. `db-list` and `os-version` leave it asleep. A Palm still asleep refuses the command, saying so (`asleep` on the control socket).
 
@@ -283,7 +285,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `ready` | The core has connected. |
 | `close` | The user closed the window. The launcher decides what to do. |
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
-| `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
+| `card` | `inserted` for the first SD slot or Memory Stick, or `sd2-inserted` for the second SD slot, when a card that `--card-swap` left ejected goes in. |
 | `rumble` | `on` or `off`, sent while the Zodiac's guest rumble motor is on, Rumble is enabled and no game controller that can rumble is open, so the window can show it. |
 | `attention` | Guest LED and vibration state, sent when it changes, for example `led=green vibrate=1`. |
 | `sync` | Sync Manager status when it changes, or a failure starting a pending HotSync. |
@@ -337,7 +339,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `cradle-button-state`, `cradle-button` | None to read, `down` or `up` to set | `cradle-button`: actual button state, or `unavailable` for a read on devices without this control. |
 | `sync-state`, `sync-profile` | None to read, profile name to set (empty to use the assigned profile) | `sync`: Sync Manager status. The profile change applies to the next HotSync. |
 | `sync-start` | Empty, `local` or `network` | `sync`: start HotSync on USB or serial. Over USB the press goes in once the device comes up, or after 2 s (a Zodiac's USB only comes up once HotSync runs), and right after a sync it waits like `hotsync`. `local` also disables Network HotSync. With `network`, open the guest's HotSync app and return `network` with a prompt to tap Network HotSync. |
-| `activesync-start` | `usb`, `serial` or empty for the configured transport | `sync`: start ActiveSync on Windows Mobile. |
+| `activesync-start` | `usb`, `serial` or empty for the configured transport, then optionally `ask` | `sync`: start ActiveSync on Windows Mobile. With `ask`, a device with no partnership and no saved answer waits at stage `partnership-question` for `activesync-answer`; without it, it pairs. |
+| `activesync-answer` | `set-up` or `guest` | `sync`: answer the partnership question. `guest` syncs nothing and isn't asked again. `none` when no question is open. |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |
@@ -346,12 +349,12 @@ State commands take no argument. Mode commands change the setting and reply with
 | `camera-mode` | `pattern`, `picture:PATH` (PNG, JPEG, BMP), `webcam:DEVICE` (V4L2 in YUYV, Linux desktop) or `frames` | `camera`; for `frames` the path of the frames file |
 | `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`), `jog-landscape=`(`hidden` `beside` `under` `over`) | `display`: `queued`, applied once the app is in the foreground |
 | `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error; frond-68k's modem gives `modem idle\|dialling\|online 33600` |
-| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, and `modem` for `serial-mode` on a device with a snap-on modem (frond-68k, `unsupported` elsewhere there), `phone` for `irda-mode` on a device with the `irPhone` capability (`unsupported` elsewhere, and on frond-68k before Palm OS 3.3) | the state |
+| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`. frond-68k also offers `ppp` for `serial-mode`, `modem` on devices with a snap-on modem and `keyboard` (the Palm Portable Keyboard) on devices with `serial_keyboard`. `irda-mode` offers `phone` with the `irPhone` capability and Palm OS 3.3 or later, `printer`, and `sync` (IR HotSync) on Palm OS 3.3 or later. | the state |
 | `irda-state` | | `infrared`; the phone gives `phone idle\|linked\|dialling\|online 33600` |
 | `irprinter` | `status`, `save ABSOLUTE_PATH` or `clear` | `irprinter`: any error text, then `attached\|off receiving\|ready bytes=N receiving=R last=LAST idle=MS` for the infrared printer (`irda-mode printer`): N is the held output `save` writes, R the bytes of a job still coming in, LAST the last save's result and MS the milliseconds since a byte arrived or a job ended (-1 with none) |
 | `irda-stats` | | `infrared`: counters `rx= tx= rx_drop= tx_drop= pending= baud= rx_on= tx_on= power= sleeping=`; frond-68k gives `rx= tx= port=`; the phone gives `frames_in= frames_out= bad= connects= resent= timeouts=` (frond-68k with `port=` first) |
 | `serial-stats` | | frond-68k: `serial`: the modem's `power=on\|off dtr=on\|off`, or `off` outside modem mode |
-| `modem-sync` | none, or `off`, `pty`, `tcp:PORT` or `unix:PATH` | frond-68k: `modem-sync`: the modem's HotSync link, as `serial-state` shows a link; `unsupported` without a modem |
+| `modem-sync` | none, or `off`, `pty`, `tcp:PORT`, `unix:PATH` or `sync` | frond-68k shows the modem's HotSync link. `sync` routes it to Sync Manager. |
 | `bluetooth-state` | | `bluetooth` |
 | `bluetooth-mode` | `off` or an absolute Unix socket path | `bluetooth` |
 | `network-state` | | `network`: mode name |
@@ -529,13 +532,14 @@ The per-machine settings file `<name>.frond.settings.json` has `infrared`, `seri
 | `infrared`, `serial` | `off`, `pty`, `tcp:PORT`, `link:local` (This computer, desktop), `link:ID` |
 | `infrared` | also `phone` on a device with the `irPhone` capability: the desktop passes `--irda phone`, Android sends `irda-mode phone` once the core answers and opens no link |
 | `infrared` | also `printer` on any device with infrared: the desktop passes `--irda printer`, Android sends `irda-mode printer` once the core answers and opens no link. Both poll `irprinter status` every second while it is the choice |
-| `serial` | also `modem` on a device with the `modem` capability (the 68k Palms except the m100 and m105): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
+| `infrared` | also `sync` (IR HotSync) on a HotSync device with infrared: the desktop passes `--irda sync`, Android sends `irda-mode sync` once the core answers and opens no link |
+| `serial` | `modem` on a device with the `modem` capability and `ppp` for direct PPP on 68k serial ports. Android sends the mode once the core answers. |
 | `usb` | `off`, `pty`, `tcp:PORT` |
 | `usbPort` | Dana: `off`, `printer` or `wifi`, the USB port choice. The desktop sends `printer attach on` or `usb-port wifi` once the core answers, Android does the same on connect. Older settings with `usbPrinter` true count as `printer`; the file still writes `usbPrinter` when the choice is the printer |
 | `wifiModule` | Dana Wireless: `false` when the built-in Wi-Fi is off, left out when on. Sent as `network-mode disabled` or `wireless` at every start, before the USB port choice |
 | `bluetooth` | `off`, `radio` (This Frond), `phone` (This Frond with the mobile phone), `socket:/absolute/path`, `link:ID` |
 
-A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID` (and `modem` for `serial`, `phone` and `printer` for `infrared`). Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.
+A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID` (and `modem` for `serial`, `phone`, `printer` and `sync` for `infrared`). Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.
 
 ### btvirt
 
@@ -614,13 +618,13 @@ Monitor commands:
 | `monitor pace-last-step` | JSON for the last stepped instruction. |
 | `monitor attribution` | Foreground app metadata at the TX native UI wait. Names and creators are hex. |
 
-Breakpoints and snapshots aren't saved in sessions. On Android, Settings > Debugger > gdb server opens the port on all network addresses, so only use it on a network you trust.
+Breakpoints and snapshots aren't saved in sessions. On Android, Settings > Debugger > gdb server binds to loopback by default. Turn on **Allow gdb over the network** in the same settings before starting the machine to connect from another computer.
 
 `tools/pace-report.py` combines a `monitor pace` object with the PRC you ran and prints a private report with resource offsets and, given the matching executable, symbols (`--context`, `--program`, `--executable`, `--runtime-map`, `--tool-prefix`).
 
 ## 68k Palms (frond-68k)
 
-`frond-68k` runs the 68k Palms on the CloudpilotEmu 68k core: the DragonBall EZ ones (Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100, m105, Palm OS 3.1 to 4.1) and the DragonBall VZ ones (m125, m130, m500, c500, m505, m515, m520, Dana, Palm OS 4.0 and 4.1). It is a separate program from `frond`, built by `make out/frond-68k` (the cloudpilot sources with `FROND_68K=1`, no network proxy, readline or Fast engine) and shipped in the Debian package as `/usr/lib/frond/frond-68k-core` beside `frond-core`. The desktop and Android apps start it for 68k devices. Run it by hand like this:
+`frond-68k` runs the 68k Palms on the CloudpilotEmu 68k core: the DragonBall EZ ones (Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100, m105, Palm OS 3.1 to 4.1), the Palm III (the original DragonBall 328, Palm OS 3.0) and the DragonBall VZ ones (m125, m130, m500, c500, m505, m515, m520, Dana, Palm OS 4.0 and 4.1). It is a separate program from `frond`, built by `make out/frond-68k` (the cloudpilot sources with `FROND_68K=1`, no network proxy, readline or Fast engine) and shipped in the Debian package as `/usr/lib/frond/frond-68k-core` beside `frond-core`. The desktop and Android apps start it for 68k devices. Run it by hand like this:
 
 ```sh
 out/frond-68k --rom palm-os-3.5-ez.rom --run-for 10 --framebuffer-output out.png
@@ -648,7 +652,7 @@ out/frond-68k iiix.frond --serial pty
 | `--audio-output FILE` | Write the piezo sound to a WAV file. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
 | `--tone-log` | Print each tone change (`tone: HZ Hz duty D at S s`). |
-| `--modem-sync off\|pty\|tcp:PORT\|unix:PATH` | frond-68k: the modem's HotSync link. A call to the HotSync number (4687962) is bridged to it raw, for pilot-link. Devices with the `modem` capability. |
+| `--modem-sync off\|pty\|tcp:PORT\|unix:PATH\|sync` | frond-68k uses this endpoint for a modem call to 4687962. Use `sync` for Sync Manager or a host endpoint for pilot-link. Devices with the `modem` capability. |
 | `--serial off\|pty\|tcp:PORT\|unix:PATH\|modem`, `--irda off\|pty\|tcp:PORT\|unix:PATH\|phone` | Connect the serial port or infrared to a host PTY, a loopback TCP listener or a Unix socket. The PTY path is printed. `modem` puts the snap-on modem on the serial port (devices with the `modem` capability): any number dialled connects at 33600 to a PPP server with slirp behind it, guest 10.0.2.15, DNS 10.0.2.3. `phone` puts a mobile phone with the same modem on the IR port (devices with the `irPhone` capability, Palm OS 3.3 or later), reached over IrCOMM. |
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
@@ -678,8 +682,8 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `snapshot FILE` | Save the Palm screen as a PNG. |
 | `window-snapshot FILE` | Save the whole window, with silkscreen and buttons, as a PNG. |
 | `audio-on`, `audio-off`, `sound-state` | Turn sound on or off, or show it. |
-| `serial-mode off\|pty\|tcp:PORT\|unix:PATH\|modem`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH\|phone` | Set the serial or infrared endpoint and show its state. |
-| `modem-sync off\|pty\|tcp:PORT\|unix:PATH` | Set the modem's HotSync link and show it. |
+| `serial-mode off\|pty\|tcp:PORT\|unix:PATH\|modem\|ppp\|keyboard`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH\|phone` | Set the serial or infrared endpoint and show its state. |
+| `modem-sync off\|pty\|tcp:PORT\|unix:PATH\|sync` | Set the modem's HotSync link and show it. |
 | `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp\|unix ENDPOINT connected\|waiting`, for the modem `modem idle\|dialling\|online 33600` (then `; hotsync` and the HotSync link while it's on), or for the phone `phone idle\|linked\|dialling\|online 33600`. |
 | `hotsync` | Press and release the cradle's HotSync button. |
 | `backlight-state` | `backlight: on` or `off`. |
@@ -704,9 +708,9 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 
 ### Control socket
 
-The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `keyboard-grab` (`on` or `off`), `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `serial-stats`, `modem-sync`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the 68k Palms' own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come, or `asleep` when the Palm is asleep (`db-list` without `wake` doesn't wake it), as on `frond`. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
+The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `keyboard-grab` (`on` or `off`), `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `irda-sync-support`, `serial-stats`, `modem-sync`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the 68k Palms' own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come, or `asleep` when the Palm is asleep (`db-list` without `wake` doesn't wake it), as on `frond`. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
 
-What a 68k Palm doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached`, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`; `sd-state` is `none` on the ones without a card slot) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key`, `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
+What a 68k Palm doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached` unless the Palm Portable Keyboard is on the serial port, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`; `sd-state` is `none` on the ones without a card slot) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key` (without the Palm Portable Keyboard), `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
 
 ### Debugging 68k apps with GDB
 
@@ -778,6 +782,8 @@ Dial plan: the default plan is empty, so every number connects. `HayesModem::Opt
 IR phone details: it answers discovery in a random slot as "IrCOMM" (hints PDA and IrCOMM), takes SNRM with up to 115200 baud, window 1 and 512 byte frames, answers at the guest's own minimum turnaround, and serves `IrDA:IrCOMM` and `IrDA:IrLMP` in IAS. IrCOMM is 9-wire cooked, 3-wire cooked or raw, and the modem is powered while IrCOMM is open. `irda-stats` gives `frames_in= frames_out= bad= connects= resent= timeouts=`. Tests: `make test-modem`, `make test-ir-peer`.
 
 IR printer details: `irda-mode printer` (or `--irda printer`) on any device with infrared puts an IrDA printer on the port, "Frond Printer" with the printer and IrCOMM hints. It serves IrLPT (IAS class `IrLPT`, IrLMP LSAP 4, what PrintBoy uses) and IrCOMM. Each connection is a job, ended by the guest's LM disconnect, IrLAP DISC or its disconnect time; finished jobs are held until `irprinter save` or `clear`. A load or reset drops a job still coming in. Tests: `make test-ir-printer`, and `make test-printer-control` for the socket commands. An overflowing job gets an LM disconnect on IrLPT or IrCOMM. The desktop and Android reuse the USB printer's job handling for it (`PrinterPanel` and `PrintJob`, `PrintJobs` and `PrintStore`) with the `irprinter` command; unsaved or arriving output is confirmed before the choice changes. On Android one notice and one notification cover both printers on a Dana: "2 prints ready" with Show, which opens the Connections sheet's prints.
+
+IR HotSync details: `irda-mode sync` (or `--irda sync`) puts a PC on the IR port, "Frond" with the computer and IrCOMM hints (`frondIr::IrSync`, the same IrLAP, IrLMP, IAS, Tiny TP and IrCOMM as the phone). Its IrCOMM port is a Sync Manager endpoint with transport `infrared`, so the HotSync app's IR to a PC/Handheld runs the serial HotSync protocol (SLP, PADP, CMP) to the machine's profile; the CMP answer keeps the speed. `irda-state` gives `sync idle|linked|open; ` then the `sync-state` line. On frond-68k it needs Palm OS 3.3 or later, and `irda-sync-support` answers `yes` or `no` for the running ROM; on frond only Palm OS devices take it. `sync-start` still uses the cradle; start an IR HotSync from the HotSync app. Test: `make test-ir-peer` (discovery, IAS, IrCOMM and the CMP wakeup answer).
 
 Bluetooth phone (desktop only, any `bluetooth` device): the settings value `bluetooth` `phone` is This Frond's radio with `"phone": true` in the hub's `bt-attach`. While any machine asks for it the hub runs `bluetooth-opp-peer RADIO-SOCKET --dun` beside `btvirt` (`FROND_BT_PHONE`, else `../lib/frond/bluetooth-phone`, `bluetooth-phone` beside the binary, then the build tree; installed by `make deb` as `/usr/lib/frond/bluetooth-phone`). The hub's state is `nophone` when it's missing. The peer prints `DUN_STATE idle|dialling|online SPEED|off` lines; the hub passes the last one on as `call` in the attach status (`off` as `idle`). The peer is "Frond Phone" (class of device 0x52020C, address 02:46:52:4E:44:50 written with 0xfc01 at start, so a pairing holds whatever order radios join) with PIN 1234 and an SDP record for Dial-up Networking (0x1103, 0x1201) on RFCOMM channel 9. It takes one call at a time: another link's connect is ignored while a call is up, and the call ends on an RFCOMM DISC, L2CAP close or the link going. The channel's bytes go to `tools/bluetooth-dun.cpp`, a C shim over the same `HayesModem`, `PppServer` and `SlirpIp` on monotonic time, powered while the channel is open. `make test-bluetooth-dun` runs a scripted client through a private `btvirt`: the phone's address, then SDP, RFCOMM, `ATDT*99#`, CONNECT 33600, LCP and IPCP up, twice on the same handle (hung up by dropping the link, then by DISC).
 
@@ -949,6 +955,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `FROND_ZIRE_EVIDENCE` | Folder those runs write screenshots to. |
 | `FROND_ARM_SESSION` | ARM session for `tests/core-control.py`. Default the palm-tx smoke machine. |
 | `FROND_LINK_PRINT` | `1` makes `make test-link-protocol` print its pinned values instead of only checking them. |
+| `FROND_LINK_ALLOW_NETWORK=1` | Allow incoming desktop Frond links on network interfaces and enable UDP discovery, whatever the Connections setting says (`0` forces it off). Without it the Connections setting decides, off by default: TCP binds to loopback and network discovery is off. |
 | `FROND_LINK_SOCKET`, `FROND_LINK_PORT`, `FROND_LINK_DISCOVERY_PORT`, `FROND_LINK_DISCOVERY_BIND`, `FROND_LINK_BEACON_TO`, `FROND_LINK_IDLE_EXIT_MS`, `FROND_LINK_PAIR_CODE_MS`, `FROND_LINK_HUB` | Link hub hooks for tests: hub socket, TCP port (0 for an ephemeral one), UDP discovery port (0 turns it off), the address the beacon socket binds, host:port beacon targets (comma list) instead of broadcast, idle exit in ms (default 30000), the pairing code's life in ms (default and most 120000) and the hub program a window starts. |
 | `XDG_RUNTIME_DIR` | Holds `frond/` (mode 0700) with the link hub's socket and the cores' link sockets. |
 | `FROND_DESKTOP`, `FROND_IR_PROBE` | `frond-desktop` and the IR probe PRC for `tests/link-irda-cores.py`. Defaults `out/frond-desktop` and a probe built with pilrc and the SDK. |
@@ -1232,7 +1239,7 @@ Tests in `make test`, by area:
 | --- | --- |
 | CPU and engines | `test-cpu`, `test-arm920-fcse`, `test-arm920-jit-tables`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit`, `test-xscale-cost`, `test-xscale-cost-session` |
 | SoC and timing | `test-s3c2442`, `test-s3c2442-machine`, `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16`, `test-pxa-clock`, `test-pxa-faster` |
-| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-clie-gamepad`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
+| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-clie-gamepad`, `test-device-profiles`, `test-device-controls`, `test-palm-candidate-art` (art for Palms not emulated yet, `PALM_CANDIDATE_ART_OUT` for preview PNGs), `test-sony-candidate-art` (art for CLIÉs not emulated yet, `SONY_CANDIDATE_ART_OUT` for preview PNGs), `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-pxa-mmc` (memory SD and SDIO registers, transfers and interrupts), `test-sd-lifecycle` (partial transfers, removal and state compatibility), `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/out/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions), `test-tg50-sd-refusal` (the TG50 smoke session; `sd-*` commands are refused on a Memory Stick device), `test-card-install`, `test-68k-card-swap` |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
@@ -1527,3 +1534,9 @@ SD protocol chunks retain v1. MMC chunks use v2 with a trailing uint32 protocol
 value 1; MMC refuses ACMD state. Restore checks the decoded family against the
 staged descriptor before installing either card. Ejected media retain the family.
 A standalone `.frondsd` holds blocks only; specify the family again on attachment.
+
+## Palm Portable Keyboard
+
+`serial-mode keyboard` (or `--serial keyboard`) on frond-68k puts the Palm Portable Keyboard on the cradle serial port of a device with `serial_keyboard` (the Palm III family); other devices answer `unsupported`. The model (`core/src/common/serial/PortableKeyboard.h`) follows Think Outside's Hardware and Electronics Reference 1.1: 9600 8N1, HotSync line pulses on power up or a key in low power (3, 1 s apart, then asleep), ID `FA FD` plus the held keys on an RTS rising edge, make code `Y<<3|X`, break `|0x80` sent twice for the last key, 6 buffered key downs, low power with RTS low or 10 minutes idle. The keyboard sees RTS through the line driver, so the driver opening the port with RTS on is the rising edge. `serial-state` is `keyboard ready|low-power|pulsing|asleep|idle`. The window's keys go to it by physical US position (`PortableKeyboardKeys.h`). Control: `keyboard-state` is `attached` while it is plugged in, `keyboard-key HEX d|u` presses or lets go of a matrix code (`busy` when the 6-key buffer is full). Console: `keyboard-down NAME` and `keyboard-up NAME` take SDL scancode names, `keyboard-type TEXT` types US characters 10 keys a second (`\n` is Enter), `keyboard-state` prints the phase.
+
+Tests: `make test-portable-keyboard` for the protocol, and `tests/frond-68k-peripherals.py --only keyboard --sdk SDK` with the `kbd68k` probe (FrondKeyboard68k), which opens the port at 9600, raises RTS on the cradle event and checks the ID, make and break codes, low power and the wake from a key.

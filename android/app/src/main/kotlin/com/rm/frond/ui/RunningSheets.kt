@@ -185,7 +185,7 @@ private fun ZaurusApplications(model: RunningModel) {
     if (ready.none { it }) EmptyNote("Eject a writable card to queue an IPK.")
 }
 
-// Windows CE: Install copies the picked files onto the SD card; the application list isn't done yet.
+// Windows CE installs from the SD card and reads the installed-program list over ActiveSync.
 @Composable
 private fun WindowsCeApplications(model: RunningModel) {
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> model.install(uris) }
@@ -193,8 +193,19 @@ private fun WindowsCeApplications(model: RunningModel) {
         TextButton(enabled = model.device.installsToCard, onClick = { pick.launch(arrayOf("*/*")) }) { Text("Install…") }
         TextButton(enabled = false, onClick = {}) { Text("Export all…") }
         TextButton(enabled = false, onClick = {}) { Text("Other…") }
+        if (model.device.rx1950) TextButton(
+            enabled = !model.readingInstalledPrograms && model.busy == null,
+            onClick = model::refreshInstalledPrograms,
+        ) { Text("Refresh") }
     }
-    EmptyNote("Not available yet")
+    if (model.device.rx1950) {
+        if (model.readingInstalledPrograms) Progress()
+        model.installedProgramsNote?.let { EmptyNote(it) }
+        for (name in model.installedPrograms) ListItem(
+            headlineContent = { Text(name) },
+            colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+        )
+    } else EmptyNote("Not available yet")
 }
 
 // Launch or export any RAM database by name, picked from the list or typed.
@@ -446,6 +457,7 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
             AudioRow.MICROPHONE -> MicrophoneRow(model)
             AudioRow.AUDIO_PREVIEW -> MachineAudioPreviewRow(device, model.settings, true, APPLIES_AT_NEXT_START) { model.changeSettings(it) }
             AudioRow.RUMBLE -> MachineRumbleRow(device, model.settings, true) { model.changeSettings(it) }
+            AudioRow.RECORD_KEY -> MachineRecordKeyRow(model.settings, true) { model.changeSettings(it) }
         }
         RunningSheets.Group.GAME_CONTROLLER -> {
             val context = androidx.compose.ui.platform.LocalContext.current

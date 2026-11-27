@@ -32,6 +32,13 @@ class RelayAddressTest {
         assertNull(UsbLink.address("a host:5030"))
         assertNull(UsbLink.address("[]:5030"))
         assertNull(UsbLink.address("[fe80::1]5030"))
+        // Stray brackets (found by RelayAddressFuzzTest): the host wouldn't read back from hostPort.
+        assertNull(UsbLink.address("[[fe80::1]:5030"))
+        assertNull(UsbLink.address("[fe80[::1]:5030"))
+        assertNull(UsbLink.address("[fe80::1]]:5030"))
+        assertNull(UsbLink.address("desk]:5030"))
+        assertNull(UsbLink.address("desk[1]"))
+        assertNull(UsbLink.address("desk\u0000:5030"))
     }
 
     @Test
@@ -46,7 +53,8 @@ class RelayAddressTest {
             assertEquals(mode, BeamMode.decode(mode.encode()))
         }
         assertEquals("off", BeamMode.Off.encode())
-        assertEquals("listen:5030", BeamMode.Listen(5030).encode())
+        assertEquals("listen-local:5030", BeamMode.Listen(5030).encode())
+        assertEquals("listen-network:5030", BeamMode.Listen(5030, allowNetwork = true).encode())
         assertEquals("connect:10.0.2.2:5031", BeamMode.Connect("10.0.2.2", 5031).encode())
         assertNull(BeamMode.decode(null))
         assertNull(BeamMode.decode("listen:0"))

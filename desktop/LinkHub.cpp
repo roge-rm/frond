@@ -1,4 +1,5 @@
 #include "LinkHub.h"
+#include "LinkLines.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QJsonArray>
@@ -34,7 +35,6 @@ constexpr qint64 kRadioStartMs = 5000;  // btvirt gets this long to make its soc
 constexpr qint64 kBluetoothAhead = 16384;
 constexpr int kMaxPending = 16;       // connections not yet authenticated
 constexpr int kPerAddress = 10;       // new connections per address in 10 s
-const QByteArray kBeaconMagic("FRLB");
 
 Bytes toBytes(const QByteArray& a) { return Bytes(a.begin(), a.end()); }
 QByteArray fromBytes(const Bytes& b) { return QByteArray(reinterpret_cast<const char*>(b.data()), int(b.size())); }
@@ -154,10 +154,12 @@ QString Hub::start() {
     bool ok = false;
     const int envPort = qEnvironmentVariableIntValue("FROND_LINK_PORT", &ok);
     const quint16 wantPort = ok ? quint16(envPort) : store.port;
-    if (!listener.listen(QHostAddress::Any, wantPort) && !listener.listen(QHostAddress::Any, 0))
-        return listener.errorString();
-    listener.setMaxPendingConnections(kMaxPending);
-    connect(&listener, &QTcpServer::newConnection, this, &Hub::incoming);
+    allowNetwork = effectiveNetwork();
+    if (const auto error = listen(wantPort); !error.isEmpty()) return error;
+    for (auto* tcp : {&listener, &ipv6Listener}) {
+        tcp->setMaxPendingConnections(kMaxPending);
+        connect(tcp, &QTcpServer::newConnection, this, [this, tcp] { incoming(*tcp); });
+    }
     const int envDiscovery = qEnvironmentVariableIntValue("FROND_LINK_DISCOVERY_PORT", &ok);
     discoveryPort = ok ? quint16(envDiscovery) : defaultPort;
     // Test hooks: the address the beacon socket binds, and host:port targets instead of broadcast.
@@ -167,9 +169,8 @@ QString Hub::start() {
         const auto port = quint16(item.section(':', 1).toUInt());
         if (!host.isNull() && port) beaconTargets.push_back({host, port});
     }
-    if (discoveryPort && udp.bind(bindTo.isNull() ? QHostAddress(QHostAddress::AnyIPv4) : bindTo, discoveryPort,
-                                  QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint))
-        connect(&udp, &QUdpSocket::readyRead, this, &Hub::datagrams);
+    discoveryBind = bindTo;
+    bindDiscovery();
     if (const int idle = qEnvironmentVariableIntValue("FROND_LINK_IDLE_EXIT_MS", &ok); ok && idle > 0) idleExitMs = idle;
     // Test hook: a shorter life for the code shown while someone pairs with us.
     if (const int life = qEnvironmentVariableIntValue("FROND_LINK_PAIR_CODE_MS", &ok); ok && life > 0)
@@ -182,6 +183,42 @@ QString Hub::start() {
 }
 
 // ---- Clients ----
+
+// The setting in the store, unless FROND_LINK_ALLOW_NETWORK is set: 1 allows the network, anything else doesn't.
+bool Hub::effectiveNetwork() const {
+    if (qEnvironmentVariableIsSet("FROND_LINK_ALLOW_NETWORK")) return qEnvironmentVariableIntValue("FROND_LINK_ALLOW_NETWORK") == 1;
+    return store.allowNetwork;
+}
+
+QString Hub::listen(quint16 wantPort) {
+    const QHostAddress address(allowNetwork ? QHostAddress::Any : QHostAddress::LocalHost);
+    if (!listener.listen(address, wantPort) && !listener.listen(address, 0)) return listener.errorString();
+    if (!allowNetwork) ipv6Listener.listen(QHostAddress::LocalHostIPv6, listener.serverPort());
+    return {};
+}
+
+void Hub::bindDiscovery() {
+    if (allowNetwork && discoveryPort && !discoveryBind.isNull() &&
+        udp.bind(discoveryBind, discoveryPort, QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint) && !udpConnected) {
+        connect(&udp, &QUdpSocket::readyRead, this, &Hub::datagrams);
+        udpConnected = true;
+    }
+}
+
+// Moves the listeners and discovery between loopback and the network without dropping links that are up.
+void Hub::setNetwork(bool on) {
+    store.allowNetwork = on;
+    store.saveIdentity();
+    const bool want = effectiveNetwork();
+    if (want == allowNetwork) return;
+    allowNetwork = want;
+    const auto port = listener.serverPort();
+    listener.close();
+    ipv6Listener.close();
+    udp.close();
+    listen(port);
+    bindDiscovery();
+}
 
 void Hub::newClient() {
     while (auto* s = server.nextPendingConnection()) {
@@ -196,12 +233,9 @@ void Hub::newClient() {
 }
 void Hub::clientInput(Client* c) {
     c->input += c->socket->readAll();
-    if (c->input.size() > 1 << 20) { c->socket->abort(); return; }
-    for (int at; (at = c->input.indexOf('\n')) >= 0;) {
-        const auto line = c->input.left(at);
-        c->input.remove(0, at + 1);
-        const auto doc = QJsonDocument::fromJson(line);
-        if (doc.isObject()) handle(c, doc.object());
+    if (c->input.size() > kClientInputMax) { c->socket->abort(); return; }
+    for (QJsonObject op; takeClientLine(c->input, op);) {
+        if (!op.isEmpty()) handle(c, op);
         if (!clients.contains(c)) return;
     }
 }
@@ -235,6 +269,8 @@ void Hub::handle(Client* c, const QJsonObject& op) {
         else if (!watchers() && code) endPairRequest("cancelled");
     } else if (type == "state") {
         sendTo(c, snapshot());
+    } else if (type == "network") {
+        setNetwork(op.value("on").toBool());
     } else if (type == "rename") {
         const auto name = op.value("name").toString().trimmed().left(64);
         if (!name.isEmpty()) store.setName(name);
@@ -268,19 +304,11 @@ void Hub::handle(Client* c, const QJsonObject& op) {
             pairOut.port = it->port;
             pairOut.peerName = it->name;
         } else {
-            auto address = op.value("address").toString().trimmed();
+            const auto address = op.value("address").toString().trimmed();
             pairOut.typedAddress = address;
-            quint16 port = quint16(op.value("port").toInt(defaultPort));
-            // host, host:port, [v6]:port
-            if (address.startsWith('[') && address.contains("]:")) {
-                port = quint16(address.section("]:", 1).toUInt());
-                address = address.section("]:", 0, 0).mid(1);
-            } else if (address.count(':') == 1) {
-                port = quint16(address.section(':', 1).toUInt());
-                address = address.section(':', 0, 0);
-            }
-            pairOut.host = address;
-            pairOut.port = port ? port : defaultPort;
+            const auto target = splitAddress(address, quint16(op.value("port").toInt(defaultPort)), defaultPort);
+            pairOut.host = target.first;
+            pairOut.port = target.second;
         }
         pairOutStart();
     } else if (type == "pair-code") {
@@ -358,8 +386,8 @@ Hub::Conn* Hub::makeConn(QTcpSocket* s, bool outgoing) {
     return c;
 }
 
-void Hub::incoming() {
-    while (auto* s = listener.nextPendingConnection()) {
+void Hub::incoming(QTcpServer& tcp) {
+    while (auto* s = tcp.nextPendingConnection()) {
         const auto from = s->peerAddress();
         if (!allowedPeer(from)) { s->abort(); s->deleteLater(); continue; }
         auto& times = recent[from.toString()];
@@ -564,11 +592,8 @@ QList<QPair<QString, quint16>> Hub::dialTargets(const QString& hex) const {
     if (const auto it = runs.find(hex); it != runs.end() && !it->seen.isNull()) add(it->seen.toString(), it->seenPort);
     add(p->goodHost, p->goodPort);
     if (!p->address.isEmpty()) {
-        auto host = p->address;
-        quint16 port = defaultPort;
-        if (host.startsWith('[') && host.contains("]:")) { port = quint16(host.section("]:", 1).toUInt()); host = host.section("]:", 0, 0).mid(1); }
-        else if (host.count(':') == 1) { port = quint16(host.section(':', 1).toUInt()); host = host.section(':', 0, 0); }
-        add(host, port ? port : defaultPort);
+        const auto target = splitAddress(p->address, defaultPort, defaultPort);
+        add(target.first, target.second);
     }
     return targets;
 }
@@ -1073,7 +1098,7 @@ bool Hub::pullSerial(Conn* c) {
 }
 
 // ---- Discovery ----
-// Beacon: "FRLB", version 1, type (1 beacon, 2 query), install id, TCP port, name.
+// Beacons are laid out in LinkLines.h.
 
 bool Hub::discoveryActive() const {
     if (watchers() || pairOut.client) return true;
@@ -1107,13 +1132,13 @@ void Hub::datagrams() {
     while (udp.hasPendingDatagrams()) {
         const auto d = udp.receiveDatagram(512);
         const auto data = d.data();
-        if (!allowedPeer(d.senderAddress()) || !data.startsWith(kBeaconMagic)) continue;
-        Reader r(reinterpret_cast<const uint8_t*>(data.constData()) + 4, size_t(data.size() - 4));
-        const auto version = r.u8(), type = r.u8();
-        const auto id = r.array<16>();
-        const auto port = r.u16();
-        const auto name = QString::fromStdString(r.str8()).left(64);
-        if (!r.ok() || version != 1 || id == store.local().id) continue;
+        if (!allowedPeer(d.senderAddress())) continue;
+        const auto heard = parseBeacon(data);
+        if (!heard || heard->id == store.local().id) continue;
+        const auto type = heard->type;
+        const auto& id = heard->id;
+        const auto port = heard->port;
+        const auto& name = heard->name;
         if (type == 2 && discoveryActive()) beacon(1, d.senderAddress(), quint16(d.senderPort()));
         const auto hex = hexId(id);
         if (auto* p = store.find(id); p && p->paired) {
@@ -1202,6 +1227,23 @@ QString Hub::peerChannels(const QString& hex) const {
     return kinds.join(QStringLiteral(" · "));
 }
 
+QString Hub::listenAddresses() const {
+    const auto port = listener.serverPort();
+    if (allowNetwork) {
+        QStringList addresses;
+        for (const auto& ip : QNetworkInterface::allAddresses()) {
+            if (!ip.isNull()) addresses.append(ip.protocol() == QAbstractSocket::IPv6Protocol
+                ? QString("[%1]:%2").arg(ip.toString()).arg(port)
+                : QString("%1:%2").arg(ip.toString()).arg(port));
+        }
+        addresses.removeDuplicates();
+        return addresses.join(", ");
+    }
+    QString addresses = QString("127.0.0.1:%1").arg(port);
+    if (ipv6Listener.isListening()) addresses += QString(", [::1]:%1").arg(port);
+    return addresses;
+}
+
 QJsonObject Hub::snapshot() const {
     QJsonArray list;
     for (const auto& p : store.peers) {
@@ -1224,7 +1266,7 @@ QJsonObject Hub::snapshot() const {
     for (auto it = nearby.begin(); it != nearby.end(); ++it)
         near.append(QJsonObject{{"id", it.key()}, {"name", it->name}, {"address", it->address.toString()}, {"port", int(it->port)}});
     return {{"type", "state"}, {"id", hexId(store.local().id)}, {"name", store.name()}, {"port", int(listener.serverPort())},
-            {"connections", list}, {"nearby", near}, {"local", peerChannels("local")}};
+            {"connections", list}, {"nearby", near}, {"local", peerChannels("local")}, {"listen", listenAddresses()}, {"network", allowNetwork}};
 }
 
 void Hub::tick() {

@@ -44,7 +44,7 @@ void EncodeNode(const WbxmlNode& node, uint8_t& page, std::vector<uint8_t>& out)
 struct Decoder {
     const uint8_t* data;
     size_t size, pos{0};
-    std::string table;
+    std::string table{};
     uint8_t page{0};
 
     bool Byte(uint8_t& value) {

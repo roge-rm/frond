@@ -80,9 +80,16 @@ private fun SettingsList(model: HomeModel) {
                 model.update(s.copy(orientation = v))
             }
             SwitchRow("Immersive mode", s.immersive) { v -> model.update(s.copy(immersive = v)) }
+            Header("Connections", Modifier.padding(top = 16.dp))
+            SwitchRow("Allow incoming Frond links over the network", s.linkNetwork) { v -> model.update(s.copy(linkNetwork = v)) }
+            Text("Applies when the link service next starts.", style = MaterialTheme.typography.bodyMedium)
             Header("Debugger", Modifier.padding(top = 16.dp))
             SwitchRow("gdb server", s.debugger) { v -> model.update(s.copy(debugger = v)) }
-            if (s.debugger) DebuggerPort(s.debuggerPort) { v -> model.update(s.copy(debuggerPort = v)) }
+            if (s.debugger) {
+                SwitchRow("Allow gdb over the network", s.debuggerNetwork) { v -> model.update(s.copy(debuggerNetwork = v)) }
+                Text("Applies when a machine starts.", style = MaterialTheme.typography.bodyMedium)
+                DebuggerPort(s.debuggerPort, s.debuggerNetwork) { v -> model.update(s.copy(debuggerPort = v)) }
+            }
             Header("Controller", Modifier.padding(top = 16.dp))
             SwitchRow("Hide touch controls with a controller", s.hideTouchWithController) { v -> model.update(s.copy(hideTouchWithController = v)) }
             val added = model.added
@@ -99,7 +106,7 @@ private fun SettingsList(model: HomeModel) {
 
 // The port gdb connects to on this device, saved once it's a valid port, with this device's addresses.
 @Composable
-private fun DebuggerPort(port: Int, onChange: (Int) -> Unit) {
+private fun DebuggerPort(port: Int, allowNetwork: Boolean, onChange: (Int) -> Unit) {
     val context = LocalContext.current
     var text by remember { mutableStateOf(port.toString()) }
     val valid = NetRelay.port(text) != null
@@ -115,10 +122,12 @@ private fun DebuggerPort(port: Int, onChange: (Int) -> Unit) {
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
     )
-    val addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value
+    val addresses = produceState<List<String>?>(null, allowNetwork) {
+        value = if (allowNetwork) withContext(Dispatchers.IO) { NetRelay.addresses(context) } else listOf("127.0.0.1", "::1")
+    }.value
     if (addresses != null) {
         Text(
-            if (addresses.isEmpty()) "No network address" else "This device: " + addresses.joinToString(", "),
+            if (addresses.isEmpty()) "All interfaces" else "Listening addresses: " + addresses.joinToString(", ") { NetRelay.hostPort(it, port) },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -187,5 +196,27 @@ fun <T> Choice(label: String, value: T, options: List<T>, name: (T) -> String, o
                 })
             }
         }
+    }
+}
+
+// Like Choice, with the grouped device menu.
+@Composable
+fun DeviceChoice(label: String, value: com.rm.frond.Device, onChange: (com.rm.frond.Device) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        OutlinedTextField(
+            value = value.listLabel,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(label) },
+            trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Box(
+            Modifier.matchParentSize()
+                .semantics { contentDescription = "$label, ${value.listLabel}"; role = Role.DropdownList }
+                .clickableRow { open = true },
+        )
+        DeviceMenu(open, { open = false }, onPick = onChange)
     }
 }

@@ -27,7 +27,10 @@ enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, p
                           s3c2442Rx1950, pxa270Spitz };
 // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
 enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50, zodiac, hpIpaq210, hpIpaqRx1950, hpIpaqH4350,
-                       m125, iiie, iiixe, v, vx, m100, m105, m500, c500, iiic, m505, m130, m520, t415 };
+                       m125, iiie, iiixe, v, vx, m100, m105, m500, c500, iiic, m505, m130, m520, t415, iii,
+                       // Art only, no device profile yet.
+                       treo650, zire31, pilotProfessional,
+                       t615c, n710c, nx70v };
 // Settings and peripherals a device supports; the desktop and core gate on these.
 // backgroundPanel: the device menu keeps the machine running without drawing and fences its audio.
 // modem: a snap-on Hayes modem for the serial port (the core's own, through PPP to slirp).
@@ -75,10 +78,31 @@ struct DeviceFrontend5 {
     bool clieGamepad{false};
 };
 
+// The picker's groups, in the order it lists them.
+enum class DeviceGroup5 { none, palmOs5, palmClassic, sonyClie, tapwave, hp, alphaSmart, ibm, sharp };
+inline constexpr DeviceGroup5 deviceGroups5[] = {DeviceGroup5::palmOs5, DeviceGroup5::palmClassic, DeviceGroup5::sonyClie,
+    DeviceGroup5::tapwave, DeviceGroup5::hp, DeviceGroup5::alphaSmart, DeviceGroup5::ibm, DeviceGroup5::sharp};
+inline constexpr const char* deviceGroupName5(DeviceGroup5 group) {
+    switch (group) {
+        case DeviceGroup5::palmOs5: return "Palm OS 5";
+        case DeviceGroup5::palmClassic: return "Palm classic";
+        case DeviceGroup5::sonyClie: return "Sony CLIÉ";
+        case DeviceGroup5::tapwave: return "Tapwave";
+        case DeviceGroup5::hp: return "HP";
+        case DeviceGroup5::alphaSmart: return "AlphaSmart";
+        case DeviceGroup5::ibm: return "IBM";
+        case DeviceGroup5::sharp: return "Sharp";
+        case DeviceGroup5::none: break;
+    }
+    return "";
+}
+
 struct DeviceProfile5 {
     DeviceType5 deviceType;  // deviceTypeInvalid for a name reserved for a device not built yet
     const char* name;
     const char* displayName;
+    DeviceGroup5 group;      // The picker's group; none only for a name that is not offered.
+    uint32_t released;       // Year * 100 + month the maker released it; orders a group, oldest first.
     DeviceCohort5 cohort;
     DeviceSupport5 support;
     DeviceDetect5 detect;
@@ -109,9 +133,19 @@ struct DeviceProfile5 {
 inline constexpr uint32_t deviceCompanyPalm5 = 0x50616c6d;  // 'Palm'
 inline constexpr size_t deviceNameMax5 = 31;
 
+constexpr DeviceProfile5 zodiacProfile5(DeviceType5 type, const char* name, const char* label, uint32_t released, uint32_t ram) {
+    return {type, name, label, DeviceGroup5::tapwave, released, DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
+            DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
+            DeviceBoard5::imx1Zodiac, DeviceArt::zodiac,
+            {false, false, true, true, false, true, true, true, false, false, false, true, false, false, false, 3, true},
+            0x7d0000, 0, ram, ram, DisplayMode::mode_480x320, 1u << 10, false,
+            DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
+            {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}};
+}
+
 // Inventory of native models and reserved names, not a list of verified Palm devices.
 inline constexpr DeviceProfile5 deviceProfiles5[] = {
-    {deviceTypeTX, "palm-tx", "Palm TX", DeviceCohort5::txNand, DeviceSupport5::txDesktop,
+    {deviceTypeTX, "palm-tx", "Palm TX", DeviceGroup5::palmOs5, 200510, DeviceCohort5::txNand, DeviceSupport5::txDesktop,
      DeviceDetect5::norSize, 0, 0, DeviceBoard5::pxa270Tx, DeviceArt::tx,
      {true, true, true, true, true, true, true, true, false, false, false, true},
      16u << 20, 2112u * 64 * 1024, 32u << 20, 32u << 20, DisplayMode::mode_320x480, 1u << 6, true,
@@ -120,7 +154,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|left|right|centre|app1|app2|app3|app4|menu|power", -1, -1, 54, 466, true, true, false,
       "85b048a692aa317763a7077ea72da6cb", "wallpaper"},
      0, 0, 312000000},
-    {deviceTypeE2, "palm-e2", "Tungsten E2", DeviceCohort5::e2Nand, DeviceSupport5::e2Desktop,
+    {deviceTypeE2, "palm-e2", "Tungsten E2", DeviceGroup5::palmOs5, 200504, DeviceCohort5::e2Nand, DeviceSupport5::e2Desktop,
      DeviceDetect5::cardHeader, deviceCompanyPalm5, 0x68737072 /* hspr */, DeviceBoard5::pxa255E2,
      DeviceArt::e2, {false, true, true, true, true, true, true, true, false, false, false, true},
      8u << 20, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x320, 1u << 5, false,
@@ -131,7 +165,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      0, 0, 200000000},
     // The E2 board with a patched E3-style ROM. The ROM has no Bluetooth stack, and its Fake Net
     // Library links to BtLib, so NetLib can't open: no Bluetooth and no mobile phone.
-    {deviceTypeFrankenE2, "palm-e2-franken", "Tungsten E3", DeviceCohort5::patchedE2,
+    {deviceTypeFrankenE2, "palm-e2-franken", "Tungsten E3", DeviceGroup5::palmOs5, 200504, DeviceCohort5::patchedE2,
      DeviceSupport5::experimentalDesktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
      0x446d4752 /* DmGR */, DeviceBoard5::pxa255E2, DeviceArt::e2,
      {false, true, true, true, true, true, false, true, false, false, false, false},
@@ -140,13 +174,13 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      {true, "e3", 320, 480, 0, 96, "Calendar|Contacts|Tasks|Note Pad",
       "up|down|left|right|centre|app1|app2|app3|app4|home|menu", 20, 466, 88, 466, false, true, false, "a79f98bddd50c61e7eb89eee46eb81bd", "e3-stock"},
      0, 0, 200000000},
-    {deviceTypePV, "repalm", "rePalm paravirtualized", DeviceCohort5::paravirtual,
+    {deviceTypePV, "repalm", "rePalm paravirtualized", DeviceGroup5::none, 0, DeviceCohort5::paravirtual,
      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, 0, 0x50765076 /* PvPv */,
      DeviceBoard5::paravirtual, DeviceArt::none, {},
      0, 0, 8u << 20, 1u << 31, DisplayMode::mode_320x480, 0x1fe, false},
     // XIP NOR with a small and a big card like the E2, on a PXA270; no NAND, Wi-Fi or serial. The camera stays
     // off until it's emulated.
-    {deviceTypeZire72, "palm-zire-72", "Zire 72", DeviceCohort5::zire72Nor,
+    {deviceTypeZire72, "palm-zire-72", "Zire 72", DeviceGroup5::palmOs5, 200404, DeviceCohort5::zire72Nor,
      DeviceSupport5::zire72Desktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
      0x615a3732 /* aZ72 */, DeviceBoard5::pxa270Zire72, DeviceArt::zire72,
      {false, true, false, true, true, true, true, true, true, false, false, true},
@@ -157,7 +191,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "0f3e0bf04ceaa5ad73a1768b7d9ede98", "wallpaper"},
      0, 0, 312000000},
     // PXA250 with a built-in keyboard; unsupported transports stay disabled.
-    {deviceTypeTG50, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceCohort5::tg50Nor, DeviceSupport5::experimentalDesktop,
+    {deviceTypeTG50, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceGroup5::sonyClie, 200303, DeviceCohort5::tg50Nor, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::cardHeader, 0x736f6e79 /* sony */, 0x76726e61 /* vrna */,
      DeviceBoard5::pxa250SonyTG50, DeviceArt::tg50,
      {false, true, true, true, false, true, true, true, true, true, false, true},
@@ -167,11 +201,22 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
       DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true, true},
      4 | 8 | 16 | 32 | 64 | 128, 1886, 200000000},
+    // Palm III: the original 68328 board (not the EZ) with 2 MiB of RAM and OS 3.0 in flash. Its ROMs (header
+    // version 2, 3 or 5 with no EZ flag) are told by the missing EZ flag and, from version 5, the HAL ID. Serial,
+    // IrDA, piezo and the snap-on Palm III modem like the IIIx.
+    {deviceTypePalmIII, "palm-iii", "Palm III", DeviceGroup5::palmClassic, 199803, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+     DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x72636b79 /* rcky */, DeviceBoard5::ez328, DeviceArt::iii,
+     {false, false, true, false, false, true, false, true, false, false, true, true},
+     0, 0, 2u << 20, 2u << 20, DisplayMode::mode_160x160, 1u << 1, false,
+     DeviceNorLayout5::any, 0, 0, false, 0, 0,
+     {true, "iii", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",
+      "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iii"},
+     0, 0, 16580608},
     // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
     // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial, IrDA and the snap-on Palm III modem; nothing else
     // is on the device.
     // The desktop and Android run it in their 68k runners (frond-68k, libmain68k.so).
-    {deviceTypeIIIx, "palm-iiix", "Palm IIIx", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeIIIx, "palm-iiix", "Palm IIIx", DeviceGroup5::palmClassic, 199902, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x73756d6f /* sumo */, DeviceBoard5::ez328, DeviceArt::iiix,
      {false, false, true, false, false, true, false, true, false, false, true, true},
      0, 0, 4u << 20, 4u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -181,7 +226,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      0, 0, 16580608},
     // Palm IIIe: the IIIx board with 2 MiB of RAM and no flash. It has no ROM of its own; it runs the IIIx 3.1 ROM and
     // is picked by choosing the device, as the ROM can only say IIIx.
-    {deviceTypeIIIe, "palm-iiie", "Palm IIIe", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeIIIe, "palm-iiie", "Palm IIIe", DeviceGroup5::palmClassic, 199907, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0, 0, DeviceBoard5::ez328, DeviceArt::iiie,
      {false, false, true, false, false, true, false, true, false, false, true, true},
      0, 0, 2u << 20, 2u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -190,7 +235,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iiix"},
      0, 0, 16580608},
     // Palm IIIxe: the IIIx board with 8 MiB of RAM. Its ROM header has no HAL ID, so it is picked by choosing the device.
-    {deviceTypeIIIxe, "palm-iiixe", "Palm IIIxe", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeIIIxe, "palm-iiixe", "Palm IIIxe", DeviceGroup5::palmClassic, 200002, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0, 0, DeviceBoard5::ez328, DeviceArt::iiixe,
      {false, false, true, false, false, true, false, true, false, false, true, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -199,7 +244,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iiix"},
      0, 0, 16580608},
     // Palm V: 2 MiB of RAM, the IIIx peripherals (the snap-on modem is the Palm V one) and no power key in the bar.
-    {deviceTypeV, "palm-v", "Palm V", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeV, "palm-v", "Palm V", DeviceGroup5::palmClassic, 199902, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0, 0, DeviceBoard5::ez328, DeviceArt::v,
      {false, false, true, false, false, true, false, true, false, false, true, true},
      0, 0, 2u << 20, 2u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -208,7 +253,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "iiix"},
      0, 0, 16580608},
     // Palm Vx: the V with 8 MiB of RAM.
-    {deviceTypeVx, "palm-vx", "Palm Vx", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeVx, "palm-vx", "Palm Vx", DeviceGroup5::palmClassic, 199910, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0, 0, DeviceBoard5::ez328, DeviceArt::vx,
      {false, false, true, false, false, true, false, true, false, false, true, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -217,7 +262,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "iiix"},
      0, 0, 20250624},  // the Vx ROMs set the PLL to 20.25 MHz
     // Palm m100: 2 MiB of RAM, serial cradle and infrared. The ROM is told by its clock database (no HAL ID in the header).
-    {deviceTypeM100, "palm-m100", "Palm m100", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM100, "palm-m100", "Palm m100", DeviceGroup5::palmClassic, 200008, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0, 0, DeviceBoard5::ez328, DeviceArt::m100,
      {false, false, true, false, false, true, false, true, false, false, false, true},
      0, 0, 2u << 20, 2u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -226,7 +271,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "iiix"},
      0, 0, 16580608},
     // Palm m105: the m100 with 8 MiB of RAM. Its ROM looks like the m100's, so it is picked by choosing the device.
-    {deviceTypeM105, "palm-m105", "Palm m105", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM105, "palm-m105", "Palm m105", DeviceGroup5::palmClassic, 200103, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0, 0, DeviceBoard5::ez328, DeviceArt::m105,
      {false, false, true, false, false, true, false, true, false, false, false, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -236,7 +281,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      0, 0, 16580608},
     // Palm m125: DragonBall VZ with 8 MiB of RAM, one SD/MMC slot, serial and USB HotSync on the Universal
     // Connector and infrared. Power is on the top edge, outside the bar.
-    {deviceTypeM125, "palm-m125", "Palm m125", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM125, "palm-m125", "Palm m125", DeviceGroup5::palmClassic, 200109, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x76737475 /* vstu */, DeviceBoard5::vz328, DeviceArt::m125,
      {false, false, true, true, false, true, false, true, false, false, true, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -245,7 +290,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, true, false, "", "iiix"},
      0, 0, 33161216},
     // Palm m500: the m125's board with the m515's keys, 8 MiB of RAM and the same slot and connector.
-    {deviceTypeM500, "palm-m500", "Palm m500", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM500, "palm-m500", "Palm m500", DeviceGroup5::palmClassic, 200104, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x7674726e /* vtrn */, DeviceBoard5::vz328, DeviceArt::m500,
      {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -254,7 +299,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, true, false, "", "iiix"},
      0, 0, 33161216},
     // IBM WorkPad c500: an m500 sold by IBM. Its ROM has the m500's HAL ID, so it is picked by choosing the device.
-    {deviceTypeC500, "ibm-workpad-c500", "IBM WorkPad c500", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeC500, "ibm-workpad-c500", "IBM WorkPad c500", DeviceGroup5::ibm, 200105, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::none, 0x70616c6d /* palm */, 0x7674726e /* vtrn */, DeviceBoard5::vz328, DeviceArt::c500,
      {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -264,7 +309,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      0, 0, 33161216},
     // Palm IIIc: the EZ board with 8 MiB of RAM and a colour STN panel on Epson's SED1375 controller, picked by
     // its HAL ID. Serial cradle, IrDA, piezo and the snap-on modem like the IIIx.
-    {deviceTypeIIIc, "palm-iiic", "Palm IIIc", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeIIIc, "palm-iiic", "Palm IIIc", DeviceGroup5::palmClassic, 200002, DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x6173746e /* astn */, DeviceBoard5::ez328, DeviceArt::iiic,
      {false, false, true, false, false, true, false, true, false, false, true, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -273,7 +318,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iiix"},
      0, 0, 20250624},  // the IIIc ROM sets the PLL to 20.25 MHz
     // Palm m505: the m500 with a colour reflective TFT on Epson's SED1376 controller, 8 MiB of RAM.
-    {deviceTypeM505, "palm-m505", "Palm m505", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM505, "palm-m505", "Palm m505", DeviceGroup5::palmClassic, 200105, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x65637479 /* ecty */, DeviceBoard5::vz328, DeviceArt::m505,
      {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -282,7 +327,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, true, false, "", "iiix"},
      0, 0, 33161216},
     // Palm m515: the m505 with a brighter colour TFT and 16 MiB of RAM.
-    {deviceTypeM515, "palm-m515", "Palm m515", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM515, "palm-m515", "Palm m515", DeviceGroup5::palmClassic, 200203, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x766c6974 /* vlit */, DeviceBoard5::vz328, DeviceArt::m515,
      {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 16u << 20, 16u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -291,7 +336,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, true, false, "", "iiix"},
      0, 0, 33161216},
     // Palm m130: the m125's keys with a colour STN panel on a MediaQ MQ1100, 8 MiB of RAM and an SD/MMC slot.
-    {deviceTypeM130, "palm-m130", "Palm m130", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM130, "palm-m130", "Palm m130", DeviceGroup5::palmClassic, 200203, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x76686273 /* vhbs */, DeviceBoard5::vz328, DeviceArt::m130,
      {false, false, true, true, false, true, false, true, false, false, true, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_160x160, 1u << 1, false,
@@ -300,7 +345,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, true, false, "", "iiix"},
      0, 0, 33161216},
     // Palm m520: an unreleased m515 with a 320x320 colour panel on a MediaQ MQ1100 and 16 MiB of RAM.
-    {deviceTypeM520, "palm-m520", "Palm m520", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeM520, "palm-m520", "Palm m520", DeviceGroup5::palmClassic, 200212, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x7366676f /* sfgo */, DeviceBoard5::vz328, DeviceArt::m520,
      {false, false, true, true, false, true, false, true, false, false, true, true, false, false, false, 1, true},
      0, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
@@ -309,7 +354,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, true, false, "", "iiix-hires"},
      0, 0, 33161216},
     // Dana uses its built-in keyboard and two independent SD/MMC slots.
-    {deviceTypeDana, "alphasmart-dana", "AlphaSmart Dana", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeDana, "alphasmart-dana", "AlphaSmart Dana", DeviceGroup5::alphaSmart, 200206, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
      DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, true, false, 3},
      6u << 20, 0, 8u << 20, 8u << 20, DisplayMode::mode_560x160, 1u << 9, false,
@@ -318,26 +363,19 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // The Dana board with 16 MiB and built-in Wi-Fi, on the same ROM: the core makes the ROM's serial
     // number token read as a Wireless one. The USB host port takes the printer only, as the module
     // already gives it Wi-Fi.
-    {deviceTypeDanaWireless, "alphasmart-dana-wireless", "AlphaSmart Dana Wireless", DeviceCohort5::vz68k,
+    {deviceTypeDanaWireless, "alphasmart-dana-wireless", "AlphaSmart Dana Wireless", DeviceGroup5::alphaSmart, 200309, DeviceCohort5::vz68k,
      DeviceSupport5::experimentalDesktop, DeviceDetect5::none, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
      DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, false, true, 3},
      6u << 20, 0, 16u << 20, 16u << 20, DisplayMode::mode_560x160, 1u << 9, false,
      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
-    // The guarded i.MX1 machine behind SocIMX1: screen, pen, buttons, stick, an SD card in slot 1, up
-    // to 2 GB as the OS has no SDHC, PCM sound, the connector's serial port (UART1), IrDA (UART2), USB
-    // HotSync through the cradle (the W4200's USB function) and Bluetooth through an HCI shim (zodiac_bluetooth.cpp).
-    {deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
-     DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
-     DeviceBoard5::imx1Zodiac, DeviceArt::zodiac,
-     {false, false, true, true, false, true, true, true, false, false, false, false, false, false, false, 3, true},
-     0x7d0000, 0, 128u << 20, 128u << 20, DisplayMode::mode_480x320, 1u << 10, false,
-     DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
-     {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}},
+    // Both models use the same ROM; the header inspector defaults to the Zodiac 2.
+    zodiacProfile5(deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", 200310, 128u << 20),
+    zodiacProfile5(deviceTypeZodiac1, "tapwave-zodiac-1", "Tapwave Zodiac 1", 200310, 32u << 20),
 
     // Sony CLIE T415: DragonBall VZ with 8 MiB of RAM, a 320x320 16-grey panel and the silkscreen below it,
     // a classic Memory Stick slot (4 to 128 MB, no Pro), IrDA, USB cradle and Sony FM and ADPCM sound.
-    {deviceTypeT415, "sony-clie-t415", "Sony CLIÉ T415", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+    {deviceTypeT415, "sony-clie-t415", "Sony CLIÉ T415", DeviceGroup5::sonyClie, 200111, DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::romHeader68k, 0x736f6e79 /* sony */, 0x766e6365 /* vnce */, DeviceBoard5::vz328, DeviceArt::t415,
      {false, false, true, true, false, true, false, true, false, false, false, true, false, false, false, 3, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_320x320, 1u << 5, false,
@@ -347,7 +385,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       DeviceStorageSlot5::memoryStick, 0, false, false, 38, true},
      4 | 8 | 16 | 32 | 64 | 128, 0, 33161216},
     // Windows Mobile iPAQs: button bar art only, no Windows CE core yet.
-    {deviceTypeInvalid, "hp-ipaq-210", "HP iPAQ 210", DeviceCohort5::reserved, DeviceSupport5::reserved,
+    {deviceTypeInvalid, "hp-ipaq-210", "HP iPAQ 210", DeviceGroup5::none, 0, DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaq210, {},
      0, 0, 0, 0, DisplayMode::mode_480x640, 0, false},
     // HP iPAQ rx1950 (Windows Mobile 5): a Samsung S3C2442 (ARM920T) at 300 MHz, 32 MB of SDRAM, 64 MB of NAND,
@@ -357,7 +395,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // USB is WM5's RNDIS function (03F0:1C1D) on Frond's RNDIS host, with ActiveSync's connections going to the
     // desktop's sync program. The charge LED shows green, red or amber. The NOR is HP's bootloader (CEBL.nbf) and the NAND the flash made from it and
     // CEOS.nbf at import.
-    {deviceTypeRx1950, "hp-ipaq-rx1950", "HP iPAQ rx1950", DeviceCohort5::rx1950Nand, DeviceSupport5::experimentalDesktop,
+    {deviceTypeRx1950, "hp-ipaq-rx1950", "HP iPAQ rx1950", DeviceGroup5::hp, 200509, DeviceCohort5::rx1950Nand, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::norSize, 0, 0, DeviceBoard5::s3c2442Rx1950, DeviceArt::hpIpaqRx1950,
      {true, false, true, true, false, true, false, true, true, false, false, false, false, false, false, 3, false, true},
      264794, 69206016, 32u << 20, 32u << 20, DisplayMode::mode_240x320, 1u << 4, true,
@@ -365,7 +403,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      {true, "", 240, 320, 0, 89, "Calendar|Contacts|Inbox|Wireless",
       "app1|app2|app3|app4|up|down|left|right|centre|power", -1, -1, -1, -1, false, true},
      0, 0, 296352000},
-    {deviceTypeSpitz, "sharp-zaurus-sl-c3000", "Sharp Zaurus SL-C3000",
+    {deviceTypeSpitz, "sharp-zaurus-sl-c3000", "Sharp Zaurus SL-C3000", DeviceGroup5::sharp, 200411,
      DeviceCohort5::spitzNand, DeviceSupport5::staged, DeviceDetect5::none, 0, 0,
      DeviceBoard5::pxa270Spitz, DeviceArt::none, {false, false, false, false, false, true, false, true, true, false, false, true},
      8u << 20, 528u * 32 * 1024, 64u << 20, 64u << 20, DisplayMode::mode_480x640, 1u << 11, true,
@@ -374,7 +412,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
       "app1|app2|app3|app4|up|down|left|right|centre|home|back|jog-up|jog-down|jog-press|power",
       -1, -1, -1, -1, false, true},
      0, 0, 416000000},
-    {deviceTypeInvalid, "hp-ipaq-h4350", "HP iPAQ h4350", DeviceCohort5::reserved, DeviceSupport5::reserved,
+    {deviceTypeInvalid, "hp-ipaq-h4350", "HP iPAQ h4350", DeviceGroup5::none, 0, DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaqH4350, {},
      0, 0, 0, 0, DisplayMode::mode_240x320, 0, false},
 };
@@ -445,6 +483,19 @@ inline bool deviceTypeIsDana5(int32_t deviceType) {
     return deviceType == deviceTypeDana || deviceType == deviceTypeDanaWireless;
 }
 
+// Picker order inside a release month: the Zodiac 2 after the Zodiac 1 (the table lists it first, as the
+// shared ROM's default); other ties keep the table order.
+inline int deviceProfilePickerRank5(int32_t deviceType) { return deviceType == deviceTypeZodiac2 ? 1 : 0; }
+
+inline bool deviceTypeIsZodiac5(int32_t deviceType) {
+    return deviceType == deviceTypeZodiac2 || deviceType == deviceTypeZodiac1;
+}
+
+// A shared ROM can identify the family. Sessions still check the exact device type.
+inline bool deviceProfileTakesArmRom5(int32_t device, int32_t detected) {
+    return detected >= 0 && (device == detected || (deviceTypeIsZodiac5(device) && deviceTypeIsZodiac5(detected)));
+}
+
 // Built devices only; reserved names have no internal type.
 inline const DeviceProfile5* deviceProfile5(int32_t deviceType) {
     if (deviceType < 0) return nullptr;
@@ -464,13 +515,20 @@ inline bool deviceProfileHasPalmBoardInputs5(int32_t deviceType) {
 }
 
 inline bool deviceProfileSdWriteProtection5(int32_t deviceType) {
-    return deviceType == deviceTypeZodiac2 || deviceType == deviceTypeSpitz || deviceProfileHasPalmBoardInputs5(deviceType);
+    return deviceTypeIsZodiac5(deviceType) || deviceType == deviceTypeSpitz || deviceProfileHasPalmBoardInputs5(deviceType);
 }
 
 inline bool deviceProfileNetworkHotSync5(const DeviceProfile5& profile) {
     if (profile.deviceType == deviceTypeSpitz) return false;
     const auto& caps = profile.capabilities;
     return profile.deviceType == deviceTypeTX || caps.modem || caps.irPhone || caps.usbWifi || caps.builtInWifi;
+}
+
+// The Palm Portable Keyboard for the Palm III series fits the Palm III, IIIx, IIIe, IIIxe and IIIc
+// cradle port (frond-68k's serial-mode keyboard).
+inline bool deviceProfileSerialKeyboard5(int32_t deviceType) {
+    return deviceType == deviceTypePalmIII || deviceType == deviceTypeIIIx || deviceType == deviceTypeIIIe ||
+           deviceType == deviceTypeIIIxe || deviceType == deviceTypeIIIc;
 }
 
 inline bool deviceProfileHasPalmSdioWifi5(int32_t deviceType) {
@@ -483,6 +541,11 @@ inline bool deviceProfileHasHotSyncButton5(int32_t deviceType) {
     return profile && (profile->board == DeviceBoard5::pxa255E2 || profile->board == DeviceBoard5::imx1Zodiac ||
                        profile->board == DeviceBoard5::pxa270Tx || profile->board == DeviceBoard5::ez328 ||
                        (profile->board == DeviceBoard5::vz328 && !deviceTypeIsDana5(deviceType)));
+}
+
+// A voice or record key: the Zire 72 and TG50 voice key, the rx1950 record button (keyIdVoice).
+inline bool deviceProfileHasVoiceKey5(int32_t deviceType) {
+    return deviceType == deviceTypeZire72 || deviceType == deviceTypeTG50 || deviceType == deviceTypeRx1950;
 }
 
 // A connector the device has that Frond doesn't run yet, named as the frontends grey it out; empty for none.
@@ -568,7 +631,7 @@ inline DeviceNorInfo5 deviceProfileInspectNor5(uint64_t size, Reader read) {
 }
 
 // Reads only the card header of a 68k ROM, so a ROM it accepts can still be one the board can't run;
-// frond-68k checks that properly. Header versions 1 and 2 (68328 ROMs) and 68328-only ROMs are refused.
+// frond-68k checks that properly. Header version 1 and 68328 ROMs other than the Palm III's are refused.
 // Version 5 headers carry company and HAL IDs, which must match the profile's; older ones have none.
 struct Device68kRomInfo5 {
     const DeviceProfile5* profile{nullptr};
@@ -670,6 +733,17 @@ inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read)
         }
         return info;
     }
+    // The Palm III's ROMs have no EZ, VZ or 0x0080 flag: header version 2, 3 or 5, with the Palm III's HAL ID from
+    // version 5. Symbol's scanner ROMs carry ScanMgr and the Palm VII's carry "RAM NetIF"; the Palm III has neither.
+    if ((info.headerVersion == 2 || info.headerVersion == 3 || info.headerVersion == 5) && !(flags & 0x00e1)) {
+        const auto* iii = deviceProfileNamed5("palm-iii");
+        if (info.headerVersion == 5 && (info.companyId != iii->companyId || info.halId != iii->halId)) return info;
+        if (size > rom68kMaxSize5 || size % 0x1000 || cardBytes > size) return info;
+        if (reset < rom68kEzBase5 || reset - rom68kEzBase5 >= size) return info;
+        if (rom68kHasText5(size, read, "ScanMgr") || rom68kHasText5(size, read, "RAM NetIF")) return info;
+        info.profile = iii;
+        return info;
+    }
     if (info.headerVersion < 3 || info.headerVersion > 5 || (flags & 0x0001) || !(flags & 0x0020)) return info;
     if (size > rom68kMaxSize5 || size % 0x1000 || cardBytes > size) return info;
     if (reset < rom68kEzBase5 || reset - rom68kEzBase5 >= size) return info;
@@ -681,7 +755,8 @@ inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read)
         return info;
     }
     for (const auto& p : deviceProfiles5) {
-        if (p.detect != DeviceDetect5::romHeader68k || p.board != DeviceBoard5::ez328) continue;
+        if (p.detect != DeviceDetect5::romHeader68k || p.board != DeviceBoard5::ez328 ||
+            p.deviceType == deviceTypePalmIII) continue;
         if (info.headerVersion >= 5 && (info.companyId != p.companyId || info.halId != p.halId)) continue;
         info.profile = &p;
         return info;
@@ -705,6 +780,8 @@ inline bool deviceProfileTakes68kRom5(const DeviceProfile5& chosen, const Device
     // The IIIc's ROM (its own HAL ID) goes to the IIIc only and the IIIc takes no other; the rest of the EZ
     // devices share the IIIx family's ROMs.
     if (chosen.deviceType == deviceTypeIIIc || info.profile->deviceType == deviceTypeIIIc) return false;
+    // The Palm III's ROMs (68328, no EZ flag) are its own too.
+    if (chosen.deviceType == deviceTypePalmIII || info.profile->deviceType == deviceTypePalmIII) return false;
     return chosen.board == DeviceBoard5::ez328 && info.profile->board == DeviceBoard5::ez328;
 }
 

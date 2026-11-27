@@ -21,17 +21,20 @@ static void zodiac2();
 static void danaInventory();
 static void danaWirelessInventory();
 static void ezProfiles();
+static void palmIiiProfile();
 static void vzProfiles();
 static void t415();
 static void rx1950();
 // The VZ Palms: the m125, m500 and WorkPad c500, on the Dana's board.
 static bool vzPalm(const DeviceProfile5& p) { return p.board == DeviceBoard5::vz328 && !deviceTypeIsDana5(p.deviceType); }
 static void originalHz();
+static void pickerGroups();
 
 int main() {
     static_assert(int(DisplayMode::mode_320x320) == 5 && int(DisplayMode::mode_320x480) == 6);
     static_assert(int(DisplayMode::mode_480x720) == 8 && int(DisplayMode::mode_480x320) == 10);
     zodiac2();
+    pickerGroups();
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
@@ -54,7 +57,7 @@ int main() {
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
-                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.board == DeviceBoard5::ez328 ||
+                p.deviceType == deviceTypeTG50 || deviceTypeIsZodiac5(p.deviceType) || p.board == DeviceBoard5::ez328 ||
                 p.deviceType == deviceTypeFrankenE2 || p.board == DeviceBoard5::vz328 || p.deviceType == deviceTypeRx1950));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
@@ -65,7 +68,7 @@ int main() {
                 : p.deviceType == deviceTypeTG50 ? ram == (16u << 20)
                 : p.board == DeviceBoard5::ez328 ? ram == p.minRam
                 : vzPalm(p) ? ram == p.minRam
-                : p.deviceType == deviceTypeZodiac2 ? ram == (128u << 20)
+                : deviceTypeIsZodiac5(p.deviceType) ? ram == p.minRam
                 : p.deviceType == deviceTypeDana ? ram == (8u << 20)
                 : p.deviceType == deviceTypeDanaWireless ? ram == (16u << 20)
                 : p.deviceType == deviceTypeRx1950 ? ram == (32u << 20)
@@ -107,15 +110,17 @@ int main() {
                 return true;
             });
         };
-        assert(inspect().profile == &p && inspect().hasHeader && inspect().validLayout);
+        const auto* detected = p.deviceType == deviceTypeZodiac1 ? deviceProfile5(deviceTypeZodiac2) : &p;
+        assert(inspect().profile == detected && inspect().hasHeader && inspect().validLayout);
+        assert(deviceProfileTakesArmRom5(p.deviceType, detected->deviceType));
         if (p.norLayout == DeviceNorLayout5::smallAndBigCards) {
             nor[p.bigCardOffset + 0x84] ^= 1;
-            assert(inspect().profile == &p && !inspect().validLayout);
+            assert(inspect().profile == detected && !inspect().validLayout);
         }
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 25 && names.size() == 29 && types.size() == 27);
+    assert(desktopCount == 27 && names.size() == 31 && types.size() == 29);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -123,7 +128,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 27, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, int(deviceTypeSpitz) + 1, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -237,8 +242,11 @@ int main() {
                    (other.deviceType == deviceTypeTX || other.deviceType == deviceTypeE2 ||
                     other.deviceType == deviceTypeFrankenE2 || other.board == DeviceBoard5::imx1Zodiac ||
                     other.board == DeviceBoard5::ez328 || vzPalm(other)));
+        assert(deviceProfileHasVoiceKey5(deviceTypeZire72) && deviceProfileHasVoiceKey5(deviceTypeTG50) &&
+               deviceProfileHasVoiceKey5(deviceTypeRx1950) && !deviceProfileHasVoiceKey5(deviceTypeTX) &&
+               !deviceProfileHasVoiceKey5(deviceTypeE2));
         for (int unknown : {-1, 99}) {
-            assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown));
+            assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown) && !deviceProfileHasVoiceKey5(unknown));
         }
         assert(p->norSize == (8u << 20) && p->headerOffset == 0x20000 && p->legacySessionNor);
         for (size_t size : {size_t(256), size_t(4u << 20), size_t((8u << 20) - 1), size_t((8u << 20) + 1), size_t(16u << 20)}) {
@@ -374,7 +382,7 @@ int main() {
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.irPhone == (p.board == DeviceBoard5::ez328 || vzPalm(p) || p.deviceType == deviceTypeTX ||
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
-                                          p.deviceType == deviceTypeZire72 || p.deviceType == deviceTypeSpitz));
+                                          p.deviceType == deviceTypeZire72 || p.deviceType == deviceTypeSpitz || deviceTypeIsZodiac5(p.deviceType)));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbPrinter == deviceTypeIsDana5(p.deviceType));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbWifi == (p.deviceType == deviceTypeDana));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.builtInWifi == (p.deviceType == deviceTypeDanaWireless));
@@ -423,7 +431,7 @@ int main() {
         }
         for (int type : {deviceTypeE2, deviceTypeTX, deviceTypeZire72, deviceTypeFrankenE2, deviceTypePV})
             assert(deviceProfileRunnerEligible5(type));
-        for (const char* name : {"palm-iiix", "palm-m515", "palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100",
+        for (const char* name : {"palm-iiix", "palm-iii", "palm-m515", "palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100",
                                   "palm-m105", "palm-m125", "palm-m500", "ibm-workpad-c500", "palm-iiic", "palm-m505",
                                   "palm-m130", "palm-m520", "sony-clie-t415", "hp-ipaq-210", "hp-ipaq-h4350"})
             assert(!deviceProfileRunnerEligible5(deviceProfileNamed5(name)->deviceType));
@@ -442,6 +450,7 @@ int main() {
 
     palmIIIx();
     ezProfiles();
+    palmIiiProfile();
     rx1950();
     vzProfiles();
     t415();
@@ -653,10 +662,10 @@ static void palmIIIx() {
         put32(arm, 0x84, 0x68737072);
         refused(arm, false);
     }
-    // 68328-only, RAM-only, header versions 2 and 6, a reset vector outside the ROM, other 4.1 IDs.
-    refused(rom68k(0x128000, 3, 0x0010, 0, 0, base + 0x822a, 0x128000), true);
+    // RAM-only, header versions 1 and 6, a reset vector outside the ROM, other 4.1 IDs. A ROM with no EZ flag
+    // and header version 2 to 5 is the Palm III's (palmIiiProfile).
     refused(rom68k(0x128000, 3, ez | 0x0001, 0, 0, base + 0x822a, 0x128000), true);
-    refused(rom68k(0x128000, 2, ez, 0, 0, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x128000, 1, 0, 0, 0, base + 0x822a, 0x128000), true);
     refused(rom68k(0x128000, 6, ez, palm, sumo, base + 0x822a, 0x128000), true);
     refused(rom68k(0x128000, 3, ez, 0, 0, 0x00c0822a, 0x128000), true);
     refused(rom68k(0x128000, 3, ez, 0, 0, base + 0x128000, 0x128000), true);
@@ -683,9 +692,17 @@ static void zodiac2() {
     const auto& c = p->capabilities;
     // Serial (UART1), IrDA (UART2), USB HotSync and Bluetooth (the HCI shim) are on.
     assert(!c.network && !c.keyboard && c.serial && c.usb && !c.fastAudio && c.infrared &&
-           c.bluetooth && c.sound && !c.microphone && !c.backgroundPanel);
+           c.bluetooth && c.irPhone && c.sound && !c.microphone && !c.backgroundPanel);
     assert(p->norSize == 0x7d0000 && !p->nandSize && !p->requiresExplicitNand);
     assert(p->minRam == (128u << 20) && p->maxRam == p->minRam);
+    const auto* first = deviceProfileNamed5("tapwave-zodiac-1");
+    assert(first && first->deviceType == deviceTypeZodiac1 && first->minRam == (32u << 20));
+    assert(first->maxRam == first->minRam && first->board == p->board && first->art == p->art);
+    assert(deviceProfileCardSlotCount5(*first) == 2 && deviceProfileSdWriteProtection5(first->deviceType));
+    assert(!deviceConfigurationSupportsRamSize(first->deviceType, p->minRam));
+    assert(deviceProfileTakesArmRom5(first->deviceType, p->deviceType));
+    assert(!deviceProfileTakesArmRom5(first->deviceType, deviceTypeTX));
+    assert(!deviceProfileTakesArmRom5(first->deviceType, deviceTypeInvalid));
     assert(!deviceProfileSdSizeValid5(p->deviceType, 512));
     const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
     assert(display.width == 480 && display.height == 320 && !display.graffitiHeight && display.density == 144);
@@ -729,6 +746,51 @@ static void zodiac2() {
     assert(deviceProfileValidateNorLayout5(p->deviceType, 0, false, true) == DeviceFirmwareError5::none);
     assert(deviceProfileValidateNorLayout5(p->deviceType, 0, false, false) == DeviceFirmwareError5::norLayout);
     assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), 1, false, false) == DeviceFirmwareError5::nandSize);
+}
+
+// The Palm III: the 68328 board, picked by a ROM with no EZ flag (OS 3.0 has header version 2, 3.3 version 3 and
+// 4.1 version 5 with the "rcky" HAL ID) and taking nothing else.
+static void palmIiiProfile() {
+    const auto* p = deviceProfileNamed5("palm-iii");
+    assert(p && p->deviceType == deviceTypePalmIII && deviceProfile5(deviceTypePalmIII) == p && p->art == DeviceArt::iii);
+    assert(p->support == DeviceSupport5::experimentalDesktop && p->frontend.available && p->detect == DeviceDetect5::romHeader68k);
+    assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
+    assert(p->minRam == (2u << 20) && p->maxRam == p->minRam && p->cpuHz == 16580608u);
+    assert(p->frontend.width == 160 && p->frontend.height == 160 && p->frontend.silkscreenHeight == 60);
+    assert(std::string(p->frontend.buttons) == "up|down|app1|app2|app3|app4|power");
+    const auto& caps = p->capabilities;
+    assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && caps.infrared && !caps.bluetooth &&
+           caps.sound && caps.modem && caps.irPhone && deviceProfileHasHotSyncButton5(p->deviceType));
+    constexpr uint32_t base = 0x10c00000, palm = 0x70616c6d, rcky = 0x72636b79, sumo = 0x73756d6f, ez = 0x0020;
+    const auto v30 = inspect68k(rom68k(0x200000, 2, 0, 0, 0, base + 0x8226, 0x200000));
+    const auto v33 = inspect68k(rom68k(0x148000, 3, 0x0010, 0, 0, base + 0x823c, 0x148000));
+    const auto v41 = inspect68k(rom68k(0x1a8000, 5, 0x0010, palm, rcky, base + 0xc6ee, 0x1a8000));
+    for (const auto* info : {&v30, &v33, &v41}) {
+        assert(info->profile == p && info->hasHeader);
+        assert(deviceProfileTakes68kRom5(*p, *info));
+        for (const char* other : {"palm-iiix", "palm-iiie", "palm-v", "palm-m100", "palm-iiic"})
+            assert(!deviceProfileTakes68kRom5(*deviceProfileNamed5(other), *info));
+    }
+    // Not the Palm III's: another 4.1 HAL, the RAM-only flag, a reset vector outside the ROM, over 2 MiB.
+    auto refused = [&](const std::vector<uint8_t>& rom) { assert(!inspect68k(rom).profile); };
+    refused(rom68k(0x1a8000, 5, 0x0010, palm, sumo, base + 0xc6ee, 0x1a8000));
+    refused(rom68k(0x200000, 2, 0x0001, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 2, 0, 0, 0, 0x00c08226, 0x200000));
+    refused(rom68k((2u << 20) + 0x1000, 2, 0, 0, 0, base + 0x8226, 0x200000));
+    // Other 68328 devices with Palm III-like headers: HandEra (v4, 0x0040), Palm VII (v4, 0x0010), Symbol (v2 0, v3 0x0010).
+    refused(rom68k(0x200000, 4, 0x0040, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 4, 0x0010, 0, 0, base + 0x8226, 0x200000));
+    refused(rom68k(0x200000, 2, 0x0080, 0, 0, base + 0x8226, 0x200000));
+    for (const char* text : {"ScanMgr", "RAM NetIF"}) {
+        for (auto [version, flags] : {std::pair<int, int>{2, 0}, {3, 0x0010}}) {
+            auto rom = rom68k(0x200000, version, flags, 0, 0, base + 0x8226, 0x200000);
+            std::copy(text, text + strlen(text), rom.begin() + 0x1000);
+            refused(rom);
+        }
+    }
+    // An EZ ROM goes to the EZ devices only.
+    const auto v31 = inspect68k(rom68k(0x128000, 3, ez, 0, 0, base + 0x822a, 0x128000));
+    assert(v31.profile != p && !deviceProfileTakes68kRom5(*p, v31));
 }
 
 // The other EZ devices run on the IIIx's board and ROM format. Only the IIIx is told from its header; the others
@@ -804,11 +866,11 @@ static void ezProfiles() {
     auto v41 = rom68k(0x1a8000, 5, ez, palm, sumo, base + 0xc6ea, 0x1a8000);
     std::memcpy(v41.data() + 0x1000, "cclkPalmClock", 14);
     assert(inspect68k(v41).profile == iiix);
-    // Only the IIIx and the IIIc are detected from a header; no other EZ profile takes the detection.
+    // Only the IIIx, the IIIc and the Palm III are detected from a header; no other EZ profile takes the detection.
     unsigned detecting = 0;
     for (const auto& p : deviceProfiles5)
         if (p.detect == DeviceDetect5::romHeader68k && p.board == DeviceBoard5::ez328) ++detecting;
-    assert(detecting == 2);
+    assert(detecting == 3);
     // The IIIc: a colour panel, 8 MiB, the IIIx's peripherals and power key, told by its HAL ID.
     const auto* iiic = deviceProfileNamed5("palm-iiic");
     assert(iiic && iiic->deviceType == deviceTypeIIIc && iiic->art == DeviceArt::iiic && iiic->board == DeviceBoard5::ez328);
@@ -1093,4 +1155,28 @@ static void t415() {
     assert(!inspect68k(rom68k(0x200000, 5, vz, palm, sumo, base + 0x2a2, 0x8000)).profile);
     assert(inspect68k(rom68k(0x200000, 5, ez, palm, sumo, 0x10c002a2, 0x8000)).profile == deviceProfileNamed5("palm-iiix"));
     std::cout << "PASS: Sony CLIE T415 profile and ROM header detection\n";
+}
+
+// Every available profile has a group the picker lists and a release year and month; the picker orders a group by them.
+static void pickerGroups() {
+    std::set<DeviceGroup5> known(std::begin(deviceGroups5), std::end(deviceGroups5));
+    std::set<DeviceGroup5> used;
+    for (const auto& p : deviceProfiles5) {
+        if (!p.frontend.available) continue;
+        if (!known.count(p.group) || !*deviceGroupName5(p.group)) {
+            std::cerr << p.name << " has no picker group\n";
+            assert(false);
+        }
+        const unsigned year = p.released / 100, month = p.released % 100;
+        if (year < 1998 || year > 2010 || month < 1 || month > 12) {
+            std::cerr << p.name << " has no release date\n";
+            assert(false);
+        }
+        used.insert(p.group);
+    }
+    assert(used == known);
+    // The Zodiac 1 comes before the Zodiac 2, and the E3 is Frond's patched E2.
+    assert(deviceProfileNamed5("tapwave-zodiac-1")->released == deviceProfileNamed5("tapwave-zodiac-2")->released);
+    assert(deviceProfilePickerRank5(deviceTypeZodiac1) < deviceProfilePickerRank5(deviceTypeZodiac2));
+    assert(deviceProfileNamed5("palm-e2-franken")->released == deviceProfileNamed5("palm-e2")->released);
 }

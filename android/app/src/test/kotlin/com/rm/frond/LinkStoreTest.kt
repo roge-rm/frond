@@ -122,6 +122,20 @@ class LinkStoreTest {
         assertEquals(emptyList<LinkStore.Peer>(), LinkStore.readPeers(File(tmp.root, "none")))
     }
 
+    // Found by LinkStoreFuzzTest: ports outside 0 to 65535 read as the default port, or no last port.
+    @Test fun portsOutOfRangeAreDropped() {
+        folder().mkdirs()
+        for ((port, want) in listOf(1253328303 to LinkWire.DEFAULT_PORT, -1 to LinkWire.DEFAULT_PORT, 65535 to 65535)) {
+            File(folder(), "identity.json").writeText(JSONObject().put("version", 1).put("id", id(1))
+                .put("name", "Tab").put("secret", LinkWire.hex(key(2))).put("port", port).toString())
+            assertEquals(want, LinkStore.readIdentity(folder())!!.port)
+        }
+        File(folder(), "connections.json").writeText(JSONObject().put("version", 1).put("entries", org.json.JSONArray()
+            .put(JSONObject().put("id", id(3)).put("peerName", "A").put("key", LinkWire.hex(key(1))).put("lastPort", 70000))
+            .put(JSONObject().put("id", id(4)).put("peerName", "B").put("key", LinkWire.hex(key(1))).put("lastPort", -5))).toString())
+        assertEquals(listOf(0, 0), LinkStore.readPeers(folder()).map { it.lastPort })
+    }
+
     @Test fun bluetoothRadioChoiceRoundTrips() {
         val s = LinkStore(folder(), FakeKeys)
         assertNull(s.open("Phone"))

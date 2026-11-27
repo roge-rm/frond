@@ -35,7 +35,7 @@ static void exerciseCablePutBack(SocPXA& soc, const std::vector<uint8_t>& unplug
         [&] { return soc.GetTime(); },
         [&] { soc.KickUsbHost(); },
         [&](const UsbHostHooks* hooks) { soc.SetUsbHostHooks(hooks); },
-        {}, {}, {}, {}
+        {}, {}, {}, {}, {}
     };
     std::string error;
     UsbHostBridge bridge;

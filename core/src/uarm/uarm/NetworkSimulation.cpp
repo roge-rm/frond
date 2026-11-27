@@ -187,7 +187,8 @@ bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
         if (trap == 0xa805) {
             auto p = g.arg(6);
             g.writable(p, 16);
-            in_addr ip{htonl(g.arg(2))};
+            in_addr ip{};
+            ip.s_addr = htonl(g.arg(2));
             char text[16];
             if (!inet_ntop(AF_INET, &ip, text, sizeof(text))) return result(0, param);
             g.bytes(p, text, strlen(text) + 1, true);

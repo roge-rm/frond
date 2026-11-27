@@ -3,6 +3,8 @@
 #include <cstring>
 #include <vector>
 #include "MMU_internal.h"
+#include "RAM.h"
+#include "memory_buffer.h"
 
 static std::vector<uint8_t> memory(0x10000);
 static bool access(void*, uint32_t addr, uint_fast8_t size, bool write, void* buf) {
@@ -12,7 +14,71 @@ static bool access(void*, uint32_t addr, uint_fast8_t size, bool write, void* bu
     return true;
 }
 static void put(uint32_t addr,uint32_t word) { std::memcpy(memory.data()+addr,&word,4); }
+static void testArm920SubpageWrites() {
+    constexpr uint32_t ttb = 0x4000, l2 = 0x8000, alternate = 0x8400;
+    constexpr uint32_t mixed = 3u << 4 | 1u << 6 | 2u << 10 | 2u;
+    auto* mem = memInit();
+    MemoryBuffer ram{};
+    assert(memoryBufferAllocate(&ram, 0x10000));
+    ramSetNoFramebuffer(ramInit(mem, nullptr, 0, 0x10000, &ram, true));
+
+    auto* exact = mmuInit(mem, false);
+    auto* fast = mmuInit(mem, false);
+    auto store = [&](uint32_t pa, uint32_t value) { assert((memAccess<4, true>(mem, pa, &value))); };
+    auto compare = [&](uint32_t va, bool privileged) {
+        const auto result = mmuTranslateCached<true, false, true>(fast, va, privileged);
+        assert(result == mmuTranslate(exact, va, privileged, true));
+        return result;
+    };
+    auto domain = [&](uint32_t value) {
+        mmuSetDomainCfg(exact, value);
+        mmuSetDomainCfg(fast, value);
+    };
+    for (auto* mmu : {exact, fast}) mmuSetTTP(mmu, ttb);
+
+    store(ttb, l2 | 1);
+    store(l2, 0x10000000 | mixed | 8);
+    domain(1);
+    for (int repeat = 0; repeat < 2; ++repeat)
+        for (uint32_t offset : {0x28u, 0x424u, 0xa04u, 0xffcu})
+            for (bool privileged : {true, false}) compare(offset, privileged);
+    assert(fast->subpageWrites[0].valid && fast->subpageWrites[3].valid);
+    assert(!mmuTlbLive(fast, 0));
+    domain(0);
+    assert(MMU_TRANSLATE_RESULT_FSR(compare(0x28, true)) == 0x0b);
+    domain(3);
+    assert(MMU_TRANSLATE_RESULT_PA(compare(0xa04, false)) == 0x10000a04);
+
+    // Both descriptor words can change before a guest TLB flush.
+    store(l2, 0x20000000 | mixed | 4);
+    assert(compare(0x28, true) == (1ull << 61 | 0x20000028));
+    store(ttb, alternate | 1);
+    store(alternate, 0x30000000 | mixed);
+    assert(MMU_TRANSLATE_RESULT_PA(compare(0x28, true)) == 0x30000028);
+    store(alternate, 0);
+    assert(MMU_TRANSLATE_RESULT_FSR(compare(0x28, true)) == 7);
+
+    store(alternate, 0x30000000 | mixed);
+    assert(MMU_TRANSLATE_RESULT_PA(compare(0x28, true)) == 0x30000028);
+    assert(memHoldRam(mem, true));
+    assert(MMU_TRANSLATE_RESULT_FSR(compare(0x28, true)) == 5);
+    assert(memHoldRam(mem, false));
+    assert(MMU_TRANSLATE_RESULT_PA(compare(0x28, true)) == 0x30000028);
+
+    // An ordinary walk can fill the guest TLB while the old subpage memo still exists.
+    store(alternate, 0x10000ff2);
+    for (auto* mmu : {exact, fast})
+        assert(MMU_TRANSLATE_RESULT_PA(mmuTranslate(mmu, 0x28, true, true)) == 0x10000028);
+    assert(mmuTlbLive(fast, 0) && fast->subpageWrites[0].valid);
+    store(alternate, 0x20000000 | mixed);
+    assert(MMU_TRANSLATE_RESULT_PA(compare(0x28, true)) == 0x10000028);
+    for (auto* mmu : {exact, fast}) mmuTlbFlush(mmu);
+    assert(MMU_TRANSLATE_RESULT_PA(compare(0x28, true)) == 0x20000028);
+    assert(!mmuTlbLive(fast, 0));
+}
+
 int main() {
+    testArm920SubpageWrites();
     auto mem=memInit(); assert(memRegionAdd(mem,0,memory.size(),access,nullptr));
     auto reference=mmuInit(mem,true), fast=mmuInit(mem,true);
     auto compare=[&](uint32_t addr,bool privileged,bool write) {

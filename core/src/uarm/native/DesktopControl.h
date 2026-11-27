@@ -154,6 +154,7 @@ class DesktopControl {
             channel.Reply(pcLinkCloseRequest, true, "closed", {});
             pcLinkCloseRequest.clear();
         }
+        finishApplicationList(ctx);
         // No request is taken while a save writes in the background: it answers when it's done,
         // and everything after it, a quit or a card change too, waits behind it.
         if (pendingSave) {
@@ -166,12 +167,20 @@ class DesktopControl {
         switch (channel.Receive(request)) {
             case DesktopChannel::Poll::closed: return lost(ctx);
             case DesktopChannel::Poll::handled: return false;
-            case DesktopChannel::Poll::idle: break;
+            case DesktopChannel::Poll::idle:
+                if (GuestDatabaseOps::FinishDue(timestampUsec())) finishInstalls(ctx);
+                break;
             case DesktopChannel::Poll::request: {
                 const auto& command = request.command;
-                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || (command == "sync-start" && request.argument == "network") || command == "delete-db" || command == "input-replay" || command == "zaurus-install" ||
+                const bool work = command == "guest-ready" || command == "save" || (command == "install" || command == "install-copy") || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || (command == "sync-start" && request.argument == "network") || command == "delete-db" || command == "input-replay" || command == "zaurus-install" ||
                                   (command.rfind("cf-", 0) == 0 && command != "cf-state" &&
                                    command != "cf-identity" && command != "cf-protection") || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
+                // Installs sent one after another finish together once they stop coming; any other
+                // command except a read-only query waits for that first.
+                const bool readOnly = command == "window-id" || command == "app-active" || command == "irda-stats" ||
+                                      (command.size() > 6 && command.compare(command.size() - 6, 6, "-state") == 0);
+                if (GuestDatabaseOps::FinishWaiting() && command != "install" && command != "install-copy" && !readOnly)
+                    finishInstalls(ctx);
                 if (work) {
                     // Host calls only drop capture for their length; the user's choice stays and capture comes back.
                     if (ctx.microphone) ctx.microphone->Suspend();
@@ -217,9 +226,21 @@ class DesktopControl {
  private:
     // The socket closed. When the launcher went away without asking to quit, the session is saved
     // where its close would have saved it, here on the emulation thread like a save request.
+    // The sync notifies and the launcher relaunch for installs sent one after another
+    // (GuestDatabaseOps::InstallLater), with playback paused like any host call.
+    void finishInstalls(commands::Context& ctx) {
+        if (ctx.microphone) ctx.microphone->Suspend();
+        ctx.audioDriver.Pause();
+        GuestDatabaseOps::FinishPending(*ctx.soc, timestampUsec());
+        if (sound) ctx.audioDriver.Start();
+        ctx.mainLoop.PauseAt(timestampUsec());
+    }
+
     bool lost(commands::Context& ctx) {
         finishPendingSave(ctx);
         zaurusPcLink.Close();
+        if (GuestDatabaseOps::FinishWaiting() && !saveOnLoss.empty() && !quit && channel.Lost() && !channel.QuitPending())
+            finishInstalls(ctx);
         if (saveOnLoss.empty() || quit || !channel.Lost() || channel.QuitPending()) return true;
         if (ctx.microphone) ctx.microphone->Disarm();
         ctx.audioDriver.Pause();
@@ -319,6 +340,19 @@ class DesktopControl {
         return state == "off" && !ctx.serialError.empty() ? "off " + ctx.serialError : state;
     }
     struct Reply { bool ok{false}; std::string code{"failed"}, message; };
+    void finishApplicationList(commands::Context& ctx) {
+        if (!applicationListPending) return;
+        const auto job = applicationList.lock();
+        if (job && job->Running()) return;
+        applicationListPending = false;
+        applicationList.reset();
+        if (!job) event("winmo-apps-error", "The Windows Mobile connection closed.");
+        else if (!job->ApplicationError().empty()) event("winmo-apps-error", job->ApplicationError());
+        else event("winmo-apps", job->Applications());
+        if (ctx.usb->RouteGeneration() != applicationListUsbGeneration) return;
+        if (applicationListCable) ctx.usb->Stop();
+        else if (auto* device = dynamic_cast<SocS3C2442*>(ctx.soc)) device->StopActiveSync();
+    }
     // A save request: the snapshot and any card or NAND journal here on the emulation thread, then
     // the .frond compressed and written on saveJob while the guest runs. True when the reply waits
     // for that write; false with `result` set when the save failed before it.
@@ -729,11 +763,13 @@ class DesktopControl {
         }
         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
-        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+        const bool fileCommand = command == "save" || (command == "install" || command == "install-copy") || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && !frondPosix::IsAbsolutePath(path)) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "zaurus-lid" && command != "zaurus-battery-door" && command != "headphones" && command != "headphones-preference" && command != "zaurus-remote" && command != "zaurus-remote-key" && command != "cradle-button" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && !path.empty()) return {false, "argument", "This command takes no argument."};
-        if (command == "install" && ctx.soc->InstallsToCard()) {
-            const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path);
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "zaurus-lid" && command != "zaurus-battery-door" && command != "headphones" && command != "headphones-preference" && command != "zaurus-remote" && command != "zaurus-remote-key" && command != "cradle-button" && command != "voice-key" && command != "cradle" && command != "speed" && command != "sync-profile" && command != "sync-start" && command != "activesync-start" && command != "activesync-answer" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (command == "install-copy" && !ctx.soc->InstallsToCard())
+            return {false, "unsupported", "Install to SD is unavailable for this device."};
+        if ((command == "install" || command == "install-copy") && ctx.soc->InstallsToCard()) {
+            const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path, command == "install");
             return {result.ok, result.code, result.message};
         }
         // A board with no guest calls takes none of the commands that need them.
@@ -838,7 +874,7 @@ class DesktopControl {
         if (command == "irda-stats") {
             if (!ctx.infrared || !caps.infrared)
                 return {false,"unsupported","This device has no infrared endpoint."};
-            if (ctx.infrared->PhoneMode() || ctx.infrared->PrinterMode()) return {true,"infrared",ctx.infrared->PhoneStats()};
+            if (ctx.infrared->PhoneMode() || ctx.infrared->PrinterMode() || ctx.infrared->SyncMode()) return {true,"infrared",ctx.infrared->PhoneStats()};
             auto* port=ctx.infrared->Port();
             const auto state=port?port->Mode():HostUartMode{};
             const auto c=ctx.infrared->GetCounters();
@@ -871,8 +907,15 @@ class DesktopControl {
                     ctx.infrared->StartPrinter(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
                 return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
             }
+            if (ctx.infrared && path == "sync") {
+                if (deviceProfileOs5(*deviceProfile5(ctx.soc->GetDeviceType())) != DeviceOs5::palmOs)
+                    return {false,"unsupported","This device has no IR HotSync."};
+                const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->StartSync(ctx.soc->InfraredHostPort(),ctx.infraredError):
+                    ctx.infrared->StartSync(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
+                return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
+            }
             HostSerial::Config config;
-            if (!ctx.infrared || !HostSerial::Parse(path,config) || config.kind==HostSerial::Kind::syncManager) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
+            if (!ctx.infrared || !HostSerial::Parse(path,config) || config.kind==HostSerial::Kind::syncManager) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone, printer or sync."};
             const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->Start(ctx.soc->InfraredHostPort(),config,ctx.infraredError):
                 ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError));
             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
@@ -886,12 +929,42 @@ class DesktopControl {
             manager.Configure(options);
             return {true, "sync", SyncState()};
         }
+        if (command == "activesync-answer") {
+            if (path != "set-up" && path != "guest") return {false, "argument", "Use set-up or guest."};
+            if (!frondSync::SyncManager::Get().AnswerPartnership(path == "set-up"))
+                return {false, "none", "No partnership question is open."};
+            return {true, "sync", path == "set-up" ? "Setting up a partnership." : "Connecting as a guest."};
+        }
+        if (command == "winmo-apps") {
+            auto* device = dynamic_cast<SocS3C2442*>(ctx.soc);
+            if (!device || !ctx.usb) return {false, "unsupported", "Installed programs are unavailable for this device."};
+            if (applicationListPending || device->ActiveSyncRunning())
+                return {false, "busy", "An ActiveSync connection is already open."};
+            if (device->PowerSleeping()) return {false, "asleep", "Windows Mobile is asleep."};
+            applicationListCable = !ctx.usb->Host();
+            std::string error;
+            if (!ctx.usb->StartCable(ctx.soc, error)) return {false, "usb", error};
+            applicationListUsbGeneration = ctx.usb->RouteGeneration();
+            applicationList = device->StartActiveSync(true);
+            applicationListPending = true;
+            return {true, "pending", {}};
+        }
         if (command == "activesync-start") {
             auto* device = dynamic_cast<SocS3C2442*>(ctx.soc);
             if (!device || !ctx.usb) return {false, "unsupported", "ActiveSync is unavailable for this device."};
-            if (frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
+            if (device->ActiveSyncRunning() ||
+                frondSync::SyncManager::Get().Status().state == frondSync::SyncStatus::State::syncing)
                 return {false, "busy", "An ActiveSync is already running."};
-            if (path == "serial" || (path.empty() && frondSync::ConfiguredActiveSyncUsesSerial())) {
+            // A trailing "ask": the frontend answers the partnership question; without it the device pairs.
+            const bool ask = path == "ask" || (path.size() > 4 && path.compare(path.size() - 4, 4, " ask") == 0);
+            const auto transport = ask ? path.substr(0, path.size() == 3 ? 0 : path.size() - 4) : path;
+            {
+                auto& manager = frondSync::SyncManager::Get();
+                auto options = manager.Options();
+                options.askPartnership = ask;
+                manager.Configure(options);
+            }
+            if (transport == "serial" || (transport.empty() && frondSync::ConfiguredActiveSyncUsesSerial())) {
                 if (!ctx.serial || !ctx.serialPort) return {false, "unsupported", "Serial ActiveSync is unavailable."};
                 ctx.usb->Stop();
                 ctx.serial->Stop();
@@ -899,7 +972,7 @@ class DesktopControl {
                 if (!device->StartSerialActiveSync()) return {false, "serial", "Couldn't attach the serial ActiveSync cable."};
                 return {true, "sync", "Starting ActiveSync over serial."};
             }
-            if (!path.empty() && path != "usb") return {false, "argument", "Use usb or serial."};
+            if (!transport.empty() && transport != "usb") return {false, "argument", "Use usb or serial."};
             ctx.usbError.clear();
             if (!ctx.usb->StartCable(ctx.soc, ctx.usbError)) return {false, "usb", ctx.usbError};
             device->StartActiveSync();
@@ -937,6 +1010,12 @@ class DesktopControl {
             if (usbSync && guestClosingSync(ctx)) {
                 queueSyncPress(ctx, true);
                 return {true, "sync", "Starting a HotSync over USB."};
+            }
+            // A cable already plugged in and up is not replugged: the press goes in as the cradle button's does.
+            if (usbSync && ctx.usb->Host() && ctx.usb->Host()->GetPhase() == UsbBusHost::Phase::running) {
+                if (!ctx.soc->PressHotSync())
+                    return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
+                return {true, "sync", "HotSync button pressed."};
             }
             const HostSerial::Config config{Kind::syncManager, 0, {}};
             const bool usbFree = caps.usb && ctx.usb && !UsbHostBridge::NetworkLink(ctx.soc) &&
@@ -1022,6 +1101,13 @@ class DesktopControl {
             if (!ctx.soc->HeadphonesSupported() || !ctx.soc->SetHeadphones(path == "in"))
                 return {false, "unsupported", "This device has no headphone jack that can be set."};
             return {true, "headphones", ctx.soc->HeadphonesIn() ? "in" : "out"};
+        }
+        if (command == "voice-key") {
+            // d holds the voice or record key down, u lets it go; queued like other keys.
+            if (path != "d" && path != "u") return {false, "argument", "Use d or u."};
+            if (!deviceProfileHasVoiceKey5(ctx.soc->GetDeviceType())) return {false, "unsupported", "This device has no voice key."};
+            if (path == "d") ctx.soc->KeyDown(keyIdVoice); else ctx.soc->KeyUp(keyIdVoice);
+            return {true, "voice-key", path == "d" ? "down" : "up"};
         }
         if (command == "cradle-button-state")
             return {true, "cradle-button", !ctx.soc->CradleButtonSupported() ? "unavailable" : ctx.soc->CradleButtonDown() ? "down" : "up"};
@@ -1369,7 +1455,7 @@ class DesktopControl {
         if (command == "install") {
             std::unique_ptr<uint8_t[]> data; size_t size;
             if (!util::ReadFile(path, data, size)) return {false, "read", "Could not read the application database."};
-            const auto result = GuestDatabaseOps::Install(*ctx.soc, size, data.get());
+            const auto result = GuestDatabaseOps::InstallLater(*ctx.soc, size, data.get(), timestampUsec());
             switch (result) {
                 case DB_INSTALL_RESULT_OK: return {true, "installed", "Application installed."};
                 case DB_INSTALL_RESULT_NEEDS_RESET: return {true, "needs-reset", "Installed. Reset the Palm to finish installation."};
@@ -1554,6 +1640,9 @@ class DesktopControl {
         return {true, "done", "Done."};
     }
     DesktopChannel channel;
+    std::weak_ptr<frondSync::ActiveSyncSession> applicationList;
+    uint64_t applicationListUsbGeneration{0};
+    bool applicationListPending{false}, applicationListCable{false};
     bool sound, quit{false}, saveFailed{false};
     std::string saveOnLoss;
     ZaurusPcLink zaurusPcLink;

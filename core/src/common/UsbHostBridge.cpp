@@ -28,7 +28,7 @@ struct UsbHostBridge::Impl {
             self.replaced = false;
             self.Unplug();
             self.plugPending = true;
-            self.plugAt = now + replugNs;
+            self.plugAt = self.PlugTime(now + replugNs);
         }
         if (self.plugPending && now >= self.plugAt) {
             self.plugPending = false;
@@ -84,6 +84,7 @@ struct UsbHostBridge::Impl {
         self.host->Poke();
         self.soc.kick();
     }
+    uint64_t PlugTime(uint64_t at) const { return soc.plugReadyAt ? std::max(at, soc.plugReadyAt()) : at; }
     void Unplug() {
         if (soc.attached()) soc.cable(false);
     }
@@ -146,7 +147,7 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
         soc.mode);
     // Let the guest see a disconnect before replugging a restored or replaced cable.
     impl->plugPending = true;
-    impl->plugAt = soc.time() + (wasPlugged ? replugNs : 0);
+    impl->plugAt = impl->PlugTime(soc.time() + (wasPlugged ? replugNs : 0));
     impl->lastPhase = UsbBusHost::Phase::detached;
     impl->netPollAt = 0;
     if (soc.ethernetOut && soc.mode == UsbBusHost::Mode::zaurusNetwork) {
