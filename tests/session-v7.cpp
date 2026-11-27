@@ -1790,12 +1790,19 @@ static void MetadataRecords() {
     assert(!r.anyFirmware && !r.savedAt);
     r = parse("any-firmware");
     assert(r.anyFirmware && !r.savedAt);
-    const auto bytes = frondNative::sessionMetadata({true, 1764078000});
+    const auto bytes = frondNative::sessionMetadata({true, 1764078000, {}});
     assert(std::string(bytes.begin(), bytes.end()) == "any-firmware\nsaved-at 1764078000\n");
     r = frondNative::parseSessionMetadata(bytes);
     assert(r.anyFirmware && r.savedAt && *r.savedAt == 1764078000);
-    r = frondNative::parseSessionMetadata(frondNative::sessionMetadata({false, 42}));
-    assert(!r.anyFirmware && r.savedAt == 42);
+    r = frondNative::parseSessionMetadata(frondNative::sessionMetadata({false, 42, {}}));
+    assert(!r.anyFirmware && r.savedAt == 42 && r.microdrive.empty());
+    // A Zaurus save's Microdrive generation, alone as older saves hold it or after saved-at.
+    r = parse("zaurus-microdrive-v1 abc123");
+    assert(!r.anyFirmware && !r.savedAt && r.microdrive == "abc123");
+    const auto zaurus = frondNative::sessionMetadata({false, 7, "abc123"});
+    assert(std::string(zaurus.begin(), zaurus.end()) == "saved-at 7\nzaurus-microdrive-v1 abc123\n");
+    r = frondNative::parseSessionMetadata(zaurus);
+    assert(r.savedAt == 7 && r.microdrive == "abc123");
     r = parse("later thing\nsaved-at 12x\nsaved-at \nany-firmwarex");
     assert(!r.anyFirmware && !r.savedAt);
 }
