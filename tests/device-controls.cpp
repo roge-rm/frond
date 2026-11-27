@@ -3249,6 +3249,8 @@ static void zaurusSwivelPanel() {
             const auto lcd = zaurusDeviceLayout(turned ? display.height : display.width,
                                                 turned ? display.width : display.height, *view.zaurus).screen;
             auto* output = SDL_GetRenderer(window);
+            // A fitted window draws the device on its own texture: read the window it was copied to.
+            SDL_SetRenderTarget(output, nullptr);
             SDL_RenderSetScale(output, 1, 1);
             SDL_RenderSetViewport(output, nullptr);
             auto* shot = SDL_CreateRGBSurfaceWithFormat(0, ww, wh, 32, SDL_PIXELFORMAT_RGBA32);

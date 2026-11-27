@@ -1162,7 +1162,8 @@ static void pickerGroups() {
     std::set<DeviceGroup5> known(std::begin(deviceGroups5), std::end(deviceGroups5));
     std::set<DeviceGroup5> used;
     for (const auto& p : deviceProfiles5) {
-        if (!p.frontend.available) continue;
+        // The Zaurus has its own setup and is offered with the staged profile.
+        if (!p.frontend.available && p.deviceType != deviceTypeSpitz) continue;
         if (!known.count(p.group) || !*deviceGroupName5(p.group)) {
             std::cerr << p.name << " has no picker group\n";
             assert(false);
