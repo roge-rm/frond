@@ -8,7 +8,7 @@ class DevicePickerTest {
     private fun ids(group: String) = DevicePicker.groups().first { it.first == group }.second.map { it.id }
 
     @Test fun groupsInOrder() {
-        assertEquals(listOf("Palm OS 5", "Palm classic", "Sony CLIÉ", "Tapwave", "HP", "AlphaSmart", "IBM"), DevicePicker.groups().map { it.first })
+        assertEquals(listOf("Palm OS 5", "Palm classic", "Sony CLIÉ", "Tapwave", "HP", "AlphaSmart", "IBM", "Sharp"), DevicePicker.groups().map { it.first })
     }
 
     @Test fun everyDeviceHasAGroupAndADate() {
@@ -24,6 +24,7 @@ class DevicePickerTest {
         assertEquals(listOf("tapwave-zodiac-1", "tapwave-zodiac-2"), ids("Tapwave"))
         assertEquals(listOf("sony-clie-t415", "sony-clie-tg50"), ids("Sony CLIÉ"))
         assertEquals(listOf("alphasmart-dana", "alphasmart-dana-wireless"), ids("AlphaSmart"))
+        assertEquals(listOf("sharp-zaurus-sl-c3000"), ids("Sharp"))
         assertEquals(
             listOf("palm-iii", "palm-iiix", "palm-v", "palm-iiie", "palm-vx", "palm-iiixe", "palm-iiic", "palm-m100", "palm-m105", "palm-m500",
                 "palm-m505", "palm-m125", "palm-m515", "palm-m130", "palm-m520"),
