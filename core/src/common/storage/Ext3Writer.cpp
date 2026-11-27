@@ -49,41 +49,46 @@ uint32_t journalSize(uint32_t blocks) {
     return 32768;
 }
 
-// Folder blocks: entries with file types, none crossing a block, the last one filling it.
+// Folder blocks: entries with file types, none crossing a block, the last one in each block
+// filling it. A new entry goes in the first block with room, as e2fsprogs' ext2fs_link does.
 class DirBlocks {
    public:
     std::vector<std::vector<uint8_t>> blocks;
 
     void add(uint32_t ino, const std::string& name, uint8_t type) {
         const uint32_t need = 8 + ((uint32_t(name.size()) + 3) & ~3u);
-        if (blocks.empty() || pos_ + need > 1024) {
-            close();
+        size_t b = 0;
+        while (b < blocks.size() && used_[b].pos + need > 1024) ++b;
+        if (b == blocks.size()) {
             blocks.emplace_back(1024, 0);
-            pos_ = 0;
+            used_.push_back({});
         }
-        uint8_t* e = blocks.back().data() + pos_;
+        auto& used = used_[b];
+        uint8_t* e = blocks[b].data() + used.pos;
         put32(e, ino);
         put16(e + 4, need);
         e[6] = uint8_t(name.size());
         e[7] = type;
         memcpy(e + 8, name.data(), name.size());
-        last_ = pos_;
-        pos_ += need;
+        used.last = used.pos;
+        used.pos += need;
     }
     // An empty block, as lost+found keeps spare ones.
     void spare() {
-        close();
         blocks.emplace_back(1024, 0);
         put16(blocks.back().data() + 4, 1024);
-        pos_ = 1024;
-        last_ = 0;
+        used_.push_back({1024, 0});
     }
     void close() {
-        if (!blocks.empty()) put16(blocks.back().data() + last_ + 4, 1024 - last_);
+        for (size_t b = 0; b < blocks.size(); ++b)
+            put16(blocks[b].data() + used_[b].last + 4, 1024 - used_[b].last);
     }
 
    private:
-    uint32_t pos_{0}, last_{0};
+    struct Used {
+        uint32_t pos{0}, last{0};
+    };
+    std::vector<Used> used_;
 };
 
 }  // namespace

@@ -264,6 +264,8 @@ def ext_tree(image, work):
         e['links'] = int(re.search(r'Links: (\d+)', text).group(1))
         mode = re.search(r'Mode:\s+(\d+)', text).group(1)
         e['perm'] = int(mode, 8)
+        # ls -p leaves folder sizes out.
+        e['size'] = int(re.search(r'Size: (\d+)', text).group(1))
         for field in ('atime', 'ctime', 'mtime'):
             e[field] = int(re.search(field + r': (0x[0-9a-f]+)', text).group(1), 16)
         fast = re.search(r'Fast link dest: "(.*)"', text)
