@@ -2665,7 +2665,10 @@ for line in s.makefile('rb'):
             const auto real = QFileInfo(a).canonicalFilePath();
             QVERIFY2(commands.contains("sd-attach\t\"" + real + "/sd.frondsd\" " + n1.key + " writable sd\n"), qPrintable(commands));
             QVERIFY2(commands.contains("sd2-attach\t\"" + real + "/sd2.frondsd\" " + n2.key + " writable mmc\n"), qPrintable(commands));
-            QVERIFY(commands.indexOf("sd2-attach\t") < commands.indexOf("network-state\t"));
+            // network-state can come after the picks show, so wait for it before checking the order.
+            QTRY_VERIFY(read("commands").contains("network-state\t"));
+            const auto ordered = read("commands");
+            QVERIFY2(ordered.indexOf("sd2-attach\t") < ordered.indexOf("network-state\t"), qPrintable(ordered));
             // No card in slot 2: eject after the confirmation, take out, to the drawer. The view setting
             // sent at start holds the request slot and a pick during it does nothing, so wait it out.
             QTRY_VERIFY(read("commands").contains("dana-view\tkeyboard="));

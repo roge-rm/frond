@@ -87,7 +87,8 @@ class DeviceInputTest(unittest.TestCase):
                                                  'SDL_AUDIODRIVER': 'dummy'})
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(message, result.stderr + result.stdout)
-        self.assertNotIn('SDL', result.stderr)
+        # Refused before SDL starts: no SDL message ahead of the usage text, which names SDL buttons.
+        self.assertNotIn('SDL', result.stderr.split('Usage:')[0])
         return result
 
     def test_window_scaling_options(self):
