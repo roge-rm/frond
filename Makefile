@@ -198,6 +198,21 @@ test-storage-fat: prepare
 		tests/storage-fat.cpp $(OBJ_ROOT)/miniz-storage-fat.o -o $(OBJ_ROOT)/test-storage-fat
 	python3 tests/storage-fat.py $(OBJ_ROOT)/test-storage-fat
 
+.PHONY: test-zaurus-cf-builder
+test: test-zaurus-cf-builder
+# The core's Zaurus CF builder (storage/ZaurusCf.h) against tools/create-zaurus-cf.py on a synthetic
+# HDD1 archive: e2fsck and fsck.fat clean, the same tree, owners, times and contents; bad archives,
+# cancel and overflow refused (tests/zaurus-cf-builder.py). Needs e2fsprogs, dosfstools and mtools.
+ZAURUS_CF_SOURCES = core/src/common/storage/TarStream.cpp core/src/common/storage/Ext3Writer.cpp \
+	core/src/common/storage/Fat32Writer.cpp core/src/common/storage/ZaurusCf.cpp
+test-zaurus-cf-builder: prepare
+	$(CC) -std=gnu99 -O1 -g -Icore/src/common -c core/src/common/zip/miniz.c \
+		-o $(OBJ_ROOT)/miniz-zaurus-cf-builder.o
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/common \
+		tests/zaurus-cf-builder.cpp $(ZAURUS_CF_SOURCES) $(OBJ_ROOT)/miniz-zaurus-cf-builder.o \
+		-o $(OBJ_ROOT)/test-zaurus-cf-builder
+	python3 tests/zaurus-cf-builder.py $(OBJ_ROOT)/test-zaurus-cf-builder
+
 .PHONY: test-storage-ms
 test: test-storage-ms
 # Files on classic Memory Sticks: writes into held and unclaimed blocks read back through
@@ -3462,7 +3477,7 @@ FUZZ_TARGETS := hayes-modem ppp-server irda-phone netsync-wakeup hotsync-link ho
 	wbxml airsync-http link-wire link-mux link-pairing link-handshake \
 	palm-db pim-record installer session-file rom-info gunzip zip rx1950-nand sync-profile \
 	wifi-router slirp-ip rndis-host usb-bus-host gdbstub-arm gdbstub-68k desktop-channel \
-	savestate card-container fat-image zodiac-rom zodiac-smf bluetooth-hci conduit-ipc netlib jni-link jni-sync
+	savestate card-container fat-image zaurus-cf zodiac-rom zodiac-smf bluetooth-hci conduit-ipc netlib jni-link jni-sync
 FUZZ_CC ?= $(or $(shell command -v clang-19 2>/dev/null),clang)
 FUZZ_CXX ?= $(or $(shell command -v clang++-19 2>/dev/null),clang++)
 FUZZ_ROOT = $(OBJ_ROOT)/fuzz

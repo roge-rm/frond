@@ -1,6 +1,7 @@
 // Writes the synthetic seed corpora for the fuzz targets: seeds DIR makes DIR/<target>/<n>.
 // Every seed is made here from Frond's own encoders or by hand; none come from firmware,
 // sessions or user data.
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -326,6 +327,52 @@ int main(int argc, char** argv) {
         GzipContext gzip(text.data(), text.size());
         while (gzip.GetState() == 0 || gzip.GetState() == 1) gzip.Continue();
         Seed("gunzip", Bytes(gzip.GetGzipData(), gzip.GetGzipData() + gzip.GetGzipSize()));
+    }
+
+    {
+        // An HDD1 archive: hdd1 with its file list and a gzip factory seed holding hdd2 and hdd3.
+        auto entry = [](const std::string& name, char type, const Bytes& data, const std::string& link = "") {
+            Bytes h(512, 0);
+            auto octal = [&](size_t at, size_t width, unsigned long long v) {
+                snprintf(reinterpret_cast<char*>(&h[at]), width, "%0*llo", int(width - 1), v);
+            };
+            memcpy(&h[0], name.data(), std::min<size_t>(name.size(), 100));
+            octal(100, 8, type == '5' ? 0755 : 0644), octal(108, 8, 0), octal(116, 8, 0);
+            octal(124, 12, data.size()), octal(136, 12, 1100000000);
+            h[156] = uint8_t(type);
+            memcpy(&h[157], link.data(), std::min<size_t>(link.size(), 100));
+            memcpy(&h[257], "ustar\0" "00", 8);
+            memset(&h[148], ' ', 8);
+            unsigned sum = 0;
+            for (uint8_t c : h) sum += c;
+            snprintf(reinterpret_cast<char*>(&h[148]), 7, "%06o", sum);
+            Bytes out = Cat(h, data);
+            out.resize((out.size() + 511) / 512 * 512, 0);
+            return out;
+        };
+        auto gz = [](const Bytes& data) {
+            GzipContext gzip(data.data(), data.size());
+            while (gzip.GetState() == 0 || gzip.GetState() == 1) gzip.Continue();
+            return Bytes(gzip.GetGzipData(), gzip.GetGzipData() + gzip.GetGzipSize());
+        };
+        Bytes seed = entry("hdd2", '5', {});
+        seed = Cat(seed, entry("hdd2/etc", '5', {}));
+        seed = Cat(seed, entry("hdd2/etc/passwd", '0', Bytes(700, 'p')));
+        seed = Cat(seed, entry("hdd2/etc/rc", '1', {}, "hdd2/etc/passwd"));
+        seed = Cat(seed, entry("hdd2/sh", '2', {}, "busybox"));
+        seed = Cat(seed, entry("hdd3", '5', {}));
+        seed = Cat(seed, entry("hdd3/Documents", '5', {}));
+        seed = Cat(seed, entry("hdd3/Documents/readme.txt", '0', Bytes(1500, 'r')));
+        seed = Cat(seed, Bytes(1024, 0));
+        Bytes hdd1 = entry("hdd1", '5', {});
+        hdd1 = Cat(hdd1, entry("hdd1/.sys", '5', {}));
+        hdd1 = Cat(hdd1, entry("hdd1/.sys/hdlist1.dat", '0', Bytes{'.', '/', 'u', '\n'}));
+        hdd1 = Cat(hdd1, entry("hdd1/.sys/hdimage2.tgz", '0', gz(seed)));
+        hdd1 = Cat(hdd1, entry("hdd1/usr", '5', {}));
+        hdd1 = Cat(hdd1, entry("hdd1/usr/bin", '0', Bytes(3000, 'b')));
+        hdd1 = Cat(hdd1, Bytes(1024, 0));
+        Seed("zaurus-cf", hdd1);
+        Seed("zaurus-cf", gz(hdd1));
     }
 
     {
