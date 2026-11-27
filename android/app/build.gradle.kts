@@ -7,11 +7,17 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Release signing comes from ../Keys/frond-keystore.properties, beside the
-// projects rather than in one. Without that file the release build is unsigned.
-val signingProperties: Properties? = rootProject.file("../../../AndroidStudioProjects/Keys/frond-keystore.properties")
-    .takeIf { it.exists() }
+// Release signing reads frond-keystore.properties from -Pfrond.signingProperties, else
+// ~/Projects/Keys, else ../Keys beside the projects, so any checkout or worktree finds it.
+// Without one, a release build stops unless -Pfrond.allowUnsigned=true.
+val signingPropertiesFile: File? = listOfNotNull(
+    providers.gradleProperty("frond.signingProperties").orNull?.let { File(it) },
+    File(System.getProperty("user.home"), "Projects/Keys/frond-keystore.properties"),
+    rootProject.file("../../../AndroidStudioProjects/Keys/frond-keystore.properties"),
+).firstOrNull { it.exists() }
+val signingProperties: Properties? = signingPropertiesFile
     ?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
+val allowUnsigned = providers.gradleProperty("frond.allowUnsigned").orNull == "true"
 val releaseStoreFile = signingProperties?.getProperty("storeFile")
 
 // The repo root, one above android/. The core's source is in core/ there.
@@ -326,5 +332,16 @@ tasks.withType<Test>().configureEach {
         systemProperty("jazzer.internal.basedir", File(repoRoot, "build/fuzzing-f6").absolutePath)
         filter.includeTestsMatching("com.rm.frond.$fuzzTarget")
         outputs.upToDateWhen { false }
+    }
+}
+
+// A release APK without the release key can't update installed copies, so fail instead.
+val releaseSigned = releaseStoreFile != null && File(releaseStoreFile).exists()
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    doFirst {
+        if (!releaseSigned && !allowUnsigned) {
+            throw GradleException("No release key: frond-keystore.properties not found or its storeFile is missing. " +
+                "Pass -Pfrond.signingProperties=PATH, or -Pfrond.allowUnsigned=true for an unsigned build.")
+        }
     }
 }
