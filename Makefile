@@ -1586,6 +1586,13 @@ test-controller-map:
 		tests/controller-map.cpp -o $(OBJ_ROOT)/test-controller-map
 	$(OBJ_ROOT)/test-controller-map
 
+# A controller map sent while a T|X runs applies at once, pressed on a virtual game controller
+# (tests/controller-map-live.py); skips without the T|X smoke machine.
+.PHONY: test-controller-map-live
+test: test-controller-map-live
+test-controller-map-live: out/frond
+	python3 tests/controller-map-live.py
+
 # CLIÉ game controller: the pad model alone, then on the TG50: plug-in ID, buttons, Hold, live detach and re-attach, save and reload;
 # skips without the TG50 smoke session (tests/clie-gamepad.py).
 .PHONY: test-clie-gamepad
