@@ -3971,7 +3971,7 @@ void paintZodiacControls(Canvas& canvas, const DeviceControlProfile& profile, De
 // Sharp Zaurus SL-C3000: white keys with navy legends on a brushed silver plate, blue second
 // legends printed above the keys, a white cursor ring with a blue OK in a chrome surround that
 // runs on round Cancel, and five round app keys along the bottom. The lid's bezel is black with
-// grey hard icons; the hinge edge has a black roller and black OK and Cancel keys.
+// grey hard icons; the hinge edge has a ridged roller and small silver OK and Cancel pills.
 const Rgb zaurusInk{36,42,62},zaurusBlue{40,84,176},zaurusGlow{226,146,44};
 
 // Filled or stroked glyphs for the app keys and hard icons, about 20 units across, centred.
@@ -4390,9 +4390,9 @@ void paintZaurusIcons(Canvas& canvas, bool turned, const ZaurusKeysHeld& held) {
 }
 
 // The hinge edge in view style, left of the LCD, turned a quarter so it runs down the panel: pale
-// silver plastic with the chrome hinge band beside the LCD. Along it from the top: the OK pill,
-// the ridged jog roller in its slot, the Cancel pill, then Power, their names printed beside them.
-constexpr float zaurusSideFace=42,zaurusSideChrome=43,zaurusSideBezel=61,zaurusSideMid=22;
+// silver plastic with a thin line where it meets the LCD. Along it from the top: the OK pill, the
+// ridged jog roller in its slot, the Cancel pill, then Power, their names printed beside them.
+constexpr float zaurusSideMid=22;
 
 // Text reading up the panel, the tops of its capitals at x, centred on cy.
 void paintZaurusSideText(Canvas& canvas, const char* text, float x, float cy, float size, Rgb colour) {
@@ -4402,7 +4402,7 @@ void paintZaurusSideText(Canvas& canvas, const char* text, float x, float cy, fl
     canvas.turned=false;
 }
 
-// Brightness of the polished hinge band across its width, t 0 to 1: a mirror of the room.
+// Brightness of polished metal across a pill, t 0 to 1: a mirror of the room.
 float zaurusChrome(float t) {
     static const float stops[][2]={{0,70},{0.08f,120},{0.2f,236},{0.32f,200},{0.42f,96},{0.52f,82},
                                    {0.64f,168},{0.78f,242},{0.88f,150},{1,56}};
@@ -4419,31 +4419,16 @@ void paintZaurusSide(Canvas& canvas, const ZaurusKeysHeld& held) {
     const auto& art=zaurusArt();
     const float L=704,mid=zaurusSideMid;
     const Rgb ink{70,72,78};
-    // The plastic face, rolling off at the outer edge and the two ends.
+    // The plastic face, rolling off at the outer edge and the two ends, and the line by the LCD.
     canvas.paint(-1e5f,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
-        const float across=clamp01(x/zaurusSideFace);
-        Rgb c=mix(Rgb{222,224,228},Rgb{192,195,201},across)+Rgb{1.5f,1.5f,1.5f}*speckle(x*3,y*3);
+        const float across=clamp01(x/zaurusSideWidth);
+        Rgb c=mix(Rgb{222,224,228},Rgb{198,201,207},across)+Rgb{1.5f,1.5f,1.5f}*speckle(x*3,y*3);
         if(x<3)c=mix(Rgb{150,152,158},c,clamp01(x/3)*clamp01(x/3));
+        c=mix(c,Rgb{150,152,158},clamp01(x-(zaurusSideWidth-1.2f)));
         const float end=std::min(y,L-y);
         if(end<4)c=c*(0.72f+0.28f*clamp01(end/4));
         return c;
     });
-    // Shadow line where the face meets the hinge band, then the band itself.
-    canvas.paint(zaurusSideFace-1,-1e5f,zaurusSideBezel,1e5f,[&](float x,float) {return clamp01(x-(zaurusSideFace-1));},
-                 [&](float x,float y,Rgb) {
-        // The middle knuckle belongs to the lid and sits a little proud: its reflection is shifted.
-        const bool knuckle=y>300 && y<560;
-        const float t=(x-zaurusSideChrome)/(zaurusSideBezel-zaurusSideChrome)+(knuckle ? 0.05f : 0);
-        float v=x<zaurusSideChrome ? 60 : zaurusChrome(t);
-        const float seam=std::min(std::fabs(y-300),std::fabs(y-560));
-        if(seam<1.2f)v=v*(0.3f+0.7f*seam/1.2f);
-        else if(seam<2.4f)v=std::min(255.f,v+40*(2.4f-seam));
-        const float end=std::min(y,L-y);
-        if(end<4)v*=0.6f+0.4f*clamp01(end/4);
-        return Rgb{v,v,v*1.03f};
-    });
-    // The LCD bezel's edge on the right.
-    canvas.paint(zaurusSideBezel,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[](float,float,Rgb) {return Rgb{30,31,35};});
 
     const ZaurusKeyArt* up=nullptr;const ZaurusKeyArt* down=nullptr;
     for(size_t i=0;i<art.count;++i) {
@@ -4471,7 +4456,7 @@ void paintZaurusSide(Canvas& canvas, const ZaurusKeysHeld& held) {
             const float d=-dp(x,y);
             if(d<0.5f)return Rgb{84,86,92};
             const float across=(x-pill.x)/pill.w;
-            // Polished like the hinge: a bright band, a dark middle, a lit far rim.
+            // Polished: a bright band, a dark middle, a lit far rim.
             float v=zaurusChrome(0.12f+across*0.8f)*0.85f+20;
             // A glint near the top end, the edge rolling off.
             const float glint=std::exp(-(std::pow(x-(pill.x+4.5f),2.f)+std::pow(y-(pill.y+6.5f),2.f))/5);
