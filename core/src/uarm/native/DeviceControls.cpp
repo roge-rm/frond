@@ -4390,9 +4390,8 @@ void paintZaurusIcons(Canvas& canvas, bool turned, const ZaurusKeysHeld& held) {
 }
 
 // The hinge edge in view style, left of the LCD, turned a quarter so it runs down the panel: pale
-// silver plastic with the chrome hinge band beside the LCD. Along it from the top: the ridged jog
-// roller in its slot, the OK, Cancel and Power pills with their names printed beside them, then
-// the mini USB port, the door plate beside a long groove and the DC jack, drawn only.
+// silver plastic with the chrome hinge band beside the LCD. Along it from the top: the OK pill,
+// the ridged jog roller in its slot, the Cancel pill, then Power, their names printed beside them.
 constexpr float zaurusSideFace=42,zaurusSideChrome=43,zaurusSideBezel=61,zaurusSideMid=22;
 
 // Text reading up the panel, the tops of its capitals at x, centred on cy.
@@ -4515,67 +4514,6 @@ void paintZaurusSide(Canvas& canvas, const ZaurusKeysHeld& held) {
                                             segment(x,y,mid+3.5f,py-dir*1.8f,mid,py+dir*1.8f))-0.55f);
             },[&](float,float,Rgb) {return h ? zaurusGlow : Rgb{120,122,128};});
         }
-    }
-
-    // Mini USB port in a moulded surround, its symbol below.
-    {
-        const SDL_Rect frame{int(mid-6),386,12,22},port{int(mid-4),388,8,18};
-        canvas.paint(frame.x-1,frame.y-1,frame.x+frame.w+1,frame.y+frame.h+1,[&](float x,float y) {
-            return canvas.edge(std::fabs(deviceRoundedDistance(frame,3,x,y))-0.45f);
-        },[](float,float,Rgb p) {return p*0.7f;});
-        canvas.paint(port.x-1,port.y-1,port.x+port.w+1,port.y+port.h+1,[&](float x,float y) {
-            // Narrower on the face side, as the real socket.
-            const float taper=clamp01((mid-x)/4)*1.2f;
-            return canvas.edge(std::max(deviceRoundedDistance(port,1.2f,x,y),std::fabs(y-(port.y+port.h*0.5f))-(port.h*0.5f-taper)));
-        },[&](float x,float y,Rgb) {
-            // The tongue inside, a pale bar with contacts.
-            if(std::fabs(x-(mid+1))<1.2f && std::fabs(y-(port.y+port.h*0.5f))<6.5f)
-                return std::fmod(y,2.f)<1 ? Rgb{150,140,110} : Rgb{120,122,128};
-            return Rgb{22,23,26};
-        });
-        // USB trident along the panel.
-        const float y0=414,y1=428;
-        canvas.paint(mid-5,y0-2,mid+5,y1+2,[&](float x,float y) {
-            float d=segment(x,y,mid,y0+1.5f,mid,y1);
-            d=std::min(d,std::min(segment(x,y,mid,y0+5,mid-3,y0+7.5f),segment(x,y,mid-3,y0+7.5f,mid-3,y0+9.5f)));
-            d=std::min(d,std::min(segment(x,y,mid,y0+7.5f,mid+3,y0+10),segment(x,y,mid+3,y0+10,mid+3,y0+11.5f)));
-            d=std::min(d,std::hypot(x-mid,y-y0-1)-1.1f);
-            d=std::min(d,std::max(std::fabs(x-mid)-1.2f+(y-y1)*0.6f,std::fabs(y-y1)-1.5f));
-            return canvas.edge(d-0.4f);
-        },[&](float,float,Rgb) {return ink;});
-    }
-    // The door plate on the face, a long groove beside it ending in a dot, and the DC jack.
-    {
-        const SDL_Rect plate{int(mid-7),452,14,104};
-        canvas.paint(plate.x-1,plate.y-1,plate.x+plate.w+1,plate.y+plate.h+1,[&](float x,float y) {
-            return canvas.edge(deviceRoundedDistance(plate,1.5f,x,y));
-        },[&](float x,float y,Rgb) {
-            const float d=-deviceRoundedDistance(plate,1.5f,x,y);
-            if(d<0.6f)return Rgb{120,122,126};
-            // A small notch for a fingernail halfway along.
-            if(std::fabs(y-(plate.y+plate.h*0.5f))<1.5f && x>plate.x+plate.w-2.2f)return Rgb{90,90,92};
-            return mix(Rgb{212,210,198},Rgb{188,186,176},clamp01((x-plate.x)/plate.w));
-        });
-        const float gx=34,g0=440,g1=636;
-        canvas.paint(gx-2,g0-2,gx+2.5f,g1+3,[&](float x,float y) {
-            return canvas.edge(std::min(segment(x,y,gx,g0,gx,g1-6),std::hypot(x-gx,y-g1)-0.9f)-0.45f);
-        },[](float,float,Rgb) {return Rgb{128,130,136};});
-        canvas.paint(gx+0.4f,g0,gx+1.6f,g1-6,[&](float x,float) {return canvas.edge(std::fabs(x-(gx+1))-0.3f);},
-                     [](float,float,Rgb) {return Rgb{240,241,244};});
-        const float jy=672;
-        canvas.paint(mid-7,jy-7,mid+7,jy+7,[&](float x,float y) {return canvas.edge(std::hypot(x-mid,y-jy)-5.6f);},
-                     [&](float x,float y,Rgb) {
-            const float r=std::hypot(x-mid,y-jy);
-            if(r>4.6f)return mix(Rgb{110,112,118},Rgb{236,238,242},clamp01((x-mid)/5));
-            if(r<1.3f)return Rgb{150,152,156};
-            return Rgb{18,18,21};
-        });
-        // DC symbol: a line and a dashed line.
-        canvas.paint(mid+8,jy-7,mid+14,jy+7,[&](float x,float y) {
-            float d=segment(x,y,mid+9.5f,jy-5,mid+9.5f,jy+5);
-            if(std::fmod(y-(jy-5)+20,4.f)<2.6f)d=std::min(d,segment(x,y,mid+12,jy-5,mid+12,jy+5));
-            return canvas.edge(d-0.4f);
-        },[&](float,float,Rgb) {return ink;});
     }
 }
 }  // namespace
@@ -4957,10 +4895,10 @@ const ZaurusArt& zaurusArt() {
         {"icon-mail",I,{296,6,80,52},"Mail","","",M::mail,-1,-1},
         {"icon-home",I,{392,6,80,52},"Home","","",M::home,-1,-1},
 
-        {"exjogup",S,{14,40,36,50},"Scroll up","","",M::jogUp,1,10},
-        {"exjogdown",S,{14,90,36,50},"Scroll down","","",M::jogDown,1,9},
-        {"exok",S,{14,184,36,44},"OK","","",M::ok,0,9},
-        {"excancel",S,{14,252,36,44},"Cancel","","",M::cancel,0,10},
+        {"exjogup",S,{14,68,36,50},"Scroll up","","",M::jogUp,1,10},
+        {"exjogdown",S,{14,118,36,50},"Scroll down","","",M::jogDown,1,9},
+        {"exok",S,{14,20,36,44},"OK","","",M::ok,0,9},
+        {"excancel",S,{14,172,36,44},"Cancel","","",M::cancel,0,10},
         {"expower",S,{14,320,36,44},"Power","","",M::power,-1,-1},
     };
     static const ZaurusArt art{keys,std::size(keys)};
