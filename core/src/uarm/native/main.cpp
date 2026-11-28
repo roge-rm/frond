@@ -1839,6 +1839,7 @@ namespace {
                     soc->SetFramebufferDirty();
                 }
                 sdlEventHandler.FollowGamepadAttach();
+                sdlEventHandler.ServiceHolds();
                 if (sdlEventHandler.QuitRequested()) {
                     if (!desktop) break;
                     desktop->event("close");

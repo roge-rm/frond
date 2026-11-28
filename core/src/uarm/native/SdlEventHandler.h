@@ -56,6 +56,8 @@ class SdlEventHandler {
     // Attaching or detaching the CLIÉ game controller since the last call moves the buttons the
     // controllers hold between its keys and the CLIÉ's own.
     void FollowGamepadAttach();
+    // Lets go of a Zaurus Power tap once its hold is over. Call it once a loop, on the SoC's thread.
+    void ServiceHolds();
 
     void SetRotation(Rotation rotation);
     Rotation DrawnRotation() const { return rotation; }
@@ -73,6 +75,8 @@ class SdlEventHandler {
     virtual bool DirectTouch(SDL_TouchID touch) const {
         return SDL_GetTouchDeviceType(touch) == SDL_TOUCH_DEVICE_DIRECT;
     }
+    // Host milliseconds, for the Zaurus Power hold.
+    virtual uint32_t NowMs() const { return SDL_GetTicks(); }
 
    private:
     void ReleasePointer();
@@ -101,6 +105,8 @@ class SdlEventHandler {
     // while that tap is still possible.
     bool HoldStill(bool& pending, float downX, float downY, int x, int y) const;
     void TapStickPress();
+    // A click or tap on the Zaurus art's Power holds the key as the toolbar's Power does.
+    bool TapZaurusPower(KeyId key);
     // Sends what the game controller holds now: its keys that changed and the stick.
     void UpdateGamepad();
     // Game controllers are opened: the Zodiac, a CLIÉ that takes the game controller, or a map with keys.
@@ -156,6 +162,9 @@ class SdlEventHandler {
     DeviceStick padStick{};
     DeviceStick stick{};
     bool penDown{false};
+    // A Zaurus Power tap holds the key (one built-in hold) until this host time.
+    bool powerTapHeld{false};
+    uint32_t powerTapUntil{0};
     float scale{1};
     bool redrawRequested{false};
     bool quitRequested{false};

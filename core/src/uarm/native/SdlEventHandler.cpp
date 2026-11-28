@@ -175,6 +175,30 @@ void SdlEventHandler::HandleEvents() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) HandleEvent(event);
     FollowGamepadAttach();
+    ServiceHolds();
+}
+
+// The Zaurus wants Power held: the PROM's power-on waits about 2.75 s for it, so a tap holds it
+// that long, as the desktop and Android toolbars' Power does.
+constexpr uint32_t zaurusPowerHoldMs = 2750;
+
+bool SdlEventHandler::TapZaurusPower(KeyId key) {
+    if (key != keyIdPower || !controlView.zaurus || controlView.bare) return false;
+    if (!powerTapHeld) {
+        powerTapHeld = true;
+        if (++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
+    }
+    powerTapUntil = NowMs() + zaurusPowerHoldMs;
+    redrawRequested = true;
+    return true;
+}
+
+void SdlEventHandler::ServiceHolds() {
+    if (!powerTapHeld || int32_t(NowMs() - powerTapUntil) < 0) return;
+    powerTapHeld = false;
+    if (builtInHolds[keyIdPower] && --builtInHolds[keyIdPower] == 0 && !hardKeys[keyIdPower] && pointerKey != keyIdPower)
+        soc->KeyUp(keyIdPower);
+    redrawRequested = true;
 }
 
 void SdlEventHandler::FollowGamepadAttach() {
@@ -215,7 +239,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                                                           : TouchStick(event.button.x, event.button.y);
                     UpdateStick();
                 } else if (event.button.x>=0 && event.button.y>=0) {
-                    pointerKey = ControlAt(event.button.x, event.button.y);
+                    const KeyId key = ControlAt(event.button.x, event.button.y);
+                    pointerKey = TapZaurusPower(key) ? keyInvalid : key;
                     if (pointerKey && !hardKeys[pointerKey] && !builtInHolds[pointerKey]) soc->KeyDown(pointerKey);
                     redrawRequested=true;
                 }
@@ -574,6 +599,8 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         KeyId also = keyInvalid;
         const KeyId key = keysAt(x, y, also);
         if (!key && !pen) return;
+        // The tap holds Power by itself; the finger isn't tracked.
+        if (!pen && TapZaurusPower(key)) return;
         if (pen) {
             if (penDown) return;
             for (const auto& item : fingers) if (item.active && item.pen) return;
@@ -663,6 +690,7 @@ void SdlEventHandler::ReleaseInputs() {
     }
     builtInHolds.fill(0);
     builtInHeld.fill(keyInvalid);
+    powerTapHeld = false;
     redrawRequested=true;
 }
 SDL_Rect SdlEventHandler::StickWell() const {

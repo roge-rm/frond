@@ -1,6 +1,6 @@
 // Fingers on the ARM runner's SdlEventHandler and the 68k runner's Touch68k: several buttons held at
 // once, a button with the pen, one pen finger at most, release on lift, slide-off and focus loss, and
-// SDL's touch-to-mouse copies ignored.
+// SDL's touch-to-mouse copies ignored. A tap on the Zaurus art's Power holds it like the toolbar.
 #include <cassert>
 #include <cstdio>
 #include <map>
@@ -56,7 +56,9 @@ struct Guest : public SoC {
 struct Handler : SdlEventHandler {
     using SdlEventHandler::SdlEventHandler;
     bool direct{true};
+    uint32_t now{1000};
     bool DirectTouch(SDL_TouchID) const override { return direct; }
+    uint32_t NowMs() const override { return now; }
 };
 
 using Keys = std::vector<std::pair<KeyId,bool>>;
@@ -334,14 +336,72 @@ static void rawFingers() {
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
+// The side panel's Power (and the keyboard's) is a tap: the guest gets the key held 2.75 s, as the
+// toolbar's Power gives it, however short the click or finger.
+static void zaurus() {
+    Guest guest(deviceTypeSpitz);
+    DisplayConfiguration display{480, 640, 0, 2};
+    DeviceControlView view;
+    view.zaurus = ZaurusStyle::view;
+    Handler input(&guest, 1, display, Rotation::portrait_0, view);
+    const auto layout = zaurusDeviceLayout(480, 640, ZaurusStyle::view);
+    const auto& art = zaurusArt();
+    const auto power = zaurusKeyRect(layout, art.keys[zaurusKeyIndex("expower")]);
+    const auto ok = zaurusKeyRect(layout, art.keys[zaurusKeyIndex("exok")]);
+    const int px = power.x + power.w / 2, py = power.y + power.h / 2;
+    const SDL_Point size = deviceControlSize(deviceControls(deviceTypeSpitz, view), 480, 640, view);
+    auto finger = [&](Uint32 type, int x, int y) {
+        SDL_Event e{}; e.type = type; e.tfinger.type = type; e.tfinger.touchId = 3; e.tfinger.fingerId = 1;
+        e.tfinger.x = (x + 0.5f) / size.x; e.tfinger.y = (y + 0.5f) / size.y;
+        input.HandleEvent(e);
+    };
+    auto mouse = [&](Uint32 type, int x, int y) {
+        SDL_Event e{}; e.type = type; e.button.type = type; e.button.button = SDL_BUTTON_LEFT;
+        e.button.x = x; e.button.y = y; input.HandleEvent(e);
+    };
+    // A finger tap: down at once, up 2.75 s later.
+    finger(SDL_FINGERDOWN, px, py);
+    finger(SDL_FINGERUP, px, py);
+    assert((guest.keys() == Keys{{keyIdPower,true}}));
+    assert(input.PressedButtons() & deviceKeyBit(keyIdPower));
+    input.now += 2749; input.ServiceHolds();
+    assert(guest.keys().empty());
+    input.now += 1; input.ServiceHolds();
+    assert((guest.keys() == Keys{{keyIdPower,false}}));
+    assert(!(input.PressedButtons() & deviceKeyBit(keyIdPower)));
+    // A mouse click, then a second click during the hold: one press, held 2.75 s from the second.
+    mouse(SDL_MOUSEBUTTONDOWN, px, py); mouse(SDL_MOUSEBUTTONUP, px, py);
+    input.now += 1000; input.ServiceHolds();
+    mouse(SDL_MOUSEBUTTONDOWN, px, py); mouse(SDL_MOUSEBUTTONUP, px, py);
+    input.now += 2000; input.ServiceHolds();
+    assert((guest.keys() == Keys{{keyIdPower,true}}));
+    input.now += 750; input.ServiceHolds();
+    assert((guest.keys() == Keys{{keyIdPower,false}}));
+    // The side OK still follows the finger.
+    finger(SDL_FINGERDOWN, ok.x + ok.w / 2, ok.y + ok.h / 2);
+    const KeyId okKey = zaurusArtKey(art.keys[zaurusKeyIndex("exok")]);
+    assert((guest.keys() == Keys{{okKey,true}}));
+    finger(SDL_FINGERUP, ok.x + ok.w / 2, ok.y + ok.h / 2);
+    assert((guest.keys() == Keys{{okKey,false}}));
+    // Focus loss during the hold lets go at once, and the time running out adds nothing.
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    guest.keys();
+    SDL_Event lost{}; lost.type = SDL_WINDOWEVENT; lost.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
+    input.HandleEvent(lost);
+    assert((guest.keys() == Keys{{keyIdPower,false}}));
+    input.now += 3000; input.ServiceHolds();
+    assert(guest.keys().empty());
+}
+
 int main() {
     assert(SDL_Init(SDL_INIT_EVENTS) == 0);
     arm(deviceTypeTX, DeviceArt::tx, 320, 480);
     arm(deviceTypeE2, DeviceArt::e2, 320, 320);
     arm(deviceTypeFrankenE2, DeviceArt::e2, 320, 480);
     arm(deviceTypeZire72, DeviceArt::zire72, 320, 320);
+    zaurus();
     m68k();
     rawFingers();
     SDL_Quit();
-    puts("PASS: multi-touch buttons and pen on the ARM and 68k runners");
+    puts("PASS: multi-touch buttons and pen on the ARM and 68k runners, Zaurus Power tap");
 }
