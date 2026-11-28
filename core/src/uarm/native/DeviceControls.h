@@ -1242,7 +1242,7 @@ struct ZaurusKeyArt {
     const char* name;
     ZaurusPart part;
     // In the part's units: the keyboard is 600x340, the icon strip 480x64 as in view style (turned
-    // a quarter anticlockwise beside the clamshell LCD), the side panel 64x704.
+    // a quarter anticlockwise beside the clamshell LCD), the side panel 52x704.
     SDL_Rect bounds;
     // Printed on the cap: the main legend, and the shifted one at its upper left.
     const char* legend;
@@ -1258,7 +1258,7 @@ struct ZaurusArt {
 };
 const ZaurusArt& zaurusArt();
 constexpr int zaurusKeyboardWidth=600, zaurusKeyboardHeight=340;
-constexpr int zaurusIconsLength=480, zaurusIconsDepth=64, zaurusSideWidth=64;
+constexpr int zaurusIconsLength=480, zaurusIconsDepth=64, zaurusSideWidth=52;
 inline KeyId zaurusArtKey(const ZaurusKeyArt& key) {
     if (key.mark == ZaurusMark::power) return keyIdPower;
     return key.row >= 0 ? spitzKey(key.row, key.column) : keyInvalid;

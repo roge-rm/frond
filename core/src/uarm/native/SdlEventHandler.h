@@ -56,6 +56,14 @@ class SdlEventHandler {
     // Attaching or detaching the CLIÉ game controller since the last call moves the buttons the
     // controllers hold between its keys and the CLIÉ's own.
     void FollowGamepadAttach();
+    // Lets go of a Zaurus Power tap once its hold is over. Call it once a loop, on the SoC's thread.
+    void ServiceHolds();
+    // An input replay's key (the toolbar's Power): Power shares the hold count with the keys,
+    // fingers and art taps here, so overlapping presses reach the guest as one. Returns false for
+    // the keys it leaves to the SoC.
+    bool ReplayKey(KeyId key, bool down);
+    // A new replay replaced the one that held Power: lets go of its hold.
+    void ReleaseReplayKeys();
 
     void SetRotation(Rotation rotation);
     Rotation DrawnRotation() const { return rotation; }
@@ -79,7 +87,10 @@ class SdlEventHandler {
     void HandleFinger(const SDL_TouchFingerEvent& event);
     void ReleaseFingers();
     void Capture(bool on);
-    void ReleaseInputs();
+    // Losing focus keeps the timed Power holds (a desktop toolbar click takes focus); going to
+    // the background or quitting lets go of them too.
+    void ReleaseInputs(bool keepTimedPower = false);
+    void ReleaseTimedPower();
     bool OnScreen(int x, int y) const;
     SDL_Rect ScreenRect() const;
     int TabletKeyAt(int x, int y) const;
@@ -101,6 +112,8 @@ class SdlEventHandler {
     // while that tap is still possible.
     bool HoldStill(bool& pending, float downX, float downY, int x, int y) const;
     void TapStickPress();
+    // A click or tap on the Zaurus art's Power holds the key as the toolbar's Power does.
+    bool TapZaurusPower(KeyId key);
     // Sends what the game controller holds now: its keys that changed and the stick.
     void UpdateGamepad();
     // Game controllers are opened: the Zodiac, a CLIÉ that takes the game controller, or a map with keys.
@@ -156,6 +169,14 @@ class SdlEventHandler {
     DeviceStick padStick{};
     DeviceStick stick{};
     bool penDown{false};
+    // A Zaurus Power tap holds the key (one built-in hold) for zaurusPowerHoldMs of guest time from
+    // powerTapAt (guest ns). An input replay's Power is another built-in hold. Losing focus keeps
+    // both: they let go by themselves.
+    bool powerTapHeld{false};
+    uint64_t powerTapAt{0};
+    // Guest time at the last ServiceHolds: going back means a reset.
+    uint64_t holdsSeenAt{0};
+    bool replayPower{false};
     float scale{1};
     bool redrawRequested{false};
     bool quitRequested{false};

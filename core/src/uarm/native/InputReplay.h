@@ -14,11 +14,15 @@ class SdlRenderer;
 class InputReplay {
    public:
     bool Load(const std::string& path, int width, int height, std::string& error);
+    // Different for each Load, so the main loop can tell when a replay replaced another.
+    uint64_t Id() const { return id; }
     // Delivers due events. Snapshot failures are recorded in SnapshotResults, not returned.
     void Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer);
     // Same, with snapshots saved by save(path, blank), which works like
     // SdlRenderer::SaveFramebuffer.
-    void Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<bool(const char*, bool&)>& save);
+    // key, where given, takes key presses first and returns false for those it leaves to the SoC.
+    void Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<bool(const char*, bool&)>& save,
+                  const std::function<bool(KeyId, bool)>& key = {});
     uint64_t LastEventMs() const { return events.empty() ? 0 : events.back().at; }
     bool Finished() const { return next == events.size() && !paused; }
     // A pause event holds the main loop's guest time from the slice it lands in until Continue,
@@ -33,6 +37,7 @@ class InputReplay {
     const std::vector<std::string>& SnapshotResults() const { return snapshots; }
 
    private:
+    uint64_t id{0};
     enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, keyboardAttach, gamepadAttach, snapshot, stick, pause };
     struct Event {
         uint64_t at;

@@ -363,6 +363,15 @@ static void spitzKeyboardAndHinge() {
     assert(level(0) && level(95) && !level(36));
     power(soc, false);
     assert(!level(0) && !level(95));
+    // A session saved with Power held (its release still queued) loads with Power up.
+    power(soc, true);
+    assert(level(95));
+    auto held = snapshot(soc);
+    soc.KeyUp(keyIdPower);
+    assert(soc.Load(held.size(), held.data()));
+    assert(!level(95) && !level(0));
+    run(soc, 100);
+    assert(!level(95) && !level(0));
 
     assert(!level(96) && !level(97));
     write(soc, GPIO + 0x130, bit(96) | bit(97));  // GRER3

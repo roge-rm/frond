@@ -1,6 +1,6 @@
 // Fingers on the ARM runner's SdlEventHandler and the 68k runner's Touch68k: several buttons held at
 // once, a button with the pen, one pen finger at most, release on lift, slide-off and focus loss, and
-// SDL's touch-to-mouse copies ignored.
+// SDL's touch-to-mouse copies ignored. A tap on the Zaurus art's Power holds it like the toolbar.
 #include <cassert>
 #include <cstdio>
 #include <map>
@@ -33,7 +33,9 @@ struct Guest : public SoC {
     bool Load(size_t,void*) override{return true;}
     void DumpMMU() override{}
     void JamKey(KeyId,uint32_t) override{}
-    uint64_t GetTime() override{return 0;}
+    // Guest time in ns, moved by the tests.
+    uint64_t time{0};
+    uint64_t GetTime() override{return time;}
     uint32_t* GetPendingFrame(uint32_t&,uint32_t&) override{return nullptr;}
     void ResetPendingFrame() override{}
     DeviceType5 GetDeviceType() override{return type;}
@@ -334,14 +336,150 @@ static void rawFingers() {
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
+// The side panel's Power (and the keyboard's) is a tap: the guest gets the key held 2.75 s of guest
+// time, as the toolbar's Power gives it, however short the click or finger. The toolbar's replayed
+// Power, F10 and the tap share one hold.
+static void zaurus() {
+    Guest guest(deviceTypeSpitz);
+    guest.time = 5000000000ull;
+    DisplayConfiguration display{480, 640, 0, 2};
+    DeviceControlView view;
+    view.zaurus = ZaurusStyle::view;
+    Handler input(&guest, 1, display, Rotation::portrait_0, view);
+    const auto layout = zaurusDeviceLayout(480, 640, ZaurusStyle::view);
+    const auto& art = zaurusArt();
+    const auto power = zaurusKeyRect(layout, art.keys[zaurusKeyIndex("expower")]);
+    const auto ok = zaurusKeyRect(layout, art.keys[zaurusKeyIndex("exok")]);
+    const KeyId okKey = zaurusArtKey(art.keys[zaurusKeyIndex("exok")]);
+    const int px = power.x + power.w / 2, py = power.y + power.h / 2;
+    const int ox = ok.x + ok.w / 2, oy = ok.y + ok.h / 2;
+    const SDL_Point size = deviceControlSize(deviceControls(deviceTypeSpitz, view), 480, 640, view);
+    auto finger = [&](Uint32 type, int x, int y) {
+        SDL_Event e{}; e.type = type; e.tfinger.type = type; e.tfinger.touchId = 3; e.tfinger.fingerId = 1;
+        e.tfinger.x = (x + 0.5f) / size.x; e.tfinger.y = (y + 0.5f) / size.y;
+        input.HandleEvent(e);
+    };
+    auto mouse = [&](Uint32 type, int x, int y) {
+        SDL_Event e{}; e.type = type; e.button.type = type; e.button.button = SDL_BUTTON_LEFT;
+        e.button.x = x; e.button.y = y; input.HandleEvent(e);
+    };
+    auto f10 = [&](Uint32 type) {
+        SDL_Event e{}; e.type = type; e.key.type = type;
+        e.key.keysym.scancode = SDL_SCANCODE_F10; e.key.keysym.sym = SDLK_F10; input.HandleEvent(e);
+    };
+    auto pass = [&](uint64_t ms) { guest.time += ms * 1000000; input.ServiceHolds(); };
+    const Keys down{{keyIdPower,true}}, up{{keyIdPower,false}};
+    // A finger tap: down at once, up after 2.75 s of guest time.
+    finger(SDL_FINGERDOWN, px, py);
+    finger(SDL_FINGERUP, px, py);
+    assert(guest.keys() == down);
+    assert(input.PressedButtons() & deviceKeyBit(keyIdPower));
+    pass(2749);
+    assert(guest.keys().empty());
+    pass(1);
+    assert(guest.keys() == up);
+    assert(!(input.PressedButtons() & deviceKeyBit(keyIdPower)));
+    // A mouse click, then a second click during the hold: one press, held 2.75 s from the second.
+    mouse(SDL_MOUSEBUTTONDOWN, px, py); mouse(SDL_MOUSEBUTTONUP, px, py);
+    pass(1000);
+    mouse(SDL_MOUSEBUTTONDOWN, px, py); mouse(SDL_MOUSEBUTTONUP, px, py);
+    pass(2000);
+    assert(guest.keys() == down);
+    pass(750);
+    assert(guest.keys() == up);
+    // Host time alone doesn't end it: the guest paused, the hold waits.
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    for (int i = 0; i < 5; ++i) input.ServiceHolds();
+    assert(guest.keys() == down);
+    pass(2750);
+    assert(guest.keys() == up);
+    // The side OK still follows the finger.
+    finger(SDL_FINGERDOWN, ox, oy);
+    assert((guest.keys() == Keys{{okKey,true}}));
+    finger(SDL_FINGERUP, ox, oy);
+    assert((guest.keys() == Keys{{okKey,false}}));
+    // A finger sliding from OK onto Power taps Power and lets go of OK; lifting it adds nothing.
+    finger(SDL_FINGERDOWN, ox, oy);
+    finger(SDL_FINGERMOTION, px, py);
+    assert((guest.keys() == Keys{{okKey,true},{keyIdPower,true},{okKey,false}}));
+    finger(SDL_FINGERUP, px, py);
+    pass(2750);
+    assert(guest.keys() == up);
+    // The toolbar's replayed Power overlapping a tap: one press, let go when both are done.
+    assert(input.ReplayKey(keyIdPower, true));
+    assert(guest.keys() == down);
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    pass(1000);
+    assert(input.ReplayKey(keyIdPower, false));
+    assert(guest.keys().empty() && (input.PressedButtons() & deviceKeyBit(keyIdPower)));
+    pass(1750);
+    assert(guest.keys() == up);
+    // The other way round, and other keys stay with the SoC.
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    input.ReplayKey(keyIdPower, true);
+    pass(2750);
+    assert(guest.keys() == down);
+    input.ReplayKey(keyIdPower, false);
+    assert(guest.keys() == up);
+    assert(!input.ReplayKey(okKey, true));
+    // F10 held across a tap: one press, let go after both.
+    f10(SDL_KEYDOWN);
+    assert(guest.keys() == down);
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    f10(SDL_KEYUP);
+    assert(guest.keys().empty());
+    pass(2750);
+    assert(guest.keys() == up);
+    // Focus loss keeps a tap and a replayed Power: they let go by themselves.
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    input.ReplayKey(keyIdPower, true);
+    guest.keys();
+    SDL_Event lost{}; lost.type = SDL_WINDOWEVENT; lost.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
+    input.HandleEvent(lost);
+    assert(guest.keys().empty());
+    pass(2750);
+    assert(guest.keys().empty());
+    input.ReplayKey(keyIdPower, false);
+    assert(guest.keys() == up);
+    // A new replay replacing one that holds Power lets go of it; F10 works after.
+    input.ReplayKey(keyIdPower, true);
+    input.ReleaseReplayKeys();
+    assert((guest.keys() == Keys{{keyIdPower,true},{keyIdPower,false}}));
+    input.ReleaseReplayKeys();
+    f10(SDL_KEYDOWN); f10(SDL_KEYUP);
+    assert((guest.keys() == Keys{{keyIdPower,true},{keyIdPower,false}}));
+    // Going to the background or quitting lets go of a tap and a replayed Power at once.
+    for (const Uint32 type : {Uint32(SDL_APP_DIDENTERBACKGROUND), Uint32(SDL_QUIT)}) {
+        finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+        input.ReplayKey(keyIdPower, true);
+        assert(guest.keys() == down);
+        SDL_Event e{}; e.type = type; input.HandleEvent(e);
+        assert(guest.keys() == up);
+        assert(!(input.PressedButtons() & deviceKeyBit(keyIdPower)));
+        pass(2750);
+        input.ReplayKey(keyIdPower, false);
+        assert(guest.keys() == up);
+        SDL_Event back{}; back.type = SDL_APP_DIDENTERFOREGROUND; input.HandleEvent(back);
+    }
+    // A reset (guest time going back) lets go of the tap instead of holding Power while it boots.
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    pass(500);
+    guest.time = 1000000;
+    input.ServiceHolds();
+    assert((guest.keys() == Keys{{keyIdPower,true},{keyIdPower,false}}));
+    pass(3000);
+    assert(guest.keys().empty());
+}
+
 int main() {
     assert(SDL_Init(SDL_INIT_EVENTS) == 0);
     arm(deviceTypeTX, DeviceArt::tx, 320, 480);
     arm(deviceTypeE2, DeviceArt::e2, 320, 320);
     arm(deviceTypeFrankenE2, DeviceArt::e2, 320, 480);
     arm(deviceTypeZire72, DeviceArt::zire72, 320, 320);
+    zaurus();
     m68k();
     rawFingers();
     SDL_Quit();
-    puts("PASS: multi-touch buttons and pen on the ARM and 68k runners");
+    puts("PASS: multi-touch buttons and pen on the ARM and 68k runners, Zaurus Power tap");
 }

@@ -175,6 +175,65 @@ void SdlEventHandler::HandleEvents() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) HandleEvent(event);
     FollowGamepadAttach();
+    ServiceHolds();
+}
+
+// The Zaurus wants Power held: the PROM's power-on waits about 2.75 s for it, so a tap holds it
+// that long in guest time, as the desktop and Android toolbars' Power does.
+constexpr uint64_t zaurusPowerHoldMs = 2750;
+
+bool SdlEventHandler::TapZaurusPower(KeyId key) {
+    if (key != keyIdPower || !controlView.zaurus || controlView.bare) return false;
+    if (!powerTapHeld) {
+        powerTapHeld = true;
+        if (++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
+    }
+    powerTapAt = soc->GetTime();
+    redrawRequested = true;
+    return true;
+}
+
+void SdlEventHandler::ServiceHolds() {
+    const uint64_t now = soc->GetTime(), seen = holdsSeenAt;
+    holdsSeenAt = now;
+    // A reset puts guest time back: it lets go of the timed holds, so Power isn't down while it boots.
+    if (now < seen) {
+        ReleaseTimedPower();
+        return;
+    }
+    if (!powerTapHeld || now - powerTapAt < zaurusPowerHoldMs * 1000000) return;
+    powerTapHeld = false;
+    if (builtInHolds[keyIdPower] && --builtInHolds[keyIdPower] == 0 && !hardKeys[keyIdPower] && pointerKey != keyIdPower)
+        soc->KeyUp(keyIdPower);
+    redrawRequested = true;
+}
+
+bool SdlEventHandler::ReplayKey(KeyId key, bool down) {
+    if (key != keyIdPower) return false;
+    if (down) {
+        if (!replayPower && ++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
+        replayPower = true;
+    } else if (replayPower) {
+        replayPower = false;
+        if (--builtInHolds[key] == 0 && !hardKeys[key] && pointerKey != key) soc->KeyUp(key);
+    } else if (!builtInHolds[key] && !hardKeys[key] && pointerKey != key) {
+        soc->KeyUp(key);
+    }
+    redrawRequested = true;
+    return true;
+}
+
+void SdlEventHandler::ReleaseReplayKeys() {
+    if (replayPower) ReplayKey(keyIdPower, false);
+}
+
+void SdlEventHandler::ReleaseTimedPower() {
+    const unsigned timed = unsigned(powerTapHeld) + unsigned(replayPower);
+    if (!timed) return;
+    powerTapHeld = replayPower = false;
+    builtInHolds[keyIdPower] -= std::min(builtInHolds[keyIdPower], timed);
+    if (!builtInHolds[keyIdPower] && !hardKeys[keyIdPower] && pointerKey != keyIdPower) soc->KeyUp(keyIdPower);
+    redrawRequested = true;
 }
 
 void SdlEventHandler::FollowGamepadAttach() {
@@ -215,7 +274,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                                                           : TouchStick(event.button.x, event.button.y);
                     UpdateStick();
                 } else if (event.button.x>=0 && event.button.y>=0) {
-                    pointerKey = ControlAt(event.button.x, event.button.y);
+                    const KeyId key = ControlAt(event.button.x, event.button.y);
+                    pointerKey = TapZaurusPower(key) ? keyInvalid : key;
                     if (pointerKey && !hardKeys[pointerKey] && !builtInHolds[pointerKey]) soc->KeyDown(pointerKey);
                     redrawRequested=true;
                 }
@@ -416,7 +476,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
                     event.window.event==SDL_WINDOWEVENT_HIDDEN ||
                     event.window.event==SDL_WINDOWEVENT_MINIMIZED) {
-                    ReleaseInputs();
+                    ReleaseInputs(event.window.event==SDL_WINDOWEVENT_FOCUS_LOST);
                     // Focus moved to the desktop app's own window: controllers still count.
                     if (appActive && event.window.event==SDL_WINDOWEVENT_FOCUS_LOST) padFocused = true;
                 }
@@ -574,6 +634,8 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         KeyId also = keyInvalid;
         const KeyId key = keysAt(x, y, also);
         if (!key && !pen) return;
+        // The tap holds Power by itself; the finger isn't tracked.
+        if (!pen && TapZaurusPower(key)) return;
         if (pen) {
             if (penDown) return;
             for (const auto& item : fingers) if (item.active && item.pen) return;
@@ -600,6 +662,12 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         const KeyId key = keysAt(x, y, also);
         if (key == finger->key && also == finger->also) return;
         if (!key) { release(); return; }
+        // Rolling onto the Zaurus Power taps it: the finger lets go and the tap holds it.
+        if (controlView.zaurus && !controlView.bare && key == keyIdPower) {
+            TapZaurusPower(key);
+            release();
+            return;
+        }
         const KeyId oldKey = finger->key, oldAlso = finger->also;
         finger->key = key;
         finger->also = also;
@@ -626,10 +694,11 @@ void SdlEventHandler::ReleaseFingers() {
 void SdlEventHandler::SetAppActive(bool active) {
     appActive = active;
     if (active) { padFocused = true; UpdateGamepad(); }
-    else if (!SDL_GetKeyboardFocus()) ReleaseInputs();
+    else if (!SDL_GetKeyboardFocus()) ReleaseInputs(true);
 }
 
-void SdlEventHandler::ReleaseInputs() {
+void SdlEventHandler::ReleaseInputs(bool keepTimedPower) {
+    if (!keepTimedPower) ReleaseTimedPower();
     ReleaseFingers();
     ReleasePointer();
     soc->ReleaseKeyboard();
@@ -657,11 +726,13 @@ void SdlEventHandler::ReleaseInputs() {
     padDirections = {};
     UpdateStick();
     hostKeys.fill(false); codeHolds.fill(0);
+    const unsigned timedPower = unsigned(powerTapHeld) + unsigned(replayPower);
     for (unsigned key=1;key<hardKeys.size();++key) {
-        if (hardKeys[key] || builtInHolds[key]) soc->KeyUp(static_cast<KeyId>(key));
+        if ((hardKeys[key] || builtInHolds[key]) && !(key == keyIdPower && timedPower)) soc->KeyUp(static_cast<KeyId>(key));
         hardKeys[key]=false;
     }
     builtInHolds.fill(0);
+    builtInHolds[keyIdPower] = timedPower;
     builtInHeld.fill(keyInvalid);
     redrawRequested=true;
 }

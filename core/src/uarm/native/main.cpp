@@ -1282,6 +1282,8 @@ namespace {
             make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, drawnRotation, options.smoothLcd,
                                          options.windowFit, options.windowBackground, controlView);
         SdlEventHandler sdlEventHandler(soc, scale, displayConfiguration, drawnRotation, controlView);
+        // The replay whose Power holds the handler has; a new one lets go of them.
+        uint64_t replaySeen = replay.Id();
         sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
         // The guest thread's copy of fitted, for the layouts the SDL thread sends it.
         bool inputFitted = fitted;
@@ -1839,6 +1841,7 @@ namespace {
                     soc->SetFramebufferDirty();
                 }
                 sdlEventHandler.FollowGamepadAttach();
+                sdlEventHandler.ServiceHolds();
                 if (sdlEventHandler.QuitRequested()) {
                     if (!desktop) break;
                     desktop->event("close");
@@ -2039,8 +2042,13 @@ namespace {
                 }
                 if (!headless) {
                     sdlEventHandler.ClearRedrawRequested();
+                    if (replay.Id() != replaySeen) {
+                        replaySeen = replay.Id();
+                        sdlEventHandler.ReleaseReplayKeys();
+                    }
                     const uint64_t replayNow = commands::replayClockUsec(commandContext);
-                    replay.Dispatch((replayNow - replayStartedAt) / 1000, *soc, snapshot);
+                    replay.Dispatch((replayNow - replayStartedAt) / 1000, *soc, snapshot,
+                                    [&](KeyId key, bool down) { return sdlEventHandler.ReplayKey(key, down); });
                 }
 
                 if (now - lastSpeedDump > 1000000) {

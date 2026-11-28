@@ -3971,7 +3971,7 @@ void paintZodiacControls(Canvas& canvas, const DeviceControlProfile& profile, De
 // Sharp Zaurus SL-C3000: white keys with navy legends on a brushed silver plate, blue second
 // legends printed above the keys, a white cursor ring with a blue OK in a chrome surround that
 // runs on round Cancel, and five round app keys along the bottom. The lid's bezel is black with
-// grey hard icons; the hinge edge has a black roller and black OK and Cancel keys.
+// grey hard icons; the hinge edge has a ridged roller and small silver OK and Cancel pills.
 const Rgb zaurusInk{36,42,62},zaurusBlue{40,84,176},zaurusGlow{226,146,44};
 
 // Filled or stroked glyphs for the app keys and hard icons, about 20 units across, centred.
@@ -4389,66 +4389,115 @@ void paintZaurusIcons(Canvas& canvas, bool turned, const ZaurusKeysHeld& held) {
     }
 }
 
-// The hinge edge in view style, left of the LCD: a ridged roller that rocks up and down, then OK
-// and Cancel, black on the silver body, with their names printed over them.
+// The hinge edge in view style, left of the LCD, turned a quarter so it runs down the panel: pale
+// silver plastic with a thin line where it meets the LCD. Along it from the top: the OK pill, the
+// ridged jog roller in its slot, the Cancel pill, then Power, their names printed beside them.
+constexpr float zaurusSideMid=22;
+
+// Text reading up the panel, the tops of its capitals at x, centred on cy.
+void paintZaurusSideText(Canvas& canvas, const char* text, float x, float cy, float size, Rgb colour) {
+    canvas.turned=true;
+    // Turned, text units (u,v) land at panel (v,-u), so the text centre u is -cy.
+    paintZaurusText(canvas,text,-cy,x,size,colour);
+    canvas.turned=false;
+}
+
+// Brightness of polished metal across a pill, t 0 to 1: a mirror of the room.
+float zaurusChrome(float t) {
+    static const float stops[][2]={{0,70},{0.08f,120},{0.2f,236},{0.32f,200},{0.42f,96},{0.52f,82},
+                                   {0.64f,168},{0.78f,242},{0.88f,150},{1,56}};
+    t=clamp01(t);
+    for(size_t i=1;i<std::size(stops);++i)
+        if(t<=stops[i][0]) {
+            const float f=(t-stops[i-1][0])/(stops[i][0]-stops[i-1][0]);
+            return stops[i-1][1]+(stops[i][1]-stops[i-1][1])*(f*f*(3-2*f));
+        }
+    return stops[std::size(stops)-1][1];
+}
+
 void paintZaurusSide(Canvas& canvas, const ZaurusKeysHeld& held) {
     const auto& art=zaurusArt();
-    const float W=zaurusSideWidth;
+    const float L=704,mid=zaurusSideMid;
+    const Rgb ink{70,72,78};
+    // The plastic face, rolling off at the outer edge and the two ends, and the line by the LCD.
     canvas.paint(-1e5f,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
-        const float t=clamp01(x/W);
-        return mix(Rgb{150,153,160},Rgb{212,215,220},std::sin(t*2.6f))+Rgb{2,2,2}*std::sin(y*2.9f);
+        const float across=clamp01(x/zaurusSideWidth);
+        Rgb c=mix(Rgb{222,224,228},Rgb{198,201,207},across)+Rgb{1.5f,1.5f,1.5f}*speckle(x*3,y*3);
+        if(x<3)c=mix(Rgb{150,152,158},c,clamp01(x/3)*clamp01(x/3));
+        c=mix(c,Rgb{150,152,158},clamp01(x-(zaurusSideWidth-1.2f)));
+        const float end=std::min(y,L-y);
+        if(end<4)c=c*(0.72f+0.28f*clamp01(end/4));
+        return c;
     });
-    // The LCD bezel's edge on the right.
-    canvas.paint(W-3,-1e5f,W+1,1e5f,[&](float x,float) {return clamp01(x-(W-2.5f));},
-                 [](float,float,Rgb) {return Rgb{30,31,35};});
+
     const ZaurusKeyArt* up=nullptr;const ZaurusKeyArt* down=nullptr;
     for(size_t i=0;i<art.count;++i) {
         const auto& k=art.keys[i];
         if(k.part!=ZaurusPart::side)continue;
-        if(k.mark==ZaurusMark::jogUp)up=&k;
-        else if(k.mark==ZaurusMark::jogDown)down=&k;
-        else {
-            // A black pill key in a dark slot.
-            const SDL_Rect& r=k.bounds;
-            const bool h=held.Held(i);
-            const float c=r.w*0.5f;
-            canvas.paint(r.x-2,r.y-2,r.x+r.w+2,r.y+r.h+2,[&](float x,float y) {
-                return canvas.edge(deviceRoundedDistance(r,c,x,y)-1.5f);
-            },[](float,float,Rgb) {return Rgb{70,72,78};});
-            canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {
-                return canvas.edge(deviceRoundedDistance(r,c,x,y));
-            },[&](float x,float,Rgb) {
-                const float t=clamp01((x-r.x)/r.w);
-                const Rgb col=mix(Rgb{22,23,27},Rgb{68,70,78},std::sin(t*3.14159265f)*0.8f);
-                return h ? col*0.6f : col;
-            });
-            paintZaurusText(canvas,k.legend,r.x+r.w*0.5f,r.y-11,0.9f,h ? zaurusGlow : Rgb{44,46,54});
-        }
+        if(k.mark==ZaurusMark::jogUp) {up=&k;continue;}
+        if(k.mark==ZaurusMark::jogDown) {down=&k;continue;}
+        // A small silver pill in a shallow oval recess, the hit area round it larger than the pill.
+        const SDL_Rect& r=k.bounds;
+        const bool h=held.Held(i);
+        const float cy=r.y+r.h*0.5f;
+        const SDL_Rect pill{int(mid-6.5f),int(cy-13),13,26};
+        const SDL_Rect well{pill.x-3,pill.y-3,pill.w+6,pill.h+6};
+        canvas.paint(well.x-1,well.y-1,well.x+well.w+1,well.y+well.h+1,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(well,well.w*0.5f,x,y));
+        },[&](float x,float y,Rgb p) {
+            // Shaded on the side away from the light, lit along the far rim.
+            const float d=-deviceRoundedDistance(well,well.w*0.5f,x,y);
+            const float lit=clamp01((x-mid)/8)*clamp01(1-d/1.5f);
+            return mix(p*0.86f,Rgb{238,240,244},lit*0.7f);
+        });
+        auto dp=[&](float x,float y) {return deviceRoundedDistance(pill,6.5f,x,y);};
+        canvas.paint(pill.x-1,pill.y-1,pill.x+pill.w+1,pill.y+pill.h+1,[&](float x,float y) {return canvas.edge(dp(x,y)-0.6f);},
+                     [&](float x,float y,Rgb) {
+            const float d=-dp(x,y);
+            if(d<0.5f)return Rgb{84,86,92};
+            const float across=(x-pill.x)/pill.w;
+            // Polished: a bright band, a dark middle, a lit far rim.
+            float v=zaurusChrome(0.12f+across*0.8f)*0.85f+20;
+            // A glint near the top end, the edge rolling off.
+            const float glint=std::exp(-(std::pow(x-(pill.x+4.5f),2.f)+std::pow(y-(pill.y+6.5f),2.f))/5);
+            v=v*(0.8f+0.2f*clamp01(d/2.5f))+70*glint;
+            if(h)v*=0.68f;
+            return Rgb{v,v,v*1.02f};
+        });
+        paintZaurusSideText(canvas,k.legend,mid+9.5f,cy,0.8f,h ? zaurusGlow : ink);
     }
     if(up && down) {
-        const SDL_Rect r{up->bounds.x,up->bounds.y,up->bounds.w,down->bounds.y+down->bounds.h-up->bounds.y};
+        // The roller sits across the edge in a dark slot and turns up and down the panel.
         const bool hu=held.Held(size_t(up-art.keys)),hd=held.Held(size_t(down-art.keys));
-        const float mid=float(down->bounds.y);
-        canvas.paint(r.x-3,r.y-3,r.x+r.w+3,r.y+r.h+3,[&](float x,float y) {
-            return canvas.edge(deviceRoundedDistance(r,8,x,y)-2.5f);
-        },[](float,float,Rgb) {return Rgb{40,42,48};});
-        canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(r,7,x,y));},
+        const float split=float(down->bounds.y),cy=split;
+        const SDL_Rect slot{int(mid-9),int(cy-32),18,64};
+        canvas.paint(slot.x-2,slot.y-2,slot.x+slot.w+2,slot.y+slot.h+2,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(slot,6,x,y)-1.2f);
+        },[&](float x,float,Rgb p) {return mix(p*0.8f,Rgb{240,242,246},clamp01((x-mid)/9)*0.6f);});
+        canvas.paint(slot.x,slot.y,slot.x+slot.w,slot.y+slot.h,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(slot,6,x,y));},
                      [&](float x,float y,Rgb) {
-            const float across=clamp01((x-r.x)/r.w),end=clamp01(std::min(y-r.y,r.y+r.h-y)/14);
-            const float ridge=0.78f+0.22f*std::cos(y*1.9f);
-            Rgb c=mix(Rgb{20,21,25},Rgb{96,98,106},std::sin(across*3.14159265f))*(ridge*(0.6f+0.4f*end));
-            if((hu && y<mid) || (hd && y>=mid))c=c*0.55f;
+            const float inside=clamp01((-deviceRoundedDistance(slot,6,x,y))/2.5f);
+            Rgb c=Rgb{26,27,31}*(0.7f+0.3f*inside);
+            // The roller: a cylinder seen side on, its ridges bunching towards the ends.
+            const float rx=std::fabs(x-mid),ry=(y-cy)/29;
+            if(rx<6.5f && std::fabs(ry)<1) {
+                const float a=std::asin(ry),shade=std::cos(a);
+                const float phase=(hu ? 0.5f : hd ? -0.5f : 0);
+                const float ridge=0.5f+0.5f*std::cos((a*9+phase)*3.14159265f);
+                float v=(46+120*shade*shade)*(0.55f+0.45f*ridge)*(0.85f+0.15f*clamp01((6.5f-rx)/2));
+                if((hu && y<split) || (hd && y>=split))v*=0.62f;
+                c=Rgb{v,v,v*1.04f};
+            }
             return c;
         });
-        // Chevrons on the body above and below the roller.
-        const float cx=r.x+r.w*0.5f;
+        // Small printed carets beyond each end of the slot.
         for(int part : {0,1}) {
-            const float cy=part ? r.y+r.h+10.f : r.y-10.f,dir=part ? 1.f : -1.f;
+            const float py=part ? slot.y+slot.h+7.f : slot.y-7.f,dir=part ? 1.f : -1.f;
             const bool h=part ? hd : hu;
-            canvas.paint(cx-7,cy-5,cx+7,cy+5,[&](float x,float y) {
-                return canvas.edge(std::min(segment(x,y,cx-5,cy-dir*2.5f,cx,cy+dir*2.5f),
-                                            segment(x,y,cx+5,cy-dir*2.5f,cx,cy+dir*2.5f))-0.9f);
-            },[&](float,float,Rgb) {return h ? zaurusGlow : Rgb{44,46,54};});
+            canvas.paint(mid-5,py-4,mid+5,py+4,[&](float x,float y) {
+                return canvas.edge(std::min(segment(x,y,mid-3.5f,py-dir*1.8f,mid,py+dir*1.8f),
+                                            segment(x,y,mid+3.5f,py-dir*1.8f,mid,py+dir*1.8f))-0.55f);
+            },[&](float,float,Rgb) {return h ? zaurusGlow : Rgb{120,122,128};});
         }
     }
 }
@@ -4831,10 +4880,10 @@ const ZaurusArt& zaurusArt() {
         {"icon-mail",I,{296,6,80,52},"Mail","","",M::mail,-1,-1},
         {"icon-home",I,{392,6,80,52},"Home","","",M::home,-1,-1},
 
-        {"exjogup",S,{14,40,36,50},"Scroll up","","",M::jogUp,1,10},
-        {"exjogdown",S,{14,90,36,50},"Scroll down","","",M::jogDown,1,9},
-        {"exok",S,{14,184,36,44},"OK","","",M::ok,0,9},
-        {"excancel",S,{14,252,36,44},"Cancel","","",M::cancel,0,10},
+        {"exjogup",S,{14,68,36,50},"Scroll up","","",M::jogUp,1,10},
+        {"exjogdown",S,{14,118,36,50},"Scroll down","","",M::jogDown,1,9},
+        {"exok",S,{14,20,36,44},"OK","","",M::ok,0,9},
+        {"excancel",S,{14,172,36,44},"Cancel","","",M::cancel,0,10},
         {"expower",S,{14,320,36,44},"Power","","",M::power,-1,-1},
     };
     static const ZaurusArt art{keys,std::size(keys)};
