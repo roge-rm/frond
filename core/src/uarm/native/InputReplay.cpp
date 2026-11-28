@@ -13,6 +13,8 @@
 #include "SoC.h"
 
 bool InputReplay::Load(const std::string& path, int width, int height, std::string& error) {
+    static uint64_t loads = 0;
+    id = ++loads;
     events.clear();
     snapshots.clear();
     next = 0;

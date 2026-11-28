@@ -14,6 +14,8 @@ class SdlRenderer;
 class InputReplay {
    public:
     bool Load(const std::string& path, int width, int height, std::string& error);
+    // Different for each Load, so the main loop can tell when a replay replaced another.
+    uint64_t Id() const { return id; }
     // Delivers due events. Snapshot failures are recorded in SnapshotResults, not returned.
     void Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer);
     // Same, with snapshots saved by save(path, blank), which works like
@@ -35,6 +37,7 @@ class InputReplay {
     const std::vector<std::string>& SnapshotResults() const { return snapshots; }
 
    private:
+    uint64_t id{0};
     enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, keyboardAttach, gamepadAttach, snapshot, stick, pause };
     struct Event {
         uint64_t at;

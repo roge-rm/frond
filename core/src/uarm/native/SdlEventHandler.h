@@ -62,6 +62,8 @@ class SdlEventHandler {
     // fingers and art taps here, so overlapping presses reach the guest as one. Returns false for
     // the keys it leaves to the SoC.
     bool ReplayKey(KeyId key, bool down);
+    // A new replay replaced the one that held Power: lets go of its hold.
+    void ReleaseReplayKeys();
 
     void SetRotation(Rotation rotation);
     Rotation DrawnRotation() const { return rotation; }
@@ -85,7 +87,10 @@ class SdlEventHandler {
     void HandleFinger(const SDL_TouchFingerEvent& event);
     void ReleaseFingers();
     void Capture(bool on);
-    void ReleaseInputs();
+    // Losing focus keeps the timed Power holds (a desktop toolbar click takes focus); going to
+    // the background or quitting lets go of them too.
+    void ReleaseInputs(bool keepTimedPower = false);
+    void ReleaseTimedPower();
     bool OnScreen(int x, int y) const;
     SDL_Rect ScreenRect() const;
     int TabletKeyAt(int x, int y) const;
@@ -169,6 +174,8 @@ class SdlEventHandler {
     // both: they let go by themselves.
     bool powerTapHeld{false};
     uint64_t powerTapAt{0};
+    // Guest time at the last ServiceHolds: going back means a reset.
+    uint64_t holdsSeenAt{0};
     bool replayPower{false};
     float scale{1};
     bool redrawRequested{false};

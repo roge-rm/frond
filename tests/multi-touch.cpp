@@ -441,6 +441,34 @@ static void zaurus() {
     assert(guest.keys().empty());
     input.ReplayKey(keyIdPower, false);
     assert(guest.keys() == up);
+    // A new replay replacing one that holds Power lets go of it; F10 works after.
+    input.ReplayKey(keyIdPower, true);
+    input.ReleaseReplayKeys();
+    assert((guest.keys() == Keys{{keyIdPower,true},{keyIdPower,false}}));
+    input.ReleaseReplayKeys();
+    f10(SDL_KEYDOWN); f10(SDL_KEYUP);
+    assert((guest.keys() == Keys{{keyIdPower,true},{keyIdPower,false}}));
+    // Going to the background or quitting lets go of a tap and a replayed Power at once.
+    for (const Uint32 type : {Uint32(SDL_APP_DIDENTERBACKGROUND), Uint32(SDL_QUIT)}) {
+        finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+        input.ReplayKey(keyIdPower, true);
+        assert(guest.keys() == down);
+        SDL_Event e{}; e.type = type; input.HandleEvent(e);
+        assert(guest.keys() == up);
+        assert(!(input.PressedButtons() & deviceKeyBit(keyIdPower)));
+        pass(2750);
+        input.ReplayKey(keyIdPower, false);
+        assert(guest.keys() == up);
+        SDL_Event back{}; back.type = SDL_APP_DIDENTERFOREGROUND; input.HandleEvent(back);
+    }
+    // A reset (guest time going back) lets go of the tap instead of holding Power while it boots.
+    finger(SDL_FINGERDOWN, px, py); finger(SDL_FINGERUP, px, py);
+    pass(500);
+    guest.time = 1000000;
+    input.ServiceHolds();
+    assert((guest.keys() == Keys{{keyIdPower,true},{keyIdPower,false}}));
+    pass(3000);
+    assert(guest.keys().empty());
 }
 
 int main() {

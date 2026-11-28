@@ -194,11 +194,14 @@ bool SdlEventHandler::TapZaurusPower(KeyId key) {
 }
 
 void SdlEventHandler::ServiceHolds() {
-    if (!powerTapHeld) return;
-    const uint64_t now = soc->GetTime();
-    // A reset puts guest time back; the hold starts again from there.
-    if (now < powerTapAt) powerTapAt = now;
-    if (now - powerTapAt < zaurusPowerHoldMs * 1000000) return;
+    const uint64_t now = soc->GetTime(), seen = holdsSeenAt;
+    holdsSeenAt = now;
+    // A reset puts guest time back: it lets go of the timed holds, so Power isn't down while it boots.
+    if (now < seen) {
+        ReleaseTimedPower();
+        return;
+    }
+    if (!powerTapHeld || now - powerTapAt < zaurusPowerHoldMs * 1000000) return;
     powerTapHeld = false;
     if (builtInHolds[keyIdPower] && --builtInHolds[keyIdPower] == 0 && !hardKeys[keyIdPower] && pointerKey != keyIdPower)
         soc->KeyUp(keyIdPower);
@@ -218,6 +221,19 @@ bool SdlEventHandler::ReplayKey(KeyId key, bool down) {
     }
     redrawRequested = true;
     return true;
+}
+
+void SdlEventHandler::ReleaseReplayKeys() {
+    if (replayPower) ReplayKey(keyIdPower, false);
+}
+
+void SdlEventHandler::ReleaseTimedPower() {
+    const unsigned timed = unsigned(powerTapHeld) + unsigned(replayPower);
+    if (!timed) return;
+    powerTapHeld = replayPower = false;
+    builtInHolds[keyIdPower] -= std::min(builtInHolds[keyIdPower], timed);
+    if (!builtInHolds[keyIdPower] && !hardKeys[keyIdPower] && pointerKey != keyIdPower) soc->KeyUp(keyIdPower);
+    redrawRequested = true;
 }
 
 void SdlEventHandler::FollowGamepadAttach() {
@@ -460,7 +476,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
                     event.window.event==SDL_WINDOWEVENT_HIDDEN ||
                     event.window.event==SDL_WINDOWEVENT_MINIMIZED) {
-                    ReleaseInputs();
+                    ReleaseInputs(event.window.event==SDL_WINDOWEVENT_FOCUS_LOST);
                     // Focus moved to the desktop app's own window: controllers still count.
                     if (appActive && event.window.event==SDL_WINDOWEVENT_FOCUS_LOST) padFocused = true;
                 }
@@ -678,10 +694,11 @@ void SdlEventHandler::ReleaseFingers() {
 void SdlEventHandler::SetAppActive(bool active) {
     appActive = active;
     if (active) { padFocused = true; UpdateGamepad(); }
-    else if (!SDL_GetKeyboardFocus()) ReleaseInputs();
+    else if (!SDL_GetKeyboardFocus()) ReleaseInputs(true);
 }
 
-void SdlEventHandler::ReleaseInputs() {
+void SdlEventHandler::ReleaseInputs(bool keepTimedPower) {
+    if (!keepTimedPower) ReleaseTimedPower();
     ReleaseFingers();
     ReleasePointer();
     soc->ReleaseKeyboard();
