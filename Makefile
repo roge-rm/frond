@@ -822,7 +822,8 @@ test-keyboard: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/keyboard-core-objects.rsp
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
 		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/host-keyboard.cpp core/src/uarm/native/SdlEventHandler.cpp @$(OBJ_ROOT)/keyboard-core-objects.rsp \
+		tests/host-keyboard.cpp core/src/uarm/native/SdlEventHandler.cpp core/src/uarm/native/DeviceControls.cpp \
+		@$(OBJ_ROOT)/keyboard-core-objects.rsp \
 		$(COMMON_LIB) $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o $(OBJ_ROOT)/test-host-keyboard
 	$(OBJ_ROOT)/test-host-keyboard
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
