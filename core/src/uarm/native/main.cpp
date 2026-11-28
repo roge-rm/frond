@@ -2041,7 +2041,8 @@ namespace {
                 if (!headless) {
                     sdlEventHandler.ClearRedrawRequested();
                     const uint64_t replayNow = commands::replayClockUsec(commandContext);
-                    replay.Dispatch((replayNow - replayStartedAt) / 1000, *soc, snapshot);
+                    replay.Dispatch((replayNow - replayStartedAt) / 1000, *soc, snapshot,
+                                    [&](KeyId key, bool down) { return sdlEventHandler.ReplayKey(key, down); });
                 }
 
                 if (now - lastSpeedDump > 1000000) {

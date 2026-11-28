@@ -58,6 +58,10 @@ class SdlEventHandler {
     void FollowGamepadAttach();
     // Lets go of a Zaurus Power tap once its hold is over. Call it once a loop, on the SoC's thread.
     void ServiceHolds();
+    // An input replay's key (the toolbar's Power): Power shares the hold count with the keys,
+    // fingers and art taps here, so overlapping presses reach the guest as one. Returns false for
+    // the keys it leaves to the SoC.
+    bool ReplayKey(KeyId key, bool down);
 
     void SetRotation(Rotation rotation);
     Rotation DrawnRotation() const { return rotation; }
@@ -75,8 +79,6 @@ class SdlEventHandler {
     virtual bool DirectTouch(SDL_TouchID touch) const {
         return SDL_GetTouchDeviceType(touch) == SDL_TOUCH_DEVICE_DIRECT;
     }
-    // Host milliseconds, for the Zaurus Power hold.
-    virtual uint32_t NowMs() const { return SDL_GetTicks(); }
 
    private:
     void ReleasePointer();
@@ -162,9 +164,12 @@ class SdlEventHandler {
     DeviceStick padStick{};
     DeviceStick stick{};
     bool penDown{false};
-    // A Zaurus Power tap holds the key (one built-in hold) until this host time.
+    // A Zaurus Power tap holds the key (one built-in hold) for zaurusPowerHoldMs of guest time from
+    // powerTapAt (guest ns). An input replay's Power is another built-in hold. Losing focus keeps
+    // both: they let go by themselves.
     bool powerTapHeld{false};
-    uint32_t powerTapUntil{0};
+    uint64_t powerTapAt{0};
+    bool replayPower{false};
     float scale{1};
     bool redrawRequested{false};
     bool quitRequested{false};

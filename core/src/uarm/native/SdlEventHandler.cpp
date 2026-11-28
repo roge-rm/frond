@@ -179,8 +179,8 @@ void SdlEventHandler::HandleEvents() {
 }
 
 // The Zaurus wants Power held: the PROM's power-on waits about 2.75 s for it, so a tap holds it
-// that long, as the desktop and Android toolbars' Power does.
-constexpr uint32_t zaurusPowerHoldMs = 2750;
+// that long in guest time, as the desktop and Android toolbars' Power does.
+constexpr uint64_t zaurusPowerHoldMs = 2750;
 
 bool SdlEventHandler::TapZaurusPower(KeyId key) {
     if (key != keyIdPower || !controlView.zaurus || controlView.bare) return false;
@@ -188,17 +188,36 @@ bool SdlEventHandler::TapZaurusPower(KeyId key) {
         powerTapHeld = true;
         if (++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
     }
-    powerTapUntil = NowMs() + zaurusPowerHoldMs;
+    powerTapAt = soc->GetTime();
     redrawRequested = true;
     return true;
 }
 
 void SdlEventHandler::ServiceHolds() {
-    if (!powerTapHeld || int32_t(NowMs() - powerTapUntil) < 0) return;
+    if (!powerTapHeld) return;
+    const uint64_t now = soc->GetTime();
+    // A reset puts guest time back; the hold starts again from there.
+    if (now < powerTapAt) powerTapAt = now;
+    if (now - powerTapAt < zaurusPowerHoldMs * 1000000) return;
     powerTapHeld = false;
     if (builtInHolds[keyIdPower] && --builtInHolds[keyIdPower] == 0 && !hardKeys[keyIdPower] && pointerKey != keyIdPower)
         soc->KeyUp(keyIdPower);
     redrawRequested = true;
+}
+
+bool SdlEventHandler::ReplayKey(KeyId key, bool down) {
+    if (key != keyIdPower) return false;
+    if (down) {
+        if (!replayPower && ++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
+        replayPower = true;
+    } else if (replayPower) {
+        replayPower = false;
+        if (--builtInHolds[key] == 0 && !hardKeys[key] && pointerKey != key) soc->KeyUp(key);
+    } else if (!builtInHolds[key] && !hardKeys[key] && pointerKey != key) {
+        soc->KeyUp(key);
+    }
+    redrawRequested = true;
+    return true;
 }
 
 void SdlEventHandler::FollowGamepadAttach() {
@@ -627,6 +646,12 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         const KeyId key = keysAt(x, y, also);
         if (key == finger->key && also == finger->also) return;
         if (!key) { release(); return; }
+        // Rolling onto the Zaurus Power taps it: the finger lets go and the tap holds it.
+        if (controlView.zaurus && !controlView.bare && key == keyIdPower) {
+            TapZaurusPower(key);
+            release();
+            return;
+        }
         const KeyId oldKey = finger->key, oldAlso = finger->also;
         finger->key = key;
         finger->also = also;
@@ -684,13 +709,14 @@ void SdlEventHandler::ReleaseInputs() {
     padDirections = {};
     UpdateStick();
     hostKeys.fill(false); codeHolds.fill(0);
+    const unsigned timedPower = unsigned(powerTapHeld) + unsigned(replayPower);
     for (unsigned key=1;key<hardKeys.size();++key) {
-        if (hardKeys[key] || builtInHolds[key]) soc->KeyUp(static_cast<KeyId>(key));
+        if ((hardKeys[key] || builtInHolds[key]) && !(key == keyIdPower && timedPower)) soc->KeyUp(static_cast<KeyId>(key));
         hardKeys[key]=false;
     }
     builtInHolds.fill(0);
+    builtInHolds[keyIdPower] = timedPower;
     builtInHeld.fill(keyInvalid);
-    powerTapHeld = false;
     redrawRequested=true;
 }
 SDL_Rect SdlEventHandler::StickWell() const {

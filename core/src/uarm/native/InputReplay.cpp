@@ -104,14 +104,15 @@ void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer) 
     Dispatch(elapsedMs, soc, [&](const char* path, bool& blank) { return renderer.SaveFramebuffer(path, blank); });
 }
 
-void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<bool(const char*, bool&)>& save) {
+void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<bool(const char*, bool&)>& save,
+                           const std::function<bool(KeyId, bool)>& key) {
     while (!paused && next < events.size() && events[next].at <= elapsedMs) {
         const auto& event = events[next++];
         switch (event.kind) {
             case Kind::penDown: soc.PenDown(event.x, event.y); break;
             case Kind::penUp: soc.PenUp(); break;
-            case Kind::keyDown: soc.KeyDown(event.key); break;
-            case Kind::keyUp: soc.KeyUp(event.key); break;
+            case Kind::keyDown: if (!key || !key(event.key, true)) soc.KeyDown(event.key); break;
+            case Kind::keyUp: if (!key || !key(event.key, false)) soc.KeyUp(event.key); break;
             case Kind::keyboardDown: soc.KeyboardKey(event.x,true); break;
             case Kind::keyboardUp: soc.KeyboardKey(event.x,false); break;
             case Kind::keyboardAttach: soc.AttachKeyboard(event.x); break;
