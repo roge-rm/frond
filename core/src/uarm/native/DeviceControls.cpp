@@ -4389,67 +4389,193 @@ void paintZaurusIcons(Canvas& canvas, bool turned, const ZaurusKeysHeld& held) {
     }
 }
 
-// The hinge edge in view style, left of the LCD: a ridged roller that rocks up and down, then OK
-// and Cancel, black on the silver body, with their names printed over them.
+// The hinge edge in view style, left of the LCD, turned a quarter so it runs down the panel: pale
+// silver plastic with the chrome hinge band beside the LCD. Along it from the top: the ridged jog
+// roller in its slot, the OK, Cancel and Power pills with their names printed beside them, then
+// the mini USB port, the door plate beside a long groove and the DC jack, drawn only.
+constexpr float zaurusSideFace=42,zaurusSideChrome=43,zaurusSideBezel=61,zaurusSideMid=22;
+
+// Text reading up the panel, the tops of its capitals at x, centred on cy.
+void paintZaurusSideText(Canvas& canvas, const char* text, float x, float cy, float size, Rgb colour) {
+    canvas.turned=true;
+    // Turned, text units (u,v) land at panel (v,-u), so the text centre u is -cy.
+    paintZaurusText(canvas,text,-cy,x,size,colour);
+    canvas.turned=false;
+}
+
+// Brightness of the polished hinge band across its width, t 0 to 1: a mirror of the room.
+float zaurusChrome(float t) {
+    static const float stops[][2]={{0,70},{0.08f,120},{0.2f,236},{0.32f,200},{0.42f,96},{0.52f,82},
+                                   {0.64f,168},{0.78f,242},{0.88f,150},{1,56}};
+    t=clamp01(t);
+    for(size_t i=1;i<std::size(stops);++i)
+        if(t<=stops[i][0]) {
+            const float f=(t-stops[i-1][0])/(stops[i][0]-stops[i-1][0]);
+            return stops[i-1][1]+(stops[i][1]-stops[i-1][1])*(f*f*(3-2*f));
+        }
+    return stops[std::size(stops)-1][1];
+}
+
 void paintZaurusSide(Canvas& canvas, const ZaurusKeysHeld& held) {
     const auto& art=zaurusArt();
-    const float W=zaurusSideWidth;
+    const float L=704,mid=zaurusSideMid;
+    const Rgb ink{70,72,78};
+    // The plastic face, rolling off at the outer edge and the two ends.
     canvas.paint(-1e5f,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
-        const float t=clamp01(x/W);
-        return mix(Rgb{150,153,160},Rgb{212,215,220},std::sin(t*2.6f))+Rgb{2,2,2}*std::sin(y*2.9f);
+        const float across=clamp01(x/zaurusSideFace);
+        Rgb c=mix(Rgb{222,224,228},Rgb{192,195,201},across)+Rgb{1.5f,1.5f,1.5f}*speckle(x*3,y*3);
+        if(x<3)c=mix(Rgb{150,152,158},c,clamp01(x/3)*clamp01(x/3));
+        const float end=std::min(y,L-y);
+        if(end<4)c=c*(0.72f+0.28f*clamp01(end/4));
+        return c;
+    });
+    // Shadow line where the face meets the hinge band, then the band itself.
+    canvas.paint(zaurusSideFace-1,-1e5f,zaurusSideBezel,1e5f,[&](float x,float) {return clamp01(x-(zaurusSideFace-1));},
+                 [&](float x,float y,Rgb) {
+        // The middle knuckle belongs to the lid and sits a little proud: its reflection is shifted.
+        const bool knuckle=y>300 && y<560;
+        const float t=(x-zaurusSideChrome)/(zaurusSideBezel-zaurusSideChrome)+(knuckle ? 0.05f : 0);
+        float v=x<zaurusSideChrome ? 60 : zaurusChrome(t);
+        const float seam=std::min(std::fabs(y-300),std::fabs(y-560));
+        if(seam<1.2f)v=v*(0.3f+0.7f*seam/1.2f);
+        else if(seam<2.4f)v=std::min(255.f,v+40*(2.4f-seam));
+        const float end=std::min(y,L-y);
+        if(end<4)v*=0.6f+0.4f*clamp01(end/4);
+        return Rgb{v,v,v*1.03f};
     });
     // The LCD bezel's edge on the right.
-    canvas.paint(W-3,-1e5f,W+1,1e5f,[&](float x,float) {return clamp01(x-(W-2.5f));},
-                 [](float,float,Rgb) {return Rgb{30,31,35};});
+    canvas.paint(zaurusSideBezel,-1e5f,1e5f,1e5f,[](float,float) {return 1.f;},[](float,float,Rgb) {return Rgb{30,31,35};});
+
     const ZaurusKeyArt* up=nullptr;const ZaurusKeyArt* down=nullptr;
     for(size_t i=0;i<art.count;++i) {
         const auto& k=art.keys[i];
         if(k.part!=ZaurusPart::side)continue;
-        if(k.mark==ZaurusMark::jogUp)up=&k;
-        else if(k.mark==ZaurusMark::jogDown)down=&k;
-        else {
-            // A black pill key in a dark slot.
-            const SDL_Rect& r=k.bounds;
-            const bool h=held.Held(i);
-            const float c=r.w*0.5f;
-            canvas.paint(r.x-2,r.y-2,r.x+r.w+2,r.y+r.h+2,[&](float x,float y) {
-                return canvas.edge(deviceRoundedDistance(r,c,x,y)-1.5f);
-            },[](float,float,Rgb) {return Rgb{70,72,78};});
-            canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {
-                return canvas.edge(deviceRoundedDistance(r,c,x,y));
-            },[&](float x,float,Rgb) {
-                const float t=clamp01((x-r.x)/r.w);
-                const Rgb col=mix(Rgb{22,23,27},Rgb{68,70,78},std::sin(t*3.14159265f)*0.8f);
-                return h ? col*0.6f : col;
-            });
-            paintZaurusText(canvas,k.legend,r.x+r.w*0.5f,r.y-11,0.9f,h ? zaurusGlow : Rgb{44,46,54});
-        }
+        if(k.mark==ZaurusMark::jogUp) {up=&k;continue;}
+        if(k.mark==ZaurusMark::jogDown) {down=&k;continue;}
+        // A small silver pill in a shallow oval recess, the hit area round it larger than the pill.
+        const SDL_Rect& r=k.bounds;
+        const bool h=held.Held(i);
+        const float cy=r.y+r.h*0.5f;
+        const SDL_Rect pill{int(mid-6.5f),int(cy-13),13,26};
+        const SDL_Rect well{pill.x-3,pill.y-3,pill.w+6,pill.h+6};
+        canvas.paint(well.x-1,well.y-1,well.x+well.w+1,well.y+well.h+1,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(well,well.w*0.5f,x,y));
+        },[&](float x,float y,Rgb p) {
+            // Shaded on the side away from the light, lit along the far rim.
+            const float d=-deviceRoundedDistance(well,well.w*0.5f,x,y);
+            const float lit=clamp01((x-mid)/8)*clamp01(1-d/1.5f);
+            return mix(p*0.86f,Rgb{238,240,244},lit*0.7f);
+        });
+        auto dp=[&](float x,float y) {return deviceRoundedDistance(pill,6.5f,x,y);};
+        canvas.paint(pill.x-1,pill.y-1,pill.x+pill.w+1,pill.y+pill.h+1,[&](float x,float y) {return canvas.edge(dp(x,y)-0.6f);},
+                     [&](float x,float y,Rgb) {
+            const float d=-dp(x,y);
+            if(d<0.5f)return Rgb{84,86,92};
+            const float across=(x-pill.x)/pill.w;
+            // Polished like the hinge: a bright band, a dark middle, a lit far rim.
+            float v=zaurusChrome(0.12f+across*0.8f)*0.85f+20;
+            // A glint near the top end, the edge rolling off.
+            const float glint=std::exp(-(std::pow(x-(pill.x+4.5f),2.f)+std::pow(y-(pill.y+6.5f),2.f))/5);
+            v=v*(0.8f+0.2f*clamp01(d/2.5f))+70*glint;
+            if(h)v*=0.68f;
+            return Rgb{v,v,v*1.02f};
+        });
+        paintZaurusSideText(canvas,k.legend,mid+9.5f,cy,0.8f,h ? zaurusGlow : ink);
     }
     if(up && down) {
-        const SDL_Rect r{up->bounds.x,up->bounds.y,up->bounds.w,down->bounds.y+down->bounds.h-up->bounds.y};
+        // The roller sits across the edge in a dark slot and turns up and down the panel.
         const bool hu=held.Held(size_t(up-art.keys)),hd=held.Held(size_t(down-art.keys));
-        const float mid=float(down->bounds.y);
-        canvas.paint(r.x-3,r.y-3,r.x+r.w+3,r.y+r.h+3,[&](float x,float y) {
-            return canvas.edge(deviceRoundedDistance(r,8,x,y)-2.5f);
-        },[](float,float,Rgb) {return Rgb{40,42,48};});
-        canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(r,7,x,y));},
+        const float split=float(down->bounds.y),cy=split;
+        const SDL_Rect slot{int(mid-9),int(cy-32),18,64};
+        canvas.paint(slot.x-2,slot.y-2,slot.x+slot.w+2,slot.y+slot.h+2,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(slot,6,x,y)-1.2f);
+        },[&](float x,float,Rgb p) {return mix(p*0.8f,Rgb{240,242,246},clamp01((x-mid)/9)*0.6f);});
+        canvas.paint(slot.x,slot.y,slot.x+slot.w,slot.y+slot.h,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(slot,6,x,y));},
                      [&](float x,float y,Rgb) {
-            const float across=clamp01((x-r.x)/r.w),end=clamp01(std::min(y-r.y,r.y+r.h-y)/14);
-            const float ridge=0.78f+0.22f*std::cos(y*1.9f);
-            Rgb c=mix(Rgb{20,21,25},Rgb{96,98,106},std::sin(across*3.14159265f))*(ridge*(0.6f+0.4f*end));
-            if((hu && y<mid) || (hd && y>=mid))c=c*0.55f;
+            const float inside=clamp01((-deviceRoundedDistance(slot,6,x,y))/2.5f);
+            Rgb c=Rgb{26,27,31}*(0.7f+0.3f*inside);
+            // The roller: a cylinder seen side on, its ridges bunching towards the ends.
+            const float rx=std::fabs(x-mid),ry=(y-cy)/29;
+            if(rx<6.5f && std::fabs(ry)<1) {
+                const float a=std::asin(ry),shade=std::cos(a);
+                const float phase=(hu ? 0.5f : hd ? -0.5f : 0);
+                const float ridge=0.5f+0.5f*std::cos((a*9+phase)*3.14159265f);
+                float v=(46+120*shade*shade)*(0.55f+0.45f*ridge)*(0.85f+0.15f*clamp01((6.5f-rx)/2));
+                if((hu && y<split) || (hd && y>=split))v*=0.62f;
+                c=Rgb{v,v,v*1.04f};
+            }
             return c;
         });
-        // Chevrons on the body above and below the roller.
-        const float cx=r.x+r.w*0.5f;
+        // Small printed carets beyond each end of the slot.
         for(int part : {0,1}) {
-            const float cy=part ? r.y+r.h+10.f : r.y-10.f,dir=part ? 1.f : -1.f;
+            const float py=part ? slot.y+slot.h+7.f : slot.y-7.f,dir=part ? 1.f : -1.f;
             const bool h=part ? hd : hu;
-            canvas.paint(cx-7,cy-5,cx+7,cy+5,[&](float x,float y) {
-                return canvas.edge(std::min(segment(x,y,cx-5,cy-dir*2.5f,cx,cy+dir*2.5f),
-                                            segment(x,y,cx+5,cy-dir*2.5f,cx,cy+dir*2.5f))-0.9f);
-            },[&](float,float,Rgb) {return h ? zaurusGlow : Rgb{44,46,54};});
+            canvas.paint(mid-5,py-4,mid+5,py+4,[&](float x,float y) {
+                return canvas.edge(std::min(segment(x,y,mid-3.5f,py-dir*1.8f,mid,py+dir*1.8f),
+                                            segment(x,y,mid+3.5f,py-dir*1.8f,mid,py+dir*1.8f))-0.55f);
+            },[&](float,float,Rgb) {return h ? zaurusGlow : Rgb{120,122,128};});
         }
+    }
+
+    // Mini USB port in a moulded surround, its symbol below.
+    {
+        const SDL_Rect frame{int(mid-6),386,12,22},port{int(mid-4),388,8,18};
+        canvas.paint(frame.x-1,frame.y-1,frame.x+frame.w+1,frame.y+frame.h+1,[&](float x,float y) {
+            return canvas.edge(std::fabs(deviceRoundedDistance(frame,3,x,y))-0.45f);
+        },[](float,float,Rgb p) {return p*0.7f;});
+        canvas.paint(port.x-1,port.y-1,port.x+port.w+1,port.y+port.h+1,[&](float x,float y) {
+            // Narrower on the face side, as the real socket.
+            const float taper=clamp01((mid-x)/4)*1.2f;
+            return canvas.edge(std::max(deviceRoundedDistance(port,1.2f,x,y),std::fabs(y-(port.y+port.h*0.5f))-(port.h*0.5f-taper)));
+        },[&](float x,float y,Rgb) {
+            // The tongue inside, a pale bar with contacts.
+            if(std::fabs(x-(mid+1))<1.2f && std::fabs(y-(port.y+port.h*0.5f))<6.5f)
+                return std::fmod(y,2.f)<1 ? Rgb{150,140,110} : Rgb{120,122,128};
+            return Rgb{22,23,26};
+        });
+        // USB trident along the panel.
+        const float y0=414,y1=428;
+        canvas.paint(mid-5,y0-2,mid+5,y1+2,[&](float x,float y) {
+            float d=segment(x,y,mid,y0+1.5f,mid,y1);
+            d=std::min(d,std::min(segment(x,y,mid,y0+5,mid-3,y0+7.5f),segment(x,y,mid-3,y0+7.5f,mid-3,y0+9.5f)));
+            d=std::min(d,std::min(segment(x,y,mid,y0+7.5f,mid+3,y0+10),segment(x,y,mid+3,y0+10,mid+3,y0+11.5f)));
+            d=std::min(d,std::hypot(x-mid,y-y0-1)-1.1f);
+            d=std::min(d,std::max(std::fabs(x-mid)-1.2f+(y-y1)*0.6f,std::fabs(y-y1)-1.5f));
+            return canvas.edge(d-0.4f);
+        },[&](float,float,Rgb) {return ink;});
+    }
+    // The door plate on the face, a long groove beside it ending in a dot, and the DC jack.
+    {
+        const SDL_Rect plate{int(mid-7),452,14,104};
+        canvas.paint(plate.x-1,plate.y-1,plate.x+plate.w+1,plate.y+plate.h+1,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(plate,1.5f,x,y));
+        },[&](float x,float y,Rgb) {
+            const float d=-deviceRoundedDistance(plate,1.5f,x,y);
+            if(d<0.6f)return Rgb{120,122,126};
+            // A small notch for a fingernail halfway along.
+            if(std::fabs(y-(plate.y+plate.h*0.5f))<1.5f && x>plate.x+plate.w-2.2f)return Rgb{90,90,92};
+            return mix(Rgb{212,210,198},Rgb{188,186,176},clamp01((x-plate.x)/plate.w));
+        });
+        const float gx=34,g0=440,g1=636;
+        canvas.paint(gx-2,g0-2,gx+2.5f,g1+3,[&](float x,float y) {
+            return canvas.edge(std::min(segment(x,y,gx,g0,gx,g1-6),std::hypot(x-gx,y-g1)-0.9f)-0.45f);
+        },[](float,float,Rgb) {return Rgb{128,130,136};});
+        canvas.paint(gx+0.4f,g0,gx+1.6f,g1-6,[&](float x,float) {return canvas.edge(std::fabs(x-(gx+1))-0.3f);},
+                     [](float,float,Rgb) {return Rgb{240,241,244};});
+        const float jy=672;
+        canvas.paint(mid-7,jy-7,mid+7,jy+7,[&](float x,float y) {return canvas.edge(std::hypot(x-mid,y-jy)-5.6f);},
+                     [&](float x,float y,Rgb) {
+            const float r=std::hypot(x-mid,y-jy);
+            if(r>4.6f)return mix(Rgb{110,112,118},Rgb{236,238,242},clamp01((x-mid)/5));
+            if(r<1.3f)return Rgb{150,152,156};
+            return Rgb{18,18,21};
+        });
+        // DC symbol: a line and a dashed line.
+        canvas.paint(mid+8,jy-7,mid+14,jy+7,[&](float x,float y) {
+            float d=segment(x,y,mid+9.5f,jy-5,mid+9.5f,jy+5);
+            if(std::fmod(y-(jy-5)+20,4.f)<2.6f)d=std::min(d,segment(x,y,mid+12,jy-5,mid+12,jy+5));
+            return canvas.edge(d-0.4f);
+        },[&](float,float,Rgb) {return ink;});
     }
 }
 }  // namespace
