@@ -1563,7 +1563,11 @@ namespace {
                         soc->FrameQuarterTurn() ? displayConfiguration.width : displayConfiguration.height);
         // Rows in a handed-over frame, for uploading a whole one again: the Zodiac's panel has 480.
         const uint32_t frameRows = soc->FrameQuarterTurn() ? displayConfiguration.width : displayConfiguration.height;
+        // Game controllers are opened, closed and rumbled on this thread; the guest thread asks for it.
+        HostControllers hostControllers;
+        sdlEventHandler.SetHostControllers(&hostControllers);
         link.beforeEvent = [&](const SDL_Event& event) {
+            hostControllers.Notice(event);
             microphone.AppEventOnDeviceThread(event.type);
             camera.AppEvent(event.type);
 #ifndef __ANDROID__
@@ -2146,6 +2150,7 @@ namespace {
                     link.DrainQueue();
                     notices |= link.TakeNotices(inBackground);
                 }
+                hostControllers.Service(timestampUsec());
                 appBackground = inBackground;
                 redraw = redraw || notices.redraw;
                 // Back from the background or textures lost: upload the whole newest frame.
