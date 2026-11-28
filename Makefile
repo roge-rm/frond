@@ -1594,6 +1594,22 @@ test: test-controller-map-live
 test-controller-map-live: out/frond
 	python3 tests/controller-map-live.py
 
+# The host's game controllers open, close and rumble on the SDL thread only (HostControllers.h).
+.PHONY: test-host-controllers
+test: test-host-controllers
+test-host-controllers:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) -Icore/src/uarm/native \
+		tests/host-controllers.cpp -o $(OBJ_ROOT)/test-host-controllers $(shell sdl2-config --libs)
+	SDL_VIDEODRIVER=dummy $(OBJ_ROOT)/test-host-controllers
+
+# A game controller plugged in and out while a T|X runs opens, maps a key and closes, with every SDL
+# controller call on the SDL thread (tests/controller-hotplug.py); skips without the T|X smoke machine.
+.PHONY: test-controller-hotplug
+test: test-controller-hotplug
+test-controller-hotplug: out/frond
+	python3 tests/controller-hotplug.py
+
 # CLIÉ game controller: the pad model alone, then on the TG50: plug-in ID, buttons, Hold, live detach and re-attach, save and reload;
 # skips without the TG50 smoke session (tests/clie-gamepad.py).
 .PHONY: test-clie-gamepad
