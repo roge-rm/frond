@@ -4,6 +4,8 @@
 #include <QKeyEvent>
 #include <algorithm>
 #include <QPainter>
+#include <QStyle>
+#include <QStyleOptionMenuItem>
 #include <QWidgetAction>
 #include <QActionGroup>
 #include <QLabel>
@@ -26,19 +28,17 @@ class RedItem : public QWidget {
         if (auto* menu = qobject_cast<QMenu*>(parentWidget())) connect(menu, &QMenu::hovered, this, [this] { update(); });
     }
     QSize sizeHint() const override {
-        return {fontMetrics().horizontalAdvance(act->text()) + 52, fontMetrics().height() + 10};
+        const auto opt = option(false);
+        return style()->sizeFromContents(QStyle::CT_MenuItem, &opt,
+                                         {fontMetrics().horizontalAdvance(act->text()), fontMetrics().height()}, this);
     }
  protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         const auto* menu = qobject_cast<QMenu*>(parentWidget());
         const bool lit = isEnabled() && (underMouse() || hasFocus() || (menu && menu->activeAction() == act));
-        if (lit) p.fillRect(rect(), palette().color(QPalette::Highlight));
-        QColor colour(205, 40, 40);
-        if (!isEnabled()) colour = palette().color(QPalette::Disabled, QPalette::Text);
-        else if (lit) colour = Qt::white;
-        p.setPen(colour);
-        p.drawText(rect().adjusted(26, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, act->text());
+        const auto opt = option(lit);
+        style()->drawControl(QStyle::CE_MenuItem, &opt, &p, this);
     }
     void mouseReleaseEvent(QMouseEvent* e) override {
         if (e->button() == Qt::LeftButton && rect().contains(e->position().toPoint())) choose();
@@ -64,6 +64,30 @@ class RedItem : public QWidget {
         if (!isEnabled()) return;
         if (auto* menu = qobject_cast<QMenu*>(parentWidget())) menu->close();
         act->trigger();
+    }
+    // Drawn by the style like the menu's other rows, so the text lines up in any style; only the colour differs.
+    QStyleOptionMenuItem option(bool lit) const {
+        QStyleOptionMenuItem opt;
+        opt.initFrom(this);
+        opt.state.setFlag(QStyle::State_Selected, lit);
+        opt.menuItemType = QStyleOptionMenuItem::Normal;
+        opt.checkType = QStyleOptionMenuItem::NotCheckable;
+        opt.text = act->text();
+        opt.font = font();
+        opt.rect = rect();
+        int iconWidth = 0;
+        if (const auto* menu = qobject_cast<QMenu*>(parentWidget())) {
+            for (const auto* a : menu->actions()) {
+                opt.menuHasCheckableItems |= a->isCheckable();
+                if (!a->icon().isNull()) iconWidth = style()->pixelMetric(QStyle::PM_SmallIconSize, nullptr, this) + 4;
+            }
+        }
+        opt.maxIconWidth = iconWidth;
+        if (isEnabled() && !lit) {
+            const QColor red(205, 40, 40);
+            for (auto role : {QPalette::Text, QPalette::WindowText, QPalette::ButtonText}) opt.palette.setColor(role, red);
+        }
+        return opt;
     }
     QAction* act;
 };
