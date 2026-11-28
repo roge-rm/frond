@@ -56,7 +56,7 @@ PimRecord readRecord(JsonObjectConst row, PimKind kind) {
     record.kind = kind;
     record.id = row["id"] | int64_t{0};
     record.revision = row["revision"] | int64_t{0};
-    record.category = row["category"].as<std::string>();
+    record.category = row["category"].isNull() ? std::string() : row["category"].as<std::string>();
     record.secret = row["private"] | false;
     record.archived = row["archived"] | false;
     for (const auto item : row["fields"].as<JsonObjectConst>())
@@ -91,7 +91,8 @@ Bytes readFile(const std::string& path) {
 
 bool run(const std::string& root, JsonObjectConst in, JsonObject out, std::string& error) {
     const auto op = in["op"].as<std::string>();
-    const auto str = [&](const char* key) { return in[key].as<std::string>(); };
+    // ArduinoJson turns a missing key into "null"; a missing key reads as empty.
+    const auto str = [&](const char* key) { return in[key].isNull() ? std::string() : in[key].as<std::string>(); };
     const int64_t id = in["profile"] | int64_t{0};
     const auto device = str("device");
     SyncLibrary library;
