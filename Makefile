@@ -831,7 +831,8 @@ test-keyboard: out/frond
 	find $(UARM_OBJ) -name '*.o' ! -path '*/native/*' > $(OBJ_ROOT)/keyboard-core-objects.rsp
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
 		-Icore/src/uarm/native -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tests/host-keyboard.cpp core/src/uarm/native/SdlEventHandler.cpp @$(OBJ_ROOT)/keyboard-core-objects.rsp \
+		tests/host-keyboard.cpp core/src/uarm/native/SdlEventHandler.cpp core/src/uarm/native/DeviceControls.cpp \
+		@$(OBJ_ROOT)/keyboard-core-objects.rsp \
 		$(COMMON_LIB) $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o $(OBJ_ROOT)/test-host-keyboard
 	$(OBJ_ROOT)/test-host-keyboard
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
@@ -1601,6 +1602,22 @@ test-controller-map:
 test: test-controller-map-live
 test-controller-map-live: out/frond
 	python3 tests/controller-map-live.py
+
+# The host's game controllers open, close and rumble on the SDL thread only (HostControllers.h).
+.PHONY: test-host-controllers
+test: test-host-controllers
+test-host-controllers:
+	@mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) -Icore/src/uarm/native \
+		tests/host-controllers.cpp -o $(OBJ_ROOT)/test-host-controllers $(shell sdl2-config --libs)
+	SDL_VIDEODRIVER=dummy $(OBJ_ROOT)/test-host-controllers
+
+# A game controller plugged in and out while a T|X runs opens, maps a key and closes, with every SDL
+# controller call on the SDL thread (tests/controller-hotplug.py); skips without the T|X smoke machine.
+.PHONY: test-controller-hotplug
+test: test-controller-hotplug
+test-controller-hotplug: out/frond
+	python3 tests/controller-hotplug.py
 
 # CLIÉ game controller: the pad model alone, then on the TG50: plug-in ID, buttons, Hold, live detach and re-attach, save and reload;
 # skips without the TG50 smoke session (tests/clie-gamepad.py).

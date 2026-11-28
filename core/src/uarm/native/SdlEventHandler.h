@@ -10,6 +10,7 @@
 #include <string>
 #include "DeviceControls.h"
 #include "Gamepad.h"
+#include "HostControllers.h"
 #include "Rotation.h"
 #include "WindowLayout.h"
 #include "SoC.h"
@@ -37,8 +38,11 @@ class SdlEventHandler {
     DeviceStick Stick() const { return stick; }
     // Rumbles every open game controller while on, as the guest's vibrate motor (the Zodiac's rumble).
     // Call it once a slice with the motor's state; nowUsec is host time.
-    // Returns whether a game controller is open.
+    // Returns whether an open game controller can rumble.
     bool Rumble(bool on, uint64_t nowUsec);
+    // When another thread pumps SDL: its controllers, which it services after each pump. Until set,
+    // the handler services its own on its thread.
+    void SetHostControllers(HostControllers* shared);
     bool RedrawRequested() const;
     bool QuitRequested() const;
     void ClearQuitRequested() { quitRequested = false; }
@@ -118,6 +122,8 @@ class SdlEventHandler {
     void UpdateGamepad();
     // Game controllers are opened: the Zodiac, a CLIÉ that takes the game controller, or a map with keys.
     bool ControllersWanted() const;
+    // Passes ControllersWanted on and asks for a scan; with its own controllers, scans at once.
+    void ScanControllers();
 
    private:
     SoC* soc;
@@ -162,9 +168,9 @@ class SdlEventHandler {
     bool padFocused{true};
     bool appActive{false};
     bool padAttachedSeen{false};
-    // The rumble is on, and when it was last sent; SDL stops it after rumbleMs unless sent again.
-    bool rumbling{false};
-    uint64_t rumbleSentUsec{0};
+    // The game controllers SDL has: the handler's own with one thread, else the SDL thread's.
+    HostControllers ownControllers;
+    HostControllers* controllers{&ownControllers};
     DeviceKeyMask padKeys{0};
     DeviceStick padStick{};
     DeviceStick stick{};
