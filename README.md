@@ -186,7 +186,7 @@ make -j4
 
 `make deb` builds a Debian package in `out/` instead, which also needs `dpkg-dev` and `binutils`. Neither the packages nor the APK have firmware or apps in them.
 
-The Android app is in `android/` and builds with Gradle (`./gradlew assembleDebug`).
+The Android app is in `android/` and builds with Gradle (`./gradlew assembleDebug`). On top of the packages above it needs `meson` and a JDK, 17 or newer (`sudo apt install meson openjdk-21-jdk`), and the Android SDK with its location in `ANDROID_HOME` or `android/local.properties`. Install NDK 28.2.13676358 and CMake 4.1.2 into the SDK first (`sdkmanager "ndk;28.2.13676358" "cmake;4.1.2"`). The first build downloads and builds GLib and libslirp for Android, so it needs internet access.
 
 The core is in `core/` (based on CloudpilotEmu) and Dynarmic is in `vendor/dynarmic`. See [Testing](doc/testing.md).
 
