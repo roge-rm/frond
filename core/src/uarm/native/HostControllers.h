@@ -63,16 +63,17 @@ class HostControllers {
         if (scan.exchange(false, std::memory_order_acquire)) Scan();
     }
 
-    // Debug builds stop when an SDL controller call is made off the SDL thread.
+    // An SDL controller call off the SDL thread is reported once. With FROND_SDL_THREAD_ABORT set in the
+    // environment (the tests set it) it stops the process instead.
     void CheckThread(const char* what) const {
-#ifndef NDEBUG
-        if (std::this_thread::get_id() != sdlThread) {
+        if (std::this_thread::get_id() == sdlThread) return;
+        static const bool stop = getenv("FROND_SDL_THREAD_ABORT") != nullptr;
+        if (stop) {
             fprintf(stderr, "frond: %s off the SDL thread\n", what);
             abort();
         }
-#else
-        (void)what;
-#endif
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true)) fprintf(stderr, "frond: %s off the SDL thread\n", what);
     }
 
    private:

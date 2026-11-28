@@ -1,6 +1,6 @@
 // HostControllers (core/src/uarm/native/HostControllers.h): a wanted virtual game controller opens on
 // a scan and closes once unplugged, an unwanted one stays closed, rumble reaches it from the SDL
-// thread, and in a debug build a call from another thread stops the process.
+// thread, and with FROND_SDL_THREAD_ABORT set a call from another thread stops the process.
 #undef NDEBUG
 #include "HostControllers.h"
 
@@ -98,15 +98,25 @@ int main() {
     controllers.Service(1100000);
     assert(!SDL_GameControllerFromInstanceID(second));
 
-    // Off the SDL thread, a debug build stops.
+    // Off the SDL thread: reported and carried on without FROND_SDL_THREAD_ABORT, stopped with it.
     fflush(stderr);
-    const pid_t child = fork();
+    pid_t child = fork();
     if (child == 0) {
+        unsetenv("FROND_SDL_THREAD_ABORT");
         std::thread other([&] { controllers.Service(0); });
         other.join();
         _exit(0);
     }
     int status = 0;
+    waitpid(child, &status, 0);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    child = fork();
+    if (child == 0) {
+        setenv("FROND_SDL_THREAD_ABORT", "1", 1);
+        std::thread other([&] { controllers.Service(0); });
+        other.join();
+        _exit(0);
+    }
     waitpid(child, &status, 0);
     assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
 

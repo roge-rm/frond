@@ -54,7 +54,7 @@ class Core:
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(address)
         listener.listen(1)
-        env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy')
+        env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy', FROND_SDL_THREAD_ABORT='1')
         self.fifo = None
         if shim:
             fifo = root / 'vpad.fifo'
