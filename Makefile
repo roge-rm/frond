@@ -261,6 +261,15 @@ test-sync-engine: $(COMMON_LIB)
 		-o $(OBJ_ROOT)/test-sync-engine
 	timeout 120 $(OBJ_ROOT)/test-sync-engine $(OBJ_ROOT)/sync-engine-scratch
 
+.PHONY: test-sync-jni
+test: test-sync-jni
+test-sync-jni: $(COMMON_LIB)
+	mkdir -p $(OBJ_ROOT)
+	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/common -Icore/src/common/sync -Icore/src/common/sync/vendor/arduinojson \
+		-I$(FUZZ_JNI_INCLUDE) -I$(FUZZ_JNI_INCLUDE)/linux tests/sync-jni.cpp $(COMMON_LIB) -lpthread \
+		-o $(OBJ_ROOT)/test-sync-jni
+	umask 077 && dir=$$(mktemp -d) && trap 'rmdir "$$dir"' EXIT && timeout 120 $(OBJ_ROOT)/test-sync-jni "$$dir"
+
 .PHONY: test-sync-files
 test: test-sync-files
 test-sync-files: $(COMMON_LIB)
